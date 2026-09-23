@@ -107,6 +107,9 @@ where
     /// Seconds between blocks, used to project a confirmed block header onto the next block when
     /// deriving the execution block for block-sensitive states.
     block_time_secs: u64,
+    /// Chain every component this decoder handles lives on. Stamped into each registered
+    /// [`DecoderContext`] so chain-specific decoders cannot be pointed at the wrong chain.
+    chain: Chain,
 }
 
 /// Curve migrated from the generic VM adapter (`EVMPoolState`) to the native [`CurveState`]
@@ -136,6 +139,7 @@ where
             inclusion_filters: HashMap::new(),
             override_providers: HashMap::new(),
             block_time_secs: chain.block_time_secs(),
+            chain,
         }
     }
 
@@ -230,13 +234,29 @@ where
     /// `register_decoder_with_context::<UniswapV2State>("uniswap_v2", context)`.
     /// This ensures that the exchange ID `uniswap_v2` is properly associated with the
     /// `UniswapV2State` decoder for use in the protocol stream.
-    pub fn register_decoder_with_context<T>(&mut self, exchange: &str, context: DecoderContext)
+    ///
+    /// The decoder's own chain is stamped into `context`, overriding any chain the caller set.
+    pub fn register_decoder_with_context<T>(&mut self, exchange: &str, mut context: DecoderContext)
     where
         T: ProtocolSim
             + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
             + Send
             + 'static,
     {
+        if let Some(requested) = context
+            .chain
+            .filter(|requested| *requested != self.chain)
+        {
+            warn!(
+                exchange,
+                requested_chain = %requested,
+                decoder_chain = %self.chain,
+                "DecoderContext declares a different chain than the decoder; using the decoder's \
+                 chain"
+            );
+        }
+        context.chain = Some(self.chain);
+
         if is_deprecated_curve_registration::<T>(exchange) {
             warn!(
                 registered_type = std::any::type_name::<T>(),
@@ -1730,6 +1750,113 @@ mod tests {
         assert_eq!(generated_address, address!("00000000000000000000000000001e240badbabe"));
     }
 
+    /// A single-block feed message holding one tokenless Uniswap V4 pool whose `hooks` attribute
+    /// points at an address no native handler is registered for.
+    ///
+    /// The component has no tokens and the message no VM storage, so decoding it neither reads
+    /// nor writes the process-wide simulation engine and cannot disturb other tests.
+    fn hooked_v4_msg() -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        let id = "0x00000000000000000000000000000000000000000000000000000000000000c4";
+        let static_attributes = HashMap::from([
+            ("key_lp_fee".to_string(), Bytes::from(500_i32.to_be_bytes().to_vec())),
+            ("tick_spacing".to_string(), Bytes::from(60_i32.to_be_bytes().to_vec())),
+            (
+                "hooks".to_string(),
+                Bytes::from_str("0x00000000000000000000000000000000000000c4").unwrap(),
+            ),
+        ]);
+        let attributes = HashMap::from([
+            ("liquidity".to_string(), Bytes::from(100_u64.to_be_bytes().to_vec())),
+            ("tick".to_string(), Bytes::from(300_i32.to_be_bytes().to_vec())),
+            (
+                "sqrt_price_x96".to_string(),
+                Bytes::from(
+                    79228162514264337593543950336_u128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            ),
+            ("protocol_fees/zero2one".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
+            ("protocol_fees/one2zero".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
+            ("ticks/60/net_liquidity".to_string(), Bytes::from(400_i128.to_be_bytes().to_vec())),
+        ]);
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState::new(id, attributes, HashMap::new()),
+            component: ProtocolComponent {
+                id: id.to_string(),
+                static_attributes,
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "uniswap_v4_hooks".to_string(),
+                StateSyncMessage {
+                    header: header_at(1, 1_000, None),
+                    snapshots: Snapshot {
+                        states: HashMap::from([(id.to_string(), snapshot)]),
+                        vm_storage: HashMap::new(),
+                    },
+                    deltas: None,
+                    removed_components: HashMap::new(),
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// A decoder for `chain` that decodes [`hooked_v4_msg`].
+    fn hooked_v4_decoder(chain: Chain, context: DecoderContext) -> TychoStreamDecoder<BlockHeader> {
+        let mut decoder = TychoStreamDecoder::new(chain);
+        decoder.register_decoder_with_context::<crate::evm::protocol::uniswap_v4::state::UniswapV4State>(
+            "uniswap_v4_hooks", context
+        );
+        decoder
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_hook_is_rejected_off_the_generic_vm_chains() {
+        let decoder = hooked_v4_decoder(Chain::Robinhood, DecoderContext::new());
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("a hooked pool on robinhood must not decode");
+        };
+
+        assert!(message.contains("unsupported uniswap v4 hook"), "{message}");
+        assert!(message.contains("robinhood"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_decoder_chain_overrides_the_registered_context_chain() {
+        let decoder =
+            hooked_v4_decoder(Chain::Robinhood, DecoderContext::new().chain(Chain::Ethereum));
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("the decoder's chain must win over the context's");
+        };
+
+        assert!(message.contains("robinhood"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_hook_takes_the_generic_path_on_ethereum() {
+        let decoder = hooked_v4_decoder(Chain::Ethereum, DecoderContext::new());
+
+        let Err(StreamDecodeError::Fatal(message)) = decoder.decode(&hooked_v4_msg()).await else {
+            panic!("the generic VM creator has no balance_owner attribute to work from");
+        };
+
+        assert!(!message.contains("unsupported uniswap v4 hook"), "{message}");
+        assert!(message.contains("balance_owner"), "{message}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_euler_hook_low_pool_manager_balance() {
         let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
@@ -1772,6 +1899,124 @@ mod tests {
             .expect("Get amount out failed");
 
         assert_eq!(amount_out.amount, BigUint::from_str("1216190190361759119").unwrap());
+    }
+
+    /// A single-block feed message carrying `snapshot` as a `uniswap_v4_hooks` component.
+    fn pons_feed_message(snapshot: ComponentWithState) -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
+
+        use crate::evm::protocol::uniswap_v4::pons_fixture;
+
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "uniswap_v4_hooks".to_string(),
+                StateSyncMessage {
+                    header: pons_fixture::header(),
+                    snapshots: Snapshot {
+                        states: HashMap::from([(pons_fixture::POOL_ID.to_string(), snapshot)]),
+                        vm_storage: HashMap::new(),
+                    },
+                    deltas: None,
+                    removed_components: HashMap::new(),
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// A decoder for Robinhood that knows the fixture pool's two tokens.
+    async fn pons_stream_decoder() -> TychoStreamDecoder<BlockHeader> {
+        use crate::evm::protocol::uniswap_v4::{
+            hooks::hook_handler_creator::initialize_hook_handlers, pons_fixture,
+            state::UniswapV4State,
+        };
+
+        initialize_hook_handlers().expect("hook handler registration should succeed");
+        let mut decoder = TychoStreamDecoder::new(Chain::Robinhood);
+        decoder.register_decoder::<UniswapV4State>("uniswap_v4_hooks");
+        decoder
+            .set_tokens(pons_fixture::tokens())
+            .await;
+        decoder
+    }
+
+    /// The whole stream path on Robinhood: a Pons pool arrives in a snapshot, is emitted as a
+    /// `UniswapV4State` carrying the native handler, and quotes the hookless output less the fee
+    /// and the tax `registerPool` froze for it.
+    #[tokio::test]
+    async fn test_pons_pool_decodes_through_the_stream_decoder_on_robinhood() {
+        use crate::evm::protocol::uniswap_v4::{
+            hooks::pons_v2::hook_handler::PonsV2HookHandler, pons_fixture, state::UniswapV4State,
+        };
+
+        let decoder = pons_stream_decoder().await;
+
+        let result = decoder
+            .decode(&pons_feed_message(pons_fixture::snapshot()))
+            .await
+            .expect("decode failure");
+
+        let emitted = result
+            .states
+            .get(pons_fixture::POOL_ID)
+            .expect("the Pons pool must reach consumers");
+        let pool = emitted
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .expect("a uniswap_v4_hooks component decodes into a UniswapV4State");
+        let handler = pool
+            .hook
+            .as_ref()
+            .expect("a Pons pool must carry a hook handler");
+        let pons = handler
+            .as_any()
+            .downcast_ref::<PonsV2HookHandler>()
+            .expect("the registry must hand back the native Pons handler");
+        assert_eq!(u32::from(pons.hook_fee_bps()), pons_fixture::HOOK_FEE_BPS);
+        assert_eq!(u32::from(pons.creator_tax_bps()), pons_fixture::CREATOR_TAX_BPS);
+
+        let core = pons_fixture::decode_on(pons_fixture::hookless_snapshot(), Chain::Robinhood)
+            .await
+            .expect("the same pool with no hook must decode too");
+        let (xlg, nvda) = (pons_fixture::xlg(), pons_fixture::nvda());
+        let amount_in = BigUint::from(10u64).pow(18);
+        for (token_in, token_out) in [(&xlg, &nvda), (&nvda, &xlg)] {
+            let core_out = core
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .expect("the reference pool quotes one whole token")
+                .amount;
+            let hooked_out = emitted
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .expect("the emitted pool quotes one whole token")
+                .amount;
+
+            let expected = pons_fixture::net_of_hook_take(&core_out);
+            assert!(expected < core_out, "the hook must take something out of {core_out}");
+            assert_eq!(hooked_out, expected, "{} -> {}", token_in.symbol, token_out.symbol);
+        }
+    }
+
+    /// The same pool behind a hook with no native handler never reaches consumers, even when the
+    /// stream is configured to carry on past a decode failure.
+    #[tokio::test]
+    async fn test_unknown_hook_component_is_not_emitted_on_robinhood() {
+        use crate::evm::protocol::uniswap_v4::pons_fixture;
+
+        let mut decoder = pons_stream_decoder().await;
+        decoder.skip_state_decode_failures(true);
+
+        let result = decoder
+            .decode(&pons_feed_message(pons_fixture::unknown_hook_snapshot()))
+            .await
+            .expect("a skipped decode failure is not fatal");
+
+        assert!(
+            !result
+                .states
+                .contains_key(pons_fixture::POOL_ID),
+            "a pool whose hook cannot be modelled must not be quoted"
+        );
+        assert!(result.states.is_empty());
     }
 
     fn component_with_id(id: &str) -> ComponentWithState {
