@@ -259,10 +259,11 @@ impl BlockHistory {
         Ok(if block.parent_hash == latest.hash {
             // if the block is the next expected block.
             BlockPosition::NextExpected
-        } else if block.revert && block.hash == latest.hash {
-            // The tip is already this revert's header: a lagging stream re-delivers the revert,
-            // or another extractor reports the same undo with a different dropped-partial index.
-            // Index and parent say nothing here; the hash identifies the block.
+        } else if block.hash == latest.hash {
+            // The block is already the tip: a duplicate partial, a lagging stream re-delivering a
+            // revert, or another extractor reporting the same undo with a different
+            // dropped-partial index. The hash identifies the block; index and parent say nothing
+            // more.
             BlockPosition::Latest
         } else if block.number == latest.number && block.is_partial() {
             // For a partial block at the same height, determine its position relative to latest.
@@ -278,9 +279,6 @@ impl BlockHistory {
                 }
                 _ => BlockPosition::Delayed,
             }
-        } else if (block.hash == latest.hash) & !block.revert {
-            // if the block is the latest block and it is not a revert.
-            BlockPosition::Latest
         } else if self.reverts.contains(&block.hash) {
             // if the block is still on an already reverted branch.
             BlockPosition::Delayed
