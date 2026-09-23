@@ -53,23 +53,27 @@ use super::window::FoldSink;
 ///
 /// `block_ts` is the unit of the database's `valid_from`. `block_number` orders blocks that share
 /// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
-/// database. A snapshot row loads with number 0, so a folded block at the same timestamp still
-/// applies.
+/// database. A folded block carries both from its header; a snapshot row carries both from the
+/// block of its `modify_tx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct WriteTimestamp {
-    pub(crate) block_ts: NaiveDateTime,
-    pub(crate) block_number: u64,
+    block_ts: NaiveDateTime,
+    block_number: u64,
 }
 
 impl WriteTimestamp {
-    pub(crate) fn snapshot(valid_from: NaiveDateTime) -> Self {
-        Self { block_ts: valid_from, block_number: 0 }
+    pub(crate) fn new(block_ts: NaiveDateTime, block_number: u64) -> Self {
+        Self { block_ts, block_number }
+    }
+
+    pub(crate) fn block_number(&self) -> u64 {
+        self.block_number
     }
 }
 
 impl From<&Block> for WriteTimestamp {
     fn from(block: &Block) -> Self {
-        Self { block_ts: block.ts, block_number: block.number }
+        Self::new(block.ts, block.number)
     }
 }
 
@@ -119,8 +123,7 @@ fn write_timestamped<K: Eq + Hash, V>(
     }
 }
 
-/// Write timestamps of one loaded account's values, each [`WriteTimestamp::snapshot`] of its row's
-/// `valid_from`.
+/// Write timestamps of one loaded account's values, one per database row.
 #[derive(Debug, Clone)]
 pub(crate) struct AccountWriteTimestamps {
     pub(crate) slots: HashMap<StoreKey, WriteTimestamp>,
@@ -330,7 +333,7 @@ pub(crate) struct CachedComponentState {
 }
 
 impl CachedComponentState {
-    /// Builds an entry from the startup snapshot, stamped with its newest `valid_from`.
+    /// Builds an entry from the startup snapshot, stamped with the block of its newest row.
     pub(crate) fn from_snapshot(state: ProtocolComponentState, at: WriteTimestamp) -> Self {
         Self {
             component_id: state.component_id,
@@ -371,8 +374,8 @@ impl CachedComponentState {
         if at <= self.updated_at {
             warn!(
                 component = %self.component_id,
-                block = at.block_number,
-                entry = self.updated_at.block_number,
+                block = at.block_number(),
+                entry = self.updated_at.block_number(),
                 "Component change from a block already applied skipped"
             );
             return;
@@ -778,20 +781,11 @@ mod test {
     #[test]
     fn write_keeps_the_higher_block_at_an_equal_timestamp() {
         let mut slot = Timestamped::new(1u64, at(5));
-        let lower_block = WriteTimestamp { block_ts: ts(5), block_number: 4 };
+        let lower_block = WriteTimestamp::new(ts(5), 4);
 
         slot.write(2, lower_block);
 
         assert_eq!(slot.value(), &1);
-    }
-
-    #[test]
-    fn write_applies_a_folded_block_over_a_snapshot_at_an_equal_timestamp() {
-        let mut slot = Timestamped::new(1u64, WriteTimestamp::snapshot(ts(5)));
-
-        slot.write(2, at(5));
-
-        assert_eq!(slot.value(), &2);
     }
 
     #[test]
@@ -813,11 +807,11 @@ mod test {
 
         let cached = CachedAccount::from_snapshot(
             loaded.clone(),
-            AccountWriteTimestamps::uniform(&loaded, WriteTimestamp::snapshot(ts(1))),
+            AccountWriteTimestamps::uniform(&loaded, at(1)),
         );
 
         assert_eq!(Account::from(&cached), loaded);
-        assert_eq!(cached.slots()[&slot(1)].written_at(), WriteTimestamp::snapshot(ts(1)));
+        assert_eq!(cached.slots()[&slot(1)].written_at(), at(1));
     }
 
     #[test]
@@ -969,11 +963,10 @@ mod test {
             HashMap::from([(addr(9), Bytes::from(5u64))]),
         );
 
-        let cached =
-            CachedComponentState::from_snapshot(loaded.clone(), WriteTimestamp::snapshot(ts(3)));
+        let cached = CachedComponentState::from_snapshot(loaded.clone(), at(3));
 
         assert_eq!(ProtocolComponentState::from(&cached), loaded);
-        assert_eq!(cached.updated_at(), WriteTimestamp::snapshot(ts(3)));
+        assert_eq!(cached.updated_at(), at(3));
     }
 
     fn component_at(n: u64) -> CachedComponentState {
