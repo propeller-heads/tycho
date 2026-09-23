@@ -31,7 +31,7 @@ use std::{
 };
 
 use chrono::NaiveDateTime;
-use tracing::{trace, warn};
+use tracing::warn;
 use tycho_common::{
     keccak256,
     models::{
@@ -498,9 +498,12 @@ impl CacheState {
                         CachedComponentState::from_creation(id, delta, balances, at),
                     );
                 }
-                None => {
-                    trace!(system = %block.extractor, %id, "Change for an unknown component skipped")
-                }
+                None => warn!(
+                    system = %block.extractor,
+                    %id,
+                    block = block.block.number,
+                    "Change for an unknown component skipped"
+                ),
             }
         }
         for id in block.new_protocol_components.keys() {
@@ -510,11 +513,17 @@ impl CacheState {
             }
         }
         for id in block.deleted_protocol_components.keys() {
-            if system_components
-                .get(id)
-                .is_some_and(|entry| entry.updated_at() < at)
-            {
-                system_components.remove(id);
+            match system_components.get(id) {
+                Some(entry) if entry.updated_at() < at => {
+                    system_components.remove(id);
+                }
+                Some(_) => {}
+                None => warn!(
+                    system = %block.extractor,
+                    %id,
+                    block = block.block.number,
+                    "Deletion of an unknown component skipped"
+                ),
             }
         }
     }
@@ -537,7 +546,11 @@ impl CacheState {
                     self.accounts
                         .insert(address.clone(), CachedAccount::from_creation(delta, balances, at));
                 }
-                (None, _) => trace!(%address, "Change for an unknown account skipped"),
+                (None, _) => warn!(
+                    %address,
+                    block = block.block.number,
+                    "Change for an unknown account skipped"
+                ),
             }
         }
     }
