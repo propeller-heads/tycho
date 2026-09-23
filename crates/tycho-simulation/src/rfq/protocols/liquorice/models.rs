@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr};
 
+use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
@@ -102,6 +103,16 @@ pub struct LiquoriceQuoteLevel {
     pub base_token_amount: String,
     pub quote_token_amount: String,
     pub partial_fill: Option<LiquoricePartialFill>,
+    /// Token approvals the trader must grant before the settlement call can pull funds.
+    pub allowances: Vec<LiquoriceAllowance>,
+}
+
+/// An approval the trader must grant for a quote level to settle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiquoriceAllowance {
+    pub token: Address,
+    pub spender: Address,
+    pub amount: U256,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +215,7 @@ mod tests {
                 base_token_amount: "1000".to_string(),
                 quote_token_amount: "2000".to_string(),
                 partial_fill: None,
+                allowances: vec![],
             }
         }
 

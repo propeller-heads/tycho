@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use alloy::sol_types::SolValue;
+use alloy::{
+    primitives::{Address, U256},
+    sol_types::SolValue,
+};
 use tokio::runtime::Handle;
 use tycho_common::{
     models::{protocol::GetAmountOutParams, Chain},
@@ -14,6 +17,12 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+/// Settlement entrypoints the `LiquoriceExecutor` forwards to. Kept in sync with
+/// `_SETTLE_SINGLE_SELECTOR` and `_SETTLE_SELECTOR` in `LiquoriceExecutor.sol`, which rejects
+/// anything else. `Liquorice.t.sol` pins both against the deployed settlement's ABI.
+const SETTLE_SINGLE_SELECTOR: [u8; 4] = [0x99, 0x35, 0xc8, 0x68];
+const SETTLE_SELECTOR: [u8; 4] = [0x05, 0x3b, 0x41, 0x00];
+
 /// Encodes a swap on Liquorice (RFQ) through the given executor address.
 ///
 /// Liquorice uses a Request-for-Quote model where quotes are obtained
@@ -22,9 +31,13 @@ use crate::encoding::{
 ///
 /// # Fields
 /// * `executor_address` - The address of the executor contract.
+/// * `settlement_address` - The Liquorice settlement the executor forwards calldata to.
+/// * `balance_manager_address` - The spender the router approves for the input token.
 #[derive(Clone)]
 pub struct LiquoriceSwapEncoder {
     executor_address: Bytes,
+    settlement_address: Address,
+    balance_manager_address: Address,
     runtime_handle: Handle,
     #[allow(dead_code)]
     runtime: SafeRuntime,
@@ -34,10 +47,20 @@ impl SwapEncoder for LiquoriceSwapEncoder {
     fn new(
         executor_address: Bytes,
         _chain: Chain,
-        _config: Option<HashMap<String, String>>,
+        config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
+        let config = config
+            .ok_or_else(|| EncodingError::FatalError("Liquorice config is empty".to_string()))?;
+        let settlement_address = parse_config_address(&config, "settlement_address")?;
+        let balance_manager_address = parse_config_address(&config, "balance_manager_address")?;
         let (runtime_handle, runtime) = create_encoding_runtime()?;
-        Ok(Self { executor_address, runtime_handle, runtime })
+        Ok(Self {
+            executor_address,
+            settlement_address,
+            balance_manager_address,
+            runtime_handle,
+            runtime,
+        })
     }
 
     fn encode_swap(
@@ -90,12 +113,75 @@ impl SwapEncoder for LiquoriceSwapEncoder {
             })
         })??;
 
+        let settlement = signed_quote
+            .quote_attributes
+            .get("settlement")
+            .ok_or(EncodingError::FatalError(
+                "Liquorice quote must have a settlement attribute".to_string(),
+            ))
+            .and_then(bytes_to_address)?;
+        if settlement != self.settlement_address {
+            return Err(EncodingError::InvalidInput(format!(
+                "Liquorice quote settles at {settlement}, but the executor forwards to {}",
+                self.settlement_address
+            )));
+        }
+
+        let allowances = signed_quote
+            .quote_attributes
+            .get("allowances")
+            .ok_or(EncodingError::FatalError(
+                "Liquorice quote must have an allowances attribute".to_string(),
+            ))
+            .and_then(|allowances| {
+                <Vec<(Address, Address, U256)> as SolValue>::abi_decode_validate(allowances)
+                    .map_err(|e| {
+                        EncodingError::InvalidInput(format!(
+                            "Liquorice quote has malformed allowances: {e}"
+                        ))
+                    })
+            })?;
+        let (allowance_token, allowance_spender) = match allowances[..] {
+            [(token, spender, _)] => (token, spender),
+            _ => {
+                return Err(EncodingError::InvalidInput(format!(
+                    "Liquorice quote requires {} approvals, but the router grants one",
+                    allowances.len()
+                )))
+            }
+        };
+        if allowance_spender != self.balance_manager_address {
+            return Err(EncodingError::InvalidInput(format!(
+                "Liquorice quote wants an approval for {allowance_spender}, but the executor approves {}",
+                self.balance_manager_address
+            )));
+        }
+        if allowance_token != token_in {
+            return Err(EncodingError::InvalidInput(format!(
+                "Liquorice quote wants an approval for token {allowance_token}, but the swap sells {token_in}"
+            )));
+        }
+
         let liquorice_calldata = signed_quote
             .quote_attributes
             .get("calldata")
             .ok_or(EncodingError::FatalError(
                 "Liquorice quote must have a calldata attribute".to_string(),
             ))?;
+
+        // LiquoriceExecutor.swap reverts with LiquoriceExecutor__InvalidSelector on anything else.
+        let selector: [u8; 4] = liquorice_calldata
+            .get(..4)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(EncodingError::InvalidInput(
+                "Liquorice quote calldata is shorter than a selector".to_string(),
+            ))?;
+        if selector != SETTLE_SINGLE_SELECTOR && selector != SETTLE_SELECTOR {
+            return Err(EncodingError::InvalidInput(format!(
+                "Liquorice quote calls unsupported settlement entrypoint 0x{}",
+                alloy::hex::encode(selector)
+            )));
+        }
 
         let base_token_amount = signed_quote
             .quote_attributes
@@ -159,6 +245,17 @@ impl SwapEncoder for LiquoriceSwapEncoder {
     }
 }
 
+fn parse_config_address(
+    config: &HashMap<String, String>,
+    key: &str,
+) -> Result<Address, EncodingError> {
+    config
+        .get(key)
+        .ok_or_else(|| EncodingError::FatalError(format!("Missing {key} in Liquorice config")))?
+        .parse::<Address>()
+        .map_err(|e| EncodingError::FatalError(format!("Invalid {key} in Liquorice config: {e}")))
+}
+
 fn pad_to_32_bytes(data: &Bytes) -> [u8; 32] {
     let mut padded = [0u8; 32];
     if data.len() >= 32 {
@@ -188,16 +285,22 @@ mod tests {
     };
 
     fn liquorice_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
-            "balance_manager_address".to_string(),
-            "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95".to_string(),
-        )]))
+        Some(HashMap::from([
+            (
+                "settlement_address".to_string(),
+                "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8".to_string(),
+            ),
+            (
+                "balance_manager_address".to_string(),
+                "0x56B4720e40dF52C560E520238E34e9C33d57E593".to_string(),
+            ),
+        ]))
     }
 
     #[test]
     fn test_encode_liquorice_single_with_protocol_state() {
         let quote_amount_out = BigUint::from_str("1000000000000000000").unwrap();
-        let liquorice_calldata = Bytes::from_str("0xdeadbeef1234567890").unwrap();
+        let liquorice_calldata = Bytes::from_str("0x9935c8681234567890").unwrap();
         let base_token_amount = biguint_to_u256(&BigUint::from(3_000_000_000_u64))
             .to_be_bytes::<32>()
             .to_vec();
@@ -220,6 +323,18 @@ mod tests {
                 ("base_token_amount".to_string(), Bytes::from(base_token_amount)),
                 ("min_base_token_amount".to_string(), Bytes::from(min_base_token_amount)),
                 ("partial_fill_offset".to_string(), Bytes::from(vec![12u8])),
+                (
+                    "settlement".to_string(),
+                    Bytes::from_str("0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8").unwrap(),
+                ),
+                (
+                    // [(USDC, balance manager, 3000000000)]
+                    "allowances".to_string(),
+                    Bytes::from_str(
+                        "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+                    )
+                    .unwrap(),
+                ),
             ]),
             ..Default::default()
         };
@@ -273,5 +388,212 @@ mod tests {
             "0000000000000000000000009502f900",
         ));
         assert_eq!(hex_swap, expected_swap + &liquorice_calldata.to_string()[2..]);
+    }
+
+    /// Builds an otherwise-valid Liquorice swap whose quote attributes are overridden, so each
+    /// test states only the attribute it is about.
+    fn swap_with_quote_attributes(overrides: Vec<(&str, Bytes)>) -> (Swap, EncodingContext) {
+        let token_in = Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let token_out = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+
+        let mut quote_data = HashMap::from([
+            ("calldata".to_string(), Bytes::from_str("0x9935c8681234567890").unwrap()),
+            (
+                "base_token_amount".to_string(),
+                Bytes::from(
+                    biguint_to_u256(&BigUint::from(3_000_000_000_u64))
+                        .to_be_bytes::<32>()
+                        .to_vec(),
+                ),
+            ),
+            (
+                "settlement".to_string(),
+                Bytes::from_str("0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8").unwrap(),
+            ),
+            (
+                // [(USDC, balance manager, 3000000000)]
+                "allowances".to_string(),
+                Bytes::from_str(
+                    "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+                )
+                .unwrap(),
+            ),
+        ]);
+        for (key, value) in overrides {
+            quote_data.insert(key.to_string(), value);
+        }
+
+        let swap = Swap::new(
+            ProtocolComponent {
+                id: String::from("liquorice-rfq"),
+                protocol_system: String::from("book:liquorice"),
+                ..Default::default()
+            },
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap())
+        .with_protocol_state(Arc::new(MockRFQState {
+            quote_amount_in: None,
+            quote_amount_out: BigUint::from_str("1000000000000000000").unwrap(),
+            quote_data,
+            ..Default::default()
+        }));
+
+        let context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+        };
+        (swap, context)
+    }
+
+    fn encoder() -> LiquoriceSwapEncoder {
+        LiquoriceSwapEncoder::new(
+            Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
+            Chain::Ethereum,
+            liquorice_config(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_rejects_quote_for_another_settlement() {
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "settlement",
+            Bytes::from_str("0x0448633eb8B0A42EfED924C42069E0DcF08fb552").unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, EncodingError::InvalidInput(m) if m.contains("settles at")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_quote_for_another_balance_manager() {
+        // [(USDC, the retired balance manager, 3000000000)]
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "allowances",
+            Bytes::from_str(
+                "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000b87bae43a665eb5943a5642f81b26666bc9e5c9500000000000000000000000000000000000000000000000000000000b2d05e00"
+            )
+            .unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, EncodingError::InvalidInput(m) if m.contains("wants an approval")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_quote_wanting_an_approval_for_another_token() {
+        // [(WETH, balance manager, 3000000000)], against a swap that sells USDC
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "allowances",
+            Bytes::from_str(
+                "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+            )
+            .unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, EncodingError::InvalidInput(m) if m.contains("approval for token")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_quote_wanting_two_approvals() {
+        // [(USDC, balance manager, 3000000000)], twice
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "allowances",
+            Bytes::from_str(
+                "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+            )
+            .unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, EncodingError::InvalidInput(m) if m.contains("requires 2 approvals")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_quote_wanting_no_approval() {
+        // []
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "allowances",
+            Bytes::from_str(
+                "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, EncodingError::InvalidInput(m) if m.contains("requires 0 approvals")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// The selector the settlement deployment before 0x43Dcd658 used for `settle`.
+    #[test]
+    fn test_rejects_retired_settle_selector() {
+        let (swap, context) = swap_with_quote_attributes(vec![(
+            "calldata",
+            Bytes::from_str("0xcba673a71234567890").unwrap(),
+        )]);
+
+        let error = encoder()
+            .encode_swap(&swap, &context)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                EncodingError::InvalidInput(m)
+                    if m.contains("unsupported settlement entrypoint 0xcba673a7")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_both_settlement_entrypoints() {
+        for selector in ["0x9935c868", "0x053b4100"] {
+            let (swap, context) = swap_with_quote_attributes(vec![(
+                "calldata",
+                Bytes::from_str(&format!("{selector}1234567890")).unwrap(),
+            )]);
+            assert!(
+                encoder()
+                    .encode_swap(&swap, &context)
+                    .is_ok(),
+                "{selector} should be accepted"
+            );
+        }
     }
 }

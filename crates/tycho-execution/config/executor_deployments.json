@@ -66,8 +66,8 @@
     "book:liquorice": {
       "contract": "LiquoriceExecutor",
       "args": [
-        "0x0448633eb8B0A42EfED924C42069E0DcF08fb552",
-        "0xb87bAE43a665EB5943A5642F81B26666bC9E5C95"
+        "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8",
+        "0x56B4720e40dF52C560E520238E34e9C33d57E593"
       ]
     },
     "vm:fermiswap": {
