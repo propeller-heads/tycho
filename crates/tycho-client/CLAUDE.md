@@ -41,7 +41,9 @@ TychoStreamBuilder (stream.rs)
    → removed on success, or `RetryNext` / `Blacklisted` on failure). When `partial_blocks` is
    enabled, brand-new components are held in `Deferred` state until the first message of the next
    block, then promoted to `InFlight`.
-3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
+3. `BlockSynchronizer` waits for the `Ready` synchronizers, then emits a `FeedMessage` per block.
+   While any synchronizer is `Ready` or `Advanced`, `Delayed` and `Stale` ones do not wait: they
+   contribute only what is queued when the waiting ones are done
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
 
 ## CLI
