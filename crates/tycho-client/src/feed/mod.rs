@@ -77,10 +77,14 @@ impl Display for BlockHeader {
             hex::encode(&self.hash)
         };
 
-        match self.partial_block_index {
-            Some(idx) => write!(f, "Block #{} [0x{}..] (partial {})", self.number, short_hash, idx),
-            None => write!(f, "Block #{} [0x{}..]", self.number, short_hash),
+        write!(f, "Block #{} [0x{short_hash}..]", self.number)?;
+        if let Some(idx) = self.partial_block_index {
+            write!(f, " (partial {idx})")?;
         }
+        if self.revert {
+            write!(f, " (revert)")?;
+        }
+        Ok(())
     }
 }
 
@@ -965,6 +969,9 @@ where
         {
             *block_history = Self::reinit_block_history(sync_streams, block_history)?;
         } else if let Some(header) = Self::select_round_header(ready_sync_msgs) {
+            if header.revert {
+                info!(%header, "RevertApplied");
+            }
             block_history.push(header.clone())?;
         }
         // If all synchronizers are stale (e.g. WS reconnect in progress), skip block
@@ -2719,5 +2726,15 @@ mod tests {
         assert_ready_at(&feed, "uniswap-v3", 3, None);
 
         shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    #[test]
+    fn test_block_header_display_marks_reverts() {
+        let mut header = revert_header_message(7).header;
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (revert)");
+        header.partial_block_index = Some(2);
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (partial 2) (revert)");
+        header.revert = false;
+        assert_eq!(header.to_string(), "Block #7 [0x07..] (partial 2)");
     }
 }
