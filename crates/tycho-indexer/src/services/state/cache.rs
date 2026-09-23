@@ -10,7 +10,8 @@
 //!
 //! A change applies only when its block is strictly newer than the timestamp the entry records. An
 //! equal timestamp is the same block folded again — the values are identical, so there is nothing
-//! to apply. Removals follow the same rule.
+//! to apply. Component removals follow the same rule. Account deletions are not expected and never
+//! remove an entry.
 //!
 //! The folds coming out of the block windows are the only writer. The startup load builds the
 //! cache from a database snapshot before the extractors start (ENG-6292). The cache never reads
@@ -30,7 +31,7 @@ use std::{
 };
 
 use chrono::NaiveDateTime;
-use tracing::trace;
+use tracing::{trace, warn};
 use tycho_common::{
     keccak256,
     models::{
@@ -271,21 +272,6 @@ impl CachedAccount {
         for (token, balance) in balances.into_iter().flatten() {
             write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at);
         }
-    }
-
-    /// The newest write among this account's values.
-    fn newest_write(&self) -> WriteTimestamp {
-        let mut newest = self
-            .native_balance
-            .written_at()
-            .max(self.code.written_at());
-        for slot in self.slots.values() {
-            newest = newest.max(slot.written_at());
-        }
-        for balance in self.token_balances.values() {
-            newest = newest.max(balance.written_at());
-        }
-        newest
     }
 
     pub(crate) fn slots(&self) -> &HashMap<StoreKey, Timestamped<StoreVal>> {
@@ -536,19 +522,12 @@ impl CacheState {
 
     /// Applies one block's account changes. A `Creation` delta carries the whole initial state
     /// and may create an entry; anything else for an unknown address is partial data and is
-    /// skipped. A `Deletion` removes the entry unless that block or a newer one already wrote to
-    /// it.
+    /// skipped. A `Deletion` is not expected from any extractor: it is logged and the entry stays.
     fn fold_accounts(&mut self, block: &BlockAggregatedChanges) {
         let at = WriteTimestamp::from(&block.block);
         for (address, delta) in &block.account_deltas {
             if delta.change_type() == ChangeType::Deletion {
-                if self
-                    .accounts
-                    .get(address)
-                    .is_some_and(|entry| entry.newest_write() < at)
-                {
-                    self.accounts.remove(address);
-                }
+                warn!(%address, block = block.block.number, "Account deletion ignored, the entry stays cached");
                 continue;
             }
             let balances = block.account_balances.get(address);
@@ -1123,61 +1102,19 @@ mod test {
     }
 
     #[test]
-    fn fold_removes_a_deleted_account() {
+    fn fold_keeps_an_account_the_block_deletes() {
         let cache = EntityCache::new();
         let address = addr(1);
         cache
-            .fold(&with_account_delta(msg(1), creation(&address, [], 0, "0x")))
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 10, "0x6000")))
             .unwrap();
+        let before = cached_account(&cache, &address);
 
         cache
             .fold(&with_account_delta(msg(2), deletion(&address)))
             .unwrap();
 
-        assert!(cached_account(&cache, &address).is_none());
-    }
-
-    #[test]
-    fn fold_skips_a_deletion_from_the_block_that_wrote_the_entry() {
-        let cache = EntityCache::new();
-        let address = addr(1);
-        cache
-            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
-            .unwrap();
-
-        cache
-            .fold(&with_account_delta(msg(1), deletion(&address)))
-            .unwrap();
-
-        assert!(cached_account(&cache, &address).is_some(), "block 1 cannot delete its own write");
-    }
-
-    #[test]
-    fn fold_skips_an_account_deletion_older_than_the_entry() {
-        let cache = EntityCache::new();
-        let address = addr(1);
-        cache
-            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
-            .unwrap();
-        cache
-            .fold(&with_account_delta(
-                msg(5),
-                update(&address, fixtures::optional_slots([(1, 15)])),
-            ))
-            .unwrap();
-
-        cache
-            .fold(&with_account_delta(
-                testing::aggregated_changes("other", 3, 3, Some(3)),
-                deletion(&address),
-            ))
-            .unwrap();
-
-        assert_eq!(
-            cached_account(&cache, &address).map(|a| a.slots),
-            Some(fixtures::slots([(1, 15)])),
-            "block 3 cannot delete what block 5 wrote"
-        );
+        assert_eq!(cached_account(&cache, &address), before, "a deletion never removes an entry");
     }
 
     #[test]
