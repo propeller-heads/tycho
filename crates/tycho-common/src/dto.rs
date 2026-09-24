@@ -1658,6 +1658,11 @@ pub enum Health {
     NotReady(String),
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Clone)]
+pub struct AppVersion {
+    pub version: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, ToSchema, Eq, Hash, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolSystemsRequestBody {
