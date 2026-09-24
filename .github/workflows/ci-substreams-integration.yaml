@@ -98,7 +98,7 @@ jobs:
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
         env:
           VALID: ${{ steps.all_substreams.outputs.all_substreams }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           # Read clone-to-base mappings parsed from test_runner.rs.
           declare -A CLONE_TO_BASE
