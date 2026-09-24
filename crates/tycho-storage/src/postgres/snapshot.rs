@@ -5,15 +5,16 @@
 //! because one live row per key is the versioning invariant, and they are much slower on tables
 //! this size.
 
-// Wired into the startup load in a follow-up commit.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use diesel::{ExpressionMethods, QueryDsl};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{
+    pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
+    RunQueryDsl,
+};
 use tokio::sync::mpsc;
+use tracing::error;
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -36,6 +37,9 @@ pub(crate) const ACCOUNT_CHUNK: i64 = 500;
 
 /// Component ids per `Components` chunk.
 pub(crate) const COMPONENT_CHUNK: i64 = 5_000;
+
+/// Chunks buffered between the reading task and the consumer.
+const CHANNEL_CAPACITY: usize = 2;
 
 fn receiver_gone() -> StorageError {
     StorageError::Unexpected("Snapshot receiver dropped before the snapshot ended".to_string())
@@ -494,6 +498,73 @@ impl PostgresGateway {
             })
             .collect())
     }
+
+    /// Sends the whole snapshot on `tx`: totals, accounts, components, cursors, in that order.
+    /// Runs inside the caller's transaction.
+    async fn state_snapshot(
+        &self,
+        chain: &Chain,
+        tx: &ChunkSender,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        let totals = self
+            .snapshot_totals(chain, conn)
+            .await?;
+        tx.send(Ok(SnapshotChunk::Totals(totals)))
+            .await
+            .map_err(|_| receiver_gone())?;
+        self.snapshot_accounts(chain, ACCOUNT_CHUNK, tx, conn)
+            .await?;
+        self.snapshot_components(chain, COMPONENT_CHUNK, tx, conn)
+            .await?;
+        let cursors = self
+            .snapshot_cursors(chain, conn)
+            .await?;
+        tx.send(Ok(SnapshotChunk::Cursors(cursors)))
+            .await
+            .map_err(|_| receiver_gone())
+    }
+}
+
+/// Streams the live state of `chain` from one `REPEATABLE READ`, read-only transaction.
+///
+/// A task takes one pooled connection and sends `SnapshotChunk`s on the returned receiver:
+/// `Totals`, then `Accounts` and `Components` chunks, then `Cursors`. Every chunk comes from the
+/// same database snapshot. An error ends the stream after one `Err` item. Dropping the receiver
+/// ends the task and the transaction.
+pub(crate) fn spawn_state_snapshot(
+    gateway: PostgresGateway,
+    pool: Pool<AsyncPgConnection>,
+    chain: Chain,
+) -> mpsc::Receiver<Result<SnapshotChunk, StorageError>> {
+    let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        let result: Result<(), StorageError> = async {
+            let mut conn = pool.get().await.map_err(|err| {
+                StorageError::Unexpected(format!("No connection for the state snapshot: {err}"))
+            })?;
+            conn.build_transaction()
+                .read_only()
+                .repeatable_read()
+                .run(|conn| {
+                    async {
+                        gateway
+                            .state_snapshot(&chain, &tx, conn)
+                            .await
+                            .map_err(PostgresError::from)
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .map_err(StorageError::from)
+        }
+        .await;
+        if let Err(err) = result {
+            error!(error = %err, "State snapshot failed");
+            let _ = tx.send(Err(err)).await;
+        }
+    });
+    rx
 }
 
 #[cfg(test)]
@@ -984,6 +1055,89 @@ mod test_serial_db {
                     block_number: 2,
                 }]
             );
+        })
+        .await;
+    }
+
+    async fn collect_all(
+        mut rx: mpsc::Receiver<Result<SnapshotChunk, StorageError>>,
+    ) -> Vec<Result<SnapshotChunk, StorageError>> {
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    fn kind(chunk: &Result<SnapshotChunk, StorageError>) -> &'static str {
+        match chunk {
+            Ok(SnapshotChunk::Totals(_)) => "totals",
+            Ok(SnapshotChunk::Accounts(_)) => "accounts",
+            Ok(SnapshotChunk::Components(_)) => "components",
+            Ok(SnapshotChunk::Cursors(_)) => "cursors",
+            Err(_) => "error",
+        }
+    }
+
+    #[tokio::test]
+    async fn state_snapshot_sends_totals_then_entities_then_cursors_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+            drop(conn);
+
+            let chunks = collect_all(spawn_state_snapshot(gw, pool.clone(), Chain::Ethereum)).await;
+
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(kind)
+                    .collect::<Vec<_>>(),
+                vec!["totals", "accounts", "components", "cursors"]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn state_snapshot_ignores_writes_after_it_started_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let mut rx = spawn_state_snapshot(gw, pool.clone(), Chain::Ethereum);
+            let first = rx.recv().await.unwrap().unwrap();
+            assert!(matches!(first, SnapshotChunk::Totals(t) if t.accounts == 2));
+            // A second connection adds a live slot on c0 after the snapshot transaction opened.
+            db_fixtures::insert_slots(
+                &mut conn,
+                f.c0,
+                f.txn[3],
+                &db_fixtures::yesterday_one_am(),
+                None,
+                &[(9, 9, None)],
+            )
+            .await;
+            drop(conn);
+
+            let rest = collect_all(rx).await;
+
+            let accounts = rest
+                .iter()
+                .find_map(|c| match c {
+                    Ok(SnapshotChunk::Accounts(a)) => Some(a),
+                    _ => None,
+                })
+                .unwrap();
+            let c0 = accounts
+                .iter()
+                .find(|a| a.account.title == "c0")
+                .unwrap();
+            assert_eq!(c0.account.slots.len(), 2, "slot 9 was written after the snapshot");
         })
         .await;
     }
