@@ -1656,12 +1656,14 @@ mod tests {
     }
 
     fn get_mocked_runner() -> TestRunner {
-        get_mocked_runner_for(Chain::Ethereum, "test-protocol")
-    }
-
-    fn get_mocked_runner_for(chain: Chain, protocol: &str) -> TestRunner {
         dotenv().ok();
         let rpc_url = env::var("RPC_URL").unwrap();
+        get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
+    }
+
+    /// Builds a runner for `protocol` on `chain` rooted at the current directory. The RPC URL
+    /// is only stored, so callers that never reach the network can pass a placeholder.
+    fn get_mocked_runner_for(chain: Chain, protocol: &str, rpc_url: String) -> TestRunner {
         let current_dir = std::env::current_dir().unwrap();
         TestRunner::new(RunnerConfig {
             test_type: TestType::Range(TestTypeRange { match_test: None }),
@@ -1680,7 +1682,13 @@ mod tests {
 
     #[test]
     fn robinhood_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
-        let runner = get_mocked_runner_for(Chain::Robinhood, "robinhood-uniswap-v4-with-hooks");
+        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
+        // in the no-external-deps CI job, which does not set RPC_URL.
+        let runner = get_mocked_runner_for(
+            Chain::Robinhood,
+            "robinhood-uniswap-v4-with-hooks",
+            "http://localhost:8545".to_string(),
+        );
 
         assert!(
             runner
