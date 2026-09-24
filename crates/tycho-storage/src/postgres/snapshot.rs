@@ -17,9 +17,10 @@ use tokio::sync::mpsc;
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
+        protocol::ProtocolComponentState,
         Address, Chain,
     },
-    storage::{AccountSnapshot, SnapshotChunk, StorageError, WriteTimestamp},
+    storage::{AccountSnapshot, ComponentSnapshot, SnapshotChunk, StorageError, WriteTimestamp},
     Bytes,
 };
 
@@ -29,6 +30,9 @@ pub(crate) type ChunkSender = mpsc::Sender<Result<SnapshotChunk, StorageError>>;
 
 /// Account ids per `Accounts` chunk.
 pub(crate) const ACCOUNT_CHUNK: i64 = 500;
+
+/// Component ids per `Components` chunk.
+pub(crate) const COMPONENT_CHUNK: i64 = 5_000;
 
 fn receiver_gone() -> StorageError {
     StorageError::Unexpected("Snapshot receiver dropped before the snapshot ended".to_string())
@@ -241,6 +245,169 @@ impl PostgresGateway {
         }
         Ok(out)
     }
+
+    /// Sends every component of `chain` that is not deleted as `SnapshotChunk::Components`,
+    /// `chunk_size` components per chunk, in ascending `protocol_component.id` order. A
+    /// component with no live attribute and no balance row is sent with empty maps and the block
+    /// of its `creation_tx` as `updated_at`.
+    pub(crate) async fn snapshot_components(
+        &self,
+        chain: &Chain,
+        chunk_size: i64,
+        tx: &ChunkSender,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let mut last_id = 0i64;
+        loop {
+            let components: Vec<(i64, String, String, i64)> = schema::protocol_component::table
+                .inner_join(schema::protocol_system::table)
+                .filter(schema::protocol_component::chain_id.eq(chain_id))
+                .filter(schema::protocol_component::deleted_at.is_null())
+                .filter(schema::protocol_component::id.gt(last_id))
+                .order_by(schema::protocol_component::id)
+                .limit(chunk_size)
+                .select((
+                    schema::protocol_component::id,
+                    schema::protocol_component::external_id,
+                    schema::protocol_system::name,
+                    schema::protocol_component::creation_tx,
+                ))
+                .get_results(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            let Some((chunk_last, _, _, _)) = components.last() else {
+                return Ok(());
+            };
+            last_id = *chunk_last;
+            let chunk = Self::assemble_components(components, conn).await?;
+            let done = (chunk.len() as i64) < chunk_size;
+            tx.send(Ok(SnapshotChunk::Components(chunk)))
+                .await
+                .map_err(|_| receiver_gone())?;
+            if done {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Reads attributes and balances of `components` and builds one snapshot per component.
+    async fn assemble_components(
+        components: Vec<(i64, String, String, i64)>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ComponentSnapshot>, StorageError> {
+        let ids: Vec<i64> = components
+            .iter()
+            .map(|(id, _, _, _)| *id)
+            .collect();
+
+        let creation_txs: Vec<i64> = components
+            .iter()
+            .map(|(_, _, _, tx)| *tx)
+            .collect();
+        let created_at: HashMap<i64, WriteTimestamp> = schema::transaction::table
+            .inner_join(schema::block::table)
+            .filter(schema::transaction::id.eq_any(&creation_txs))
+            .select((schema::transaction::id, schema::block::ts, schema::block::number))
+            .get_results::<(i64, NaiveDateTime, i64)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+            .into_iter()
+            .map(|(tx, ts, number)| (tx, WriteTimestamp::new(ts, number as u64)))
+            .collect();
+
+        let mut attributes: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> = HashMap::new();
+        for (component_id, name, value, valid_from, number) in schema::protocol_state::table
+            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+            .filter(schema::protocol_state::protocol_component_id.eq_any(&ids))
+            .filter(schema::protocol_state::valid_to.eq(MAX_TS))
+            .select((
+                schema::protocol_state::protocol_component_id,
+                schema::protocol_state::attribute_name,
+                schema::protocol_state::attribute_value,
+                schema::protocol_state::valid_from,
+                schema::block::number,
+            ))
+            .get_results::<(i64, String, Bytes, NaiveDateTime, i64)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+        {
+            attributes
+                .entry(component_id)
+                .or_default()
+                .push((name, value, WriteTimestamp::new(valid_from, number as u64)));
+        }
+
+        let balance_rows: Vec<(i64, i64, Bytes, NaiveDateTime, i64)> =
+            schema::component_balance::table
+                .inner_join(schema::transaction::table.inner_join(schema::block::table))
+                .filter(schema::component_balance::protocol_component_id.eq_any(&ids))
+                .filter(schema::component_balance::valid_to.eq(MAX_TS))
+                .select((
+                    schema::component_balance::protocol_component_id,
+                    schema::component_balance::token_id,
+                    schema::component_balance::new_balance,
+                    schema::component_balance::valid_from,
+                    schema::block::number,
+                ))
+                .get_results(conn)
+                .await
+                .map_err(PostgresError::from)?;
+        let token_ids: Vec<i64> = balance_rows
+            .iter()
+            .map(|(_, token_id, _, _, _)| *token_id)
+            .collect();
+        let token_addresses: HashMap<i64, Address> = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::token::id.eq_any(&token_ids))
+            .select((schema::token::id, schema::account::address))
+            .get_results::<(i64, Address)>(conn)
+            .await
+            .map_err(PostgresError::from)?
+            .into_iter()
+            .collect();
+        let mut balances: HashMap<i64, Vec<(i64, Bytes, WriteTimestamp)>> = HashMap::new();
+        for (component_id, token_id, balance, valid_from, number) in balance_rows {
+            balances
+                .entry(component_id)
+                .or_default()
+                .push((token_id, balance, WriteTimestamp::new(valid_from, number as u64)));
+        }
+
+        let mut out = Vec::with_capacity(components.len());
+        for (id, external_id, system, creation_tx) in components {
+            let mut updated_at = *created_at
+                .get(&creation_tx)
+                .ok_or_else(|| {
+                    StorageError::NotFound("Transaction".to_string(), creation_tx.to_string())
+                })?;
+            let mut attrs = HashMap::new();
+            for (name, value, written_at) in attributes
+                .remove(&id)
+                .unwrap_or_default()
+            {
+                updated_at = updated_at.max(written_at);
+                attrs.insert(name, value);
+            }
+            let mut bals = HashMap::new();
+            for (token_id, balance, written_at) in balances.remove(&id).unwrap_or_default() {
+                let token = token_addresses
+                    .get(&token_id)
+                    .ok_or_else(|| {
+                        StorageError::NotFound("Token".to_string(), token_id.to_string())
+                    })?
+                    .clone();
+                updated_at = updated_at.max(written_at);
+                bals.insert(token, balance);
+            }
+            out.push(ComponentSnapshot {
+                system,
+                state: ProtocolComponentState::new(&external_id, attrs, bals),
+                updated_at,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +500,100 @@ mod test_serial_db {
         Fixture { chain_id, txn, native_token, usdc, c0 }
     }
 
+    async fn setup_components(conn: &mut AsyncPgConnection, f: &Fixture) {
+        let ambient = db_fixtures::insert_protocol_system(conn, "ambient".to_owned()).await;
+        let zigzag = db_fixtures::insert_protocol_system(conn, "zigzag".to_owned()).await;
+        let pool_type = db_fixtures::insert_protocol_type(conn, "Pool", None, None, None).await;
+        let p1 = db_fixtures::insert_protocol_component(
+            conn,
+            "p1",
+            f.chain_id,
+            ambient,
+            pool_type,
+            f.txn[0],
+            Some(vec![f.usdc]),
+            None,
+        )
+        .await;
+        // reserve: superseded version at block 1, live version at block 2
+        db_fixtures::insert_protocol_state(
+            conn,
+            p1,
+            f.txn[0],
+            "reserve".to_owned(),
+            Bytes::from(1u64),
+            None,
+            Some(f.txn[3]),
+        )
+        .await;
+        db_fixtures::insert_protocol_state(
+            conn,
+            p1,
+            f.txn[3],
+            "reserve".to_owned(),
+            Bytes::from(2u64),
+            Some(Bytes::from(1u64)),
+            None,
+        )
+        .await;
+        db_fixtures::insert_protocol_state(
+            conn,
+            p1,
+            f.txn[0],
+            "fee".to_owned(),
+            Bytes::from(30u64),
+            None,
+            None,
+        )
+        .await;
+        db_fixtures::insert_component_balance(
+            conn,
+            Bytes::from(1000u64),
+            Bytes::default(),
+            1000.0,
+            f.usdc,
+            f.txn[1],
+            p1,
+            None,
+        )
+        .await;
+        let _p2 = db_fixtures::insert_protocol_component(
+            conn, "p2", f.chain_id, zigzag, pool_type, f.txn[2], None, None,
+        )
+        .await;
+        let p3 = db_fixtures::insert_protocol_component(
+            conn, "p3", f.chain_id, ambient, pool_type, f.txn[0], None, None,
+        )
+        .await;
+        diesel::update(
+            schema::protocol_component::table.filter(schema::protocol_component::id.eq(p3)),
+        )
+        .set(schema::protocol_component::deleted_at.eq(db_fixtures::yesterday_half_past_midnight()))
+        .execute(conn)
+        .await
+        .unwrap();
+    }
+
+    async fn collect_components(
+        gw: &PostgresGateway,
+        chunk_size: i64,
+        conn: &mut AsyncPgConnection,
+    ) -> Vec<Vec<ComponentSnapshot>> {
+        let (tx, mut rx) = mpsc::channel(16);
+        gw.snapshot_components(&Chain::Ethereum, chunk_size, &tx, conn)
+            .await
+            .unwrap();
+        drop(tx);
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk.unwrap() {
+                SnapshotChunk::Components(components) => chunks.push(components),
+                other => panic!("unexpected chunk {other:?}"),
+            }
+        }
+        chunks
+    }
+
     async fn collect_accounts(
         gw: &PostgresGateway,
         chunk_size: i64,
@@ -364,7 +625,7 @@ mod test_serial_db {
     async fn snapshot_accounts_returns_live_contracts_with_their_write_stamps_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
-            let f = setup_accounts(&mut conn).await;
+            setup_accounts(&mut conn).await;
             let gw = PostgresGateway::from_connection(&mut conn).await;
             let ts = db_fixtures::yesterday_midnight();
             let ts_p1 = db_fixtures::yesterday_half_past_midnight();
@@ -416,7 +677,6 @@ mod test_serial_db {
             let c1 = &accounts[&Bytes::from_str(C1).unwrap()];
             assert_eq!(c1.account.slots.len(), 1);
             assert!(c1.account.token_balances.is_empty());
-            let _ = (f.chain_id, f.txn, f.native_token, f.usdc, f.c0);
         })
         .await;
     }
@@ -506,6 +766,68 @@ mod test_serial_db {
                 matches!(err, StorageError::NotFound(ref what, _) if what == "native_balance"),
                 "{err}"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_components_returns_live_state_stamped_with_the_newest_write_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let components: HashMap<String, ComponentSnapshot> =
+                collect_components(&gw, 5_000, &mut conn)
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .map(|c| (c.state.component_id.clone(), c))
+                    .collect();
+
+            assert_eq!(components.len(), 2, "p3 is deleted");
+            let p1 = &components["p1"];
+            assert_eq!(p1.system, "ambient");
+            assert_eq!(p1.state.attributes["reserve"], Bytes::from(2u64), "live version wins");
+            assert_eq!(p1.state.attributes["fee"], Bytes::from(30u64));
+            assert_eq!(p1.state.balances[&Bytes::from_str(USDC).unwrap()], Bytes::from(1000u64));
+            assert_eq!(
+                p1.updated_at,
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2)
+            );
+            let p2 = &components["p2"];
+            assert_eq!(p2.system, "zigzag");
+            assert!(p2.state.attributes.is_empty());
+            assert!(p2.state.balances.is_empty());
+            assert_eq!(
+                p2.updated_at,
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
+                "creation block 2"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_components_splits_chunks_by_component_id_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let chunks = collect_components(&gw, 1, &mut conn).await;
+
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(Vec::len)
+                    .collect::<Vec<_>>(),
+                vec![1, 1]
+            );
+            assert_eq!(chunks[0][0].state.component_id, "p1");
+            assert_eq!(chunks[1][0].state.component_id, "p2");
         })
         .await;
     }
