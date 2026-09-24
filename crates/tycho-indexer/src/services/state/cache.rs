@@ -532,51 +532,68 @@ fn zip_changes<'a, K: Eq + Hash, D, B>(
     with_delta.chain(balances_only)
 }
 
+/// Every component the block creates, changes or funds, once, with whether the block creates it
+/// and what the block holds for it. Created components come first.
+fn component_changes(
+    block: &BlockAggregatedChanges,
+) -> impl Iterator<
+    Item = (
+        &ComponentId,
+        bool,
+        Option<&ProtocolComponentStateDelta>,
+        Option<&HashMap<Bytes, ComponentBalance>>,
+    ),
+> {
+    let created = block
+        .new_protocol_components
+        .keys()
+        .map(|id| (id, true, block.state_deltas.get(id), block.component_balances.get(id)));
+    let changed = zip_changes(&block.state_deltas, &block.component_balances)
+        .filter(|(id, _, _)| {
+            !block
+                .new_protocol_components
+                .contains_key(*id)
+        })
+        .map(|(id, delta, balances)| (id, false, delta, balances));
+    created.chain(changed)
+}
+
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
-    /// block's own delta and balances; one the cache already holds is logged and then treated like
-    /// any other entry. A deleted component is removed unless that block or a newer one already
-    /// wrote to it.
+    /// block's own delta and balances; one the cache already holds is logged and then takes the
+    /// block like any other entry. A deleted component is removed unless that block or a newer one
+    /// already wrote to it.
     fn fold_components(&mut self, block: &BlockAggregatedChanges) {
         let at = WriteTimestamp::from(&block.block);
         let system_components = self
             .components
             .entry(block.extractor.clone())
             .or_default();
-        for id in block.new_protocol_components.keys() {
-            if system_components.contains_key(id) {
-                warn!(
-                    system = %block.extractor,
-                    %id,
-                    block = block.block.number,
-                    "Creation of a component already cached skipped"
-                );
-            }
-        }
-        for (id, delta, balances) in zip_changes(&block.state_deltas, &block.component_balances) {
-            match system_components.get_mut(id) {
-                Some(entry) => entry.apply_block(delta, balances, at),
-                None if block
-                    .new_protocol_components
-                    .contains_key(id) =>
-                {
+        for (id, created, delta, balances) in component_changes(block) {
+            match (system_components.get_mut(id), created) {
+                (Some(entry), created) => {
+                    if created {
+                        warn!(
+                            system = %block.extractor,
+                            %id,
+                            block = block.block.number,
+                            "Creation of a component already cached skipped"
+                        );
+                    }
+                    entry.apply_block(delta, balances, at);
+                }
+                (None, true) => {
                     system_components.insert(
                         id.clone(),
                         CachedComponentState::from_creation(id, delta, balances, at),
                     );
                 }
-                None => warn!(
+                (None, false) => warn!(
                     system = %block.extractor,
                     %id,
                     block = block.block.number,
                     "Change for an unknown component skipped"
                 ),
-            }
-        }
-        for id in block.new_protocol_components.keys() {
-            if !system_components.contains_key(id) {
-                system_components
-                    .insert(id.clone(), CachedComponentState::from_creation(id, None, None, at));
             }
         }
         for id in block.deleted_protocol_components.keys() {
@@ -1124,6 +1141,56 @@ mod test {
             HashMap::from([(addr(9), Bytes::from(5u64))]),
             "the repeated creation does not rebuild the entry"
         );
+    }
+
+    #[test]
+    fn component_changes_yields_each_component_once() {
+        let block = with_component(msg(1), "created");
+        let block = with_state_delta(block, "created", 1);
+        let block = with_component_balance(block, "created", &addr(9), 5);
+        let block = with_component(block, "empty");
+        let block = with_state_delta(block, "changed", 2);
+        let block = with_component_balance(block, "funded", &addr(9), 7);
+
+        let mut changes: Vec<_> = component_changes(&block)
+            .map(|(id, created, delta, balances)| {
+                (id.as_str(), created, delta.is_some(), balances.is_some())
+            })
+            .collect();
+        changes.sort();
+
+        assert_eq!(
+            changes,
+            vec![
+                ("changed", false, true, false),
+                ("created", true, true, true),
+                ("empty", true, false, false),
+                ("funded", false, false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn fold_moves_a_repeated_creation_without_state_to_its_block() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(2), "c1"), "c1", 2))
+            .unwrap();
+
+        cache
+            .fold(&with_component(msg(3), "c1"))
+            .unwrap();
+
+        let state = cache.read();
+        let entry = state
+            .component(EXTRACTOR, "c1")
+            .unwrap();
+        assert_eq!(
+            ProtocolComponentState::from(entry).attributes["x"],
+            Bytes::from(2u64),
+            "the repeated creation does not rebuild the entry"
+        );
+        assert_eq!(entry.updated_at(), at(3), "block 3 touched the entry");
     }
 
     #[test]
