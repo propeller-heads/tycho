@@ -632,7 +632,6 @@ mod tests {
         use crate::evm::{
             engine_db::{
                 create_engine, engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB,
-                SHARED_TYCHO_DB,
             },
             protocol::{
                 uniswap_v3::{enums::FeeAmount, state::UniswapV3State},
@@ -702,10 +701,6 @@ mod tests {
         }
 
         async fn setup_balancer_pool() -> EVMPoolState<PreCachedDB> {
-            SHARED_TYCHO_DB
-                .clear()
-                .expect("Failed to clear SHARED TX");
-
             let data_str =
                 include_str!("protocol/vm/assets/balancer_contract_storage_block_20463609.json");
             let data: Value = serde_json::from_str(data_str).expect("Failed to parse JSON");
@@ -713,7 +708,9 @@ mod tests {
             let accounts: Vec<AccountUpdate> = serde_json::from_value(data["accounts"].clone())
                 .expect("Expected accounts to match AccountUpdate structure");
 
-            let db = SHARED_TYCHO_DB.clone();
+            // The process-wide `SHARED_TYCHO_DB` holds a single current-block header, so tests
+            // sharing it race; a fresh database keeps each pool independent.
+            let db = PreCachedDB::new().expect("failed to create test database");
             let engine: SimulationEngine<_> = create_engine(db.clone(), false).unwrap();
 
             let block = BlockHeader {
@@ -807,7 +804,7 @@ mod tests {
                 )
                 .adapter_contract_bytecode(Bytecode::new_raw(BALANCER_V2.into()))
                 .stateless_contracts(stateless_contracts)
-                .build(SHARED_TYCHO_DB.clone())
+                .build(db)
                 .await
                 .expect("Failed to build pool state")
         }
