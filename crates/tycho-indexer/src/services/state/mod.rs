@@ -24,4 +24,5 @@
 //! always below the window floor by then, so a below-window read never misses them.
 
 pub(crate) mod cache;
+pub(crate) mod loader;
 pub(crate) mod window;
