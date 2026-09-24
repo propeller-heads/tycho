@@ -166,7 +166,14 @@ impl RamsesV3State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -606,6 +613,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.amount, BigUint::from_str("64352395915550406461").unwrap());
+    }
+
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let wbtc = Token::new(
+            &Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let weth = Token::new(
+            &Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let pool = RamsesV3State::new(
+            377952820878029838,
+            U256::from_str("28437325270877025820973479874632004").unwrap(),
+            500,
+            10,
+            255830,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+
+        let result = pool.get_amount_out(500000000.to_biguint().unwrap(), &wbtc, &weth);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
     }
 
     #[test]

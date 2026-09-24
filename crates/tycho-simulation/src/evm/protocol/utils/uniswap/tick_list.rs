@@ -39,6 +39,7 @@ pub(crate) enum TickListErrorKind {
     BelowSmallest,
     AtOrAboveLargest,
     TicksExeeded,
+    Empty,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,8 +137,10 @@ impl TickList {
                 }
             }
             Err(insert_idx) => {
-                self.ticks
-                    .insert(insert_idx, TickInfo::new(tick, liquidity)?);
+                if liquidity != 0 {
+                    self.ticks
+                        .insert(insert_idx, TickInfo::new(tick, liquidity)?);
+                }
             }
         }
         Ok(())
@@ -191,6 +194,9 @@ impl TickList {
     }
 
     fn next_initialized_tick(&self, index: i32, lte: bool) -> Result<&TickInfo, TickListError> {
+        if self.ticks.is_empty() {
+            return Err(TickListError { kind: TickListErrorKind::Empty });
+        }
         if lte {
             if self.is_below_smallest(index) {
                 return Err(TickListError { kind: TickListErrorKind::BelowSmallest });
@@ -229,6 +235,9 @@ impl TickList {
         tick: i32,
         lte: bool,
     ) -> Result<(i32, bool), TickListError> {
+        if self.ticks.is_empty() {
+            return Err(TickListError { kind: TickListErrorKind::Empty });
+        }
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -677,5 +686,51 @@ mod tests {
 
         assert!(tick_list.get_tick(-10).is_err());
         assert!(tick_list.get_tick(10).is_err());
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_zero_on_absent_tick_leaves_list_unchanged() {
+        let mut tick_list =
+            TickList::from(10, vec![create_tick_info(10, 10), create_tick_info(20, -5)]).unwrap();
+        let unchanged = tick_list.clone();
+
+        tick_list
+            .set_tick_liquidity(30, 0)
+            .unwrap();
+
+        assert_eq!(tick_list, unchanged);
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_zero_removes_existing_tick() {
+        let mut tick_list =
+            TickList::from(10, vec![create_tick_info(10, 10), create_tick_info(20, -5)]).unwrap();
+
+        tick_list
+            .set_tick_liquidity(20, 0)
+            .unwrap();
+
+        assert_eq!(tick_list.ticks, vec![create_tick_info(10, 10)]);
+    }
+
+    #[test]
+    fn test_empty_tick_list_reports_empty_instead_of_panicking() {
+        let tick_list = TickList::from(10, vec![]).unwrap();
+
+        for lte in [true, false] {
+            let within_word = tick_list.next_initialized_tick_within_one_word(0, lte);
+            assert_eq!(
+                within_word.unwrap_err().kind,
+                TickListErrorKind::Empty,
+                "next_initialized_tick_within_one_word(lte={lte})"
+            );
+
+            let next = tick_list.next_initialized_tick(0, lte);
+            assert_eq!(
+                next.unwrap_err().kind,
+                TickListErrorKind::Empty,
+                "next_initialized_tick(lte={lte})"
+            );
+        }
     }
 }

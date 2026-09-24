@@ -246,7 +246,14 @@ impl UniswapV4State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::Empty => {
+                        return Err(SimulationError::RecoverableError("No liquidity".to_string()))
+                    }
+                    TickListErrorKind::NotFound |
+                    TickListErrorKind::BelowSmallest |
+                    TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -915,7 +922,8 @@ impl ProtocolSim for UniswapV4State {
     /// determine available liquidity at a given price without executing an actual swap.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
         if self.liquidity == 0 {
-            return Err(SimulationError::FatalError("No liquidity".to_string()));
+            // Recoverable: the pool stays in the state map for later deltas to populate.
+            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
 
         // Calculate total fee (protocol + LP fee) for V4
@@ -937,7 +945,7 @@ impl ProtocolSim for UniswapV4State {
                 max_amount_in: _,
             } => {
                 if self.liquidity == 0 {
-                    return Err(SimulationError::FatalError("No liquidity".to_string()));
+                    return Err(SimulationError::RecoverableError("No liquidity".to_string()));
                 }
 
                 let (amount_in, amount_out, swap_result) = clmm_swap_to_price(
@@ -1969,6 +1977,32 @@ mod tests {
         let result = fees.calculate_swap_fees_pips(true, None);
         // 500 + 0 - (500 * 0 / 1_000_000) = 500
         assert_eq!(result, 500);
+    }
+
+    #[test]
+    fn test_empty_tick_list_with_liquidity_errors_instead_of_panicking() {
+        let sqrt_price = get_sqrt_price_q96(U256::from(20_000_000u64), U256::from(10_000_000u64))
+            .expect("Failed to calculate sqrt price");
+        let tick = get_tick_at_sqrt_ratio(sqrt_price).expect("Failed to calculate tick");
+        let pool = UniswapV4State::new(
+            100_000_000_000_000_000_000u128,
+            sqrt_price,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
+            tick,
+            60,
+            vec![],
+        )
+        .expect("an empty tick list is a valid pool state");
+        let amount =
+            I256::checked_from_sign_and_abs(Sign::Positive, U256::from(100_000_000_000_000_000u64))
+                .unwrap();
+
+        let result = pool.swap(true, amount, None, None);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(_))),
+            "expected a recoverable no-liquidity error, got {result:?}"
+        );
     }
 
     // Helper to create a basic test pool for swap_to_price tests

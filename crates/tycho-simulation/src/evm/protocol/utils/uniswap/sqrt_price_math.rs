@@ -193,6 +193,13 @@ pub(crate) fn sqrt_price_q96_to_f64(
             "sqrt_price_q96_to_f64: x value {x} exceeds U160 max"
         )));
     }
+    // A pool that was created but never initialized carries a zero sqrt price. Returning a price
+    // here would be zero in one token direction and infinite in the other.
+    if x.is_zero() {
+        return Err(SimulationError::RecoverableError(
+            "sqrt_price_q96_to_f64: pool is not initialized".to_string(),
+        ));
+    }
     let token_correction = 10f64.powi(token_0_decimals as i32 - token_1_decimals as i32);
 
     let price = u256_to_f64(x)? / 2.0f64.powi(96);
@@ -439,6 +446,17 @@ mod tests {
         let res = sqrt_price_q96_to_f64(sqrt_price, t0d, t1d).expect("convert sqrt price");
 
         assert_ulps_eq!(res, exp, epsilon = f64::EPSILON);
+    }
+
+    // An uninitialized pool would otherwise price at zero one way and infinity the other.
+    #[test]
+    fn test_q96_to_f64_rejects_an_uninitialized_pool() {
+        let result = sqrt_price_q96_to_f64(U256::ZERO, 18, 6);
+
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(ref msg)) if msg.contains("not initialized")),
+            "expected an uninitialized-pool error, got: {result:?}"
+        );
     }
 
     #[test]
