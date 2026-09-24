@@ -26,3 +26,15 @@
 pub(crate) mod cache;
 pub(crate) mod loader;
 pub(crate) mod window;
+
+/// Rollout stage of the entity cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum EntityCacheMode {
+    /// No cache is loaded; every request reads the database.
+    #[default]
+    Off,
+    /// The cache is loaded and kept current; requests still read the database.
+    Shadow,
+    /// The cache is loaded and kept current; requests read the cache where it can serve them.
+    Serve,
+}
