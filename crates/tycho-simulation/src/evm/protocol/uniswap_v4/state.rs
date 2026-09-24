@@ -871,34 +871,23 @@ impl ProtocolSim for UniswapV4State {
             self.fees.one_for_zero = u32::from(one2zero_protocol_fee.clone());
         }
 
-        // apply tick changes
+        // Apply tick changes.
         for (key, value) in delta.updated_attributes.iter() {
-            // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
-            if key.starts_with("ticks/") {
-                let parts: Vec<&str> = key.split('/').collect();
+            if let Some(tick_index) = tick_index_from_liquidity_key(key) {
                 self.ticks
-                    .set_tick_liquidity(
-                        parts[1]
-                            .parse::<i32>()
-                            .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
+                    .upsert_tick_liquidity(
+                        tick_index.map_err(|err| TransitionError::DecodeError(err.to_string()))?,
                         i128::from(value.clone()),
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
         }
-        // delete ticks - ignores deletes for attributes other than tick liquidity
+        // Only explicit net-liquidity deletions remove initialized ticks.
         for key in delta.deleted_attributes.iter() {
-            // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
-            if key.starts_with("ticks/") {
-                let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
-                    .set_tick_liquidity(
-                        parts[1]
-                            .parse::<i32>()
-                            .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        0,
-                    )
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+            if let Some(tick_index) = tick_index_from_liquidity_key(key) {
+                self.ticks.remove_tick(
+                    tick_index.map_err(|err| TransitionError::DecodeError(err.to_string()))?,
+                );
             }
         }
 
@@ -988,6 +977,15 @@ impl ProtocolSim for UniswapV4State {
             false
         }
     }
+}
+
+fn tick_index_from_liquidity_key(key: &str) -> Option<Result<i32, std::num::ParseIntError>> {
+    key.strip_prefix("ticks/")
+        .and_then(|key| {
+            key.strip_suffix("/net-liquidity")
+                .or_else(|| key.strip_suffix("/net_liquidity"))
+        })
+        .map(str::parse)
 }
 
 #[cfg(test)]
@@ -1100,8 +1098,8 @@ mod tests {
             ("protocol_fees/zero2one".to_string(), Bytes::from(50_u32.to_be_bytes().to_vec())),
             ("protocol_fees/one2zero".to_string(), Bytes::from(75_u32.to_be_bytes().to_vec())),
             ("fee".to_string(), Bytes::from(100_u32.to_be_bytes().to_vec())),
-            ("ticks/-120/net_liquidity".to_string(), Bytes::from(10200_u64.to_be_bytes().to_vec())),
-            ("ticks/120/net_liquidity".to_string(), Bytes::from(9800_u64.to_be_bytes().to_vec())),
+            ("ticks/-120/net-liquidity".to_string(), Bytes::from(10200_u64.to_be_bytes().to_vec())),
+            ("ticks/120/net-liquidity".to_string(), Bytes::from(9800_u64.to_be_bytes().to_vec())),
             ("block_number".to_string(), Bytes::from(2000_u64.to_be_bytes().to_vec())),
             ("block_timestamp".to_string(), Bytes::from(1758201935_u64.to_be_bytes().to_vec())),
         ]
@@ -1139,8 +1137,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_delta_transition_preserves_zero_net_tick_until_deleted() {
+        let mut pool = UniswapV4State::new(
+            1000,
+            U256::from(1000),
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0 },
+            0,
+            60,
+            vec![TickInfo::new(-60, 1000).unwrap(), TickInfo::new(60, -1000).unwrap()],
+        )
+        .unwrap();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/0/net-liquidity".to_owned(),
+                Bytes::from(0_i128.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+        assert_eq!(
+            pool.ticks
+                .get_tick(0)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+
+        pool.delta_transition(
+            ProtocolStateDelta {
+                component_id: "State1".to_owned(),
+                updated_attributes: HashMap::new(),
+                deleted_attributes: HashSet::from(["ticks/0/net-liquidity".to_owned()]),
+            },
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
+        assert!(pool.ticks.get_tick(0).is_err());
+    }
+
+    #[test]
+    fn tick_liquidity_key_parser_accepts_wire_and_persisted_forms() {
+        assert_eq!(
+            tick_index_from_liquidity_key("ticks/-120/net-liquidity")
+                .unwrap()
+                .unwrap(),
+            -120
+        );
+        assert_eq!(
+            tick_index_from_liquidity_key("ticks/120/net_liquidity")
+                .unwrap()
+                .unwrap(),
+            120
+        );
+        assert!(tick_index_from_liquidity_key("ticks/120/liquidity").is_none());
+    }
+
     #[tokio::test]
-    /// Compares a quote from the UniswapV4 Quoter contract on Sepolia with a simulation.
     async fn test_swap_sim() {
         use tycho_client::feed::dto;
         let project_root = env!("CARGO_MANIFEST_DIR");
@@ -2004,6 +2061,79 @@ mod tests {
             ticks,
         )
         .expect("Failed to create pool")
+    }
+
+    #[test]
+    fn test_zero_net_tick_is_crossed_and_charged_as_initialized() {
+        let pool = create_tick_boundary_v4_test_pool();
+        let boundary = get_sqrt_ratio_at_tick(-120).unwrap();
+        let result = pool
+            .swap(
+                true,
+                -I256::from_raw(U256::from(1_000_000_000_000_000_000u128)),
+                Some(boundary),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.sqrt_price, boundary);
+        assert_eq!(result.tick, -121);
+        assert_eq!(result.liquidity, pool.liquidity);
+        assert_eq!(result.gas_used, U256::from(251_000));
+        assert_ne!(result.amount_calculated, I256::ZERO);
+    }
+
+    #[test]
+    fn zero_net_boundary_prevents_a_one_wei_overquote() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
+        let fees = UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 };
+        let faithful = UniswapV4State::new(
+            100_000_000_000_000_000_000,
+            sqrt_price,
+            fees.clone(),
+            0,
+            60,
+            vec![
+                TickInfo::new(-180, 1).unwrap(),
+                TickInfo::new(-120, 0).unwrap(),
+                TickInfo::new(120, -1).unwrap(),
+            ],
+        )
+        .unwrap();
+        let net_only = UniswapV4State::new(
+            100_000_000_000_000_000_000,
+            sqrt_price,
+            fees,
+            0,
+            60,
+            vec![TickInfo::new(-180, 1).unwrap(), TickInfo::new(120, -1).unwrap()],
+        )
+        .unwrap();
+        let amount_in = -I256::from_raw(U256::from(1_000_000_000_000_000_000u128));
+        let limit = get_sqrt_ratio_at_tick(-150).unwrap();
+
+        let faithful_result = faithful
+            .swap(true, amount_in, Some(limit), None)
+            .unwrap();
+        let net_only_result = net_only
+            .swap(true, amount_in, Some(limit), None)
+            .unwrap();
+
+        assert_eq!(
+            faithful_result.amount_calculated,
+            -I256::from_raw(U256::from(747_157_300_758_257_498u128))
+        );
+        assert_eq!(
+            net_only_result.amount_calculated,
+            -I256::from_raw(U256::from(747_157_300_758_257_499u128))
+        );
+        assert_eq!(
+            net_only_result.amount_calculated - faithful_result.amount_calculated,
+            -I256::ONE
+        );
+        assert_eq!(faithful_result.gas_used, U256::from(254_500));
+        assert_eq!(net_only_result.gas_used, U256::from(222_000));
+        assert_eq!(faithful_result.gas_used - net_only_result.gas_used, U256::from(32_500));
     }
 
     #[test]

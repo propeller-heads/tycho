@@ -15,6 +15,7 @@ pub fn map_protocol_changes(
     balances_store_deltas: StoreDeltas,
     ticks_map_deltas: TickDeltas,
     ticks_store_deltas: StoreDeltas,
+    ticks_gross_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
@@ -25,6 +26,7 @@ pub fn map_protocol_changes(
         balances_store_deltas,
         ticks_map_deltas,
         ticks_store_deltas,
+        ticks_gross_store_deltas,
         pool_liquidity_changes,
         pool_liquidity_store_deltas,
     );
