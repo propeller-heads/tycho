@@ -96,7 +96,9 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    reorg. On `ExtractorRestarted`, `ws.rs` sends `Response::SubscriptionEnded` and `PendingDeltas`
    folds that extractor's committed blocks into the sink and clears its window
 8. `PendingDeltas` (`services/deltas_buffer.rs`) receives broadcast
-   - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`
+   - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`.
+     Evicted blocks fold into the `EntityCache` when `ENTITY_CACHE_MODE` is not `off`; the cache
+     is built from one database snapshot before the server starts
    - Retains a block until it is at or below `min(finalized, db_committed, tip - depth)`, then
      folds it into a `FoldSink` and evicts it; committed blocks stay servable meanwhile
    - A block the window cannot apply ends the pump and the process; the window cannot refill
@@ -200,6 +202,7 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 | `RPC_MAX_BATCH_SIZE` / `RPC_STORAGE_SLOT_MAX_BATCH_SIZE` | RPC request batching limits |
 | `DELTA_WINDOW_DEPTH` | Blocks each extractor's RPC-side window retains (default 128) |
 | `DELTA_WINDOW_FOLD_BATCH` | Evictable blocks required before a fold runs (default 1) |
+| `ENTITY_CACHE_MODE` | `off` (default), `shadow`, or `serve`; anything but `off` loads the entity cache at startup and folds windows into it |
 | `TYCHO_S3_BUCKET` | S3 bucket the Substreams spkg packages are fetched from |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |
 | `RUST_LOG` | Tracing filter (e.g. `tycho_indexer=debug`) |

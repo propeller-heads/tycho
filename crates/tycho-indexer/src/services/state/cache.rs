@@ -22,8 +22,7 @@
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
 
-// Not yet constructed by production code; built by the startup load (ENG-6292) and fed by the
-// pump (ENG-6305).
+// The read side is consumed by the state service, ENG-6293.
 #![allow(dead_code)]
 
 use std::{

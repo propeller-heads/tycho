@@ -34,7 +34,9 @@ impl EntityCache {
     ///
     /// # Errors
     ///
-    /// See [`EntityCache::from_chunks`].
+    /// `LoadError::Storage` when the snapshot read fails, `LoadError::Incomplete` when the stream
+    /// ends before the totals and the cursors arrive, `LoadError::Mismatch` when the row totals
+    /// disagree with what was built. No cache exists after an error.
     pub async fn load(
         gateway: &CachedGateway,
         chain: Chain,
