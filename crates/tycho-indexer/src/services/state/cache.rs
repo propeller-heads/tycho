@@ -534,14 +534,25 @@ fn zip_changes<'a, K: Eq + Hash, D, B>(
 
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
-    /// block's own delta and balances. A deleted component is removed unless that block or a newer
-    /// one already wrote to it.
+    /// block's own delta and balances; one the cache already holds is logged and then treated like
+    /// any other entry. A deleted component is removed unless that block or a newer one already
+    /// wrote to it.
     fn fold_components(&mut self, block: &BlockAggregatedChanges) {
         let at = WriteTimestamp::from(&block.block);
         let system_components = self
             .components
             .entry(block.extractor.clone())
             .or_default();
+        for id in block.new_protocol_components.keys() {
+            if system_components.contains_key(id) {
+                warn!(
+                    system = %block.extractor,
+                    %id,
+                    block = block.block.number,
+                    "Creation of a component already cached skipped"
+                );
+            }
+        }
         for (id, delta, balances) in zip_changes(&block.state_deltas, &block.component_balances) {
             match system_components.get_mut(id) {
                 Some(entry) => entry.apply_block(delta, balances, at),
@@ -1093,6 +1104,26 @@ mod test {
         let state = cached_component(&cache, "c1").unwrap();
         assert_eq!(state.attributes["x"], Bytes::from(1u64));
         assert_eq!(state.balances[&addr(9)], Bytes::from(5u64));
+    }
+
+    #[test]
+    fn fold_keeps_an_already_cached_component_on_a_repeated_creation() {
+        let cache = EntityCache::new();
+        let first = with_state_delta(with_component(msg(2), "c1"), "c1", 2);
+        let first = with_component_balance(first, "c1", &addr(9), 5);
+        cache.fold(&first).unwrap();
+
+        cache
+            .fold(&with_state_delta(with_component(msg(3), "c1"), "c1", 3))
+            .unwrap();
+
+        let state = cached_component(&cache, "c1").unwrap();
+        assert_eq!(state.attributes["x"], Bytes::from(3u64), "block 3 applies");
+        assert_eq!(
+            state.balances,
+            HashMap::from([(addr(9), Bytes::from(5u64))]),
+            "the repeated creation does not rebuild the entry"
+        );
     }
 
     #[test]
