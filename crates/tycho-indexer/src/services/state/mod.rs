@@ -5,9 +5,9 @@
 //!
 //! # Planned end state
 //!
-//! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The database
-//! fill path and the request routing layer are not built yet; `DiscardSink` is still the
-//! production sink and every request reads the database.
+//! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The request
+//! routing layer is not built yet (ENG-6293); the cache is built at startup by [`loader`] when
+//! the mode is not `off`, and every request still reads the database.
 //!
 //! State responses are built as `cached base ⊕ window deltas up to the requested version`, where
 //! `⊕` applies deltas on top of a base and the highest block wins for each value. The database is
