@@ -4,6 +4,8 @@
 //!
 //! Robinhood runs no dynamic contract indexing, so the block changes carry no storage payload.
 
+use std::collections::HashSet;
+
 use anyhow::{anyhow, Result};
 use ethereum_uniswap_v4_shared::{
     pb::uniswap::v4::{Events, LiquidityChanges, TickDeltas},
@@ -19,11 +21,14 @@ use crate::{
     storage::{pad32, tx_storage_writes, Word},
 };
 
-/// Query-string parameters of [`map_pons_enriched_block_changes`], e.g.
-/// `pons_hook=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044`.
+/// Query-string parameters of [`map_pons_enriched_block_changes`]. `pons_hooks` is a non-empty,
+/// comma-separated list of 20-byte hexadecimal addresses, e.g.
+/// `pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,0x...`. The singular `pons_hook` form
+/// remains accepted for existing overrides, but cannot be combined with `pons_hooks`.
 #[derive(Debug, Deserialize)]
 pub struct Params {
-    pub pons_hook: String,
+    pub pons_hooks: Option<String>,
+    pub pons_hook: Option<String>,
 }
 
 impl Params {
@@ -34,19 +39,54 @@ impl Params {
             .map_err(|e| anyhow!("failed to parse query params `{input}`: {e}"))
     }
 
-    /// The Pons hook as the 20 raw bytes a component's `hooks` static attribute carries. Hex in
-    /// either case, with or without a `0x` prefix. Fails, naming the value, when it is not 20
-    /// hex-encoded bytes.
-    pub fn pons_hook_address(&self) -> Result<[u8; 20]> {
-        let digits = self
-            .pons_hook
-            .strip_prefix("0x")
-            .unwrap_or(&self.pons_hook);
-        let bytes = hex::decode(digits)
-            .map_err(|e| anyhow!("pons_hook `{}` is not hex: {e}", self.pons_hook))?;
+    /// Returns the configured Pons hooks as raw addresses. Each comma-separated entry must be
+    /// exactly 20 hexadecimal bytes, and duplicate addresses are rejected case-insensitively.
+    pub fn pons_hook_addresses(&self) -> Result<Vec<[u8; 20]>> {
+        let value = match (&self.pons_hooks, &self.pons_hook) {
+            (Some(_), Some(_)) => {
+                return Err(anyhow!(
+                    "set exactly one of `pons_hooks` or the legacy `pons_hook`, not both"
+                ))
+            }
+            (Some(value), None) => value,
+            (None, Some(value)) => value,
+            (None, None) => {
+                return Err(anyhow!(
+                    "missing Pons hook configuration: set `pons_hooks` to one or more comma-separated addresses"
+                ))
+            }
+        };
 
-        <[u8; 20]>::try_from(bytes.as_slice())
-            .map_err(|_| anyhow!("pons_hook `{}` is not 20 bytes", self.pons_hook))
+        if value.is_empty() {
+            return Err(anyhow!("`pons_hooks` must contain at least one address"))
+        }
+
+        let mut addresses = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, value) in value.split(',').enumerate() {
+            if value.is_empty() {
+                return Err(anyhow!("`pons_hooks` entry {} is empty", index + 1))
+            }
+
+            let digits = value
+                .strip_prefix("0x")
+                .unwrap_or(value);
+            let bytes = hex::decode(digits).map_err(|e| {
+                anyhow!("`pons_hooks` entry {} `{value}` is not hex: {e}", index + 1)
+            })?;
+            let address = <[u8; 20]>::try_from(bytes.as_slice()).map_err(|_| {
+                anyhow!("`pons_hooks` entry {} `{value}` is not exactly 20 bytes", index + 1)
+            })?;
+            if !seen.insert(address) {
+                return Err(anyhow!(
+                    "`pons_hooks` entry {} `{value}` duplicates an earlier address",
+                    index + 1
+                ))
+            }
+            addresses.push(address);
+        }
+
+        Ok(addresses)
     }
 }
 
@@ -63,7 +103,7 @@ pub fn map_pons_enriched_block_changes(
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
-    let pons_hook = Params::parse_from_query(&params)?.pons_hook_address()?;
+    let pons_hooks = Params::parse_from_query(&params)?.pons_hook_addresses()?;
 
     let mut changes = collect_transaction_changes(
         created_pools,
@@ -75,38 +115,38 @@ pub fn map_pons_enriched_block_changes(
         pool_liquidity_changes,
         pool_liquidity_store_deltas,
     );
-    enrich_pons_creations(&pons_hook, &block, &mut changes);
+    enrich_pons_creations(&pons_hooks, &block, &mut changes);
 
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }
 
-/// Adds the Pons static attributes to every component in `changes` that `pons_hook` created:
-/// `hook_identifier` always, and the fee terms `registerPool` froze when the creating transaction
-/// is in `block` and wrote them.
+/// Adds the Pons static attributes to every component in `changes` that a configured Pons hook
+/// created: `hook_identifier` always, and the fee terms `registerPool` froze when the creating
+/// transaction is in `block` and wrote them.
 ///
 /// A component whose registration writes are missing, reverted or out of range keeps
 /// `hook_identifier` alone and the reason is logged, so a consumer that needs the fee terms
 /// rejects the pool instead of pricing it with a substituted value. Components of other hooks, and
 /// every other change, are left untouched.
 pub fn enrich_pons_creations(
-    pons_hook: &[u8; 20],
+    pons_hooks: &[[u8; 20]],
     block: &eth::Block,
     changes: &mut [TransactionChanges],
 ) {
     for tx_changes in changes {
-        enrich_transaction(pons_hook, block, tx_changes);
+        enrich_transaction(pons_hooks, block, tx_changes);
     }
 }
 
 fn enrich_transaction(
-    pons_hook: &[u8; 20],
+    pons_hooks: &[[u8; 20]],
     block: &eth::Block,
     tx_changes: &mut TransactionChanges,
 ) {
     let creates_a_pons_pool = tx_changes
         .component_changes
         .iter()
-        .any(|component| is_pons_creation(component, pons_hook));
+        .any(|component| configured_pons_hook(component, pons_hooks).is_some());
     if !creates_a_pons_pool {
         return
     }
@@ -115,23 +155,20 @@ fn enrich_transaction(
         .tx
         .as_ref()
         .map_or_else(String::new, |tx| hex::encode(&tx.hash));
-    let writes = tx_changes
+    let trace = tx_changes
         .tx
         .as_ref()
-        .and_then(|tx| find_transaction(block, &tx.hash))
-        .map(|trace| tx_storage_writes(trace, pons_hook));
+        .and_then(|tx| find_transaction(block, &tx.hash));
 
     for component in &mut tx_changes.component_changes {
-        if !is_pons_creation(component, pons_hook) {
-            continue
-        }
+        let Some(pons_hook) = configured_pons_hook(component, pons_hooks) else { continue };
         component.static_att.push(Attribute {
             name: "hook_identifier".to_string(),
             value: PONS_HOOK_IDENTIFIER.as_bytes().to_vec(),
             change: ChangeType::Creation.into(),
         });
 
-        let Some(writes) = writes.as_ref() else {
+        let Some(trace) = trace else {
             substreams::log::info!(
                 "pons: pool {} keeps no fee terms: transaction {} is not in this block",
                 component.id,
@@ -146,7 +183,8 @@ fn enrich_transaction(
             );
             continue
         };
-        match pons_static_attributes(&pool_id, writes) {
+        let writes = tx_storage_writes(trace, pons_hook);
+        match pons_static_attributes(&pool_id, &writes) {
             Some(attributes) => component.static_att.extend(attributes),
             None => substreams::log::info!(
                 "pons: pool {} keeps no fee terms from transaction {}",
@@ -157,10 +195,19 @@ fn enrich_transaction(
     }
 }
 
-/// Whether `component` is a pool `pons_hook` created.
-fn is_pons_creation(component: &ProtocolComponent, pons_hook: &[u8; 20]) -> bool {
-    component.change == i32::from(ChangeType::Creation) &&
-        static_attribute(component, "hooks") == Some(pons_hook.as_slice())
+/// Returns the configured hook that created `component`.
+fn configured_pons_hook<'a>(
+    component: &ProtocolComponent,
+    pons_hooks: &'a [[u8; 20]],
+) -> Option<&'a [u8; 20]> {
+    if component.change != i32::from(ChangeType::Creation) {
+        return None
+    }
+
+    let hooks = static_attribute(component, "hooks")?;
+    pons_hooks
+        .iter()
+        .find(|pons_hook| hooks == pons_hook.as_slice())
 }
 
 fn static_attribute<'a>(component: &'a ProtocolComponent, name: &str) -> Option<&'a [u8]> {
@@ -196,6 +243,8 @@ mod tests {
     };
 
     const PONS_HOOK: [u8; 20] = hex_literal::hex!("e5e702641ea86f4ae6cc3cdaed2b886f976be044");
+    const SECOND_PONS_HOOK: [u8; 20] =
+        hex_literal::hex!("0000000000000000000000000000000000000002");
     const OTHER_HOOK: [u8; 20] = hex_literal::hex!("0000000aa232009084bd71a5797d089aa4edfad4");
 
     // Two registered pools read off Robinhood; the raw responses behind the words are in
@@ -251,13 +300,19 @@ mod tests {
 
     /// The call `registerPool` makes: the two `launches[pool_id]` words this decoder reads, written
     /// over a slot that held zero.
-    fn registration_call(pool_id: &str, word_0: &str, word_4: &str, reverted: bool) -> Call {
+    fn registration_call(
+        hook: &[u8; 20],
+        pool_id: &str,
+        word_0: &str,
+        word_4: &str,
+        reverted: bool,
+    ) -> Call {
         let base = mapping_slot(&word(pool_id), PONS_LAUNCHES_SLOT);
         let storage_changes = [(0u64, word_0), (4, word_4)]
             .into_iter()
             .enumerate()
             .map(|(ordinal, (offset, value))| StorageChange {
-                address: PONS_HOOK.to_vec(),
+                address: hook.to_vec(),
                 key: word_at_offset(&base, offset).to_vec(),
                 old_value: vec![0u8; 32],
                 new_value: word(value).to_vec(),
@@ -304,12 +359,18 @@ mod tests {
     fn a_pons_creation_gets_the_identifier_and_the_fee_terms() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+            vec![registration_call(
+                &PONS_HOOK,
+                POOL_100_100,
+                WORD_0_100_100,
+                WORD_4_100_100,
+                false,
+            )],
         )]);
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         let component = &changes[0].component_changes[0];
         assert_eq!(
@@ -328,12 +389,18 @@ mod tests {
     fn a_component_of_another_hook_is_left_untouched() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+            vec![registration_call(
+                &PONS_HOOK,
+                POOL_100_100,
+                WORD_0_100_100,
+                WORD_4_100_100,
+                false,
+            )],
         )]);
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &OTHER_HOOK)])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(attribute_names(&changes[0].component_changes[0]), ["pool_id", "hooks"]);
     }
@@ -342,13 +409,19 @@ mod tests {
     fn a_component_that_is_not_a_creation_is_left_untouched() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+            vec![registration_call(
+                &PONS_HOOK,
+                POOL_100_100,
+                WORD_0_100_100,
+                WORD_4_100_100,
+                false,
+            )],
         )]);
         let mut component = creation_component(POOL_100_100, &PONS_HOOK);
         component.change = i32::from(ChangeType::Update);
         let mut changes = vec![transaction_changes(&TX_ONE, vec![component])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(attribute_names(&changes[0].component_changes[0]), ["pool_id", "hooks"]);
     }
@@ -359,7 +432,7 @@ mod tests {
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(
             attribute_names(&changes[0].component_changes[0]),
@@ -371,12 +444,12 @@ mod tests {
     fn pons_writes_in_a_reverted_call_yield_only_the_identifier() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, true)],
+            vec![registration_call(&PONS_HOOK, POOL_100_100, WORD_0_100_100, WORD_4_100_100, true)],
         )]);
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(
             attribute_names(&changes[0].component_changes[0]),
@@ -390,7 +463,7 @@ mod tests {
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(
             attribute_names(&changes[0].component_changes[0]),
@@ -402,13 +475,19 @@ mod tests {
     fn changes_without_a_transaction_yield_only_the_identifier() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+            vec![registration_call(
+                &PONS_HOOK,
+                POOL_100_100,
+                WORD_0_100_100,
+                WORD_4_100_100,
+                false,
+            )],
         )]);
         let mut changes =
             vec![transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)])];
         changes[0].tx = None;
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(
             attribute_names(&changes[0].component_changes[0]),
@@ -420,7 +499,13 @@ mod tests {
     fn a_component_without_a_pool_id_yields_only_the_identifier() {
         let block = block(vec![trace(
             &TX_ONE,
-            vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+            vec![registration_call(
+                &PONS_HOOK,
+                POOL_100_100,
+                WORD_0_100_100,
+                WORD_4_100_100,
+                false,
+            )],
         )]);
         let mut component = creation_component(POOL_100_100, &PONS_HOOK);
         component
@@ -428,7 +513,7 @@ mod tests {
             .retain(|attribute| attribute.name != "pool_id");
         let mut changes = vec![transaction_changes(&TX_ONE, vec![component])];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         assert_eq!(attribute_names(&changes[0].component_changes[0]), ["hooks", "hook_identifier"]);
     }
@@ -438,16 +523,25 @@ mod tests {
         let block = block(vec![
             trace(
                 &TX_ONE,
-                vec![registration_call(POOL_100_100, WORD_0_100_100, WORD_4_100_100, false)],
+                vec![registration_call(
+                    &PONS_HOOK,
+                    POOL_100_100,
+                    WORD_0_100_100,
+                    WORD_4_100_100,
+                    false,
+                )],
             ),
-            trace(&TX_TWO, vec![registration_call(POOL_0_100, WORD_0_0_100, WORD_4_0_100, false)]),
+            trace(
+                &TX_TWO,
+                vec![registration_call(&PONS_HOOK, POOL_0_100, WORD_0_0_100, WORD_4_0_100, false)],
+            ),
         ]);
         let mut changes = vec![
             transaction_changes(&TX_ONE, vec![creation_component(POOL_100_100, &PONS_HOOK)]),
             transaction_changes(&TX_TWO, vec![creation_component(POOL_0_100, &PONS_HOOK)]),
         ];
 
-        enrich_pons_creations(&PONS_HOOK, &block, &mut changes);
+        enrich_pons_creations(&[PONS_HOOK], &block, &mut changes);
 
         let first = &changes[0].component_changes[0];
         assert_eq!(attribute_value(first, "pons_hook_fee_bps"), [0x64]);
@@ -458,51 +552,94 @@ mod tests {
     }
 
     #[test]
-    fn params_parse_a_prefixed_address() {
+    fn two_configured_hooks_created_in_one_transaction_keep_their_own_terms() {
+        let block = block(vec![trace(
+            &TX_ONE,
+            vec![
+                registration_call(&PONS_HOOK, POOL_100_100, WORD_0_100_100, WORD_4_100_100, false),
+                registration_call(&SECOND_PONS_HOOK, POOL_0_100, WORD_0_0_100, WORD_4_0_100, false),
+            ],
+        )]);
+        let mut changes = vec![transaction_changes(
+            &TX_ONE,
+            vec![
+                creation_component(POOL_100_100, &PONS_HOOK),
+                creation_component(POOL_0_100, &SECOND_PONS_HOOK),
+                creation_component(POOL_100_100, &OTHER_HOOK),
+            ],
+        )];
+
+        enrich_pons_creations(&[PONS_HOOK, SECOND_PONS_HOOK], &block, &mut changes);
+
+        let first = &changes[0].component_changes[0];
+        assert_eq!(attribute_value(first, "pons_hook_fee_bps"), [0x64]);
+        assert_eq!(attribute_value(first, "pons_creator_tax_bps"), [0x64]);
+        let second = &changes[0].component_changes[1];
+        assert_eq!(attribute_value(second, "pons_hook_fee_bps"), [0x64]);
+        assert_eq!(attribute_value(second, "pons_creator_tax_bps"), [0x00]);
+        assert_eq!(attribute_names(&changes[0].component_changes[2]), ["pool_id", "hooks"]);
+    }
+
+    #[test]
+    fn params_accept_the_canonical_singleton() {
         let params =
-            Params::parse_from_query("pons_hook=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044")
-                .expect("a prefixed address parses");
-
+            Params::parse_from_query("pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044")
+                .expect("the singleton query parses");
         assert_eq!(
             params
-                .pons_hook_address()
-                .expect("a prefixed address decodes"),
-            PONS_HOOK
+                .pons_hook_addresses()
+                .expect("the canonical singleton decodes"),
+            vec![PONS_HOOK]
         );
     }
 
     #[test]
-    fn params_parse_an_unprefixed_uppercase_address() {
-        let params = Params::parse_from_query("pons_hook=E5E702641EA86F4AE6CC3CDAED2B886F976BE044")
-            .expect("an unprefixed address parses");
-
+    fn params_accept_multiple_hooks_and_the_legacy_singleton() {
+        let params = Params::parse_from_query(
+            "pons_hooks=E5E702641EA86F4AE6CC3CDAED2B886F976BE044,0x0000000000000000000000000000000000000002",
+        )
+        .expect("the multiple-hook query parses");
         assert_eq!(
             params
-                .pons_hook_address()
-                .expect("an unprefixed address decodes"),
-            PONS_HOOK
+                .pons_hook_addresses()
+                .expect("multiple hooks decode"),
+            vec![PONS_HOOK, SECOND_PONS_HOOK]
+        );
+
+        let legacy = Params::parse_from_query("pons_hook=e5e702641ea86f4ae6cc3cdaed2b886f976be044")
+            .expect("the legacy query parses");
+        assert_eq!(
+            legacy
+                .pons_hook_addresses()
+                .expect("the legacy value decodes"),
+            vec![PONS_HOOK]
         );
     }
 
     #[test]
-    fn params_reject_an_address_that_is_not_twenty_bytes() {
-        let params = Params::parse_from_query("pons_hook=0xe5e702641ea86f4ae6cc3cdaed2b886f976be0")
-            .expect("the query string itself is well formed");
-
-        assert!(params.pons_hook_address().is_err());
-    }
-
-    #[test]
-    fn params_reject_a_non_hex_address() {
-        let params = Params::parse_from_query("pons_hook=0xzzz")
-            .expect("the query string itself is well formed");
-
-        assert!(params.pons_hook_address().is_err());
+    fn params_reject_malformed_empty_and_duplicate_lists() {
+        for input in [
+            "pons_hooks=",
+            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,",
+            "pons_hooks=0xzzz",
+            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be0",
+            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,E5E702641EA86F4AE6CC3CDAED2B886F976BE044",
+            "pons_hook=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044&pons_hooks=0x0000000000000000000000000000000000000002",
+        ] {
+            let error = Params::parse_from_query(input)
+                .expect("the query syntax is valid")
+                .pons_hook_addresses()
+                .expect_err("the hook list must be rejected");
+            assert!(!error.to_string().is_empty(), "{input}");
+        }
     }
 
     #[test]
     fn params_reject_a_query_string_without_the_hook() {
-        assert!(Params::parse_from_query("pool_manager=0x00").is_err());
+        assert!(Params::parse_from_query("pool_manager=0x00")
+            .expect("the query syntax is valid")
+            .pons_hook_addresses()
+            .is_err());
     }
 
     #[test]
@@ -521,9 +658,9 @@ mod tests {
         assert_eq!(
             Params::parse_from_query(params)
                 .expect("the manifest params parse")
-                .pons_hook_address()
-                .expect("the manifest hook address decodes"),
-            PONS_HOOK
+                .pons_hook_addresses()
+                .expect("the manifest hook list decodes"),
+            vec![PONS_HOOK]
         );
     }
 }

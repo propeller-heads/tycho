@@ -156,7 +156,7 @@ fn block_changes(block: &Block) -> BlockChanges {
         LiquidityChanges::default(),
         StoreDeltas::default(),
     );
-    enrich_pons_creations(&PONS_HOOK, block, &mut changes);
+    enrich_pons_creations(&[PONS_HOOK], block, &mut changes);
 
     BlockChanges { block: Some(block.into()), changes, storage_changes: vec![] }
 }
