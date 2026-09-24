@@ -440,7 +440,7 @@ impl From<&CachedComponentState> for ProtocolComponentState {
 }
 
 /// The long-lived entity store. See the module doc for the data model and locking.
-pub(crate) struct EntityCache {
+pub struct EntityCache {
     state: RwLock<CacheState>,
 }
 
