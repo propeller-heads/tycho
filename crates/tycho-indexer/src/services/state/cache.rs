@@ -32,51 +32,21 @@ use std::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use chrono::NaiveDateTime;
 use tracing::warn;
 use tycho_common::{
     keccak256,
     models::{
-        blockchain::{Block, BlockAggregatedChanges},
+        blockchain::BlockAggregatedChanges,
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentState, ProtocolComponentStateDelta},
         Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId,
         ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
-    storage::StorageError,
+    storage::{StorageError, WriteTimestamp},
     Bytes,
 };
 
 use super::window::FoldSink;
-
-/// When a value was written: a logical timestamp, the writing block's wall-clock timestamp then
-/// its number.
-///
-/// `block_ts` is the unit of the database's `valid_from`. `block_number` orders blocks that share
-/// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
-/// database. A folded block carries both from its header; a snapshot row carries both from the
-/// block of its `modify_tx`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct WriteTimestamp {
-    block_ts: NaiveDateTime,
-    block_number: u64,
-}
-
-impl WriteTimestamp {
-    pub(crate) fn new(block_ts: NaiveDateTime, block_number: u64) -> Self {
-        Self { block_ts, block_number }
-    }
-
-    pub(crate) fn block_number(&self) -> u64 {
-        self.block_number
-    }
-}
-
-impl From<&Block> for WriteTimestamp {
-    fn from(block: &Block) -> Self {
-        Self::new(block.ts, block.number)
-    }
-}
 
 /// What a write did to a [`Timestamped`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,6 +637,7 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
+    use chrono::NaiveDateTime;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
