@@ -64,7 +64,7 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{PlansConfig, ServicesBuilder, WindowConfig},
+    services::{EntityCache, EntityCacheMode, PlansConfig, ServicesBuilder, WindowConfig},
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -524,21 +524,35 @@ async fn create_indexing_tasks(
     })?;
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .dci_protocols(dci_protocols)
-            .protocol_systems(protocol_systems)
-            .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs)
-            .window_config(WindowConfig {
-                depth: global_args.delta_window_depth,
-                min_fold_batch: global_args.delta_window_fold_batch,
-            })
-            .run()?;
+    let mut services = ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .dci_protocols(dci_protocols)
+        .protocol_systems(protocol_systems.clone())
+        .register_extractors(extractor_handles.clone())
+        .pending_deltas(pending_deltas_rxs)
+        .window_config(WindowConfig {
+            depth: global_args.delta_window_depth,
+            min_fold_batch: global_args.delta_window_fold_batch,
+        });
+
+    // The load runs after the extractors are built and before the server and the pump start:
+    // the snapshot sees the initialized accounts, nothing writes during the build, and no
+    // request or fold can reach a half-built cache.
+    if global_args.entity_cache_mode != EntityCacheMode::Off {
+        let chain = *chains
+            .first()
+            .expect("No chain provided");
+        info!(mode = ?global_args.entity_cache_mode, "Loading the entity cache");
+        let cache = EntityCache::load(&cached_gw, chain, &protocol_systems)
+            .await
+            .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
+        services = services.entity_cache(Arc::new(cache));
+    }
+
+    let (server_handle, server_task) = services.run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
