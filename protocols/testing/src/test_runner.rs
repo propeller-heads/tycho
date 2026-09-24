@@ -69,6 +69,8 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
         ("arc-uniswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
@@ -1656,39 +1658,73 @@ mod tests {
     }
 
     #[test]
-    fn arc_uniswap_v2_uses_the_shared_package_and_arc_manifest() {
+    fn arc_uniswap_packages_use_shared_packages_and_arc_manifests() {
         let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("protocols/testing must live below protocols")
             .to_path_buf();
-        let runner = TestRunner::new(RunnerConfig {
-            test_type: TestType::Range(TestTypeRange { match_test: None }),
-            root_path,
-            chain: Chain::Arc,
-            protocol: "arc-uniswap-v2".to_string(),
-            db_url: String::new(),
-            rpc_url: "http://localhost:8545".to_string(),
-            tycho_server_port: 4242,
-            vm_simulation_traces: false,
-            reuse_last_sync: false,
-            prebuilt_wasm: false,
-        })
-        .expect("Arc package resolution must produce a runner");
 
-        assert!(runner
-            .substreams_path
-            .ends_with("substreams/ethereum-uniswap-v2"));
-        assert!(runner
-            .config_file_path
-            .ends_with("integration_test_arc_uniswap_v2.tycho.yaml"));
+        for (protocol, base_protocol, config_file_name, manifest_path) in [
+            (
+                "arc-uniswap-v2",
+                "ethereum-uniswap-v2",
+                "integration_test_arc_uniswap_v2.tycho.yaml",
+                "./arc-uniswap-v2.yaml",
+            ),
+            (
+                "arc-uniswap-v3",
+                "ethereum-uniswap-v3-logs-only",
+                "integration_test_arc_uniswap_v3.tycho.yaml",
+                "./arc-uniswap-v3.yaml",
+            ),
+            (
+                "arc-uniswap-v4-no-hooks",
+                "ethereum-uniswap-v4/no-hooks",
+                "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
+                "./arc-uniswap-v4-no-hooks.yaml",
+            ),
+        ] {
+            let runner = TestRunner::new(RunnerConfig {
+                test_type: TestType::Range(TestTypeRange { match_test: None }),
+                root_path: root_path.clone(),
+                chain: Chain::Arc,
+                protocol: protocol.to_string(),
+                db_url: String::new(),
+                rpc_url: "http://localhost:8545".to_string(),
+                tycho_server_port: 4242,
+                vm_simulation_traces: false,
+                reuse_last_sync: false,
+                prebuilt_wasm: false,
+            })
+            .expect("Arc package resolution must produce a runner");
 
-        let config = TestRunner::parse_config(&runner.config_file_path)
-            .expect("Arc integration test configuration must parse");
-        assert_eq!(config.substreams_yaml_path, "./arc-uniswap-v2.yaml");
-        assert!(runner
-            .substreams_path
-            .join(config.substreams_yaml_path)
-            .is_file());
+            assert!(
+                runner
+                    .substreams_path
+                    .ends_with(PathBuf::from("substreams").join(base_protocol)),
+                "unexpected shared package for {protocol}",
+            );
+            assert!(
+                runner
+                    .config_file_path
+                    .ends_with(config_file_name),
+                "unexpected config file for {protocol}",
+            );
+
+            let config = TestRunner::parse_config(&runner.config_file_path)
+                .expect("Arc integration test configuration must parse");
+            assert_eq!(
+                config.substreams_yaml_path, manifest_path,
+                "unexpected manifest for {protocol}",
+            );
+            assert!(
+                runner
+                    .substreams_path
+                    .join(config.substreams_yaml_path)
+                    .is_file(),
+                "manifest must exist for {protocol}",
+            );
+        }
     }
 
     fn get_mocked_runner() -> TestRunner {
