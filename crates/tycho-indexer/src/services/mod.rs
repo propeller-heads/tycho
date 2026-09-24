@@ -42,7 +42,7 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
-pub use state::{cache::EntityCache, window::WindowConfig, EntityCacheMode};
+pub use state::{cache::EntityCache, loader::LoadError, window::WindowConfig, EntityCacheMode};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {

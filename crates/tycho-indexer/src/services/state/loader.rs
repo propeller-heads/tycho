@@ -1,8 +1,5 @@
 //! Builds the [`EntityCache`] from a state snapshot stream.
 
-// Wired into startup in a follow-up commit.
-#![allow(dead_code)]
-
 use std::{collections::HashMap, time::Instant};
 
 use metrics::gauge;
@@ -10,12 +7,13 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tycho_common::{
-    models::{Address, ComponentId, ProtocolSystem},
+    models::{Address, Chain, ComponentId, ProtocolSystem},
     storage::{
         AccountSnapshot, ComponentSnapshot, CursorSnapshot, SnapshotChunk, SnapshotTotals,
         StorageError,
     },
 };
+use tycho_storage::postgres::cache::CachedGateway;
 
 use super::cache::{AccountWriteTimestamps, CachedAccount, CachedComponentState, EntityCache};
 
@@ -30,6 +28,21 @@ pub enum LoadError {
 }
 
 impl EntityCache {
+    /// Builds the cache from the live state of `chain`: one database snapshot, read once through
+    /// `gateway`. The gateway is used for the read and not kept; after this call the cache never
+    /// touches the database.
+    ///
+    /// # Errors
+    ///
+    /// See [`EntityCache::from_chunks`].
+    pub async fn load(
+        gateway: &CachedGateway,
+        chain: Chain,
+        extractors: &[String],
+    ) -> Result<Self, LoadError> {
+        Self::from_chunks(gateway.state_snapshot(chain), extractors).await
+    }
+
     /// Builds the cache from one snapshot stream.
     ///
     /// Consumes every chunk, turns each row into a cache entry stamped with the block that wrote
