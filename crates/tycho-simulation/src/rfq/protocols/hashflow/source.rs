@@ -7,10 +7,7 @@ use tracing::debug;
 use tycho_common::{models::token::Token, Bytes};
 
 use crate::{
-    book::{
-        component::{pair_component, pair_component_id},
-        tvl, Book, BookFeedConfig, BookSnapshot, ReceivedAt,
-    },
+    book::{component::pair_component, tvl, Book, BookFeedConfig, BookSnapshot, ReceivedAt},
     protocol::models::ProtocolComponent,
     rfq::protocols::hashflow::{
         client::HashflowClient, models::HashflowMarketMakerLevels, state::HashflowState,
@@ -20,7 +17,8 @@ use crate::{
 };
 
 /// Fetches one complete Hashflow book per poll: every market maker's levels between the
-/// configured tokens whose normalized TVL clears the threshold, as simulate-ready books.
+/// configured tokens whose normalized TVL clears the threshold, one simulate-ready book per maker
+/// and pair.
 #[derive(Clone, Debug)]
 pub struct HashflowBookSource {
     pub book_config: BookFeedConfig,
@@ -107,7 +105,7 @@ impl HashflowBookSource {
                 };
 
                 // Hashflow's levels price one direction, so the reverse pair is a different book.
-                let component_id = pair_component_id(PROTOCOL_SYSTEM, base_bytes, quote_bytes);
+                let component_id = maker_component_id(base_bytes, quote_bytes, mm_name);
                 let tvl = mm_level.levels.notional();
                 let Some(normalized_tvl) = self.normalize_tvl(tvl, quote_bytes, &levels_by_mm)
                 else {
@@ -141,6 +139,14 @@ impl HashflowBookSource {
         }
         Ok(books)
     }
+}
+
+/// The id of `market_maker`'s book from `base` into `quote`: the pair's id (see
+/// [`pair_component_id`](crate::book::component::pair_component_id)) followed by the maker's
+/// name. Each maker's ladder is its own component because a binding quote comes from the one
+/// maker it is requested from, so a swap can fill against one maker's depth only.
+fn maker_component_id(base: &Bytes, quote: &Bytes, market_maker: &str) -> Bytes {
+    Bytes::from([PROTOCOL_SYSTEM.as_bytes(), base, quote, market_maker.as_bytes()].concat())
 }
 
 impl HttpSource for HashflowBookSource {
@@ -267,9 +273,9 @@ mod tests {
 
         let books = source.fetch_books().await.unwrap();
 
-        let weth_usdc = pair_component_id(PROTOCOL_SYSTEM, &weth, &usdc);
-        let wbtc_weth = pair_component_id(PROTOCOL_SYSTEM, &wbtc, &weth);
-        let wbtc_usdc = pair_component_id(PROTOCOL_SYSTEM, &wbtc, &usdc);
+        let weth_usdc = maker_component_id(&weth, &usdc, "mm1");
+        let wbtc_weth = maker_component_id(&wbtc, &weth, "mm2");
+        let wbtc_usdc = maker_component_id(&wbtc, &usdc, "mm1");
         let key = |id: &Bytes| id.to_string();
         assert_eq!(
             books
@@ -289,6 +295,75 @@ mod tests {
             .expect("a Hashflow state");
         assert_eq!(state.base_token().address, wbtc);
         assert_eq!(state.quote_token().address, weth);
+    }
+
+    #[test]
+    fn the_maker_id_is_the_pair_id_followed_by_the_maker_name() {
+        let id =
+            maker_component_id(&Bytes::from(vec![0x11; 20]), &Bytes::from(vec![0x22; 20]), "mm1");
+
+        // "book:hashflow", the twenty bytes of each address, then "mm1", all in ASCII.
+        assert_eq!(
+            id.to_string(),
+            "0x626f6f6b3a68617368666c6f77\
+             1111111111111111111111111111111111111111\
+             2222222222222222222222222222222222222222\
+             6d6d31"
+        );
+    }
+
+    /// Two makers quoting the same pair are two books, each with its own maker and ladder.
+    #[tokio::test]
+    async fn fetch_books_keeps_every_market_maker_of_a_pair() {
+        let weth = Bytes::from_str(WETH).unwrap();
+        let usdc = Bytes::from_str(USDC).unwrap();
+        let market_makers = r#"{"marketMakers":["mm1","mm2"]}"#.to_string();
+        let price_levels = format!(
+            r#"{{"status":"success","levels":{{
+                "mm1":[{{"pair":{{"baseToken":"{WETH}","quoteToken":"{USDC}"}},"levels":[{{"q":"1","p":"3000"}}]}}],
+                "mm2":[{{"pair":{{"baseToken":"{WETH}","quoteToken":"{USDC}"}},"levels":[{{"q":"2","p":"2990"}}]}}]
+            }}}}"#
+        );
+        let server = spawn_http_server(move |target| {
+            if target.starts_with("/market-makers") {
+                Some(("200 OK", market_makers.clone()))
+            } else {
+                Some(("200 OK", price_levels.clone()))
+            }
+        })
+        .await;
+        let source = source_for(&server.url(), &[&weth, &usdc], 1.0);
+
+        let books = source.fetch_books().await.unwrap();
+
+        let makers_and_ladders: HashMap<_, _> = books
+            .values()
+            .map(|book| {
+                let state = book
+                    .state
+                    .as_any()
+                    .downcast_ref::<HashflowState>()
+                    .expect("a Hashflow state");
+                assert_eq!(
+                    book.component.id,
+                    maker_component_id(&weth, &usdc, &state.market_maker)
+                );
+                (state.market_maker.clone(), state.levels.levels.clone())
+            })
+            .collect();
+        assert_eq!(
+            makers_and_ladders,
+            HashMap::from([
+                (
+                    "mm1".to_string(),
+                    Levels::new(vec![PriceLevel { quantity: 1.0, price: 3000.0 }]).unwrap()
+                ),
+                (
+                    "mm2".to_string(),
+                    Levels::new(vec![PriceLevel { quantity: 2.0, price: 2990.0 }]).unwrap()
+                ),
+            ])
+        );
     }
 
     /// Hashflow signals failure inside an HTTP 200: a non-success status is a connection error

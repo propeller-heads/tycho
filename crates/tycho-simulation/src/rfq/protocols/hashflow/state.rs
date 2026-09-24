@@ -175,7 +175,7 @@ impl IndicativelyPriced for HashflowState {
     ) -> Result<SignedQuote, SimulationError> {
         Ok(self
             .client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, self.market_maker.clone())
             .await?)
     }
 }

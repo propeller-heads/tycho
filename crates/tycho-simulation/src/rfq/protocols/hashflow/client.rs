@@ -19,6 +19,7 @@ use crate::{
         protocols::hashflow::models::{
             HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
             HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse, HashflowRFQ,
+            HashflowRFQOptions,
         },
     },
     snapshot_feed::{errors::FeedError, http::fetch_json},
@@ -126,15 +127,18 @@ impl HashflowClient {
             .ok_or_else(|| FeedError::Parsing("API response missing levels".to_string()))
     }
 
+    /// Requests a signed quote from `market_maker` alone: the API does not fall back to another
+    /// maker when it declines, so a quote always comes from the maker whose levels priced it.
     #[instrument(
         name = "quote_request",
         level = "error",
         skip_all,
-        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in)
+        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in, %market_maker)
     )]
     pub async fn request_binding_quote(
         &self,
         params: &GetAmountOutParams,
+        market_maker: String,
     ) -> Result<SignedQuote, RFQError> {
         let hashflow_chain = HashflowChain::from(self.chain);
         // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
@@ -153,6 +157,8 @@ impl HashflowClient {
                 quote_token_amount: None,
                 trader: params.receiver.to_string(),
                 effective_trader: Some(effective_trader.to_string()),
+                market_makers: vec![market_maker],
+                options: HashflowRFQOptions { do_not_retry_with_other_makers: true },
             }],
             calldata: false,
         };
@@ -533,7 +539,7 @@ mod tests {
         let params = create_test_quote_params();
 
         let err = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap_err();
 
@@ -542,8 +548,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_binding_quote_field_mapping() {
-        // The wire request carries the receiver as Hashflow's trader and a fresh random
-        // address as the effectiveTrader — a new one per quote request.
+        // The wire request carries the receiver as Hashflow's trader, a fresh random address as
+        // the effectiveTrader — a new one per quote request — and the one maker it goes to.
         let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
         let client = create_test_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
@@ -552,11 +558,11 @@ mod tests {
         let params = create_test_quote_params();
 
         let first_quote = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap();
         client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap();
 
@@ -566,6 +572,12 @@ mod tests {
             assert!(
                 body.contains(&format!("\"trader\":\"{}\"", params.receiver)),
                 "trader is not the receiver: {body}"
+            );
+            assert!(
+                body.contains(
+                    r#""marketMakers":["mm1"],"options":{"doNotRetryWithOtherMakers":true}"#
+                ),
+                "request is not pinned to the state's maker: {body}"
             );
         }
         let first = effective_trader_of(&requests[0]);
@@ -598,7 +610,7 @@ mod tests {
         // This should timeout after 200ms
         let start = std::time::Instant::now();
         let result = client_short_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
         let elapsed = start.elapsed();
 
@@ -628,7 +640,7 @@ mod tests {
 
         // This should wait for the response (500ms)
         let result = client_long_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
 
         // Should succeed - the server waits 500ms which is within the 1s timeout
@@ -696,7 +708,7 @@ mod tests {
         );
         let params = create_test_quote_params();
         let result = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
 
         assert!(result.is_ok(), "Expected success after retries, got: {:?}", result);

@@ -108,6 +108,19 @@ pub struct HashflowRFQ {
     pub quote_token_amount: Option<String>,
     pub trader: String,
     pub effective_trader: Option<String>,
+    /// The makers the RFQ goes to; a quote from any other is only possible as the API's
+    /// fallback, which `options` disables.
+    pub market_makers: Vec<String>,
+    pub options: HashflowRFQOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashflowRFQOptions {
+    /// Without it, the API answers a failed maker with the next best one. That maker's liquidity
+    /// is a component of its own, which the same route may already be filling, so its quote could
+    /// draw on the same depth twice, at a price the requesting state did not simulate.
+    pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
