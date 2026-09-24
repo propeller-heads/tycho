@@ -30,7 +30,7 @@ contract TesseraSwapAdapterTest is Test {
     bytes32 poolId = bytes32(bytes20(PAIR));
 
     function setUp() public {
-        vm.createSelectFork(vm.envString("RPC_BASE"), 50_548_423);
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 50_548_423);
         adapter = new TesseraSwapAdapter(VENUE);
     }
 

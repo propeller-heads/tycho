@@ -39,6 +39,9 @@ contract TesseraExecutor is IExecutor {
     }
 
     // Dispatcher measures settled output; the router enforces the user's minimum.
+    // Executed by delegatecall in the router; this executor does not custody ETH.
+    // Payable preserves the dispatcher call context, as required by IExecutor.
+    // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable

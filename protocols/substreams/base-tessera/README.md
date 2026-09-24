@@ -116,7 +116,7 @@ cargo clippy -p base-tessera --all-targets -- -D warnings
 cargo build -p base-tessera --release --target wasm32-unknown-unknown
 ```
 
-From `protocols/adapter-integration/evm` with `RPC_BASE` exported:
+From `protocols/adapter-integration/evm` with `BASE_RPC_URL` exported:
 
 ```sh
 forge test --match-contract TesseraSwapAdapterTest -vv
