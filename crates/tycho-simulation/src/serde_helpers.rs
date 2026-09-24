@@ -230,23 +230,16 @@ mod tests {
     fn protocol_states_skips_non_serializable_entries() {
         use alloy::primitives::U256;
 
-        use crate::evm::protocol::{
-            uniswap_v2::state::UniswapV2State,
-            uniswap_v4::state::{UniswapV4Fees, UniswapV4State},
-        };
+        use crate::evm::{decoder::MockProtocolSim, protocol::uniswap_v2::state::UniswapV2State};
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
             "serializable".to_string(),
             Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
         );
-        states.insert(
-            "non_serializable".to_string(),
-            Box::new(
-                UniswapV4State::new(0, U256::from(1), UniswapV4Fees::new(0, 0, 3000), 0, 1, vec![])
-                    .expect("valid state"),
-            ),
-        );
+        // MockProtocolSim's Serialize always errors, so it must be skipped by the
+        // protocol_states serializer.
+        states.insert("non_serializable".to_string(), Box::new(MockProtocolSim::new()));
 
         let update = Update::new(42, states, HashMap::new());
         let json = serde_json::to_string(&update).expect("serialization should succeed");
