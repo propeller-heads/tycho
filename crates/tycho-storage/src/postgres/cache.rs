@@ -731,8 +731,11 @@ impl CachedGateway {
         }
     }
 
-    /// Streams the live state of `chain` for the entity cache, see
-    /// [`super::snapshot::spawn_state_snapshot`].
+    /// Streams the live state of `chain` from one `REPEATABLE READ`, read-only transaction.
+    ///
+    /// The receiver yields `Totals`, then `Accounts` and `Components` chunks, then `Cursors`, all
+    /// from the same database snapshot. An error ends the stream after one `Err` item. Dropping the
+    /// receiver ends the read.
     pub fn state_snapshot(
         &self,
         chain: Chain,
