@@ -98,6 +98,7 @@ const deploy_protocols = {
         "ekubo_v3",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native",
     ],
 };
 

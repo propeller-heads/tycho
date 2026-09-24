@@ -13,6 +13,7 @@
     "vm:balancer_v3": "0xf9AE8127E35612DA9d750058fCf61f326E00cA10",
     "rfq:bebop": "0x69eae6eb2C924567912fBC435b915663c9D3D11e",
     "rfq:hashflow": "0x67336209a32e14F52Ea3466A2064C49885CD5A0b",
+    "rfq:native": "0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522",
     "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
     "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
     "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
@@ -41,6 +42,7 @@
     "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
     "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
     "rfq:metric": "0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2",
+    "rfq:native": "0x4Ee002261A676D351705934c1bE26667d3f027bc",
     "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De"
   },
   "unichain": {
@@ -56,7 +58,8 @@
     "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
-    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab"
+    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
+    "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -64,7 +67,8 @@
     "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
-    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef"
+    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
+    "rfq:native": "0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -88,8 +92,9 @@
     "ramses_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "up_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
-    "ekubo_v3": "0xBd7B2A90C550f4F620F6A64C5a39e8265Afa39F1",
+    "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
-    "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E"
+    "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
+    "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
   }
 }

@@ -20,6 +20,7 @@ exclude = [
 ignored = ["ruint"]
 
 [dependencies]
+base64 = { workspace = true }
 # Serialization/Deserialization
 chrono = { workspace = true }
 hex = { workspace = true }

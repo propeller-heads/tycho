@@ -228,7 +228,7 @@ contract TychoRouterTestSetup is
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        ekuboV3Executor = new EkuboV3Executor(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
@@ -350,6 +350,7 @@ contract TychoRouterTestSetup is
         if (block.chainid == 8453) return NATIVE_ROUTER_V6_BASE;
         if (block.chainid == 42161) return NATIVE_ROUTER_V6_ARBITRUM;
         if (block.chainid == 56) return NATIVE_ROUTER_V6_BSC;
+        if (block.chainid == 4663) return NATIVE_ROUTER_V6_ROBINHOOD;
         return address(0);
     }
 

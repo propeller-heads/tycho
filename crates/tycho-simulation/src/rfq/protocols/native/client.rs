@@ -952,6 +952,32 @@ mod tests {
         assert!(deserialized.api_key.is_empty());
     }
 
+    #[rstest]
+    #[case::ethereum(Chain::Ethereum, "ethereum")]
+    #[case::bsc(Chain::Bsc, "bsc")]
+    #[case::arbitrum(Chain::Arbitrum, "arbitrum")]
+    #[case::base(Chain::Base, "base")]
+    #[case::robinhood(Chain::Robinhood, "robinhood")]
+    fn accepts_every_chain_native_serves(#[case] chain: Chain, #[case] native_name: &str) {
+        let client = NativeClient::new(
+            chain,
+            "test-api-key".to_string(),
+            HashSet::new(),
+            0.0,
+            HashSet::new(),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+
+        assert!(client.is_ok());
+        assert_eq!(
+            NativeSupportedChain::try_from(chain)
+                .unwrap()
+                .as_str(),
+            native_name
+        );
+    }
+
     #[test]
     fn rejects_unsupported_chain_at_construction() {
         let result = NativeClient::new(
