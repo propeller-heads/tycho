@@ -15,7 +15,7 @@
 //! entry.
 //!
 //! The folds coming out of the block windows are the only writer. The startup load builds the
-//! cache from a database snapshot before the extractors start (ENG-6292). The cache never reads
+//! cache from a database snapshot before the extractors start. The cache never reads
 //! the database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
@@ -469,6 +469,15 @@ impl EntityCache {
         Self {
             state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
         }
+    }
+
+    /// A cache holding the startup snapshot. Every entry already carries the timestamps of its
+    /// database rows; nothing is compared because nothing else exists yet.
+    pub(super) fn from_snapshot(
+        accounts: HashMap<Address, CachedAccount>,
+        components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
+    ) -> Self {
+        Self { state: RwLock::new(CacheState { accounts, components }) }
     }
 
     /// Returns a read guard over the entries. Folds wait until it is dropped, so hold it only as
@@ -1078,6 +1087,32 @@ mod test {
         let state = ProtocolComponentState::from(&cached);
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), at(6));
+    }
+
+    #[test]
+    fn snapshot_entries_read_back_by_address_and_by_system_and_id() {
+        let address = addr(1);
+        let loaded = account(&address);
+        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        let accounts = HashMap::from([(
+            address.clone(),
+            CachedAccount::from_snapshot(
+                loaded.clone(),
+                AccountWriteTimestamps::uniform(&loaded, at(1)),
+            ),
+        )]);
+        let components = HashMap::from([(
+            EXTRACTOR.to_string(),
+            HashMap::from([(
+                "c1".to_string(),
+                CachedComponentState::from_snapshot(state.clone(), at(1)),
+            )]),
+        )]);
+
+        let cache = EntityCache::from_snapshot(accounts, components);
+
+        assert_eq!(cached_account(&cache, &address), Some(loaded));
+        assert_eq!(cached_component(&cache, "c1"), Some(state));
     }
 
     #[test]
