@@ -29,8 +29,10 @@ RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
-# resolve_base maps clone protocol names to their base substreams directory.
-# Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
+# resolve_base maps clone protocol names to buildable substreams directories.
+# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
+# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
+# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
@@ -40,6 +42,8 @@ RUN resolve_base() { \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -73,8 +77,10 @@ RUN cargo build --release
 FROM debian:bookworm-slim AS substreams-filter
 ARG PROTOCOLS=""
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams /source
-# resolve_base maps clone protocol names to their base substreams directory.
-# Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
+# resolve_base maps clone protocol names to buildable substreams directories.
+# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
+# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
+# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
@@ -84,6 +90,8 @@ RUN resolve_base() { \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
