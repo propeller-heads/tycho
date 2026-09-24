@@ -20,7 +20,10 @@ use tycho_common::{
         protocol::ProtocolComponentState,
         Address, Chain,
     },
-    storage::{AccountSnapshot, ComponentSnapshot, SnapshotChunk, StorageError, WriteTimestamp},
+    storage::{
+        AccountSnapshot, ComponentSnapshot, CursorSnapshot, SnapshotChunk, SnapshotTotals,
+        StorageError, WriteTimestamp,
+    },
     Bytes,
 };
 
@@ -407,6 +410,89 @@ impl PostgresGateway {
             });
         }
         Ok(out)
+    }
+
+    /// Counts the live rows the account and component snapshots cover, for reconciliation.
+    pub(crate) async fn snapshot_totals(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<SnapshotTotals, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let live_code = schema::contract_code::table
+            .filter(schema::contract_code::valid_to.is_null())
+            .select(schema::contract_code::account_id);
+        let accounts: i64 = schema::account::table
+            .filter(schema::account::chain_id.eq(chain_id))
+            .filter(schema::account::deleted_at.is_null())
+            .filter(schema::account::id.eq_any(live_code))
+            .count()
+            .get_result(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let slots: i64 = schema::contract_storage::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .filter(schema::account::deleted_at.is_null())
+            .filter(schema::contract_storage::valid_to.eq(MAX_TS))
+            .count()
+            .get_result(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let components: i64 = schema::protocol_component::table
+            .filter(schema::protocol_component::chain_id.eq(chain_id))
+            .filter(schema::protocol_component::deleted_at.is_null())
+            .count()
+            .get_result(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let attributes: i64 = schema::protocol_state::table
+            .inner_join(schema::protocol_component::table)
+            .filter(schema::protocol_component::chain_id.eq(chain_id))
+            .filter(schema::protocol_component::deleted_at.is_null())
+            .filter(schema::protocol_state::valid_to.eq(MAX_TS))
+            .count()
+            .get_result(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        Ok(SnapshotTotals {
+            accounts: accounts as u64,
+            slots: slots as u64,
+            components: components as u64,
+            attributes: attributes as u64,
+        })
+    }
+
+    /// Every extractor cursor of `chain` with the block it points at. An extractor without a
+    /// saved cursor has no row.
+    pub(crate) async fn snapshot_cursors(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<CursorSnapshot>, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<(String, Option<Vec<u8>>, Bytes, i64)> = schema::extraction_state::table
+            .inner_join(schema::block::table)
+            .filter(schema::extraction_state::chain_id.eq(chain_id))
+            .order_by(schema::extraction_state::name)
+            .select((
+                schema::extraction_state::name,
+                schema::extraction_state::cursor,
+                schema::block::hash,
+                schema::block::number,
+            ))
+            .get_results(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|(extractor, cursor, block_hash, block_number)| CursorSnapshot {
+                extractor,
+                cursor: cursor.unwrap_or_default(),
+                block_hash,
+                block_number: block_number as u64,
+            })
+            .collect())
     }
 }
 
@@ -828,6 +914,76 @@ mod test_serial_db {
             );
             assert_eq!(chunks[0][0].state.component_id, "p1");
             assert_eq!(chunks[1][0].state.component_id, "p2");
+        })
+        .await;
+    }
+
+    async fn insert_cursor(conn: &mut AsyncPgConnection, f: &Fixture, name: &str, block_id: i64) {
+        diesel::insert_into(schema::extraction_state::table)
+            .values((
+                schema::extraction_state::name.eq(name),
+                schema::extraction_state::version.eq("0.1.0"),
+                schema::extraction_state::cursor.eq(Some(name.as_bytes().to_vec())),
+                schema::extraction_state::chain_id.eq(f.chain_id),
+                schema::extraction_state::block_id.eq(block_id),
+            ))
+            .execute(conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_totals_count_the_live_rows_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let totals = gw
+                .snapshot_totals(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                totals,
+                SnapshotTotals { accounts: 2, slots: 3, components: 2, attributes: 2 }
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_cursors_come_with_their_block_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            let blocks: Vec<i64> = schema::block::table
+                .order_by(schema::block::number)
+                .select(schema::block::id)
+                .get_results(&mut conn)
+                .await
+                .unwrap();
+            insert_cursor(&mut conn, &f, "ambient", blocks[1]).await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let cursors = gw
+                .snapshot_cursors(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                cursors,
+                vec![CursorSnapshot {
+                    extractor: "ambient".to_string(),
+                    cursor: b"ambient".to_vec(),
+                    block_hash: Bytes::from_str(
+                        "b495a1d7e6663152ae92708da4843337b958146015a2802f4193a410044698c9"
+                    )
+                    .unwrap(),
+                    block_number: 2,
+                }]
+            );
         })
         .await;
     }
