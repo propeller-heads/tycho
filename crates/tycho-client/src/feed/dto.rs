@@ -33,6 +33,12 @@ pub struct ComponentWithState {
 /// Serializable counterpart of [`crate::feed::synchronizer::Snapshot`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Snapshot {
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "tycho_common::serde_primitives::hex_hashmap_key"
+    )]
+    pub tokens: HashMap<Bytes, dto::ResponseToken>,
     pub states: HashMap<String, ComponentWithState>,
     #[serde(with = "tycho_common::serde_primitives::hex_hashmap_key")]
     pub vm_storage: HashMap<Bytes, ResponseAccount>,
@@ -74,6 +80,11 @@ impl From<ComponentWithState> for synchronizer::ComponentWithState {
 impl From<Snapshot> for synchronizer::Snapshot {
     fn from(value: Snapshot) -> Self {
         Self {
+            tokens: value
+                .tokens
+                .into_iter()
+                .map(|(address, token)| (address, token.into()))
+                .collect(),
             states: value
                 .states
                 .into_iter()
@@ -136,6 +147,11 @@ impl From<synchronizer::ComponentWithState> for ComponentWithState {
 impl From<synchronizer::Snapshot> for Snapshot {
     fn from(value: synchronizer::Snapshot) -> Self {
         Self {
+            tokens: value
+                .tokens
+                .into_iter()
+                .map(|(address, token)| (address, token.into()))
+                .collect(),
             states: value
                 .states
                 .into_iter()
