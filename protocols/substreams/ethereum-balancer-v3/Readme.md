@@ -25,6 +25,8 @@ Contract addresses are configured per manifest via query-string params on map/st
 - `weighted_factory` — Weighted pool factory
 - `stable_factory` — Stable pool factory
 - `reclamm_factory` — ReClamm pool factory
+- `quantamm_factory` — QuantAMM weighted pool factory (optional; set on Ethereum
+  mainnet and Base, omitted elsewhere)
 - `skip_rate_provider_pools` — When `true`, pools whose factory `Create` call includes any
   `WITH_RATE` token are not emitted as protocol components (optional, default `false`). Set to
   `true` on L2 deployments where RPC nodes lack DCI/tracing support; yield-bearing pools with rate
