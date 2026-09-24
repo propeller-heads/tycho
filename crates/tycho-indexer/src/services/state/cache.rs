@@ -80,7 +80,7 @@ impl From<&Block> for WriteTimestamp {
 
 /// What a write did to a [`Timestamped`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WriteOutcome {
+enum WriteOutcome {
     /// The write came from a newer block, and its value now holds.
     Applied,
     /// A value from the same block or a newer one already holds. The write agreed with it, or came
@@ -114,7 +114,7 @@ impl<T> Timestamped<T> {
 
     /// Writes `value` at `at` unless this already holds a value from that block or a newer one.
     /// The [`WriteOutcome`] says which of the three happened.
-    pub(crate) fn write(&mut self, value: T, at: WriteTimestamp) -> WriteOutcome
+    fn write(&mut self, value: T, at: WriteTimestamp) -> WriteOutcome
     where
         T: PartialEq,
     {
