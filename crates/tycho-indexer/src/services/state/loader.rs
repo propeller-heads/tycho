@@ -3,10 +3,12 @@
 // Wired into startup in a follow-up commit.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
+use metrics::gauge;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 use tycho_common::{
     models::{Address, ComponentId, ProtocolSystem},
     storage::{
@@ -23,6 +25,8 @@ pub enum LoadError {
     Storage(#[from] StorageError),
     #[error("Snapshot ended before totals and cursors arrived")]
     Incomplete,
+    #[error("Snapshot totals mismatch: {expected} {rows} rows in the snapshot, {loaded} loaded")]
+    Mismatch { rows: &'static str, expected: u64, loaded: u64 },
 }
 
 impl EntityCache {
@@ -38,25 +42,30 @@ impl EntityCache {
     /// without a `Totals` or a `Cursors` chunk. No cache exists after an error.
     pub(crate) async fn from_chunks(
         mut snapshot: mpsc::Receiver<Result<SnapshotChunk, StorageError>>,
-        _extractors: &[String],
+        extractors: &[String],
     ) -> Result<Self, LoadError> {
+        let started = Instant::now();
         let mut totals: Option<SnapshotTotals> = None;
         let mut cursors: Option<Vec<CursorSnapshot>> = None;
         let mut accounts: HashMap<Address, CachedAccount> = HashMap::new();
         let mut components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>> =
             HashMap::new();
+        let mut slots = 0u64;
+        let mut attributes = 0u64;
         while let Some(chunk) = snapshot.recv().await {
             match chunk? {
                 SnapshotChunk::Totals(t) => totals = Some(t),
                 SnapshotChunk::Accounts(chunk) => {
                     for row in chunk {
                         let address = row.account.address.clone();
+                        slots += row.account.slots.len() as u64;
                         accounts.insert(address, account_entry(row));
                     }
                 }
                 SnapshotChunk::Components(chunk) => {
                     for row in chunk {
                         let id = row.state.component_id.clone();
+                        attributes += row.state.attributes.len() as u64;
                         components
                             .entry(row.system.clone())
                             .or_default()
@@ -66,10 +75,54 @@ impl EntityCache {
                 SnapshotChunk::Cursors(c) => cursors = Some(c),
             }
         }
-        let (Some(_totals), Some(_cursors)) = (totals, cursors) else {
+        let (Some(totals), Some(cursors)) = (totals, cursors) else {
             return Err(LoadError::Incomplete);
         };
+        let component_count = components
+            .values()
+            .map(|c| c.len() as u64)
+            .sum::<u64>();
+        check("accounts", totals.accounts, accounts.len() as u64)?;
+        check("slots", totals.slots, slots)?;
+        check("components", totals.components, component_count)?;
+        check("attributes", totals.attributes, attributes)?;
+        report_cursors(extractors, &cursors);
+        let elapsed = started.elapsed();
+        gauge!("entity_cache_load_seconds").set(elapsed.as_secs_f64());
+        gauge!("entity_cache_accounts").set(accounts.len() as f64);
+        gauge!("entity_cache_components").set(component_count as f64);
+        info!(
+            accounts = accounts.len(),
+            slots,
+            components = component_count,
+            attributes,
+            ?elapsed,
+            "Entity cache loaded"
+        );
         Ok(Self::from_snapshot(accounts, components))
+    }
+}
+
+fn check(rows: &'static str, expected: u64, loaded: u64) -> Result<(), LoadError> {
+    if expected == loaded {
+        return Ok(());
+    }
+    Err(LoadError::Mismatch { rows, expected, loaded })
+}
+
+/// Logs where each configured extractor's stream resumes. A configured extractor without a
+/// cursor row starts from its configured block; that is a first run, not an error.
+fn report_cursors(extractors: &[String], cursors: &[CursorSnapshot]) {
+    for extractor in extractors {
+        match cursors
+            .iter()
+            .find(|c| &c.extractor == extractor)
+        {
+            Some(c) => {
+                info!(extractor, block = c.block_number, hash = %c.block_hash, "Snapshot cursor")
+            }
+            None => warn!(extractor, "No saved cursor in the snapshot; the extractor starts fresh"),
+        }
     }
 }
 
@@ -228,6 +281,41 @@ mod test {
         same_second.block.ts = testing::block(5).ts;
         cache.fold(&same_second).unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
+    }
+
+    #[tokio::test]
+    async fn load_fails_when_the_totals_do_not_match_the_rows() {
+        let rx = snapshot(vec![
+            totals(2, 1, 1, 1),
+            Ok(SnapshotChunk::Accounts(vec![account_snapshot(5)])),
+            Ok(SnapshotChunk::Components(vec![component_snapshot(5)])),
+            cursors(),
+        ]);
+
+        let err = EntityCache::from_chunks(rx, &[EXTRACTOR.to_string()])
+            .await
+            .err()
+            .expect("the load must fail");
+
+        assert!(
+            matches!(err, LoadError::Mismatch { rows: "accounts", expected: 2, loaded: 1 }),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_counts_slots_and_attributes_across_chunks() {
+        let rx = snapshot(vec![
+            totals(1, 1, 1, 1),
+            Ok(SnapshotChunk::Accounts(vec![account_snapshot(5)])),
+            Ok(SnapshotChunk::Components(vec![])),
+            Ok(SnapshotChunk::Components(vec![component_snapshot(5)])),
+            cursors(),
+        ]);
+
+        assert!(EntityCache::from_chunks(rx, &[EXTRACTOR.to_string()])
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
