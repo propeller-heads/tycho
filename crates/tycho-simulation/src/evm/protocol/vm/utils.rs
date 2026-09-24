@@ -373,9 +373,7 @@ pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, Simul
                 })?;
                 result.push(bytes);
             } else {
-                return Err(SimulationError::FatalError(
-                    "Array contains a non-string value".into(),
-                ));
+                return Err(SimulationError::FatalError("Array contains a non-string value".into()));
             }
         }
 
@@ -431,9 +429,7 @@ pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, Simu
                 let bigint = BigInt::from_signed_bytes_be(&bytes);
                 result.push(bigint);
             } else {
-                return Err(SimulationError::FatalError(
-                    "Array contains a non-string value".into(),
-                ));
+                return Err(SimulationError::FatalError("Array contains a non-string value".into()));
             }
         }
 

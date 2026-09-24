@@ -165,9 +165,8 @@ pub fn map_protocol_changes(
                 .get_last(format!("helper:{pair}"))
                 .and_then(|helper| safety_store.get_last(format!("fee:0x{helper}")))
                 .and_then(|value| hex::decode(value).ok());
-            if epoch_changed
-                || fee
-                    .as_ref()
+            if epoch_changed ||
+                fee.as_ref()
                     .is_some_and(|value| !zero(value))
             {
                 builder.change_component_pause_state(pair, true);
