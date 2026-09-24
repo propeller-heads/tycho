@@ -123,6 +123,12 @@ impl PendingDeltas {
         Self { windows, sink }
     }
 
+    /// The window of `protocol_system`, if an extractor of that name runs.
+    #[allow(dead_code)] // read by the state service, ENG-6307
+    pub(crate) fn window(&self, protocol_system: &str) -> Option<&Arc<Mutex<DeltaWindow>>> {
+        self.windows.get(protocol_system)
+    }
+
     /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
     /// the window held is lost: the restarted extractor replays every block above its database
     /// cursor.

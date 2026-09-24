@@ -1,13 +1,14 @@
 //! In-memory serving of state requests.
 //!
-//! This module holds the block window ([`window`]) and the entity cache ([`cache`]) it folds
-//! into. Locking is described in the [`cache`] module doc.
+//! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
+//! and the service that answers state requests from both ([`service`]). Locking is described in
+//! the [`cache`] module doc; the read order in the [`service`] module doc.
 //!
 //! # Planned end state
 //!
 //! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The database
-//! fill path and the request routing layer are not built yet; `DiscardSink` is still the
-//! production sink and every request reads the database.
+//! fill path is not built yet and the request routing layer is a skeleton; `DiscardSink` is still
+//! the production sink and every request reads the database.
 //!
 //! State responses are built as `cached base ⊕ window deltas up to the requested version`, where
 //! `⊕` applies deltas on top of a base and the highest block wins for each value. The database is
@@ -24,4 +25,5 @@
 //! always below the window floor by then, so a below-window read never misses them.
 
 pub(crate) mod cache;
+pub(crate) mod service;
 pub(crate) mod window;
