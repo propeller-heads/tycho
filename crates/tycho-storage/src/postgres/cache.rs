@@ -37,8 +37,8 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StorageError, Version,
-        WithTotal,
+        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, SnapshotChunk,
+        StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -729,6 +729,15 @@ impl CachedGateway {
             state_gateway: self.state_gateway.clone(),
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
+    }
+
+    /// Streams the live state of `chain` for the entity cache, see
+    /// [`super::snapshot::spawn_state_snapshot`].
+    pub fn state_snapshot(
+        &self,
+        chain: Chain,
+    ) -> mpsc::Receiver<Result<SnapshotChunk, StorageError>> {
+        super::snapshot::spawn_state_snapshot(self.state_gateway.clone(), self.pool.clone(), chain)
     }
 
     pub async fn get_delta(
