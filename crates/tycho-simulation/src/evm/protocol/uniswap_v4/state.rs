@@ -2142,8 +2142,8 @@ mod tests {
             Price::new(BigUint::from(1_010_000u64), BigUint::from(2_040_000u64));
         let pool_swap_backward = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_y,
-                token_x,
+                token_y.clone(),
+                token_x.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price_reverse,
                     tolerance: 0f64,
@@ -2158,15 +2158,29 @@ mod tests {
             "One for zero swap should return non-zero output"
         );
 
-        // Higher fees require more volume to reach the same price target
-        // trade_zfo has 0.1% protocol fee, trade_ofz has 0.02% protocol fee
+        // Comparing raw amount_out (Y) against raw amount_in (X) across directions isn't
+        // dimensionally meaningful (different tokens at a 2:1 price). Instead, each swap's
+        // resulting spot_price() should land on its own direction's target, regardless of fee.
+        let forward_target = 2_000_000f64 / 1_010_000f64;
+        let forward_result_price = pool_swap_forward
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("spot_price failed");
         assert!(
-            pool_swap_forward.amount_out() < pool_swap_backward.amount_in(),
-            "Backward fees should be lower therefore backward swap should be bigger"
+            (forward_result_price - forward_target).abs() / forward_target < 1e-6,
+            "Forward swap should land on its own target price: got {forward_result_price}, \
+             expected {forward_target}"
         );
+
+        let backward_target = 1_010_000f64 / 2_040_000f64;
+        let backward_result_price = pool_swap_backward
+            .new_state()
+            .spot_price(&token_y, &token_x)
+            .expect("spot_price failed");
         assert!(
-            pool_swap_forward.amount_in() < pool_swap_backward.amount_out(),
-            "Backward fees should be lower therefore backward swap should be bigger"
+            (backward_result_price - backward_target).abs() / backward_target < 1e-6,
+            "Backward swap should land on its own target price: got {backward_result_price}, \
+             expected {backward_target}"
         );
     }
 
@@ -2281,28 +2295,44 @@ mod tests {
         let token_x = token_x();
         let token_y = token_y();
 
-        // Test 1: Price just above spot price, too little to cover fees
+        // Test 1: Target just below spot (~one fee-width away, 0.05%). A CLMM has no inherent
+        // minimum tradeable price delta, so this is a small-but-valid trade, not an error: it
+        // should succeed and land the resulting spot price close to the target.
         let target_price = Price::new(BigUint::from(1_999_750u64), BigUint::from(1_000_250u64));
+        let target_price_f64 = 1_999_750f64 / 1_000_250f64;
 
-        let result = pool.query_pool_swap(&QueryPoolSwapParams::new(
-            token_x.clone(),
-            token_y.clone(),
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0f64,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        ));
-        assert!(result.is_err(), "Should return error when target price is unreachable");
+        let trade = pool
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_x.clone(),
+                token_y.clone(),
+                SwapConstraint::PoolTargetPrice {
+                    target: target_price,
+                    tolerance: 0f64,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .expect("swap_to_price failed for a target just below spot");
+        assert!(*trade.amount_out() > BigUint::ZERO, "Should produce a non-zero small trade");
+        let resulting_spot_price = trade
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
+        );
 
         // Test 2: Price far enough from spot prices to enable trading despite fees (0.1% lower)
         let target_price = Price::new(BigUint::from(1_999_000u64), BigUint::from(1_001_000u64));
+        let target_price_f64 = 1_999_000f64 / 1_001_000f64;
 
         let pool_swap = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -2314,11 +2344,23 @@ mod tests {
 
         // Should match V3 output exactly with same fees
         let expected_amount_out =
-            BigUint::from_str("7062236922008").expect("Failed to parse expected value");
+            BigUint::from_str("14135071621688").expect("Failed to parse expected value");
         assert_eq!(
             pool_swap.amount_out().clone(),
             expected_amount_out,
             "V4 should match V3 output with same fees (0.05%)"
+        );
+
+        // The resulting spot price should land close to the requested target.
+        let resulting_spot_price = pool_swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
         );
     }
 
@@ -2387,8 +2429,8 @@ mod tests {
 
         let pool_swap = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -2399,8 +2441,8 @@ mod tests {
             .expect("swap_to_price failed");
 
         // Should match V3's output exactly with same fees (0.3%)
-        let expected_amount_in = BigUint::from_str("246739021727519745").unwrap();
-        let expected_amount_out = BigUint::from_str("490291909043340795").unwrap();
+        let expected_amount_in = BigUint::from_str("460892043249408649").unwrap();
+        let expected_amount_out = BigUint::from_str("913085102028139287").unwrap();
 
         assert_eq!(
             *pool_swap.amount_in(),
@@ -2411,6 +2453,17 @@ mod tests {
             *pool_swap.amount_out(),
             expected_amount_out,
             "amount_out should match expected value"
+        );
+
+        // The whole point of the closed form: the resulting spot price should land exactly on
+        // target (2_000_000/1_010_000), not merely close to it.
+        let new_spot = pool_swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("spot price should be computable");
+        assert!(
+            (new_spot - 2_000_000f64 / 1_010_000f64).abs() < 1e-9,
+            "resulting spot price {new_spot} should land on target"
         );
     }
 

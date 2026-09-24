@@ -1043,8 +1043,8 @@ mod tests {
         // Query how much Y the pool can supply when buying X at this price
         let trade = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -1056,9 +1056,9 @@ mod tests {
 
         // Should match V4's output exactly with same fees (0.3%)
         let expected_amount_in =
-            BigUint::from_str("246739021727519745").expect("Failed to parse expected amount_in");
+            BigUint::from_str("460892043249408649").expect("Failed to parse expected amount_in");
         let expected_amount_out =
-            BigUint::from_str("490291909043340795").expect("Failed to parse expected amount_out");
+            BigUint::from_str("913085102028139287").expect("Failed to parse expected amount_out");
 
         assert_eq!(
             trade.amount_in().clone(),
@@ -1069,6 +1069,17 @@ mod tests {
             trade.amount_out().clone(),
             expected_amount_out,
             "amount_out should match expected value"
+        );
+
+        // The whole point of the closed form: the resulting spot price should land exactly on
+        // target (2_000_000/1_010_000), not merely close to it.
+        let new_spot = trade
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("spot price should be computable");
+        assert!(
+            (new_spot - 2_000_000f64 / 1_010_000f64).abs() < 1e-9,
+            "resulting spot price {new_spot} should land on target"
         );
     }
 
@@ -1208,6 +1219,7 @@ mod tests {
             TickInfo::new(25620, 1319490609195820).unwrap(),
             TickInfo::new(25630, 678916926147901).unwrap(),
             TickInfo::new(25640, 12208947683433103).unwrap(),
+            TickInfo::new(25650, 1177970713095301).unwrap(),
             TickInfo::new(25660, 8752304680520407).unwrap(),
             TickInfo::new(25680, 1486478248067104).unwrap(),
             TickInfo::new(25690, 1878744276123248).unwrap(),
@@ -1217,14 +1229,17 @@ mod tests {
         let pool = UniswapV3State::new(liquidity, sqrt_price, FeeAmount::Low, tick, ticks)
             .expect("Failed to create pool");
 
-        // Test cases: (sell_token, sell_price, buy_price, expected_supply, test_id)
+        // Test cases: (sell_token, sell_price, buy_price, expected_supply, test_id). The
+        // reachable prices moved closer to spot than before: reaching a given target now
+        // consumes more liquidity than it used to, so a couple of cases needed smaller price
+        // moves to stay within this fixture's tick range.
         let test_cases = vec![
             (&wbtc, 129u64, 10u64, "0", "WBTC sell_price=129, buy_price=10"),
             (&wbtc, 130u64, 10u64, "0", "WBTC sell_price=130, buy_price=10"),
-            (&wbtc, 1305u64, 100u64, "163535995630461", "WBTC sell_price=1305, buy_price=100"),
+            (&wbtc, 13030u64, 1000u64, "176076986383331", "WBTC sell_price=13030, buy_price=1000"),
             (&weth, 99u64, 1300u64, "0", "WETH sell_price=99, buy_price=1300"),
-            (&weth, 100u64, 1300u64, "0", "WETH sell_price=100, buy_price=1300"),
-            (&weth, 101u64, 1299u64, "524227092059180", "WETH sell_price=101, buy_price=1299"),
+            (&weth, 100u64, 1305u64, "0", "WETH sell_price=100, buy_price=1305"),
+            (&weth, 1000u64, 12970u64, "1894842737645507", "WETH sell_price=1000, buy_price=12970"),
         ];
 
         for (sell_token, sell_price, buy_price, expected_str, test_id) in test_cases {
@@ -1262,6 +1277,29 @@ mod tests {
                     ))
                     .unwrap_or_else(|e| panic!("{} - query_supply failed: {:?}", test_id, e));
                 assert_eq!(trade.amount_out().clone(), expected, "{}", test_id);
+
+                // QueryPoolSwapParams::new(token_in, token_out, ..) is called below as
+                // new(buy_token, sell_token, ..), so buy_token is token_in and sell_token is
+                // token_out here despite the names. Price::new(numerator, denominator) is a raw
+                // amount_out/amount_in ratio; spot_price() reports the decimal-adjusted human
+                // ratio, so scale by the token decimal difference the same way it does.
+                let decimal_adj =
+                    10f64.powi(buy_token.decimals as i32 - sell_token.decimals as i32);
+                let target_f64 = (buy_price as f64 / sell_price as f64) * decimal_adj;
+                let resulting_spot_price = trade
+                    .new_state()
+                    .spot_price(buy_token, sell_token)
+                    .unwrap_or_else(|e| panic!("{} - spot_price failed: {:?}", test_id, e));
+                // Loose tolerance: these targets use small integer Price values rather than
+                // atomic-token-amount scale, so get_sqrt_price_limit's fee rounding (see its doc
+                // comment) is a larger fraction of the total here than in realistic usage.
+                assert!(
+                    (resulting_spot_price - target_f64).abs() / target_f64 < 1e-3,
+                    "{}: resulting spot price {} should land on target {}",
+                    test_id,
+                    resulting_spot_price,
+                    target_f64
+                );
             }
         }
     }
@@ -1299,30 +1337,46 @@ mod tests {
             100,
         );
 
-        // Test 1: Price just above spot price, too little to cover fees
+        // Test 1: Target just below spot (~one fee-width away, 0.05%). A CLMM has no inherent
+        // minimum tradeable price delta, so this is a small-but-valid trade, not an error: it
+        // should succeed and land the resulting spot price close to the target.
         let target_price =
             Price::new(1_999_750u64.to_biguint().unwrap(), 1_000_250u64.to_biguint().unwrap());
+        let target_price_f64 = 1_999_750f64 / 1_000_250f64;
 
-        let result = pool.query_pool_swap(&QueryPoolSwapParams::new(
-            token_x.clone(),
-            token_y.clone(),
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0f64,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        ));
-        assert!(result.is_err(), "Should return error when target price is unreachable");
+        let trade = pool
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                token_x.clone(),
+                token_y.clone(),
+                SwapConstraint::PoolTargetPrice {
+                    target: target_price,
+                    tolerance: 0f64,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .expect("swap_to_price failed for a target just below spot");
+        assert!(*trade.amount_out() > BigUint::ZERO, "Should produce a non-zero small trade");
+        let resulting_spot_price = trade
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
+        );
 
         // Test 2: Price high enough to cover fees (0.1% higher)
         let target_price =
             Price::new(1_999_000u64.to_biguint().unwrap(), 1_001_000u64.to_biguint().unwrap());
+        let target_price_f64 = 1_999_000f64 / 1_001_000f64;
 
         let pool_swap = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
-                token_x,
-                token_y,
+                token_x.clone(),
+                token_y.clone(),
                 SwapConstraint::PoolTargetPrice {
                     target: target_price,
                     tolerance: 0f64,
@@ -1333,11 +1387,23 @@ mod tests {
             .expect("swap_to_price failed");
 
         let expected_amount_out =
-            BigUint::from_str("7062236922008").expect("Failed to parse expected value");
+            BigUint::from_str("14135071621688").expect("Failed to parse expected value");
         assert_eq!(
             pool_swap.amount_out().clone(),
             expected_amount_out,
             "Expected amount out when price covers fees"
+        );
+
+        // The resulting spot price should land close to the requested target.
+        let resulting_spot_price = pool_swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .expect("Failed to compute resulting spot price");
+        assert!(
+            (resulting_spot_price - target_price_f64).abs() < 1e-4,
+            "Resulting spot price {} should be close to target {}",
+            resulting_spot_price,
+            target_price_f64
         );
     }
 
