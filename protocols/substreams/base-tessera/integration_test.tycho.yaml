@@ -1,0 +1,20 @@
+substreams_yaml_path: ./base-tessera.yaml
+protocol_system: "vm:tessera"
+module_name: "map_protocol_changes"
+protocol_type_names: ["tessera_pair"]
+adapter_contract: "TesseraSwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e"
+skip_balance_check: true # Inventory belongs to treasury, not component address.
+tests:
+  - name: test_genesis_pairs_discovery
+    start_block: 37518600
+    stop_block: 37519400
+    expected_components:
+      - id: "0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"
+        tokens:
+          - "0x4200000000000000000000000000000000000006"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        creation_tx: "0x8978cc5e137cde75d4aaf4323d493511858971c05860b00abc2d6a922a5e29c6"
+        skip_simulation: true # Gen-1 gas-price branch panics in VM; current generation tested on fork.
+        skip_execution: true # No executor deployed on Base; full router execution tested on fork.
