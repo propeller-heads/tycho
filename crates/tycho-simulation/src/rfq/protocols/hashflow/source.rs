@@ -366,20 +366,80 @@ mod tests {
         );
     }
 
-    /// Hashflow signals failure inside an HTTP 200: a non-success status is a connection error
-    /// carrying the API's message, a success without levels a parsing error.
-    #[rstest]
-    #[case::status_fail_with_message(
-        r#"{"status":"fail","error":"rate limited"}"#,
-        FeedError::Connection("rate limited".to_string())
-    )]
-    #[case::success_without_levels(r#"{"status":"success"}"#, FeedError::Parsing(String::new()))]
+    /// A rejected key fails the market-maker request with the API's message and code (body
+    /// recorded live).
     #[tokio::test]
-    async fn price_levels_status_fail_and_missing_levels_are_errors(
+    async fn market_makers_failure_carries_the_api_error() {
+        let server = spawn_http_server(|_| {
+            Some((
+                "401 Unauthorized",
+                r#"{"status":"fail","error":{"code":72,"message":"Unauthorized access"}}"#
+                    .to_string(),
+            ))
+        })
+        .await;
+        let source = source_for(&server.url(), &[], 1.0);
+
+        let error = source
+            .client
+            .fetch_market_makers()
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                FeedError::Connection(msg) if msg == "Hashflow market makers HTTP error 401 \
+                    Unauthorized: Unauthorized access (code 72)"
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The API's error body, recorded live for an unknown maker name (served with HTTP 400).
+    const UNKNOWN_MAKER_ERROR: &str = r#"{"status":"fail","error":{"code":42,"message":"Unknown market maker: mm_does_not_exist"}}"#;
+
+    /// A failing HTTP status and a `fail` inside an HTTP 200 are connection errors carrying the
+    /// API's message and code, or the body as sent when it is not the API's; a success without
+    /// levels is a parsing error.
+    #[rstest]
+    #[case::http_error_status(
+        "400 Bad Request",
+        UNKNOWN_MAKER_ERROR,
+        FeedError::Connection(
+            "Hashflow price levels HTTP error 400 Bad Request: Unknown market maker: \
+             mm_does_not_exist (code 42)"
+                .to_string()
+        )
+    )]
+    #[case::http_error_status_without_the_api_error(
+        "403 Forbidden",
+        "<!DOCTYPE html><title>Attention Required! | Cloudflare</title>",
+        FeedError::Connection(
+            "Hashflow price levels HTTP error 403 Forbidden: <!DOCTYPE html><title>Attention \
+             Required! | Cloudflare</title>"
+                .to_string()
+        )
+    )]
+    #[case::fail_inside_http_200(
+        "200 OK",
+        UNKNOWN_MAKER_ERROR,
+        FeedError::Connection(
+            "Hashflow price levels: Unknown market maker: mm_does_not_exist (code 42)".to_string()
+        )
+    )]
+    #[case::success_without_levels(
+        "200 OK",
+        r#"{"status":"success"}"#,
+        FeedError::Parsing(String::new())
+    )]
+    #[tokio::test]
+    async fn price_levels_failures_are_errors(
+        #[case] status: &'static str,
         #[case] body: &'static str,
         #[case] expected: FeedError,
     ) {
-        let server = spawn_http_server(move |_| Some(("200 OK", body.to_string()))).await;
+        let server = spawn_http_server(move |_| Some((status, body.to_string()))).await;
         let source = source_for(&server.url(), &[], 1.0);
 
         let error = source
