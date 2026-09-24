@@ -538,6 +538,7 @@ async fn create_indexing_tasks(
                 depth: global_args.delta_window_depth,
                 min_fold_batch: global_args.delta_window_fold_batch,
             })
+            .entity_cache_mode(global_args.entity_cache_mode)
             .run()?;
     info!(server_url, "Http and Ws server started");
 

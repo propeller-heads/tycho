@@ -33,6 +33,7 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
+        state::service::{CacheOutcome, DbPathReason, EntityCacheMode, StateService},
     },
 };
 
@@ -113,6 +114,9 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    entity_cache_mode: EntityCacheMode,
+    /// Answers state requests from the entity cache. `None` without extractors.
+    state_service: Option<Arc<StateService>>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -166,6 +170,30 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            entity_cache_mode: EntityCacheMode::Off,
+            state_service: None,
+        }
+    }
+
+    /// Sets which path answers the state endpoints. Without a `state_service`, every mode
+    /// answers from the database.
+    pub(crate) fn with_state_service(
+        mut self,
+        mode: EntityCacheMode,
+        state_service: Option<Arc<StateService>>,
+    ) -> Self {
+        self.entity_cache_mode = mode;
+        self.state_service = state_service;
+        self
+    }
+
+    /// The state service, when it answers requests itself: `serve` mode only.
+    fn serving_state_service(&self) -> Option<&StateService> {
+        match self.entity_cache_mode {
+            EntityCacheMode::Serve => self.state_service.as_deref(),
+            // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
+            // it with the database answer.
+            EntityCacheMode::Shadow | EntityCacheMode::Off => None,
         }
     }
 
@@ -245,10 +273,26 @@ where
         }
         self.contract_storage_cache
             .get(request.clone(), |r| async {
-                self.get_contract_state_inner(r)
+                self.get_contract_state_routed(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+    }
+
+    /// Answers from the entity cache when it serves and can serve this request, otherwise from
+    /// the database path.
+    async fn get_contract_state_routed(
+        &self,
+        request: dto::StateRequestBody,
+    ) -> Result<dto::StateRequestResponse, RpcError> {
+        if let Some(service) = self.serving_state_service() {
+            match service.contract_state(&request)? {
+                CacheOutcome::Served(response) => return Ok(response),
+                CacheOutcome::DbPath(reason) => count_db_path("contract_state", reason),
+            }
+        }
+        self.get_contract_state_inner(request)
             .await
     }
 
@@ -469,10 +513,26 @@ where
         }
         self.protocol_state_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_state_inner(r)
+                self.get_protocol_state_routed(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+    }
+
+    /// Answers from the entity cache when it serves and can serve this request, otherwise from
+    /// the database path.
+    async fn get_protocol_state_routed(
+        &self,
+        request: dto::ProtocolStateRequestBody,
+    ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
+        if let Some(service) = self.serving_state_service() {
+            match service.protocol_state(&request)? {
+                CacheOutcome::Served(response) => return Ok(response),
+                CacheOutcome::DbPath(reason) => count_db_path("protocol_state", reason),
+            }
+        }
+        self.get_protocol_state_inner(request)
             .await
     }
 
@@ -1120,6 +1180,12 @@ where
             .map_err(|e| RpcError::Unknown(format!("Error while tracing entry points: {e:?}")))?;
         Ok(trace_results)
     }
+}
+
+/// Counts a state request the entity cache handed to the database path.
+fn count_db_path(endpoint: &'static str, reason: DbPathReason) {
+    metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+        .increment(1);
 }
 
 /// Retrieve contract states

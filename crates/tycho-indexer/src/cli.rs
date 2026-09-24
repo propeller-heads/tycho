@@ -5,7 +5,10 @@ use tycho_ethereum::rpc::{
     EthereumRpcClient,
 };
 
-use crate::{extractor::ExtractionError, services::WindowConfig};
+use crate::{
+    extractor::ExtractionError,
+    services::{EntityCacheMode, WindowConfig},
+};
 
 /// Tycho Indexer using Substreams
 ///
@@ -75,6 +78,12 @@ pub struct GlobalArgs {
         value_parser = clap::value_parser!(u64).range(1..).try_map(usize::try_from)
     )]
     pub delta_window_fold_batch: usize,
+
+    /// Which path answers `/contract_state` and `/protocol_state`: `off` reads the database,
+    /// `shadow` reads the database and compares against the entity cache, `serve` answers from
+    /// the entity cache. The `rpc` command has no entity cache and always runs as `off`.
+    #[clap(long, env, value_enum, default_value_t = EntityCacheMode::Off)]
+    pub entity_cache_mode: EntityCacheMode,
 
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
@@ -323,6 +332,8 @@ pub struct AnalyzeTokenArgs {
 
 #[cfg(test)]
 mod cli_tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[tokio::test]
@@ -360,6 +371,7 @@ mod cli_tests {
                 database_insert_batch_size: 256,
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
+                entity_cache_mode: EntityCacheMode::Off,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -440,6 +452,30 @@ mod cli_tests {
         assert!(Cli::try_parse_from(args_with_delta_window("128", "0")).is_err());
     }
 
+    #[rstest]
+    #[case::off("off", EntityCacheMode::Off)]
+    #[case::shadow("shadow", EntityCacheMode::Shadow)]
+    #[case::serve("serve", EntityCacheMode::Serve)]
+    fn test_arg_parsing_entity_cache_mode(
+        #[case] value: &'static str,
+        #[case] expected: EntityCacheMode,
+    ) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(cli.global_args.entity_cache_mode, expected);
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", "on"]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
     #[tokio::test]
     async fn test_arg_parsing_index_cmd() {
         let cli = Cli::try_parse_from(vec![
@@ -472,6 +508,7 @@ mod cli_tests {
                 database_insert_batch_size: 0,
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
+                entity_cache_mode: EntityCacheMode::Off,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

@@ -12,7 +12,7 @@ use actix_web_opentelemetry::RequestTracing;
 use deltas_buffer::PendingDeltasBuffer;
 use futures03::future::try_join_all;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 use tycho_common::storage::Gateway;
 use tycho_ethereum::{
     rpc::EthereumRpcClient, services::entrypoint_tracer::tracer::EVMEntrypointService,
@@ -26,6 +26,7 @@ use crate::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
         middleware::{compression_middleware, rpc_metrics_middleware},
+        state::service::StateService,
     },
 };
 
@@ -42,7 +43,7 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
-pub use state::window::WindowConfig;
+pub use state::{service::EntityCacheMode, window::WindowConfig};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -60,6 +61,7 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
+    entity_cache_mode: EntityCacheMode,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -95,12 +97,20 @@ where
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
+            entity_cache_mode: EntityCacheMode::default(),
         }
     }
 
     /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
     pub fn window_config(mut self, v: WindowConfig) -> Self {
         self.window_config = v;
+        self
+    }
+
+    /// Sets which path answers the state endpoints. Ignored without extractors: the standalone
+    /// rpc server has no windows and no cache, so it always runs as [`EntityCacheMode::Off`].
+    pub fn entity_cache_mode(mut self, v: EntityCacheMode) -> Self {
+        self.entity_cache_mode = v;
         self
     }
 
@@ -169,7 +179,7 @@ where
         // If no extractors are registered, run the server without spawning extractor-related tasks.
         if self.extractor_handles.is_empty() {
             info!("Starting standalone rpc server");
-            self.start_server(None, open_api, None)
+            self.start_server(None, open_api, None, None)
         } else {
             info!("Starting full server");
             self.start_server_with_deltas(open_api)
@@ -212,9 +222,24 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
+        // TODO(ENG-6305): in `shadow` and `serve` mode, build a `StateService` over
+        // `pending_deltas` and the `EntityCache` the startup load returns, and fold into that
+        // cache instead of `DiscardSink`.
+        let state_service: Option<Arc<StateService>> = match self.entity_cache_mode {
+            EntityCacheMode::Off => None,
+            mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
+                warn!(?mode, "Entity cache not built yet; serving state from the database");
+                None
+            }
+        };
+
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
-        let (server_handle, server_task) =
-            self.start_server(Some(ws_data), openapi, Some(Arc::new(pending_deltas)))?;
+        let (server_handle, server_task) = self.start_server(
+            Some(ws_data),
+            openapi,
+            Some(Arc::new(pending_deltas)),
+            state_service,
+        )?;
 
         let task = tokio::spawn(join_services([deltas_task, server_task]));
 
@@ -227,17 +252,21 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+        state_service: Option<Arc<StateService>>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
-        let rpc_data = web::Data::new(rpc::RpcHandler::new(
-            self.db_gateway,
-            pending_deltas,
-            tracer,
-            self.plans_config,
-            self.dci_protocols,
-            self.protocol_systems,
-        ));
+        let rpc_data = web::Data::new(
+            rpc::RpcHandler::new(
+                self.db_gateway,
+                pending_deltas,
+                tracer,
+                self.plans_config,
+                self.dci_protocols,
+                self.protocol_systems,
+            )
+            .with_state_service(self.entity_cache_mode, state_service),
+        );
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()
