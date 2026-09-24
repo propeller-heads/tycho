@@ -1,12 +1,12 @@
 //! Feeds that poll: the shared poll loop, the source trait a provider implements for it, and
 //! the one-request helper those sources fetch with.
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::Stream;
-use reqwest::RequestBuilder;
+use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
 use tracing::{debug_span, error, info, warn, Instrument};
@@ -228,33 +228,46 @@ fn polled_snapshots<S: HttpSource>(
     }
 }
 
-/// Sends `request` and returns its body. A transport failure or a non-success status is a
-/// [`FeedError::Connection`]; `what` names the resource in the message (e.g. "Hashflow price
-/// levels").
+/// Sends `request` and returns its status and body, whatever the status. A transport failure or a
+/// body that cannot be read is a [`FeedError::Connection`]; `what` names the resource in the
+/// message (e.g. "Hashflow price levels").
 ///
-/// For an API that reports failures inside the body of an otherwise successful response, which
-/// therefore has to be classified before it is parsed. [`fetch_json`] is the plain case.
-pub(crate) async fn fetch_bytes(request: RequestBuilder, what: &str) -> Result<Bytes, FeedError> {
+/// For an API whose failing responses carry a body worth parsing. [`fetch_bytes`] is the case
+/// where any non-success status is a connection error.
+pub(crate) async fn fetch_with_status(
+    request: RequestBuilder,
+    what: &str,
+) -> Result<(StatusCode, Bytes), FeedError> {
     let response = request
         .send()
         .await
         .map_err(|e| FeedError::Connection(format!("Failed to fetch {what}: {e}")))?;
-
-    // The body is read before the status is judged, so a failing response can report what the
-    // server said.
     let status = response.status();
     let body = response
         .bytes()
         .await
         .map_err(|e| FeedError::Connection(format!("Failed to read {what} response: {e}")))?;
+    Ok((status, body))
+}
 
+/// Sends `request` and returns its body. A transport failure or a non-success status is a
+/// [`FeedError::Connection`], the latter carrying the body as sent; `what` names the resource in
+/// the message (e.g. "Hashflow price levels").
+///
+/// For an API that reports failures inside the body of an otherwise successful response, which
+/// therefore has to be classified before it is parsed. [`fetch_json`] is the plain case.
+pub(crate) async fn fetch_bytes(request: RequestBuilder, what: &str) -> Result<Bytes, FeedError> {
+    let (status, body) = fetch_with_status(request, what).await?;
     if !status.is_success() {
-        return Err(FeedError::Connection(format!(
-            "{what} HTTP error {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(http_error(what, status, String::from_utf8_lossy(&body)));
     }
     Ok(body)
+}
+
+/// The error for a response that came back with a failing `status`: a connection error naming
+/// the resource, the status and `detail` — what the server said about it.
+pub(crate) fn http_error(what: &str, status: StatusCode, detail: impl fmt::Display) -> FeedError {
+    FeedError::Connection(format!("{what} HTTP error {status}: {detail}"))
 }
 
 /// Sends `request` and parses its JSON body. A transport failure or a non-success status is a
@@ -794,6 +807,27 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(result, Err(FeedError::Connection(msg)) if msg.contains("timed out")));
+    }
+
+    mod fetch_with_status {
+        use super::{test_support::spawn_http_server, *};
+
+        #[tokio::test]
+        async fn a_failing_status_is_returned_with_its_body() {
+            let server =
+                spawn_http_server(|_| Some(("400 Bad Request", r#"{"error":"bad"}"#.to_string())))
+                    .await;
+
+            let (status, body) = fetch_with_status(
+                reqwest::Client::new().get(format!("{}/x", server.url())),
+                "thing",
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(&body[..], br#"{"error":"bad"}"#);
+        }
     }
 
     mod fetch_json {
