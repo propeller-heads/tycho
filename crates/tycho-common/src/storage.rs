@@ -22,7 +22,7 @@ use crate::{
         },
         token::Token,
         Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
-        PaginationParams, ProtocolSystem, ProtocolType, TxHash,
+        PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
     },
     Bytes,
 };
@@ -791,4 +791,85 @@ pub trait Gateway:
     + Send
     + Sync
 {
+}
+
+/// When a value was written: a logical timestamp, the writing block's wall-clock timestamp then
+/// its number.
+///
+/// `block_ts` is the unit of the database's `valid_from`. `block_number` orders blocks that share
+/// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
+/// database. A folded block carries both from its header; a snapshot row carries both from the
+/// block of its `modify_tx`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WriteTimestamp {
+    block_ts: NaiveDateTime,
+    block_number: u64,
+}
+
+impl WriteTimestamp {
+    pub fn new(block_ts: NaiveDateTime, block_number: u64) -> Self {
+        Self { block_ts, block_number }
+    }
+
+    pub fn block_number(&self) -> u64 {
+        self.block_number
+    }
+}
+
+impl From<&Block> for WriteTimestamp {
+    fn from(block: &Block) -> Self {
+        Self::new(block.ts, block.number)
+    }
+}
+
+/// Row counts of the live state one snapshot covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SnapshotTotals {
+    /// Accounts with a live code row.
+    pub accounts: u64,
+    /// Live contract storage rows.
+    pub slots: u64,
+    /// Components that are not deleted.
+    pub components: u64,
+    /// Live protocol state rows.
+    pub attributes: u64,
+}
+
+/// One account's live state with the write stamp of every value: the block of the row's
+/// `modify_tx`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountSnapshot {
+    pub account: Account,
+    pub slot_written_at: HashMap<StoreKey, WriteTimestamp>,
+    pub native_balance_written_at: WriteTimestamp,
+    pub code_written_at: WriteTimestamp,
+    pub token_balance_written_at: HashMap<Address, WriteTimestamp>,
+}
+
+/// One component's live state, stamped with the newest write among its rows or, for a component
+/// without rows, the block of its `creation_tx`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentSnapshot {
+    pub system: ProtocolSystem,
+    pub state: ProtocolComponentState,
+    pub updated_at: WriteTimestamp,
+}
+
+/// Where one extractor's stream resumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorSnapshot {
+    pub extractor: String,
+    pub cursor: Vec<u8>,
+    pub block_hash: BlockHash,
+    pub block_number: u64,
+}
+
+/// One piece of a state snapshot. A snapshot is `Totals`, then any number of `Accounts` and
+/// `Components` chunks, then `Cursors`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotChunk {
+    Totals(SnapshotTotals),
+    Accounts(Vec<AccountSnapshot>),
+    Components(Vec<ComponentSnapshot>),
+    Cursors(Vec<CursorSnapshot>),
 }
