@@ -848,3 +848,11 @@ pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
 }
+
+/// Reads all live state of a chain from one database snapshot.
+#[async_trait]
+pub trait StateSnapshotGateway {
+    /// All live accounts and components of `chain`, every value stamped with the block that
+    /// wrote its row, all from one consistent read.
+    async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError>;
+}
