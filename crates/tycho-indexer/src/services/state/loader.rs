@@ -225,7 +225,7 @@ mod test {
             .err()
             .expect("the load must fail");
 
-        assert!(matches!(err, StorageError::Unexpected(m) if m == "boom"));
+        assert_eq!(err, StorageError::Unexpected("boom".to_string()));
     }
 
     #[tokio::test]
