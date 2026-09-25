@@ -4022,3 +4022,57 @@ fn test_sequential_encoding_strategy_sky() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
+
+#[test]
+fn test_single_encoding_strategy_tessera_weth_usdc() {
+    // WETH ──(Tessera)──> USDC
+    let tessera_pair = ProtocolComponent {
+        id: String::from("0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"),
+        protocol_system: String::from("vm:tessera"),
+        ..Default::default()
+    };
+    let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+    let token_out = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let swap = Swap::new(
+        tessera_pair,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("24000000").unwrap(),
+        BigUint::from_str("23520000").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_tessera_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
