@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use diesel::{pg::Pg, sql_types::BigInt, ExpressionMethods, JoinOnDsl, QueryDsl};
 use diesel_async::{
-    pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
-    RunQueryDsl,
+    pg::TransactionBuilder, pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt,
+    AsyncPgConnection, RunQueryDsl,
 };
 use tycho_common::{
     models::{
@@ -60,6 +60,10 @@ impl PostgresGateway {
     ///
     /// `StorageError::NotFound("native_balance", address)` when a contract has no live native
     /// balance row, as the DB read path reports it.
+    ///
+    /// `StorageError::NotFound("ContractCode", address)` when a contract has no live code row.
+    /// This means the live-code invariant is broken: the `contract_ids` subquery requires a live
+    /// code row.
     pub(crate) async fn snapshot_accounts(
         &self,
         chain: &Chain,
@@ -318,6 +322,13 @@ impl PostgresGateway {
     }
 }
 
+/// The isolation level a state snapshot read runs under: `READ ONLY`, `REPEATABLE READ`.
+fn snapshot_transaction(conn: &mut AsyncPgConnection) -> TransactionBuilder<'_, AsyncPgConnection> {
+    conn.build_transaction()
+        .read_only()
+        .repeatable_read()
+}
+
 /// Reads the live state of `chain` in one `REPEATABLE READ`, read-only transaction on a pooled
 /// connection. Every part of the result comes from the same database snapshot.
 pub(crate) async fn read_state_snapshot(
@@ -328,9 +339,7 @@ pub(crate) async fn read_state_snapshot(
     let mut conn = pool.get().await.map_err(|err| {
         StorageError::Unexpected(format!("No connection for the state snapshot: {err}"))
     })?;
-    conn.build_transaction()
-        .read_only()
-        .repeatable_read()
+    snapshot_transaction(&mut conn)
         .run(|conn| {
             async move {
                 gateway
@@ -736,10 +745,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut writer).await;
             let mut reader = pool.get().await.unwrap();
 
-            let accounts = reader
-                .build_transaction()
-                .read_only()
-                .repeatable_read()
+            let accounts = snapshot_transaction(&mut reader)
                 .run(|conn| {
                     async {
                         let before = gw
@@ -770,6 +776,21 @@ mod test_serial_db {
                 .find(|a| a.account.title == "c0")
                 .unwrap();
             assert_eq!(c0.account.slots.len(), 2, "slot 9 was committed after the snapshot");
+
+            let mut fresh = pool.get().await.unwrap();
+            let after = gw
+                .snapshot_accounts(&Chain::Ethereum, &mut fresh)
+                .await
+                .unwrap();
+            let c0_after = after
+                .iter()
+                .find(|a| a.account.title == "c0")
+                .unwrap();
+            assert_eq!(
+                c0_after.account.slots.len(),
+                3,
+                "the committed slot is visible outside the snapshot"
+            );
         })
         .await;
     }
