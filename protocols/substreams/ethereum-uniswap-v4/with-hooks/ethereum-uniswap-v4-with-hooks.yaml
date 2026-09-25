@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_uniswap_v4_with_hooks"
-  version: v0.7.0
+  version: v0.7.1
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/with-hooks"
 
 protobuf:
@@ -101,6 +101,14 @@ modules:
     inputs:
       - map: map_ticks_changes
 
+  - name: store_ticks_gross_liquidity
+    kind: store
+    initialBlock: 21688329
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
   - name: map_liquidity_changes
     kind: map
     initialBlock: 21688329
@@ -149,6 +157,8 @@ modules:
         mode: deltas
       - map: map_ticks_changes
       - store: store_ticks_liquidity
+        mode: deltas
+      - store: store_ticks_gross_liquidity
         mode: deltas
       - map: map_liquidity_changes
       - store: store_liquidity

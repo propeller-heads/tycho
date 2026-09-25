@@ -104,21 +104,21 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             .attributes
             .iter()
             .filter_map(|(key, value)| {
-                if key.starts_with("ticks/") {
-                    Some(
-                        key.split('/')
-                            .nth(1)?
-                            .parse::<i32>()
-                            .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
-                            .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
-                                    |err| InvalidSnapshotError::ValueError(err.to_string()),
-                                )
-                            }),
-                    )
-                } else {
-                    None
-                }
+                let tick_index = key
+                    .strip_prefix("ticks/")
+                    .and_then(|key| {
+                        key.strip_suffix("/net-liquidity")
+                            .or_else(|| key.strip_suffix("/net_liquidity"))
+                    })?;
+                Some(
+                    tick_index
+                        .parse::<i32>()
+                        .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
+                        .and_then(|tick_index| {
+                            TickInfo::new(tick_index, i128::from(value.clone()))
+                                .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
+                        }),
+                )
             })
             .collect();
 
@@ -128,10 +128,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             .get("hooks");
 
         let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
-                .into_iter()
-                .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
+            Ok(ticks) if !ticks.is_empty() => ticks,
             _ => {
                 // there might be pools where the liquidity is managed by the hook
                 if hook_address.is_some() {
@@ -253,6 +250,7 @@ mod tests {
             ("protocol_fees/zero2one".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
             ("protocol_fees/one2zero".to_string(), Bytes::from(0_u32.to_be_bytes().to_vec())),
             ("ticks/60/net_liquidity".to_string(), Bytes::from(400_i128.to_be_bytes().to_vec())),
+            ("ticks/120/net_liquidity".to_string(), Bytes::from(0_i128.to_be_bytes().to_vec())),
         ])
     }
 
@@ -280,7 +278,7 @@ mod tests {
             fees,
             300,
             60,
-            vec![TickInfo::new(60, 400).unwrap()],
+            vec![TickInfo::new(60, 400).unwrap(), TickInfo::new(120, 0).unwrap()],
         )
         .unwrap();
         assert_eq!(result, expected);
@@ -303,6 +301,7 @@ mod tests {
 
         if missing_attribute == "tick_liquidities" {
             attributes.remove("ticks/60/net_liquidity");
+            attributes.remove("ticks/120/net_liquidity");
         }
 
         if missing_attribute == "sqrt_price" {

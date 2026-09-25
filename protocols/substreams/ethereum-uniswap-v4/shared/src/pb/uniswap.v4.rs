@@ -42,9 +42,12 @@ pub struct TickDelta {
     /// The index of the tick.
     #[prost(int32, tag="2")]
     pub tick_index: i32,
-    /// The liquidity net delta of this tick. Bigint encoded as signed little endian bytes.
+    /// The liquidity net delta of this tick. Bigint encoded as signed big endian bytes.
     #[prost(bytes="vec", tag="3")]
     pub liquidity_net_delta: ::prost::alloc::vec::Vec<u8>,
+    /// The liquidity gross delta of this tick. Bigint encoded as signed big endian bytes.
+    #[prost(bytes="vec", tag="6")]
+    pub liquidity_gross_delta: ::prost::alloc::vec::Vec<u8>,
     /// Used to determine the order of the balance changes. Necessary for the balance store.
     #[prost(uint64, tag="4")]
     pub ordinal: u64,
@@ -65,7 +68,7 @@ pub struct LiquidityChange {
     /// The address of the pool.
     #[prost(bytes="vec", tag="1")]
     pub pool_address: ::prost::alloc::vec::Vec<u8>,
-    /// The liquidity changed amount. Bigint encoded as signed little endian bytes.
+    /// The liquidity changed amount. Bigint encoded as signed big endian bytes.
     #[prost(bytes="vec", tag="2")]
     pub value: ::prost::alloc::vec::Vec<u8>,
     /// The type of update, can be absolute or delta.
