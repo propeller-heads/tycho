@@ -64,7 +64,7 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{EntityCacheMode, PlansConfig, ServicesBuilder, WindowConfig},
+    services::{EntityCache, EntityCacheMode, PlansConfig, ServicesBuilder, WindowConfig},
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -497,14 +497,17 @@ async fn create_indexing_tasks(
 
     // The entity cache must be complete before any extractor streams a block or the server
     // answers a request, so it is loaded here, before either is built.
-    // TODO(ENG-6292): in `shadow` and `serve`, load it from one database snapshot and hand it to
-    // the `ServicesBuilder`.
-    if global_args.entity_cache_mode != EntityCacheMode::Off {
-        warn!(
-            mode = ?global_args.entity_cache_mode,
-            "Entity cache loading is not implemented; state requests read the database"
-        );
-    }
+    let entity_cache: Option<EntityCache> = match global_args.entity_cache_mode {
+        EntityCacheMode::Off => None,
+        mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
+            // TODO(ENG-6292): load the cache from one database snapshot.
+            warn!(
+                ?mode,
+                "Entity cache loading is not implemented; state requests read the database"
+            );
+            None
+        }
+    };
 
     let token_processor = EthereumTokenPreProcessor::new(
         &rpc_client,
@@ -550,7 +553,7 @@ async fn create_indexing_tasks(
                 depth: global_args.delta_window_depth,
                 min_fold_batch: global_args.delta_window_fold_batch,
             })
-            .entity_cache_mode(global_args.entity_cache_mode)
+            .entity_cache(global_args.entity_cache_mode, entity_cache)
             .run()?;
     info!(server_url, "Http and Ws server started");
 

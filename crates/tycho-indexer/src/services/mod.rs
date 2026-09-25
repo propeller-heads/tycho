@@ -27,7 +27,6 @@ use crate::{
         deltas_buffer::PendingDeltas,
         middleware::{compression_middleware, rpc_metrics_middleware},
         state::{
-            cache::EntityCache,
             service::StateService,
             window::{DiscardSink, FoldSink},
         },
@@ -47,7 +46,7 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
-pub use state::{service::EntityCacheMode, window::WindowConfig};
+pub use state::{cache::EntityCache, service::EntityCacheMode, window::WindowConfig};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -66,9 +65,8 @@ pub struct ServicesBuilder<G> {
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
     entity_cache_mode: EntityCacheMode,
-    /// Built from the database before any extractor or the server starts (ENG-6292). `None`
-    /// until that load exists; the windows then fold into a `DiscardSink` and every request
-    /// reads the database.
+    /// `None` makes the windows fold into a `DiscardSink` and every state request read the
+    /// database.
     entity_cache: Option<Arc<EntityCache>>,
 }
 
@@ -116,10 +114,15 @@ where
         self
     }
 
-    /// Sets which path answers the state endpoints. Ignored without extractors: the standalone
-    /// rpc server has no windows and no cache, so it always runs as [`EntityCacheMode::Off`].
-    pub fn entity_cache_mode(mut self, v: EntityCacheMode) -> Self {
-        self.entity_cache_mode = v;
+    /// Sets which path answers the state endpoints, and the entity cache behind it.
+    ///
+    /// `cache` must be fully loaded: the windows fold into it and requests read it from the
+    /// first block on. Without a cache every mode reads the database. Ignored without
+    /// extractors: the standalone rpc server has no windows, so it always runs as
+    /// [`EntityCacheMode::Off`].
+    pub fn entity_cache(mut self, mode: EntityCacheMode, cache: Option<EntityCache>) -> Self {
+        self.entity_cache_mode = mode;
+        self.entity_cache = cache.map(Arc::new);
         self
     }
 
