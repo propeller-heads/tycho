@@ -60,7 +60,6 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
-    entity_cache: Option<Arc<EntityCache>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -96,19 +95,12 @@ where
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
-            entity_cache: None,
         }
     }
 
     /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
     pub fn window_config(mut self, v: WindowConfig) -> Self {
         self.window_config = v;
-        self
-    }
-
-    /// Folds every extractor's `DeltaWindow` into `cache` instead of discarding evicted blocks.
-    pub fn entity_cache(mut self, cache: Arc<EntityCache>) -> Self {
-        self.entity_cache = Some(cache);
         self
     }
 
@@ -190,21 +182,16 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let (sink, sink_name): (Arc<dyn state::window::FoldSink>, &str) = match &self.entity_cache {
-            Some(cache) => (cache.clone(), "EntityCache"),
-            None => (Arc::new(state::window::DiscardSink), "DiscardSink"),
-        };
         let pending_deltas = PendingDeltas::with_config(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
-            sink,
+            Arc::new(state::window::DiscardSink),
         );
         info!(
             depth = self.window_config.depth,
             min_fold_batch = self.window_config.min_fold_batch,
-            sink = sink_name,
             "DeltaWindow configured"
         );
 
