@@ -6,9 +6,10 @@ use metrics::gauge;
 use tracing::info;
 use tycho_common::{
     models::{Address, Chain, ComponentId, ProtocolSystem},
-    storage::{AccountSnapshot, ComponentSnapshot, StateSnapshot, StorageError},
+    storage::{
+        AccountSnapshot, ComponentSnapshot, StateSnapshot, StateSnapshotGateway, StorageError,
+    },
 };
-use tycho_storage::postgres::cache::CachedGateway;
 
 use super::cache::{AccountWriteTimestamps, CachedAccount, CachedComponentState, EntityCache};
 
@@ -20,7 +21,10 @@ impl EntityCache {
     /// # Errors
     ///
     /// `StorageError` when the snapshot read fails. No cache exists after an error.
-    pub async fn load(gateway: &CachedGateway, chain: Chain) -> Result<Self, StorageError> {
+    pub async fn load(
+        gateway: &impl StateSnapshotGateway,
+        chain: Chain,
+    ) -> Result<Self, StorageError> {
         let started = Instant::now();
         let snapshot = gateway.state_snapshot(chain).await?;
         let cache = Self::from_snapshot(snapshot);
@@ -72,9 +76,12 @@ fn component_entry(row: ComponentSnapshot) -> CachedComponentState {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
     use tycho_common::{
         models::{contract::Account, protocol::ProtocolComponentState, Chain},
-        storage::WriteTimestamp,
+        storage::{StateSnapshotGateway, WriteTimestamp},
         Bytes,
     };
 
@@ -173,5 +180,65 @@ mod test {
         same_second.block.ts = testing::block(5).ts;
         cache.fold(&same_second).unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
+    }
+
+    /// Answers one `state_snapshot` call with a fixed result.
+    struct FixedGateway(Mutex<Option<Result<StateSnapshot, StorageError>>>);
+
+    impl FixedGateway {
+        fn new(result: Result<StateSnapshot, StorageError>) -> Self {
+            Self(Mutex::new(Some(result)))
+        }
+    }
+
+    #[async_trait]
+    impl StateSnapshotGateway for FixedGateway {
+        async fn state_snapshot(&self, _chain: Chain) -> Result<StateSnapshot, StorageError> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .expect("state_snapshot is called once")
+        }
+    }
+
+    #[tokio::test]
+    async fn load_builds_the_cache_the_gateway_describes() {
+        let gateway = FixedGateway::new(Ok(StateSnapshot {
+            accounts: vec![account_snapshot(5)],
+            components: vec![component_snapshot(5)],
+        }));
+
+        let cache = EntityCache::load(&gateway, Chain::Ethereum)
+            .await
+            .unwrap();
+
+        assert_eq!(cache.entry_counts(), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn load_reports_a_failed_snapshot_read() {
+        let gateway = FixedGateway::new(Err(StorageError::Unexpected("boom".to_string())));
+
+        let err = EntityCache::load(&gateway, Chain::Ethereum)
+            .await
+            .err()
+            .expect("the load must fail");
+
+        assert!(matches!(err, StorageError::Unexpected(m) if m == "boom"));
+    }
+
+    #[tokio::test]
+    async fn load_of_an_empty_snapshot_folds_normally() {
+        let gateway = FixedGateway::new(Ok(StateSnapshot { accounts: vec![], components: vec![] }));
+        let cache = EntityCache::load(&gateway, Chain::Ethereum)
+            .await
+            .unwrap();
+
+        cache
+            .fold(&with_state_delta(aggregated_changes(EXTRACTOR, 5, 5, Some(5)), "c1", 7))
+            .unwrap();
+
+        assert_eq!(cache.entry_counts(), (0, 0), "a delta for an unknown component is skipped");
     }
 }

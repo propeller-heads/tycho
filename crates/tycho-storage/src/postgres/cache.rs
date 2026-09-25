@@ -38,7 +38,7 @@ use tycho_common::{
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
         EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
-        StorageError, Version, WithTotal,
+        StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -731,12 +731,6 @@ impl CachedGateway {
         }
     }
 
-    /// All live state of `chain` from one `REPEATABLE READ`, read-only transaction, see
-    /// [`super::snapshot::read_state_snapshot`].
-    pub async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError> {
-        super::snapshot::read_state_snapshot(&self.state_gateway, &self.pool, chain).await
-    }
-
     pub async fn get_delta(
         &self,
         chain: &Chain,
@@ -1322,6 +1316,15 @@ impl EntryPointGateway for CachedGateway {
 }
 
 impl Gateway for CachedGateway {}
+
+#[async_trait]
+impl StateSnapshotGateway for CachedGateway {
+    /// One `REPEATABLE READ`, read-only transaction on a pooled connection, see
+    /// [`super::snapshot::read_state_snapshot`].
+    async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError> {
+        super::snapshot::read_state_snapshot(&self.state_gateway, &self.pool, chain).await
+    }
+}
 
 #[cfg(test)]
 mod test_serial_db {
