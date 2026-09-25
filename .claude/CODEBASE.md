@@ -99,7 +99,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`.
      Evicted blocks fold into `DiscardSink`; the `EntityCache` is built from one database
      snapshot before the server starts when `ENTITY_CACHE_MODE` is not `off`, and ENG-6293
-     wires it in
+     makes it the window fold sink and the read source
    - Retains a block until it is at or below `min(finalized, db_committed, tip - depth)`, then
      folds it into a `FoldSink` and evicts it; committed blocks stay servable meanwhile
    - A block the window cannot apply ends the pump and the process; the window cannot refill
