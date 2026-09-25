@@ -3,18 +3,17 @@
 //! Every query filters live rows directly: `valid_to = MAX_TS` on the partitioned tables,
 //! `valid_to IS NULL` on `contract_code` and `account_balance`. Versioned reads are not needed,
 //! because one live row per key is the versioning invariant, and they are much slower on tables
-//! this size.
+//! this size. Rows are selected by a subquery, never by an id list: Postgres caps bind parameters
+//! at 65,535 and a chain can hold more components than that.
 
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use diesel::{ExpressionMethods, QueryDsl};
+use diesel::{pg::Pg, sql_types::BigInt, ExpressionMethods, JoinOnDsl, QueryDsl};
 use diesel_async::{
     pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
     RunQueryDsl,
 };
-use tokio::sync::mpsc;
-use tracing::error;
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -22,7 +21,7 @@ use tycho_common::{
         Address, Chain,
     },
     storage::{
-        AccountSnapshot, ComponentSnapshot, CursorSnapshot, SnapshotChunk, SnapshotTotals,
+        AccountSnapshot, ComponentSnapshot, CursorSnapshot, SnapshotTotals, StateSnapshot,
         StorageError, WriteTimestamp,
     },
     Bytes,
@@ -30,93 +29,59 @@ use tycho_common::{
 
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 
-pub(crate) type ChunkSender = mpsc::Sender<Result<SnapshotChunk, StorageError>>;
+/// Ids of the live contracts of a chain: accounts that are not deleted and have a live code
+/// row.
+fn contract_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
+    schema::account::table
+        .filter(schema::account::chain_id.eq(chain_id))
+        .filter(schema::account::deleted_at.is_null())
+        .filter(
+            schema::account::id.eq_any(
+                schema::contract_code::table
+                    .filter(schema::contract_code::valid_to.is_null())
+                    .select(schema::contract_code::account_id),
+            ),
+        )
+        .select(schema::account::id)
+        .into_boxed()
+}
 
-/// Account ids per `Accounts` chunk.
-pub(crate) const ACCOUNT_CHUNK: i64 = 500;
-
-/// Component ids per `Components` chunk.
-pub(crate) const COMPONENT_CHUNK: i64 = 5_000;
-
-/// Chunks buffered between the reading task and the consumer.
-const CHANNEL_CAPACITY: usize = 2;
-
-fn receiver_gone() -> StorageError {
-    StorageError::Unexpected("Snapshot receiver dropped before the snapshot ended".to_string())
+/// Ids of the components of a chain that are not deleted.
+fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
+    schema::protocol_component::table
+        .filter(schema::protocol_component::chain_id.eq(chain_id))
+        .filter(schema::protocol_component::deleted_at.is_null())
+        .select(schema::protocol_component::id)
+        .into_boxed()
 }
 
 impl PostgresGateway {
-    /// Sends every live contract of `chain` as `SnapshotChunk::Accounts`, `chunk_size` accounts
-    /// per chunk, in ascending `account.id` order. A contract is an account that is not deleted
-    /// and has a live code row.
+    /// Every live contract of `chain` with its code, balances and slots, each value stamped with
+    /// the block of its row's `modify_tx`. Order is unspecified.
     ///
     /// # Errors
     ///
     /// `StorageError::NotFound("native_balance", address)` when a contract has no live native
-    /// balance row, as the DB read path reports it. `StorageError::Unexpected` when the receiver
-    /// is gone.
+    /// balance row, as the DB read path reports it.
     pub(crate) async fn snapshot_accounts(
         &self,
         chain: &Chain,
-        chunk_size: i64,
-        tx: &ChunkSender,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<(), StorageError> {
-        let chain_id = self.get_chain_id(chain)?;
-        let native_token_id = self.get_native_token_id(chain)?;
-        let mut last_id = 0i64;
-        loop {
-            let accounts: Vec<(i64, Address, String)> = schema::account::table
-                .filter(schema::account::chain_id.eq(chain_id))
-                .filter(schema::account::deleted_at.is_null())
-                .filter(schema::account::id.gt(last_id))
-                .filter(
-                    schema::account::id.eq_any(
-                        schema::contract_code::table
-                            .filter(schema::contract_code::valid_to.is_null())
-                            .select(schema::contract_code::account_id),
-                    ),
-                )
-                .order_by(schema::account::id)
-                .limit(chunk_size)
-                .select((schema::account::id, schema::account::address, schema::account::title))
-                .get_results(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            let Some((chunk_last, _, _)) = accounts.last() else {
-                return Ok(());
-            };
-            last_id = *chunk_last;
-            let chunk = self
-                .assemble_accounts(chain, native_token_id, accounts, conn)
-                .await?;
-            let done = (chunk.len() as i64) < chunk_size;
-            tx.send(Ok(SnapshotChunk::Accounts(chunk)))
-                .await
-                .map_err(|_| receiver_gone())?;
-            if done {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Reads code, balances and slots of `accounts` and builds one snapshot per account.
-    async fn assemble_accounts(
-        &self,
-        chain: &Chain,
-        native_token_id: i64,
-        accounts: Vec<(i64, Address, String)>,
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<AccountSnapshot>, StorageError> {
-        let ids: Vec<i64> = accounts
-            .iter()
-            .map(|(id, _, _)| *id)
-            .collect();
+        let chain_id = self.get_chain_id(chain)?;
+        let native_token_id = self.get_native_token_id(chain)?;
+
+        let accounts: Vec<(i64, Address, String)> = schema::account::table
+            .filter(schema::account::id.eq_any(contract_ids(chain_id)))
+            .select((schema::account::id, schema::account::address, schema::account::title))
+            .get_results(conn)
+            .await
+            .map_err(PostgresError::from)?;
 
         let mut codes: HashMap<i64, (Bytes, Bytes, WriteTimestamp, Bytes)> =
             schema::contract_code::table
                 .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::contract_code::account_id.eq_any(&ids))
+                .filter(schema::contract_code::account_id.eq_any(contract_ids(chain_id)))
                 .filter(schema::contract_code::valid_to.is_null())
                 .select((
                     schema::contract_code::account_id,
@@ -135,47 +100,35 @@ impl PostgresGateway {
                 })
                 .collect();
 
-        let balance_rows: Vec<(i64, i64, Bytes, NaiveDateTime, i64)> =
+        let mut balances: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> = HashMap::new();
+        for (account_id, token_id, token, balance, valid_from, number) in
             schema::account_balance::table
+                .inner_join(schema::token::table.inner_join(schema::account::table))
                 .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::account_balance::account_id.eq_any(&ids))
+                .filter(schema::account_balance::account_id.eq_any(contract_ids(chain_id)))
                 .filter(schema::account_balance::valid_to.is_null())
                 .select((
                     schema::account_balance::account_id,
                     schema::account_balance::token_id,
+                    schema::account::address,
                     schema::account_balance::balance,
                     schema::account_balance::valid_from,
                     schema::block::number,
                 ))
-                .get_results(conn)
+                .get_results::<(i64, i64, Address, Bytes, NaiveDateTime, i64)>(conn)
                 .await
-                .map_err(PostgresError::from)?;
-        let token_ids: Vec<i64> = balance_rows
-            .iter()
-            .map(|(_, token_id, _, _, _)| *token_id)
-            .filter(|token_id| *token_id != native_token_id)
-            .collect();
-        let token_addresses: HashMap<i64, Address> = schema::token::table
-            .inner_join(schema::account::table)
-            .filter(schema::token::id.eq_any(&token_ids))
-            .select((schema::token::id, schema::account::address))
-            .get_results::<(i64, Address)>(conn)
-            .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .collect();
-        let mut balances: HashMap<i64, Vec<(i64, Bytes, WriteTimestamp)>> = HashMap::new();
-        for (account_id, token_id, balance, valid_from, number) in balance_rows {
+                .map_err(PostgresError::from)?
+        {
             balances
                 .entry(account_id)
                 .or_default()
-                .push((token_id, balance, WriteTimestamp::new(valid_from, number as u64)));
+                .push((token_id, token, balance, WriteTimestamp::new(valid_from, number as u64)));
         }
 
         let mut slots: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> = HashMap::new();
         for (account_id, slot, value, valid_from, number) in schema::contract_storage::table
             .inner_join(schema::transaction::table.inner_join(schema::block::table))
-            .filter(schema::contract_storage::account_id.eq_any(&ids))
+            .filter(schema::contract_storage::account_id.eq_any(contract_ids(chain_id)))
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .select((
                 schema::contract_storage::account_id,
@@ -203,17 +156,11 @@ impl PostgresGateway {
             let mut native_balance = None;
             let mut token_balances = HashMap::new();
             let mut token_balance_written_at = HashMap::new();
-            for (token_id, balance, written_at) in balances.remove(&id).unwrap_or_default() {
+            for (token_id, token, balance, written_at) in balances.remove(&id).unwrap_or_default() {
                 if token_id == native_token_id {
                     native_balance = Some((balance, written_at));
                     continue;
                 }
-                let token = token_addresses
-                    .get(&token_id)
-                    .ok_or_else(|| {
-                        StorageError::NotFound("Token".to_string(), token_id.to_string())
-                    })?
-                    .clone();
                 token_balances.insert(
                     token.clone(),
                     AccountBalance::new(address.clone(), token.clone(), balance, Bytes::default()),
@@ -253,80 +200,42 @@ impl PostgresGateway {
         Ok(out)
     }
 
-    /// Sends every component of `chain` that is not deleted as `SnapshotChunk::Components`,
-    /// `chunk_size` components per chunk, in ascending `protocol_component.id` order. A
-    /// component with no live attribute and no balance row is sent with empty maps and the block
-    /// of its `creation_tx` as `updated_at`.
+    /// Every component of `chain` that is not deleted, with its live attributes and balances,
+    /// stamped with the newest write among its rows or, for a component without rows, the block
+    /// of its `creation_tx`. Order is unspecified.
     pub(crate) async fn snapshot_components(
         &self,
         chain: &Chain,
-        chunk_size: i64,
-        tx: &ChunkSender,
         conn: &mut AsyncPgConnection,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<ComponentSnapshot>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
-        let mut last_id = 0i64;
-        loop {
-            let components: Vec<(i64, String, String, i64)> = schema::protocol_component::table
+
+        let components: Vec<(i64, String, String, NaiveDateTime, i64)> =
+            schema::protocol_component::table
                 .inner_join(schema::protocol_system::table)
-                .filter(schema::protocol_component::chain_id.eq(chain_id))
-                .filter(schema::protocol_component::deleted_at.is_null())
-                .filter(schema::protocol_component::id.gt(last_id))
-                .order_by(schema::protocol_component::id)
-                .limit(chunk_size)
+                .inner_join(
+                    schema::transaction::table
+                        .on(schema::transaction::id.eq(schema::protocol_component::creation_tx)),
+                )
+                .inner_join(
+                    schema::block::table.on(schema::block::id.eq(schema::transaction::block_id)),
+                )
+                .filter(schema::protocol_component::id.eq_any(component_ids(chain_id)))
                 .select((
                     schema::protocol_component::id,
                     schema::protocol_component::external_id,
                     schema::protocol_system::name,
-                    schema::protocol_component::creation_tx,
+                    schema::block::ts,
+                    schema::block::number,
                 ))
                 .get_results(conn)
                 .await
                 .map_err(PostgresError::from)?;
-            let Some((chunk_last, _, _, _)) = components.last() else {
-                return Ok(());
-            };
-            last_id = *chunk_last;
-            let chunk = Self::assemble_components(components, conn).await?;
-            let done = (chunk.len() as i64) < chunk_size;
-            tx.send(Ok(SnapshotChunk::Components(chunk)))
-                .await
-                .map_err(|_| receiver_gone())?;
-            if done {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Reads attributes and balances of `components` and builds one snapshot per component.
-    async fn assemble_components(
-        components: Vec<(i64, String, String, i64)>,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<Vec<ComponentSnapshot>, StorageError> {
-        let ids: Vec<i64> = components
-            .iter()
-            .map(|(id, _, _, _)| *id)
-            .collect();
-
-        let creation_txs: Vec<i64> = components
-            .iter()
-            .map(|(_, _, _, tx)| *tx)
-            .collect();
-        let created_at: HashMap<i64, WriteTimestamp> = schema::transaction::table
-            .inner_join(schema::block::table)
-            .filter(schema::transaction::id.eq_any(&creation_txs))
-            .select((schema::transaction::id, schema::block::ts, schema::block::number))
-            .get_results::<(i64, NaiveDateTime, i64)>(conn)
-            .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .map(|(tx, ts, number)| (tx, WriteTimestamp::new(ts, number as u64)))
-            .collect();
 
         let mut attributes: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> = HashMap::new();
         for (component_id, name, value, valid_from, number) in schema::protocol_state::table
             .inner_join(schema::transaction::table.inner_join(schema::block::table))
-            .filter(schema::protocol_state::protocol_component_id.eq_any(&ids))
+            .filter(schema::protocol_state::protocol_component_id.eq_any(component_ids(chain_id)))
             .filter(schema::protocol_state::valid_to.eq(MAX_TS))
             .select((
                 schema::protocol_state::protocol_component_id,
@@ -345,49 +254,34 @@ impl PostgresGateway {
                 .push((name, value, WriteTimestamp::new(valid_from, number as u64)));
         }
 
-        let balance_rows: Vec<(i64, i64, Bytes, NaiveDateTime, i64)> =
-            schema::component_balance::table
-                .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::component_balance::protocol_component_id.eq_any(&ids))
-                .filter(schema::component_balance::valid_to.eq(MAX_TS))
-                .select((
-                    schema::component_balance::protocol_component_id,
-                    schema::component_balance::token_id,
-                    schema::component_balance::new_balance,
-                    schema::component_balance::valid_from,
-                    schema::block::number,
-                ))
-                .get_results(conn)
-                .await
-                .map_err(PostgresError::from)?;
-        let token_ids: Vec<i64> = balance_rows
-            .iter()
-            .map(|(_, token_id, _, _, _)| *token_id)
-            .collect();
-        let token_addresses: HashMap<i64, Address> = schema::token::table
-            .inner_join(schema::account::table)
-            .filter(schema::token::id.eq_any(&token_ids))
-            .select((schema::token::id, schema::account::address))
-            .get_results::<(i64, Address)>(conn)
+        let mut balances: HashMap<i64, Vec<(Address, Bytes, WriteTimestamp)>> = HashMap::new();
+        for (component_id, token, balance, valid_from, number) in schema::component_balance::table
+            .inner_join(schema::token::table.inner_join(schema::account::table))
+            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+            .filter(
+                schema::component_balance::protocol_component_id.eq_any(component_ids(chain_id)),
+            )
+            .filter(schema::component_balance::valid_to.eq(MAX_TS))
+            .select((
+                schema::component_balance::protocol_component_id,
+                schema::account::address,
+                schema::component_balance::new_balance,
+                schema::component_balance::valid_from,
+                schema::block::number,
+            ))
+            .get_results::<(i64, Address, Bytes, NaiveDateTime, i64)>(conn)
             .await
             .map_err(PostgresError::from)?
-            .into_iter()
-            .collect();
-        let mut balances: HashMap<i64, Vec<(i64, Bytes, WriteTimestamp)>> = HashMap::new();
-        for (component_id, token_id, balance, valid_from, number) in balance_rows {
+        {
             balances
                 .entry(component_id)
                 .or_default()
-                .push((token_id, balance, WriteTimestamp::new(valid_from, number as u64)));
+                .push((token, balance, WriteTimestamp::new(valid_from, number as u64)));
         }
 
         let mut out = Vec::with_capacity(components.len());
-        for (id, external_id, system, creation_tx) in components {
-            let mut updated_at = *created_at
-                .get(&creation_tx)
-                .ok_or_else(|| {
-                    StorageError::NotFound("Transaction".to_string(), creation_tx.to_string())
-                })?;
+        for (id, external_id, system, created_ts, created_number) in components {
+            let mut updated_at = WriteTimestamp::new(created_ts, created_number as u64);
             let mut attrs = HashMap::new();
             for (name, value, written_at) in attributes
                 .remove(&id)
@@ -397,13 +291,7 @@ impl PostgresGateway {
                 attrs.insert(name, value);
             }
             let mut bals = HashMap::new();
-            for (token_id, balance, written_at) in balances.remove(&id).unwrap_or_default() {
-                let token = token_addresses
-                    .get(&token_id)
-                    .ok_or_else(|| {
-                        StorageError::NotFound("Token".to_string(), token_id.to_string())
-                    })?
-                    .clone();
+            for (token, balance, written_at) in balances.remove(&id).unwrap_or_default() {
                 updated_at = updated_at.max(written_at);
                 bals.insert(token, balance);
             }
@@ -499,72 +387,53 @@ impl PostgresGateway {
             .collect())
     }
 
-    /// Sends the whole snapshot on `tx`: totals, accounts, components, cursors, in that order.
-    /// Runs inside the caller's transaction.
-    async fn state_snapshot(
+    /// All live state of `chain`, read inside the caller's transaction.
+    pub(crate) async fn state_snapshot(
         &self,
         chain: &Chain,
-        tx: &ChunkSender,
         conn: &mut AsyncPgConnection,
-    ) -> Result<(), StorageError> {
-        let totals = self
-            .snapshot_totals(chain, conn)
-            .await?;
-        tx.send(Ok(SnapshotChunk::Totals(totals)))
-            .await
-            .map_err(|_| receiver_gone())?;
-        self.snapshot_accounts(chain, ACCOUNT_CHUNK, tx, conn)
-            .await?;
-        self.snapshot_components(chain, COMPONENT_CHUNK, tx, conn)
-            .await?;
-        let cursors = self
-            .snapshot_cursors(chain, conn)
-            .await?;
-        tx.send(Ok(SnapshotChunk::Cursors(cursors)))
-            .await
-            .map_err(|_| receiver_gone())
+    ) -> Result<StateSnapshot, StorageError> {
+        Ok(StateSnapshot {
+            totals: self
+                .snapshot_totals(chain, conn)
+                .await?,
+            accounts: self
+                .snapshot_accounts(chain, conn)
+                .await?,
+            components: self
+                .snapshot_components(chain, conn)
+                .await?,
+            cursors: self
+                .snapshot_cursors(chain, conn)
+                .await?,
+        })
     }
 }
 
-/// Streams the live state of `chain` from one `REPEATABLE READ`, read-only transaction.
-///
-/// A task takes one pooled connection and sends `SnapshotChunk`s on the returned receiver:
-/// `Totals`, then `Accounts` and `Components` chunks, then `Cursors`. Every chunk comes from the
-/// same database snapshot. An error ends the stream after one `Err` item. Dropping the receiver
-/// ends the task and the transaction.
-pub(crate) fn spawn_state_snapshot(
-    gateway: PostgresGateway,
-    pool: Pool<AsyncPgConnection>,
+/// Reads the live state of `chain` in one `REPEATABLE READ`, read-only transaction on a pooled
+/// connection. Every part of the result comes from the same database snapshot.
+pub(crate) async fn read_state_snapshot(
+    gateway: &PostgresGateway,
+    pool: &Pool<AsyncPgConnection>,
     chain: Chain,
-) -> mpsc::Receiver<Result<SnapshotChunk, StorageError>> {
-    let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::spawn(async move {
-        let result: Result<(), StorageError> = async {
-            let mut conn = pool.get().await.map_err(|err| {
-                StorageError::Unexpected(format!("No connection for the state snapshot: {err}"))
-            })?;
-            conn.build_transaction()
-                .read_only()
-                .repeatable_read()
-                .run(|conn| {
-                    async {
-                        gateway
-                            .state_snapshot(&chain, &tx, conn)
-                            .await
-                            .map_err(PostgresError::from)
-                    }
-                    .scope_boxed()
-                })
-                .await
-                .map_err(StorageError::from)
-        }
-        .await;
-        if let Err(err) = result {
-            error!(error = %err, "State snapshot failed");
-            let _ = tx.send(Err(err)).await;
-        }
-    });
-    rx
+) -> Result<StateSnapshot, StorageError> {
+    let mut conn = pool.get().await.map_err(|err| {
+        StorageError::Unexpected(format!("No connection for the state snapshot: {err}"))
+    })?;
+    conn.build_transaction()
+        .read_only()
+        .repeatable_read()
+        .run(|conn| {
+            async move {
+                gateway
+                    .state_snapshot(&chain, conn)
+                    .await
+                    .map_err(PostgresError::from)
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(StorageError::from)
 }
 
 #[cfg(test)]
@@ -731,49 +600,9 @@ mod test_serial_db {
         .unwrap();
     }
 
-    async fn collect_components(
-        gw: &PostgresGateway,
-        chunk_size: i64,
-        conn: &mut AsyncPgConnection,
-    ) -> Vec<Vec<ComponentSnapshot>> {
-        let (tx, mut rx) = mpsc::channel(16);
-        gw.snapshot_components(&Chain::Ethereum, chunk_size, &tx, conn)
-            .await
-            .unwrap();
-        drop(tx);
-        let mut chunks = Vec::new();
-        while let Some(chunk) = rx.recv().await {
-            match chunk.unwrap() {
-                SnapshotChunk::Components(components) => chunks.push(components),
-                other => panic!("unexpected chunk {other:?}"),
-            }
-        }
-        chunks
-    }
-
-    async fn collect_accounts(
-        gw: &PostgresGateway,
-        chunk_size: i64,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<Vec<Vec<AccountSnapshot>>, StorageError> {
-        let (tx, mut rx) = mpsc::channel(16);
-        gw.snapshot_accounts(&Chain::Ethereum, chunk_size, &tx, conn)
-            .await?;
-        drop(tx);
-        let mut chunks = Vec::new();
-        while let Some(chunk) = rx.recv().await {
-            match chunk? {
-                SnapshotChunk::Accounts(accounts) => chunks.push(accounts),
-                other => panic!("unexpected chunk {other:?}"),
-            }
-        }
-        Ok(chunks)
-    }
-
-    fn by_address(chunks: Vec<Vec<AccountSnapshot>>) -> HashMap<Bytes, AccountSnapshot> {
-        chunks
+    fn by_address(accounts: Vec<AccountSnapshot>) -> HashMap<Bytes, AccountSnapshot> {
+        accounts
             .into_iter()
-            .flatten()
             .map(|s| (s.account.address.clone(), s))
             .collect()
     }
@@ -788,7 +617,7 @@ mod test_serial_db {
             let ts_p1 = db_fixtures::yesterday_half_past_midnight();
 
             let accounts = by_address(
-                collect_accounts(&gw, 500, &mut conn)
+                gw.snapshot_accounts(&Chain::Ethereum, &mut conn)
                     .await
                     .unwrap(),
             );
@@ -839,30 +668,6 @@ mod test_serial_db {
     }
 
     #[tokio::test]
-    async fn snapshot_accounts_splits_chunks_by_account_id_serial_db() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-            setup_accounts(&mut conn).await;
-            let gw = PostgresGateway::from_connection(&mut conn).await;
-
-            let chunks = collect_accounts(&gw, 1, &mut conn)
-                .await
-                .unwrap();
-
-            assert_eq!(
-                chunks
-                    .iter()
-                    .map(Vec::len)
-                    .collect::<Vec<_>>(),
-                vec![1, 1]
-            );
-            assert_eq!(chunks[0][0].account.title, "c0");
-            assert_eq!(chunks[1][0].account.title, "c1");
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn snapshot_accounts_reads_a_null_slot_as_zero_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
@@ -885,7 +690,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let accounts = by_address(
-                collect_accounts(&gw, 500, &mut conn)
+                gw.snapshot_accounts(&Chain::Ethereum, &mut conn)
                     .await
                     .unwrap(),
             );
@@ -915,7 +720,8 @@ mod test_serial_db {
             .unwrap();
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
-            let err = collect_accounts(&gw, 500, &mut conn)
+            let err = gw
+                .snapshot_accounts(&Chain::Ethereum, &mut conn)
                 .await
                 .unwrap_err();
 
@@ -935,13 +741,13 @@ mod test_serial_db {
             setup_components(&mut conn, &f).await;
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
-            let components: HashMap<String, ComponentSnapshot> =
-                collect_components(&gw, 5_000, &mut conn)
-                    .await
-                    .into_iter()
-                    .flatten()
-                    .map(|c| (c.state.component_id.clone(), c))
-                    .collect();
+            let components: HashMap<String, ComponentSnapshot> = gw
+                .snapshot_components(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.state.component_id.clone(), c))
+                .collect();
 
             assert_eq!(components.len(), 2, "p3 is deleted");
             let p1 = &components["p1"];
@@ -962,29 +768,6 @@ mod test_serial_db {
                 WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
                 "creation block 2"
             );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn snapshot_components_splits_chunks_by_component_id_serial_db() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-            let f = setup_accounts(&mut conn).await;
-            setup_components(&mut conn, &f).await;
-            let gw = PostgresGateway::from_connection(&mut conn).await;
-
-            let chunks = collect_components(&gw, 1, &mut conn).await;
-
-            assert_eq!(
-                chunks
-                    .iter()
-                    .map(Vec::len)
-                    .collect::<Vec<_>>(),
-                vec![1, 1]
-            );
-            assert_eq!(chunks[0][0].state.component_id, "p1");
-            assert_eq!(chunks[1][0].state.component_id, "p2");
         })
         .await;
     }
@@ -1059,85 +842,107 @@ mod test_serial_db {
         .await;
     }
 
-    async fn collect_all(
-        mut rx: mpsc::Receiver<Result<SnapshotChunk, StorageError>>,
-    ) -> Vec<Result<SnapshotChunk, StorageError>> {
-        let mut chunks = Vec::new();
-        while let Some(chunk) = rx.recv().await {
-            chunks.push(chunk);
-        }
-        chunks
-    }
-
-    fn kind(chunk: &Result<SnapshotChunk, StorageError>) -> &'static str {
-        match chunk {
-            Ok(SnapshotChunk::Totals(_)) => "totals",
-            Ok(SnapshotChunk::Accounts(_)) => "accounts",
-            Ok(SnapshotChunk::Components(_)) => "components",
-            Ok(SnapshotChunk::Cursors(_)) => "cursors",
-            Err(_) => "error",
-        }
-    }
-
     #[tokio::test]
-    async fn state_snapshot_sends_totals_then_entities_then_cursors_serial_db() {
+    async fn state_snapshot_reads_every_part_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let f = setup_accounts(&mut conn).await;
             setup_components(&mut conn, &f).await;
+            let blocks: Vec<i64> = schema::block::table
+                .order_by(schema::block::number)
+                .select(schema::block::id)
+                .get_results(&mut conn)
+                .await
+                .unwrap();
+            insert_cursor(&mut conn, &f, "ambient", blocks[1]).await;
             let gw = PostgresGateway::from_connection(&mut conn).await;
             drop(conn);
 
-            let chunks = collect_all(spawn_state_snapshot(gw, pool.clone(), Chain::Ethereum)).await;
+            let snapshot = read_state_snapshot(&gw, &pool, Chain::Ethereum)
+                .await
+                .unwrap();
 
-            assert_eq!(
-                chunks
-                    .iter()
-                    .map(kind)
-                    .collect::<Vec<_>>(),
-                vec!["totals", "accounts", "components", "cursors"]
-            );
+            assert_eq!(snapshot.totals.accounts, 2);
+            assert_eq!(snapshot.accounts.len(), 2);
+            assert_eq!(snapshot.components.len(), 2);
+            assert_eq!(snapshot.cursors.len(), 1);
         })
         .await;
     }
 
     #[tokio::test]
-    async fn state_snapshot_ignores_writes_after_it_started_serial_db() {
+    async fn state_snapshot_of_an_empty_chain_is_empty_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
-            let f = setup_accounts(&mut conn).await;
-            setup_components(&mut conn, &f).await;
-            let gw = PostgresGateway::from_connection(&mut conn).await;
-
-            let mut rx = spawn_state_snapshot(gw, pool.clone(), Chain::Ethereum);
-            let first = rx.recv().await.unwrap().unwrap();
-            assert!(matches!(first, SnapshotChunk::Totals(t) if t.accounts == 2));
-            // A second connection adds a live slot on c0 after the snapshot transaction opened.
-            db_fixtures::insert_slots(
+            let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
+            db_fixtures::insert_token(
                 &mut conn,
-                f.c0,
-                f.txn[3],
-                &db_fixtures::yesterday_one_am(),
-                None,
-                &[(9, 9, None)],
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
             )
             .await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
             drop(conn);
 
-            let rest = collect_all(rx).await;
-
-            let accounts = rest
-                .iter()
-                .find_map(|c| match c {
-                    Ok(SnapshotChunk::Accounts(a)) => Some(a),
-                    _ => None,
-                })
+            let snapshot = read_state_snapshot(&gw, &pool, Chain::Ethereum)
+                .await
                 .unwrap();
+
+            assert!(snapshot.accounts.is_empty());
+            assert!(snapshot.components.is_empty());
+            assert!(snapshot.cursors.is_empty());
+            assert_eq!(snapshot.totals, SnapshotTotals::default());
+        })
+        .await;
+    }
+
+    /// The reads run inside one `REPEATABLE READ` transaction, so a row committed by another
+    /// connection after the first read is invisible to the later reads.
+    #[tokio::test]
+    async fn snapshot_reads_ignore_writes_after_the_transaction_started_serial_db() {
+        run_against_db(|pool| async move {
+            let mut writer = pool.get().await.unwrap();
+            let f = setup_accounts(&mut writer).await;
+            let gw = PostgresGateway::from_connection(&mut writer).await;
+            let mut reader = pool.get().await.unwrap();
+
+            let accounts = reader
+                .build_transaction()
+                .read_only()
+                .repeatable_read()
+                .run(|conn| {
+                    async {
+                        let before = gw
+                            .snapshot_accounts(&Chain::Ethereum, conn)
+                            .await
+                            .map_err(PostgresError::from)?;
+                        assert_eq!(before.len(), 2);
+                        db_fixtures::insert_slots(
+                            &mut writer,
+                            f.c0,
+                            f.txn[3],
+                            &db_fixtures::yesterday_one_am(),
+                            None,
+                            &[(9, 9, None)],
+                        )
+                        .await;
+                        gw.snapshot_accounts(&Chain::Ethereum, conn)
+                            .await
+                            .map_err(PostgresError::from)
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .unwrap();
+
             let c0 = accounts
                 .iter()
                 .find(|a| a.account.title == "c0")
                 .unwrap();
-            assert_eq!(c0.account.slots.len(), 2, "slot 9 was written after the snapshot");
+            assert_eq!(c0.account.slots.len(), 2, "slot 9 was committed after the snapshot");
         })
         .await;
     }

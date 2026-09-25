@@ -864,12 +864,11 @@ pub struct CursorSnapshot {
     pub block_number: u64,
 }
 
-/// One piece of a state snapshot. A snapshot is `Totals`, then any number of `Accounts` and
-/// `Components` chunks, then `Cursors`.
+/// All live state of one chain, read from one database snapshot.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SnapshotChunk {
-    Totals(SnapshotTotals),
-    Accounts(Vec<AccountSnapshot>),
-    Components(Vec<ComponentSnapshot>),
-    Cursors(Vec<CursorSnapshot>),
+pub struct StateSnapshot {
+    pub totals: SnapshotTotals,
+    pub accounts: Vec<AccountSnapshot>,
+    pub components: Vec<ComponentSnapshot>,
+    pub cursors: Vec<CursorSnapshot>,
 }
