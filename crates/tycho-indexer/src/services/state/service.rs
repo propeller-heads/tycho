@@ -1,7 +1,7 @@
 //! Serves `/contract_state` and `/protocol_state` from the entity cache.
 //!
 //! A response is `cached entry ⊕ window changes up to the requested version`. The service never
-//! reads the database. A request it cannot serve comes back as [`CacheOutcome::DbPath`], and the
+//! reads the database. A request it cannot serve fails with [`StateServiceError::DbPath`], and the
 //! RPC handler answers it with today's code, which stays untouched: it is both the fallback and
 //! the instant rollback (`ENTITY_CACHE_MODE=off`).
 //!
@@ -34,6 +34,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use thiserror::Error;
 use tycho_common::dto;
 
 use super::{cache::EntityCache, window::DeltaWindow};
@@ -75,13 +76,15 @@ impl DbPathReason {
     }
 }
 
-/// Result of asking the cache to serve a request.
-#[derive(Debug)]
-pub(crate) enum CacheOutcome<T> {
-    /// The cache built the full response.
-    Served(T),
-    /// The cache cannot serve this request; the caller takes the database path.
+/// Why the state service did not answer a request.
+#[derive(Debug, Error)]
+pub(crate) enum StateServiceError {
+    /// The cache cannot serve this request; the database path answers it instead.
+    #[error("Entity cache cannot serve the request: {}", .0.as_str())]
     DbPath(DbPathReason),
+    /// The request is invalid; the client gets this error.
+    #[error(transparent)]
+    Rpc(#[from] RpcError),
 }
 
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
@@ -106,6 +109,9 @@ impl StateService {
     ///
     /// # Errors
     ///
+    /// [`StateServiceError::DbPath`] when the cache cannot serve the version or an entry. Otherwise
+    /// [`StateServiceError::Rpc`] with:
+    ///
     /// - `RpcError::Parse` (400) when `contract_ids` is `None`: the cache serves explicit ids only.
     /// - `RpcError::Parse` (400) when `protocol_system` is empty or has no window. Today this
     ///   silently reads the database.
@@ -119,7 +125,7 @@ impl StateService {
     pub(crate) fn contract_state(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<CacheOutcome<dto::StateRequestResponse>, RpcError> {
+    ) -> Result<dto::StateRequestResponse, StateServiceError> {
         let _ = request;
         todo!("ENG-6307: resolve + capture under the window lock, then read the cache")
     }
@@ -137,7 +143,7 @@ impl StateService {
     pub(crate) fn protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<CacheOutcome<dto::ProtocolStateRequestResponse>, RpcError> {
+    ) -> Result<dto::ProtocolStateRequestResponse, StateServiceError> {
         let _ = request;
         todo!("ENG-6308")
     }

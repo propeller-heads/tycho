@@ -33,7 +33,7 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
-        state::service::{CacheOutcome, DbPathReason, EntityCacheMode, StateService},
+        state::service::{DbPathReason, EntityCacheMode, StateService, StateServiceError},
     },
 };
 
@@ -287,9 +287,10 @@ where
         request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            match service.contract_state(&request)? {
-                CacheOutcome::Served(response) => return Ok(response),
-                CacheOutcome::DbPath(reason) => count_db_path("contract_state", reason),
+            match service.contract_state(&request) {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::DbPath(reason)) => count_db_path("contract_state", reason),
+                Err(StateServiceError::Rpc(err)) => return Err(err),
             }
         }
         self.get_contract_state_inner(request)
@@ -527,9 +528,10 @@ where
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            match service.protocol_state(&request)? {
-                CacheOutcome::Served(response) => return Ok(response),
-                CacheOutcome::DbPath(reason) => count_db_path("protocol_state", reason),
+            match service.protocol_state(&request) {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::DbPath(reason)) => count_db_path("protocol_state", reason),
+                Err(StateServiceError::Rpc(err)) => return Err(err),
             }
         }
         self.get_protocol_state_inner(request)
