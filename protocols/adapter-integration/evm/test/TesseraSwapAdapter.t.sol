@@ -34,7 +34,7 @@ contract TesseraSwapAdapterTest is Test {
         adapter = new TesseraSwapAdapter(VENUE);
     }
 
-    function test_tokens_capabilities_and_limits() public {
+    function testTokensCapabilitiesAndLimits() public {
         address[] memory tokens = adapter.getTokens(poolId);
         assertEq(tokens[0], WETH);
         assertEq(tokens[1], USDC);
@@ -78,31 +78,31 @@ contract TesseraSwapAdapterTest is Test {
         );
     }
 
-    function test_exact_input_both_directions() public {
+    function testExactInputBothDirections() public {
         _swap(WETH, USDC, ISwapAdapterTypes.OrderSide.Sell, 0.01 ether);
         _swap(USDC, WETH, ISwapAdapterTypes.OrderSide.Sell, 100e6);
     }
 
-    function test_exact_output_both_directions() public {
+    function testExactOutputBothDirections() public {
         _swap(WETH, USDC, ISwapAdapterTypes.OrderSide.Buy, 100e6);
         _swap(USDC, WETH, ISwapAdapterTypes.OrderSide.Buy, 0.01 ether);
     }
 
-    function test_two_fills_reuse_mutated_pair_state() public {
+    function testTwoFillsReuseMutatedPairState() public {
         uint256 beforeAccumulator = uint256(vm.load(PAIR, bytes32(uint256(3))));
         _swap(USDC, WETH, ISwapAdapterTypes.OrderSide.Sell, 100e6);
         assertGt(uint256(vm.load(PAIR, bytes32(uint256(3)))), beforeAccumulator);
         _swap(USDC, WETH, ISwapAdapterTypes.OrderSide.Sell, 100e6);
     }
 
-    function test_price_and_staleness_use_block_number() public {
+    function testPriceAndStalenessUseBlockNumber() public {
         uint256[] memory amounts = new uint256[](1);
         assertGt(adapter.price(poolId, WETH, USDC, amounts)[0].numerator, 0);
         vm.roll(block.number + 100);
         assertEq(adapter.price(poolId, WETH, USDC, amounts)[0].numerator, 0);
     }
 
-    function test_limits_preserve_small_remaining_liquidity() public {
+    function testLimitsPreserveSmallRemainingLiquidity() public {
         // Keep the real pair's large ladder bound but allow only a small quote.
         vm.etch(VENUE, address(new LimitedTesseraQuotes()).code);
         uint256[] memory limits = adapter.getLimits(poolId, WETH, USDC);
@@ -112,7 +112,7 @@ contract TesseraSwapAdapterTest is Test {
         assertLe(limits[1], limits[0] * 2);
     }
 
-    function test_cbbtc_limits_and_price_both_directions() public {
+    function testCbbtcLimitsAndPriceBothDirections() public {
         address btc = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
         bytes32 btcPool = bytes32(
             bytes20(address(0xED57BacDc2a990B631F8817853935791C122c356))
@@ -133,7 +133,7 @@ contract TesseraSwapAdapterTest is Test {
         }
     }
 
-    function test_rejects_wrong_tokens() public {
+    function testRejectsWrongTokens() public {
         vm.expectRevert();
         adapter.getLimits(poolId, WETH, address(1));
     }
