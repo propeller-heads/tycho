@@ -54,6 +54,39 @@ pub enum EntityCacheMode {
     Serve,
 }
 
+/// Which path answers state requests, holding what the cache modes need: the loaded
+/// [`EntityCache`] when building the services, the [`StateService`] once built.
+///
+/// A cache mode without a cache, or `Off` with one, cannot be expressed.
+#[derive(Clone, Debug)]
+pub enum EntityCacheSetup<T> {
+    /// See [`EntityCacheMode::Off`].
+    Off,
+    /// See [`EntityCacheMode::Shadow`].
+    Shadow(T),
+    /// See [`EntityCacheMode::Serve`].
+    Serve(T),
+}
+
+impl<T> EntityCacheSetup<T> {
+    /// The value a cache mode holds; `None` for `Off`.
+    pub fn cache(&self) -> Option<&T> {
+        match self {
+            EntityCacheSetup::Off => None,
+            EntityCacheSetup::Shadow(cache) | EntityCacheSetup::Serve(cache) => Some(cache),
+        }
+    }
+
+    /// Replaces the held value, keeping the mode.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> EntityCacheSetup<U> {
+        match self {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(cache) => EntityCacheSetup::Shadow(f(cache)),
+            EntityCacheSetup::Serve(cache) => EntityCacheSetup::Serve(f(cache)),
+        }
+    }
+}
+
 /// Why a request took the database path. The `reason` label of the `db_path_requests` counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbPathReason {

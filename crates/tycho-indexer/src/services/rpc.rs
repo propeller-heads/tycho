@@ -33,7 +33,7 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
-        state::service::{DbPathReason, EntityCacheMode, StateService, StateServiceError},
+        state::service::{DbPathReason, EntityCacheSetup, StateService, StateServiceError},
     },
 };
 
@@ -114,9 +114,8 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
-    entity_cache_mode: EntityCacheMode,
-    /// Answers state requests from the entity cache. `None` without extractors.
-    state_service: Option<Arc<StateService>>,
+    /// Which path answers state requests. `Off` without extractors.
+    state_service: EntityCacheSetup<Arc<StateService>>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -170,30 +169,26 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
-            entity_cache_mode: EntityCacheMode::Off,
-            state_service: None,
+            state_service: EntityCacheSetup::Off,
         }
     }
 
-    /// Sets which path answers the state endpoints. Without a `state_service`, every mode
-    /// answers from the database.
+    /// Sets which path answers the state endpoints.
     pub(crate) fn with_state_service(
         mut self,
-        mode: EntityCacheMode,
-        state_service: Option<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>>,
     ) -> Self {
-        self.entity_cache_mode = mode;
         self.state_service = state_service;
         self
     }
 
     /// The state service, when it answers requests itself: `serve` mode only.
     fn serving_state_service(&self) -> Option<&StateService> {
-        match self.entity_cache_mode {
-            EntityCacheMode::Serve => self.state_service.as_deref(),
+        match &self.state_service {
+            EntityCacheSetup::Serve(service) => Some(service),
             // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
             // it with the database answer.
-            EntityCacheMode::Shadow | EntityCacheMode::Off => None,
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
         }
     }
 

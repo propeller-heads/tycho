@@ -46,7 +46,11 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
-pub use state::{cache::EntityCache, service::EntityCacheMode, window::WindowConfig};
+pub use state::{
+    cache::EntityCache,
+    service::{EntityCacheMode, EntityCacheSetup},
+    window::WindowConfig,
+};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -64,10 +68,9 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
-    entity_cache_mode: EntityCacheMode,
-    /// `None` makes the windows fold into a `DiscardSink` and every state request read the
+    /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
     /// database.
-    entity_cache: Option<Arc<EntityCache>>,
+    entity_cache: EntityCacheSetup<Arc<EntityCache>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -103,8 +106,7 @@ where
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
-            entity_cache_mode: EntityCacheMode::default(),
-            entity_cache: None,
+            entity_cache: EntityCacheSetup::Off,
         }
     }
 
@@ -116,13 +118,11 @@ where
 
     /// Sets which path answers the state endpoints, and the entity cache behind it.
     ///
-    /// `cache` must be fully loaded: the windows fold into it and requests read it from the
-    /// first block on. Without a cache every mode reads the database. Ignored without
-    /// extractors: the standalone rpc server has no windows, so it always runs as
-    /// [`EntityCacheMode::Off`].
-    pub fn entity_cache(mut self, mode: EntityCacheMode, cache: Option<EntityCache>) -> Self {
-        self.entity_cache_mode = mode;
-        self.entity_cache = cache.map(Arc::new);
+    /// The cache must be fully loaded: the windows fold into it and requests read it from the
+    /// first block on. Ignored without extractors: the standalone rpc server has no windows, so
+    /// it always runs as [`EntityCacheSetup::Off`].
+    pub fn entity_cache(mut self, setup: EntityCacheSetup<EntityCache>) -> Self {
+        self.entity_cache = setup.map(Arc::new);
         self
     }
 
@@ -191,7 +191,7 @@ where
         // If no extractors are registered, run the server without spawning extractor-related tasks.
         if self.extractor_handles.is_empty() {
             info!("Starting standalone rpc server");
-            self.start_server(None, open_api, None, None)
+            self.start_server(None, open_api, None, EntityCacheSetup::Off)
         } else {
             info!("Starting full server");
             self.start_server_with_deltas(open_api)
@@ -204,7 +204,7 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let sink: Arc<dyn FoldSink> = match &self.entity_cache {
+        let sink: Arc<dyn FoldSink> = match self.entity_cache.cache() {
             Some(cache) => cache.clone(),
             None => Arc::new(DiscardSink),
         };
@@ -238,9 +238,10 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
-        let state_service = self.entity_cache.as_ref().map(|cache| {
-            Arc::new(StateService::new(pending_deltas.windows().clone(), cache.clone()))
-        });
+        let state_service = self
+            .entity_cache
+            .clone()
+            .map(|cache| Arc::new(StateService::new(pending_deltas.windows().clone(), cache)));
 
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
         let (server_handle, server_task) = self.start_server(
@@ -261,7 +262,7 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-        state_service: Option<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
@@ -274,7 +275,7 @@ where
                 self.dci_protocols,
                 self.protocol_systems,
             )
-            .with_state_service(self.entity_cache_mode, state_service),
+            .with_state_service(state_service),
         );
 
         let server = HttpServer::new(move || {
