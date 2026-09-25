@@ -69,17 +69,13 @@ fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'stati
 }
 
 impl PostgresGateway {
-    /// Every live contract of `chain` with its code, balances and slots, each value stamped with
-    /// the block of its row's `modify_tx`. Order is unspecified.
+    /// Every live contract of `chain` with its code, balances and slots, each value timestamped
+    /// with the block of its row's `modify_tx`. Order is unspecified.
     ///
     /// # Errors
     ///
     /// `StorageError::NotFound("native_balance", address)` when a contract has no live native
-    /// balance row, as the DB read path reports it.
-    ///
-    /// `StorageError::NotFound("ContractCode", address)` when a contract has no live code row.
-    /// This means the live-code invariant is broken: the `contract_ids` subquery requires a live
-    /// code row.
+    /// balance row, the same error `get_contracts` returns.
     pub(crate) async fn snapshot_accounts(
         &self,
         chain: &Chain,
@@ -88,38 +84,33 @@ impl PostgresGateway {
         let chain_id = self.get_chain_id(chain)?;
         let native_token_id = self.get_native_token_id(chain)?;
 
-        let accounts: Vec<(i64, Address, String)> = schema::account::table
-            .filter(schema::account::id.eq_any(contract_ids(chain_id)))
-            .select((schema::account::id, schema::account::address, schema::account::title))
-            .get_results(conn)
+        let accounts = schema::contract_code::table
+            .inner_join(schema::account::table)
+            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+            .filter(schema::account::chain_id.eq(chain_id))
+            .filter(
+                schema::account::deleted_at
+                    .is_null()
+                    .or(schema::account::deleted_at.eq(MAX_TS)),
+            )
+            .filter(
+                schema::contract_code::valid_to
+                    .is_null()
+                    .or(schema::contract_code::valid_to.eq(MAX_TS)),
+            )
+            .select((
+                schema::account::id,
+                schema::account::address,
+                schema::account::title,
+                schema::contract_code::code,
+                schema::contract_code::hash,
+                schema::contract_code::valid_from,
+                schema::block::number,
+                schema::transaction::hash,
+            ))
+            .get_results::<(i64, Address, String, Bytes, Bytes, NaiveDateTime, i64, Bytes)>(conn)
             .await
             .map_err(PostgresError::from)?;
-
-        let mut codes: HashMap<i64, (Bytes, Bytes, WriteTimestamp, Bytes)> =
-            schema::contract_code::table
-                .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::contract_code::account_id.eq_any(contract_ids(chain_id)))
-                .filter(
-                    schema::contract_code::valid_to
-                        .is_null()
-                        .or(schema::contract_code::valid_to.eq(MAX_TS)),
-                )
-                .select((
-                    schema::contract_code::account_id,
-                    schema::contract_code::code,
-                    schema::contract_code::hash,
-                    schema::contract_code::valid_from,
-                    schema::block::number,
-                    schema::transaction::hash,
-                ))
-                .get_results::<(i64, Bytes, Bytes, NaiveDateTime, i64, Bytes)>(conn)
-                .await
-                .map_err(PostgresError::from)?
-                .into_iter()
-                .map(|(account_id, code, hash, valid_from, number, tx)| {
-                    (account_id, (code, hash, WriteTimestamp::new(valid_from, number as u64), tx))
-                })
-                .collect();
 
         let mut balances: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> = HashMap::new();
         for (account_id, token_id, token, balance, valid_from, number) in
@@ -173,11 +164,10 @@ impl PostgresGateway {
         }
 
         let mut out = Vec::with_capacity(accounts.len());
-        for (id, address, title) in accounts {
-            let (code, code_hash, code_written_at, code_tx) =
-                codes.remove(&id).ok_or_else(|| {
-                    StorageError::NotFound("ContractCode".to_string(), address.to_string())
-                })?;
+        for (id, address, title, code, code_hash, code_valid_from, code_block_number, code_tx) in
+            accounts
+        {
+            let code_written_at = WriteTimestamp::new(code_valid_from, code_block_number as u64);
             let mut native_balance = None;
             let mut token_balances = HashMap::new();
             let mut token_balance_written_at = HashMap::new();
@@ -245,7 +235,12 @@ impl PostgresGateway {
                 .inner_join(
                     schema::block::table.on(schema::block::id.eq(schema::transaction::block_id)),
                 )
-                .filter(schema::protocol_component::id.eq_any(component_ids(chain_id)))
+                .filter(schema::protocol_component::chain_id.eq(chain_id))
+                .filter(
+                    schema::protocol_component::deleted_at
+                        .is_null()
+                        .or(schema::protocol_component::deleted_at.eq(MAX_TS)),
+                )
                 .select((
                     schema::protocol_component::id,
                     schema::protocol_component::external_id,
