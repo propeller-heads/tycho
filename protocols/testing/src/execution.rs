@@ -28,6 +28,8 @@ const MAVERICK_V2_BYTECODE_JSON: &str = include_str!("../fixtures/MaverickV2.run
 const EKUBO_V3_BYTECODE_JSON: &str = include_str!("../fixtures/EkuboV3.runtime.json");
 const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
+const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
+    include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
@@ -67,7 +69,11 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
 /// [`EXECUTOR_MAPPING`], which holds the executor used on every other chain.
 static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'static str>> =
     LazyLock::new(|| {
-        HashMap::from([((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON)])
+        HashMap::from([
+            ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
+            ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+            ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+        ])
     });
 
 /// Get executor bytecode JSON for a protocol system on `chain`.
@@ -147,4 +153,36 @@ pub fn create_router_overwrites_data(
         executors: HashMap::from([(executor_address, Some(executor_bytecode))]),
         fee_calculator_bytecode: Some(fee_calculator_bytecode),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn robinhood_uniswap_v4_and_hooks_use_the_robinhood_specific_executor() {
+        let ethereum_v4 = load_executor_bytecode(Chain::Ethereum, "uniswap_v4").unwrap();
+        let robinhood_v4 = load_executor_bytecode(Chain::Robinhood, "uniswap_v4").unwrap();
+        let robinhood_v4_hooks =
+            load_executor_bytecode(Chain::Robinhood, "uniswap_v4_hooks").unwrap();
+
+        assert!(!robinhood_v4.is_empty());
+        assert!(!robinhood_v4_hooks.is_empty());
+        assert_eq!(
+            robinhood_v4, robinhood_v4_hooks,
+            "both Robinhood protocol systems must use the same chain-specific executor"
+        );
+        assert_ne!(
+            robinhood_v4, ethereum_v4,
+            "Robinhood must not silently fall back to the Ethereum executor"
+        );
+    }
+
+    #[test]
+    fn ethereum_uniswap_v4_hooks_bytecode_is_unaffected_by_the_robinhood_override() {
+        let expected =
+            decode_runtime_bytecode(UNISWAP_V4_ANGSTROM_BYTECODE_JSON, "executor").unwrap();
+        let actual = load_executor_bytecode(Chain::Ethereum, "uniswap_v4_hooks").unwrap();
+        assert_eq!(actual, expected);
+    }
 }

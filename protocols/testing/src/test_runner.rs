@@ -79,6 +79,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
         ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
         ("robinhood-up-v3", "base-aerodrome-slipstreams"),
+        ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
     ])
 });
 
@@ -1694,12 +1695,18 @@ mod tests {
     fn get_mocked_runner() -> TestRunner {
         dotenv().ok();
         let rpc_url = env::var("RPC_URL").unwrap();
+        get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
+    }
+
+    /// Builds a runner for `protocol` on `chain` rooted at the current directory. The RPC URL
+    /// is only stored, so callers that never reach the network can pass a placeholder.
+    fn get_mocked_runner_for(chain: Chain, protocol: &str, rpc_url: String) -> TestRunner {
         let current_dir = std::env::current_dir().unwrap();
         TestRunner::new(RunnerConfig {
             test_type: TestType::Range(TestTypeRange { match_test: None }),
             root_path: current_dir,
-            chain: Chain::Ethereum,
-            protocol: "test-protocol".to_string(),
+            chain,
+            protocol: protocol.to_string(),
             db_url: "".to_string(),
             rpc_url,
             tycho_server_port: 4242,
@@ -1709,6 +1716,33 @@ mod tests {
         })
         .unwrap()
     }
+
+    #[test]
+    fn robinhood_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
+        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
+        // in the no-external-deps CI job, which does not set RPC_URL.
+        let runner = get_mocked_runner_for(
+            Chain::Robinhood,
+            "robinhood-uniswap-v4-with-hooks",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("ethereum-uniswap-v4/with-hooks"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_robinhood_uniswap_v4_with_hooks.tycho.yaml")
+        );
+    }
+
     #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();

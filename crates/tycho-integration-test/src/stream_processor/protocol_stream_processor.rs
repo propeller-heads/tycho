@@ -275,6 +275,7 @@ impl ProtocolStreamProcessor {
                     "uniswap_v2".to_string(),
                     "uniswap_v3".to_string(),
                     "uniswap_v4".to_string(),
+                    "uniswap_v4_hooks".to_string(),
                     "sushiswap_v3".to_string(),
                     "robinswap_v3".to_string(),
                     "ramses_v3".to_string(),
@@ -466,5 +467,33 @@ impl ProtocolStreamProcessor {
             }
         }
         Ok(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn processor(chain: Chain) -> ProtocolStreamProcessor {
+        ProtocolStreamProcessor::new(
+            chain,
+            "http://localhost".to_string(),
+            "key".to_string(),
+            0.0,
+            1.0,
+            None,
+            false,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn robinhood_defaults_include_uniswap_v4_hooks() {
+        let defaults = processor(Chain::Robinhood).get_default_protocols_for_chain();
+        assert!(
+            defaults.contains(&"uniswap_v4_hooks".to_string()),
+            "Robinhood defaults must include uniswap_v4_hooks: {defaults:?}"
+        );
     }
 }

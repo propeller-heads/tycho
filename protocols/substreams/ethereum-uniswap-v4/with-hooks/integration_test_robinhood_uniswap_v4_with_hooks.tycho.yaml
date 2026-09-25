@@ -1,0 +1,31 @@
+substreams_yaml_path: ./robinhood-uniswap-v4-with-hooks.yaml
+# The balance check does not support vault like contracts like uniswap v4
+skip_balance_check: true
+protocol_type_names:
+  - "uniswap_v4_pool"
+protocol_system: "uniswap_v4_hooks"
+module_name: "map_pons_enriched_block_changes"
+initialized_accounts:
+  - "0x8366a39CC670B4001A1121B8F6A443A643e40951" # pool manager
+tests:
+  # Pons V2 MemeHook pool, creatorTaxBps 100 and hookFeeBps 100, registered in the transaction that
+  # initialized it. The fee terms are decoded from the hook's storage writes in that transaction,
+  # so this test only passes on extended blocks.
+  - name: test_pons_pool_creation
+    start_block: 58759095
+    stop_block: 58759199
+    expected_components:
+      - id: "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289"
+        tokens:
+          - "0xab5983fe30f186055095305c862b0e097dab3b52"
+          - "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          hooks: "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044"
+          key_lp_fee: "0x00"
+          hook_identifier: "0x706f6e735f7632" # pons_v2
+          pons_hook_fee_bps: "0x64"
+          pons_creator_tax_bps: "0x64"
+        creation_tx: "0xf66ca58190cc186683267cb486bbc6e1f0469176b7ad4f92e43eb68a1a0936e5"
+        skip_simulation: false
+        skip_execution: false

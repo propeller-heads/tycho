@@ -44,12 +44,23 @@ Every PR that touches a package **must** bump that package's version in its `Car
 Releasing is manual and **tagging alone does nothing**:
 
 1. Merge the version bump + changelog entry to main.
-2. Tag the merge commit `{package}-{version}` (e.g. `ethereum-curve-0.3.3`).
+2. Tag the merge commit `{cargo-package-name}-{version}` (e.g. `ethereum-curve-0.3.3`). Nested
+   packages use their Cargo package name, so the tag has no slash:
+   `ethereum-uniswap-v4-with-hooks-0.8.0`.
 3. Dispatch the `release-substreams-package` job in
-   `.github/workflows/release-substreams.yaml` with that tag as the ref, the `package` input, and
-   the `config_file` input naming the single manifest (without `.yaml`). Packages with several
+   `.github/workflows/release-substreams.yaml` with that tag as the ref, the `package` input
+   (either the Cargo package name or the package directory, e.g. `ethereum-uniswap-v4/with-hooks`),
+   and the `config_file` input naming the single manifest (without `.yaml`). Packages with several
    manifests need one dispatch per manifest.
 
+`release.sh` resolves the `package` input through `cargo metadata` and publishes to
+`<package directory>/<manifest name>-<version>.spkg`, so both input forms produce the same object
+and nested packages publish under their directory path. `RELEASE_DRY_RUN=1` prints the build, pack
+and upload commands instead of running them; `tests/release_sh_test.sh` covers the resolution rules.
+The manual `publish.sh` keys by manifest name instead, which is why the registry holds several
+namespaces for the same package.
+
 Publishes are immutable — S3 conditional writes (`--if-none-match '*'`) reject an existing spkg, so
-shipping new code always means a version bump. Pre-releases land as `<pkg>-pre.<short-sha>.spkg`.
+shipping new code always means a version bump. Pre-releases land as
+`<manifest>-pre.<short-sha>.spkg`.
 See `protocols/substreams/Readme.md`.

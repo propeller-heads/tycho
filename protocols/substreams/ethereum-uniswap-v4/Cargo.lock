@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -312,12 +312,14 @@ dependencies = [
  "hex",
  "hex-literal 0.4.1",
  "prost 0.11.9",
+ "prost-types 0.11.9",
  "rstest",
  "serde",
  "serde_qs",
  "substreams",
  "substreams-ethereum",
  "substreams-helper",
+ "tiny-keccak",
  "tycho-substreams",
 ]
 

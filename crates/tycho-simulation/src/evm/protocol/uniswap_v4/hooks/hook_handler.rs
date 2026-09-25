@@ -50,6 +50,19 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// allows overriding it.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
 
+    /// Amount of the unspecified currency, the output of an exact-input swap, that the hook
+    /// takes out of a swap that would otherwise deliver `unspecified` of it.
+    ///
+    /// `None` means the hook does not model its fee as a pure function of that amount, and the
+    /// caller has to simulate a swap to learn what it charges. The default returns `None`.
+    fn unspecified_fee_amount(
+        &self,
+        _unspecified: U256,
+        _zero_for_one: bool,
+    ) -> Result<Option<U256>, SimulationError> {
+        Ok(None)
+    }
+
     // Advanced version also returning minimum swap amounts for future compatability
     // with updated ProtocolSim interface
     fn get_amount_ranges(

@@ -23,7 +23,7 @@ use crate::{
     evm::protocol::{
         clmm::clmm_swap_to_price,
         safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
+        u256_num::{u256_to_biguint, u256_to_f64},
         uniswap_v4::hooks::{
             hook_handler::HookHandler,
             models::{
@@ -70,6 +70,11 @@ const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
+// Decimal exponent of the output amount a hook is probed with to read off its fee rate.
+// Hooks floor each term of their fee, so the rate is only exact in the limit of a large amount;
+// 1e30 makes the rounding smaller than an f64 can hold and still leaves room under U256::MAX for
+// the hook's own intermediate products.
+const HOOK_FEE_PROBE_EXP: u64 = 30;
 
 #[derive(Clone)]
 pub struct UniswapV4State {
@@ -426,6 +431,49 @@ impl UniswapV4State {
     fn has_no_initialized_ticks(&self) -> bool {
         !self.ticks.has_initialized_ticks()
     }
+
+    /// The pool's own spot buy price for `base` in units of `quote`: the amount of `quote` one
+    /// `base` costs at the current price, marked up by the pool's swap fee and ignoring any hook.
+    fn core_spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let zero_for_one = base < quote;
+        let fee_pips = self
+            .fees
+            .calculate_swap_fees_pips(zero_for_one, None);
+        let fee = fee_pips as f64 / 1_000_000.0;
+
+        let price = if zero_for_one {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
+        } else {
+            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
+        };
+
+        Ok(add_fee_markup(price, fee))
+    }
+
+    /// The share of a swap's output that `hook` keeps, as a fraction of one, or `None` when the
+    /// hook does not model its fee analytically and has to be simulated instead.
+    ///
+    /// Fails if the hook would keep the whole output or more, which is not a rate a price can be
+    /// marked up by.
+    fn hook_fee_rate(
+        hook: &dyn HookHandler,
+        zero_for_one: bool,
+    ) -> Result<Option<f64>, SimulationError> {
+        let probe = U256::from(10u64).pow(U256::from(HOOK_FEE_PROBE_EXP));
+        let Some(fee) = hook.unspecified_fee_amount(probe, zero_for_one)? else {
+            return Ok(None);
+        };
+
+        let rate = u256_to_f64(fee)? / u256_to_f64(probe)?;
+        if rate >= 1.0 {
+            return Err(SimulationError::FatalError(format!(
+                "Hook {} keeps {rate} of the output, leaving no price to quote",
+                hook.address()
+            )));
+        }
+
+        Ok(Some(rate))
+    }
 }
 
 #[typetag::serde]
@@ -441,6 +489,12 @@ impl ProtocolSim for UniswapV4State {
             match hook.spot_price(base, quote) {
                 Ok(price) => return Ok(price),
                 Err(SimulationError::RecoverableError(_)) => {
+                    // Buying `base` means selling `quote` into the pool, so the hook sees a swap
+                    // whose input is `quote` and whose output, the leg it charges, is `base`.
+                    if let Some(rate) = Self::hook_fee_rate(hook.as_ref(), quote < base)? {
+                        return Ok(add_fee_markup(self.core_spot_price(base, quote)?, rate));
+                    }
+
                     // Calculate spot price by swapping two amounts and use the approximation
                     // to get the derivative, following the pattern from vm/state.rs
 
@@ -495,19 +549,7 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
-        let zero_for_one = base < quote;
-        let fee_pips = self
-            .fees
-            .calculate_swap_fees_pips(zero_for_one, None);
-        let fee = fee_pips as f64 / 1_000_000.0;
-
-        let price = if zero_for_one {
-            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
-        } else {
-            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
-        };
-
-        Ok(add_fee_markup(price, fee))
+        self.core_spot_price(base, quote)
     }
 
     fn get_amount_out(
@@ -636,7 +678,13 @@ impl ProtocolSim for UniswapV4State {
                         ))
                     })?;
                 after_swap_gas = after_swap_result.gas_estimate;
-                hook_delta_unspecified += after_swap_result.result;
+                // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
+                // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
+                // permission the PoolManager discards the return value, so the hook still costs
+                // gas but cannot move the swapper's balance.
+                if has_permission(hook.address(), HookOptions::AfterSwapReturnsDelta) {
+                    hook_delta_unspecified += after_swap_result.result;
+                }
             }
         }
 
@@ -818,6 +866,14 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
+        // A hook that charges the output reduces what a swapper can actually receive, so the
+        // limit has to be reported net of its cut.
+        if let Some(hook) = &self.hook {
+            if let Some(fee) = hook.unspecified_fee_amount(total_amount_out, zero_for_one)? {
+                total_amount_out = safe_sub_u256(total_amount_out, fee)?;
+            }
+        }
+
         Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
     }
 
@@ -994,7 +1050,7 @@ impl ProtocolSim for UniswapV4State {
 mod tests {
     use std::{collections::HashSet, fs, path::Path, str::FromStr};
 
-    use alloy::primitives::aliases::U24;
+    use alloy::primitives::{aliases::U24, U160};
     use num_traits::FromPrimitive;
     use rstest::rstest;
     use serde_json::Value;
@@ -1010,9 +1066,12 @@ mod tests {
                 utils::{get_client, get_runtime},
             },
             protocol::{
+                u256_num::biguint_to_u256,
                 uniswap_v4::hooks::{
                     angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
                     generic_vm_hook_handler::GenericVMHookHandler,
+                    models::{AfterSwapDelta, AmountRanges, BeforeSwapOutput, WithGasEstimate},
+                    pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
                 },
                 utils::uniswap::{lp_fee, sqrt_price_math::get_sqrt_price_q96},
             },
@@ -1196,6 +1255,10 @@ mod tests {
         .await
         .unwrap();
 
+        // The fixture's `hooks` attribute is the zero address, so this is a plain V4 pool and
+        // needs no chain to decode.
+        assert!(usv4_state.hook.is_none());
+
         let res = usv4_state
             .get_amount_out(BigUint::from_u64(1000000000000000000).unwrap(), &t0, &t1)
             .unwrap();
@@ -1259,6 +1322,10 @@ mod tests {
         )
         .await
         .unwrap();
+
+        // The fixture's `hooks` attribute is the zero address, so this is a plain V4 pool and
+        // needs no chain to decode.
+        assert!(usv4_state.hook.is_none());
 
         let res = usv4_state
             .get_limits(t0.address.clone(), t1.address.clone())
@@ -1665,6 +1732,426 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.amount, BigUint::from_str("1825627051870330472").unwrap())
+    }
+
+    /// Hook that only answers `after_swap`, with a configurable address and returned delta.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AfterSwapTestHook {
+        address: Address,
+        delta: I128,
+        /// Share of the output the hook reports analytically, in basis points. `None` models a
+        /// hook that cannot price its fee without a simulation.
+        analytic_fee_bps: Option<u32>,
+    }
+
+    impl HookHandler for AfterSwapTestHook {
+        fn address(&self) -> Address {
+            self.address
+        }
+
+        fn before_swap(
+            &self,
+            _: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn after_swap(
+            &self,
+            _: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            Ok(WithGasEstimate { gas_estimate: AFTER_SWAP_TEST_HOOK_GAS, result: self.delta })
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn unspecified_fee_amount(
+            &self,
+            unspecified: U256,
+            _: bool,
+        ) -> Result<Option<U256>, SimulationError> {
+            let Some(bps) = self.analytic_fee_bps else { return Ok(None) };
+            Ok(Some(unspecified * U256::from(bps) / U256::from(10_000u64)))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    // Deliberately different values: the gate tests below assert on a gas delta and on an amount
+    // delta, and equal constants would let a mix-up between the two pass.
+    const AFTER_SWAP_TEST_HOOK_GAS: u64 = 1_000;
+    const AFTER_SWAP_TEST_HOOK_DELTA: u64 = 777;
+
+    fn construct_hook_address(hook_options: &[HookOptions]) -> Address {
+        let mut hook_flags = U160::ZERO;
+        let one = U160::from_limbs([1, 0, 0]);
+        for hook_option in hook_options {
+            hook_flags |= one << (*hook_option as u8);
+        }
+        Address::from(hook_flags)
+    }
+
+    fn after_swap_test_hook(hook_options: &[HookOptions]) -> Box<dyn HookHandler> {
+        Box::new(AfterSwapTestHook {
+            address: construct_hook_address(hook_options),
+            delta: I128::unchecked_from(AFTER_SWAP_TEST_HOOK_DELTA),
+            analytic_fee_bps: None,
+        })
+    }
+
+    /// A hook that prices its fee analytically as `analytic_fee_bps` of the output.
+    fn analytic_fee_test_hook(analytic_fee_bps: u32) -> Box<dyn HookHandler> {
+        Box::new(AfterSwapTestHook {
+            address: construct_hook_address(&[
+                HookOptions::AfterSwap,
+                HookOptions::AfterSwapReturnsDelta,
+            ]),
+            delta: I128::ZERO,
+            analytic_fee_bps: Some(analytic_fee_bps),
+        })
+    }
+
+    fn basic_v4_test_pool_tokens(zero_for_one: bool) -> (Token, Token) {
+        if zero_for_one {
+            (token_x(), token_y())
+        } else {
+            (token_y(), token_x())
+        }
+    }
+
+    /// An `afterSwap` delta must be discarded unless the hook also carries
+    /// `AfterSwapReturnsDelta`, mirroring `Hooks.afterSwap` in v4-core.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_after_swap_delta_ignored_without_returns_delta_permission(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("hookless swap should succeed");
+
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(after_swap_test_hook(&[HookOptions::AfterSwap]));
+        let gated = pool
+            .get_amount_out(amount_in, &token_in, &token_out)
+            .expect("gated swap should succeed");
+
+        assert_eq!(gated.amount, hookless.amount);
+        assert_eq!(
+            gated.gas,
+            hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
+        );
+    }
+
+    /// With `AfterSwapReturnsDelta` set, the returned delta is taken out of the unspecified
+    /// (output) currency.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_after_swap_delta_applied_with_returns_delta_permission(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("hookless swap should succeed");
+
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(after_swap_test_hook(&[
+            HookOptions::AfterSwap,
+            HookOptions::AfterSwapReturnsDelta,
+        ]));
+        let with_delta = pool
+            .get_amount_out(amount_in, &token_in, &token_out)
+            .expect("swap with hook delta should succeed");
+
+        assert_eq!(with_delta.amount, &hookless.amount - BigUint::from(AFTER_SWAP_TEST_HOOK_DELTA));
+        assert_eq!(
+            with_delta.gas,
+            hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
+        );
+    }
+
+    const FEELESS_POOL_LIQUIDITY: u128 = 100_000_000_000_000_000_000; // 100e18
+
+    /// A pool with no LP fee and no protocol fee, holding a single position that spans the whole
+    /// walkable tick range, so every difference between a hooked and a hookless answer is the
+    /// hook's doing alone.
+    fn create_feeless_v4_test_pool(liquidity: u128) -> UniswapV4State {
+        let sqrt_price = get_sqrt_price_q96(U256::from(20_000_000u64), U256::from(10_000_000u64))
+            .expect("a price of two has a square root");
+        let tick = get_tick_at_sqrt_ratio(sqrt_price).expect("the sqrt price maps to a tick");
+        let position = FEELESS_POOL_LIQUIDITY as i128;
+
+        UniswapV4State::new(
+            liquidity,
+            sqrt_price,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0 },
+            tick,
+            60,
+            vec![
+                TickInfo::new(-46_080, position).unwrap(),
+                TickInfo::new(46_080, -position).unwrap(),
+            ],
+        )
+        .expect("the pool builds")
+    }
+
+    fn pons_test_handler() -> PonsV2HookHandler {
+        PonsV2HookHandler::new(PONS_V2_HOOK_ROBINHOOD, 100, 100)
+    }
+
+    /// A pool whose `hooks` attribute is the zero address carries no handler, so it prices
+    /// through `core_spot_price`: the documented `ProtocolSim::spot_price` contract, which is the
+    /// buy price `P / (1 − f)` rather than the sell-side slope `P · (1 − f)` a finite-difference
+    /// fallback would return. Pinned to a concrete number in both token orderings.
+    #[test]
+    fn hookless_spot_price_is_the_documented_buy_price_with_lp_fee_markup() {
+        const LP_FEE_PIPS: u32 = 3_000;
+        const LP_FEE: f64 = LP_FEE_PIPS as f64 / 1_000_000.0;
+        const LIQUIDITY: u128 = 100_000_000_000_000_000_000; // 100e18
+        const TOLERANCE: f64 = 1e-12;
+
+        let sqrt_price = get_sqrt_price_q96(U256::from(20_000_000u64), U256::from(10_000_000u64))
+            .expect("a price of two has a square root");
+        let tick = get_tick_at_sqrt_ratio(sqrt_price).expect("the sqrt price maps to a tick");
+        let pool = UniswapV4State::new(
+            LIQUIDITY,
+            sqrt_price,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: LP_FEE_PIPS },
+            tick,
+            60,
+            vec![
+                TickInfo::new(-46_080, LIQUIDITY as i128).unwrap(),
+                TickInfo::new(46_080, -(LIQUIDITY as i128)).unwrap(),
+            ],
+        )
+        .expect("the pool builds");
+
+        assert!(pool.hook.is_none(), "the pinned values only hold with no hook handler");
+
+        let (t0, t1) = (token_x(), token_y());
+        let pre_fee = sqrt_price_q96_to_f64(sqrt_price, t0.decimals, t1.decimals)
+            .expect("the sqrt price converts to a price");
+
+        let expected_buy_t0 = pre_fee / (1.0 - LP_FEE);
+        let expected_buy_t1 = (1.0 / pre_fee) / (1.0 - LP_FEE);
+
+        let buy_t0 = pool
+            .spot_price(&t0, &t1)
+            .expect("a hookless pool always prices");
+        let buy_t1 = pool
+            .spot_price(&t1, &t0)
+            .expect("a hookless pool always prices");
+
+        assert!(
+            (buy_t0 / expected_buy_t0 - 1.0).abs() < TOLERANCE,
+            "buying t0 quoted {buy_t0}, expected {expected_buy_t0}"
+        );
+        assert!(
+            (buy_t1 / expected_buy_t1 - 1.0).abs() < TOLERANCE,
+            "buying t1 quoted {buy_t1}, expected {expected_buy_t1}"
+        );
+    }
+
+    /// Pons takes its cut out of the swap's output, so buying one `base` through it costs
+    /// `core / (1 − rate)` of `quote`. At 100 + 100 bps that is `1 / 0.98` of the hookless
+    /// price: above it, never below.
+    #[rstest]
+    #[case::base_is_currency0(true)]
+    #[case::base_is_currency1(false)]
+    fn test_spot_price_marks_up_an_analytic_hook_fee(#[case] base_is_currency0: bool) {
+        let (base, quote) = basic_v4_test_pool_tokens(base_is_currency0);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(Box::new(pons_test_handler()));
+
+        let core = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .spot_price(&base, &quote)
+            .expect("a hookless pool always prices");
+        let price = hooked
+            .spot_price(&base, &quote)
+            .expect("the hook prices its own fee");
+
+        assert!(price > core, "hooked {price} is not above hookless {core}");
+        let ratio = price / core;
+        assert!((ratio * 0.98 - 1.0).abs() < 1e-9, "hooked/hookless is {ratio}, not 1/0.98");
+    }
+
+    /// The marked-up spot price is the limit of the hooked quote as the trade shrinks: buying
+    /// 1e-4 of a token out of 100e18 of liquidity executes within 1e-4 of it.
+    #[rstest]
+    #[case::base_is_currency0(true)]
+    #[case::base_is_currency1(false)]
+    fn test_hooked_spot_price_matches_a_small_hooked_buy(#[case] base_is_currency0: bool) {
+        let (base, quote) = basic_v4_test_pool_tokens(base_is_currency0);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(Box::new(pons_test_handler()));
+
+        let quote_in = BigUint::from(100_000_000_000_000u64);
+        let base_out = hooked
+            .get_amount_out(quote_in.clone(), &quote, &base)
+            .expect("a tiny buy always fits the pool")
+            .amount;
+
+        let executed = quote_in.to_f64().unwrap() / base_out.to_f64().unwrap();
+        let spot = hooked
+            .spot_price(&base, &quote)
+            .expect("the hook prices its own fee");
+
+        assert!((executed / spot - 1.0).abs() < 1e-4, "executed {executed}, quoted {spot}");
+    }
+
+    /// A handler that does not price its fee analytically keeps the finite-difference fallback,
+    /// which reads the slope of two quotes and so cancels out a constant per-swap take.
+    #[rstest]
+    #[case::base_is_currency0(true)]
+    #[case::base_is_currency1(false)]
+    fn test_spot_price_falls_back_to_finite_difference_without_an_analytic_fee(
+        #[case] base_is_currency0: bool,
+    ) {
+        let (base, quote) = basic_v4_test_pool_tokens(base_is_currency0);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(after_swap_test_hook(&[
+            HookOptions::AfterSwap,
+            HookOptions::AfterSwapReturnsDelta,
+        ]));
+
+        let x1 = BigUint::from(10u64).pow(base.decimals) / BigUint::from(100u64);
+        let x2 = &x1 + (&x1 / BigUint::from(100u64));
+        let y1 = hooked
+            .get_amount_out(x1.clone(), &base, &quote)
+            .expect("the smaller probe swap fits")
+            .amount;
+        let y2 = hooked
+            .get_amount_out(x2.clone(), &base, &quote)
+            .expect("the larger probe swap fits")
+            .amount;
+        let slope = (&y2 - &y1).to_f64().unwrap() / (&x2 - &x1).to_f64().unwrap();
+
+        let price = hooked
+            .spot_price(&base, &quote)
+            .expect("the fallback always prices");
+
+        assert_eq!(price, slope);
+        let core = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .spot_price(&base, &quote)
+            .expect("a hookless pool always prices");
+        assert!((price / core - 1.0).abs() < 1e-3, "fallback {price} strayed from core {core}");
+    }
+
+    /// `get_limits` reports what a swapper actually receives, so the hook's cut comes off the
+    /// output. The input the pool can absorb is unchanged: the hook charges the other leg.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_get_limits_reports_the_output_net_of_an_analytic_hook_fee(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(Box::new(pons_test_handler()));
+
+        let (hookless_in, hookless_out) = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("a pool with liquidity has limits");
+        let (limit_in, limit_out) = hooked
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("a pool with liquidity has limits");
+
+        assert!(hookless_out > BigUint::zero(), "the reference pool must move some output");
+        assert_eq!(limit_in, hookless_in);
+        let taken = pons_test_handler()
+            .fee_and_tax(biguint_to_u256(&hookless_out))
+            .expect("a pool sized output never overflows");
+        assert_eq!(limit_out, &hookless_out - u256_to_biguint(taken));
+        assert!(limit_out < hookless_out);
+    }
+
+    /// A handler with no analytic fee leaves the limits exactly where the pool's own liquidity
+    /// puts them, so hooks that quote by simulation are unaffected.
+    #[rstest]
+    #[case::zero_for_one(true)]
+    #[case::one_for_zero(false)]
+    fn test_get_limits_unchanged_without_an_analytic_hook_fee(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(after_swap_test_hook(&[
+            HookOptions::AfterSwap,
+            HookOptions::AfterSwapReturnsDelta,
+        ]));
+
+        let hookless = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("a pool with liquidity has limits");
+        let limits = hooked
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("a pool with liquidity has limits");
+
+        assert_eq!(limits, hookless);
+    }
+
+    /// A pool with no liquidity of its own still reports no limits: the hook does not manage the
+    /// liquidity here, so there is no output for it to take a cut of.
+    #[test]
+    fn test_get_limits_on_a_drained_pool_is_zero_with_an_analytic_hook() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut drained = create_feeless_v4_test_pool(0);
+        drained.set_hook_handler(Box::new(pons_test_handler()));
+
+        let limits = drained
+            .get_limits(token_in.address, token_out.address)
+            .expect("a drained pool reports zero rather than failing");
+
+        assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
+    }
+
+    /// A hook that keeps the whole output leaves no price to quote. The markup would divide by
+    /// zero or go negative, so the pool has to report the error instead.
+    #[rstest]
+    #[case::the_whole_output(10_000)]
+    #[case::more_than_the_whole_output(20_000)]
+    fn test_spot_price_rejects_a_hook_that_takes_the_whole_output(#[case] analytic_fee_bps: u32) {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(analytic_fee_test_hook(analytic_fee_bps));
+
+        let error = pool
+            .spot_price(&token_x(), &token_y())
+            .expect_err("a rate of one or more is not a price");
+
+        assert!(matches!(error, SimulationError::FatalError(_)), "{error:?}");
     }
 
     #[test]

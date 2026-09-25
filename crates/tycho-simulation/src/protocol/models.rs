@@ -70,6 +70,13 @@ pub struct DecoderContext {
     /// Set internally by the decoder from its registered override providers; not part of the
     /// public API. External consumers never set this — overrides are fully handled by the library.
     pub(crate) live_override: Option<watch::Receiver<OverrideSnapshot>>,
+    /// Chain the decoded components live on.
+    ///
+    /// Stamped by [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) at registration,
+    /// so it is `None` only for a context that never went through a decoder. Decoders whose
+    /// behaviour depends on the chain (currently the Uniswap V4 hook handler registry) reject the
+    /// snapshot when it is `None` rather than assume one.
+    pub chain: Option<Chain>,
 }
 
 impl DecoderContext {
@@ -79,7 +86,18 @@ impl DecoderContext {
             vm_traces: None,
             block_position: BlockPositionAssumption::default(),
             live_override: None,
+            chain: None,
         }
+    }
+
+    /// Declares the chain the decoded components live on.
+    ///
+    /// Registering the context with a
+    /// [`TychoStreamDecoder`](crate::evm::decoder::TychoStreamDecoder) overrides whatever is
+    /// set here with the decoder's own chain.
+    pub fn chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
     }
 
     pub fn block_position_assumption(mut self, assumption: BlockPositionAssumption) -> Self {
