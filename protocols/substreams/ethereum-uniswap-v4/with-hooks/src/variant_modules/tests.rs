@@ -166,7 +166,8 @@ mod hooks_tests {
         let mut block = Block { number: 23120299, ..Default::default() };
 
         // Create the transaction trace based on the real transaction
-        let mut tx = TransactionTrace { index: 0, ..Default::default() }; // Assuming this was the first transaction in the block for simplicity
+        // Index 0 assumes this was the first transaction in the block
+        let mut tx = TransactionTrace { index: 0, ..Default::default() };
         tx.hash = hex::decode("b2347c7bd922fe5c7f5027523e3f3b4c2e72e7b535e4d0ddd2f4ea4f21c6edbf")
             .unwrap();
         tx.to = hex::decode("000AFbF798467f9b3b97F90D05Bf7Df592d89A6CF0").unwrap(); // EulerSwap factory (padded to 20 bytes)
@@ -269,7 +270,8 @@ mod hooks_tests {
 
         let (key, pool_id) = &result[0];
         assert!(key.starts_with("hook:"));
-        assert!(key.contains("0xd585c8baa6c0099d2cc59a5a089b8366cb3ea8a8")); // Lowercase hex of hook address
+        // Lowercase hex of hook address
+        assert!(key.contains("0xd585c8baa6c0099d2cc59a5a089b8366cb3ea8a8"));
         assert_eq!(pool_id, "real_pool_id_from_tx");
 
         println!("Real transaction test - Created mapping: {} -> {}", key, pool_id);
