@@ -12,36 +12,32 @@
 //! while they take the cache write lock, so a fold can land between the two steps. That is
 //! harmless: the fold moves blocks from the patch into the entries, and a patch change applies
 //! only when it is newer than the value's write timestamp, so nothing is applied twice or lost.
-//! An entry that moved past the requested version trips the read guard (see
-//! [`DbPathReason::ReadGuard`]).
+//! A fold can also carry an entry past the requested version; see
+//! [`DbPathReason::EntryNewerThanVersion`].
 //!
 //! # Two kinds of DB path
 //!
 //! - A version below the window floor: the database holds that history, so the versioned query
 //!   answers it.
-//! - A read-guard trip: the version is inside the window, but the cache only keeps the newest
-//!   value. The database may not hold that block yet; today's handler already serves such versions
-//!   as `latest from the DB ⊕ uncommitted window changes`.
+//! - An entry newer than the requested version: the version is inside the window, but the cache
+//!   only keeps the newest value. The database may not hold that block yet; today's handler already
+//!   serves such versions as `latest from the DB ⊕ uncommitted window changes`.
 //!
 //! Today's handler picks between the two by the version's commit status, so both reasons route
 //! to the same code.
 
-// Constructed once the startup load builds the cache (ENG-6292) and the pump folds into it
-// (ENG-6305).
+// Constructed once the startup load builds the cache (ENG-6292).
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
-use tycho_common::{
-    dto,
-    models::{blockchain::Block, contract::Account, protocol::ProtocolComponentState},
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
 };
 
-use super::{
-    cache::{CachedAccount, CachedComponentState, EntityCache},
-    window::{AccountChange, ComponentChange, DeltaWindow},
-};
-use crate::services::{deltas_buffer::PendingDeltas, rpc::RpcError};
+use tycho_common::dto;
+
+use super::{cache::EntityCache, window::DeltaWindow};
+use crate::services::rpc::RpcError;
 
 /// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with
 /// `ENTITY_CACHE_MODE`.
@@ -62,11 +58,11 @@ pub enum EntityCacheMode {
 pub(crate) enum DbPathReason {
     /// The requested version is older than the window floor.
     BelowWindow,
-    /// The request lists no ids, so the database decides which entities are on the page.
-    NoIds,
-    /// A needed value was written after the requested version. The cache keeps no history.
-    /// Expected to be very rare.
-    ReadGuard,
+    /// A cached entry holds a value written after the requested version. The cache keeps only
+    /// the newest value of each entry, so it cannot rebuild the older one. This happens when a
+    /// fold moves the entry past a version close to the window floor, between the version
+    /// resolution and the cache read. Expected to be very rare.
+    EntryNewerThanVersion,
 }
 
 impl DbPathReason {
@@ -74,8 +70,7 @@ impl DbPathReason {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             DbPathReason::BelowWindow => "below_window",
-            DbPathReason::NoIds => "no_ids",
-            DbPathReason::ReadGuard => "read_guard",
+            DbPathReason::EntryNewerThanVersion => "entry_newer_than_version",
         }
     }
 }
@@ -89,97 +84,18 @@ pub(crate) enum CacheOutcome<T> {
     DbPath(DbPathReason),
 }
 
-/// Where a requested version is served from.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum VersionRoute {
-    /// A block the window holds. Serve `cache ⊕ patch up to this block`.
-    Window(Block),
-    /// The window cannot answer this version; the caller takes the database path.
-    Db(DbPathReason),
-}
-
-/// Maps a requested version to a window block, from memory only.
-///
-/// | Input                                    | Route                                     |
-/// |------------------------------------------|-------------------------------------------|
-/// | Timestamp newer than the tip (default)   | the tip                                   |
-/// | Block number, hash or timestamp in window| that block                                |
-/// | Below the window floor                   | `Db(BelowWindow)`                         |
-/// | Block number above the tip               | error, the same `NotFound` as today       |
-///
-/// A hash the window does not hold routes to `Db(BelowWindow)`: only the database can say whether
-/// it is old or unknown.
-///
-/// # Errors
-///
-/// - `RpcError::Parse` when the version carries neither a timestamp nor a usable block.
-/// - `RpcError::Storage(StorageError::NotFound("Block", ..))` above the tip. tycho-client retries a
-///   body that contains `"Could not find Block"` and may blacklist a component on any other text,
-///   so the entity name must be `Block`. Today's `calculate_versions` says `Version` here, which
-///   the client does not match; do not copy it.
-pub(crate) fn resolve_version(
-    window: &DeltaWindow,
-    version: &dto::VersionParam,
-) -> Result<VersionRoute, RpcError> {
-    let _ = (window, version);
-    todo!("ENG-6306: resolve against DeltaWindow::resolve, plus a hash lookup over the window")
-}
-
-/// Builds the account served at the requested block from its cached entry and its window
-/// changes up to that block.
-///
-/// - `entry` present: copy it and apply every change newer than the value it writes.
-/// - `entry` absent, changes present: the contract is newer than the cache. Build it from the
-///   changes alone; the first one must be a creation.
-/// - Both absent: the account does not exist. Returns `Ok(None)`; the caller omits it.
-///
-/// `code_hash` follows the delta path (`Account::apply_delta`), a known difference with the
-/// database path. Transaction references come from the startup load and never advance.
-///
-/// # Errors
-///
-/// `DbPathReason::ReadGuard` when any value of `entry` was written after `at`.
-pub(crate) fn materialize_account(
-    entry: Option<&CachedAccount>,
-    changes: &[AccountChange],
-    at: &Block,
-) -> Result<Option<Account>, DbPathReason> {
-    let _ = (entry, changes, at);
-    todo!("ENG-6307")
-}
-
-/// Builds the component state served at the requested block from its cached entry and its window
-/// changes up to that block.
-///
-/// Same rules as [`materialize_account`], with one write timestamp per entry: apply the changes
-/// newer than [`CachedComponentState::updated_at`]. Deleted attributes stay deleted. With
-/// `include_balances == false` the balances are removed from the result, like the database path.
-///
-/// # Errors
-///
-/// `DbPathReason::ReadGuard` when `entry` was written after `at`.
-pub(crate) fn materialize_component(
-    entry: Option<&CachedComponentState>,
-    changes: &[ComponentChange],
-    include_balances: bool,
-    at: &Block,
-) -> Result<Option<ProtocolComponentState>, DbPathReason> {
-    let _ = (entry, changes, include_balances, at);
-    todo!("ENG-6308")
-}
-
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
-///
-/// Built only in `shadow` and `serve` mode, and only when extractors run: the standalone rpc
-/// command has no windows and no cache, so it always behaves like `off`.
 pub(crate) struct StateService {
-    /// Shares the windows the pump writes; used for [`DeltaWindow`] reads only.
-    windows: PendingDeltas,
+    /// One window per protocol system, shared with the pump that writes them.
+    windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
     cache: Arc<EntityCache>,
 }
 
 impl StateService {
-    pub(crate) fn new(windows: PendingDeltas, cache: Arc<EntityCache>) -> Self {
+    pub(crate) fn new(
+        windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+        cache: Arc<EntityCache>,
+    ) -> Self {
         Self { windows, cache }
     }
 
@@ -190,9 +106,16 @@ impl StateService {
     ///
     /// # Errors
     ///
+    /// - `RpcError::Parse` (400) when `contract_ids` is `None`: the cache serves explicit ids only.
     /// - `RpcError::Parse` (400) when `protocol_system` is empty or has no window. Today this
     ///   silently reads the database.
-    /// - Version errors from [`resolve_version`].
+    /// - `RpcError::Storage(StorageError::NotFound("Block", ..))` when the version is a block
+    ///   number above the tip ([`WindowResolution::AboveTip`]). tycho-client retries a body that
+    ///   contains `"Could not find Block"` and may blacklist a component on any other text, so the
+    ///   entity name must be `Block`. Today's `calculate_versions` says `Version` here, which the
+    ///   client does not match; do not copy it.
+    ///
+    /// [`WindowResolution::AboveTip`]: super::window::WindowResolution::AboveTip
     pub(crate) fn contract_state(
         &self,
         request: &dto::StateRequestBody,
@@ -204,11 +127,13 @@ impl StateService {
     /// Serves `/protocol_state` from the cache.
     ///
     /// Same shape as [`Self::contract_state`]. Components are looked up under
-    /// `request.protocol_system`, the key folds use.
+    /// `request.protocol_system`, the key folds use. Deleted attributes stay deleted. With
+    /// `include_balances == false` the balances are removed from the response, like the
+    /// database path.
     ///
     /// # Errors
     ///
-    /// Same as [`Self::contract_state`].
+    /// Same as [`Self::contract_state`], with `protocol_ids` in place of `contract_ids`.
     pub(crate) fn protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,

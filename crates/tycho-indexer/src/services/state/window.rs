@@ -54,7 +54,7 @@ use tycho_common::{
         protocol::{ComponentBalance, ProtocolComponentStateDelta},
         Address,
     },
-    storage::StorageError,
+    storage::{BlockOrTimestamp, StorageError},
     Bytes,
 };
 
@@ -476,6 +476,24 @@ impl DeltaWindow {
             Some(block) => WindowResolution::InWindow(block),
             None => WindowResolution::AboveTip,
         }
+    }
+
+    /// Resolves a request's version to a servable window block, from memory only.
+    ///
+    /// | Version                                    | Resolution           |
+    /// |--------------------------------------------|----------------------|
+    /// | Timestamp newer than the tip (the default) | `InWindow(tip)`      |
+    /// | Number, hash or timestamp in the window    | `InWindow(block)`    |
+    /// | Number or timestamp below the floor        | `BelowFloor`         |
+    /// | Number above the tip                       | `AboveTip`           |
+    /// | Hash the window does not hold              | `BelowFloor`         |
+    /// | `Latest`                                   | `InWindow(tip)`      |
+    ///
+    /// Numbers and timestamps follow [`DeltaWindow::resolve`]. An unknown hash reports
+    /// `BelowFloor` because only the database can tell an old hash from one that never existed.
+    pub(crate) fn resolve_version(&self, version: &BlockOrTimestamp) -> WindowResolution {
+        let _ = version;
+        todo!("ENG-6306")
     }
 }
 
