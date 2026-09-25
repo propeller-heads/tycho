@@ -228,6 +228,13 @@ pub(crate) async fn get_code_for_contract(
     address: &str,
     connection_string: Option<String>,
 ) -> Result<Bytecode, SimulationError> {
+    get_code_for_contract_sync(address, connection_string)
+}
+
+fn get_code_for_contract_sync(
+    address: &str,
+    connection_string: Option<String>,
+) -> Result<Bytecode, SimulationError> {
     // Get the connection string, defaulting to the RPC_URL environment variable
     let connection_string = connection_string.or_else(|| env::var("RPC_URL").ok());
 
@@ -450,50 +457,58 @@ where
 {
     let mut index = 0;
     while let Some(encoded) = attributes.get(&format!("stateless_contract_addr_{index}")) {
-        let address = String::from_utf8(encoded.to_vec()).map_err(|e| {
-            SimulationError::FatalError(format!("stateless contract address is not UTF-8: {e}"))
-        })?;
-        let inline_code = attributes
-            .get(&format!("stateless_contract_code_{index}"))
-            .map(|value| value.to_vec());
+        init_stateless_contract(
+            engine,
+            encoded,
+            attributes.get(&format!("stateless_contract_code_{index}")),
+        )?;
         index += 1;
-
-        let (account, code) = match inline_code {
-            Some(bytecode) => (address, Bytecode::new_raw(bytecode.into())),
-            None => {
-                let resolved = if address.starts_with("call") {
-                    resolve_call_address(engine, &address)?
-                } else {
-                    address
-                };
-                let code = get_code_for_contract(&resolved, None).await?;
-                (resolved, code)
-            }
-        };
-        let account: Address = account.parse().map_err(|_| {
-            SimulationError::FatalError(format!(
-                "stateless contract has an invalid address {account}"
-            ))
-        })?;
-        engine
-            .state
-            .init_account(
-                account,
-                AccountInfo {
-                    balance: U256::ZERO,
-                    nonce: 0,
-                    code_hash: code.hash_slow(),
-                    code: Some(code),
-                },
-                None,
-                false,
-            )
-            .map_err(|e| {
-                SimulationError::FatalError(format!(
-                    "stateless contract init_account failed: {e:?}"
-                ))
-            })?;
     }
+    Ok(())
+}
+
+/// Loads one dependency on both snapshot creation and implementation-address updates.
+/// Inline code permits deterministic offline loading; RPC uses the existing blocking bridge.
+pub(crate) fn init_stateless_contract<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    encoded: &tycho_common::Bytes,
+    inline_code: Option<&tycho_common::Bytes>,
+) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let address = std::str::from_utf8(encoded).map_err(|e| {
+        SimulationError::FatalError(format!("stateless contract address is not UTF-8: {e}"))
+    })?;
+    let resolved = if address.starts_with("call:") {
+        resolve_call_address(engine, address)?
+    } else {
+        address.to_owned()
+    };
+    let account: Address = resolved.parse().map_err(|_| {
+        SimulationError::FatalError(format!("stateless contract has an invalid address {resolved}"))
+    })?;
+    let code = match inline_code {
+        Some(code) => Bytecode::new_raw(code.to_vec().into()),
+        None => get_code_for_contract_sync(&resolved, None)?,
+    };
+    engine
+        .state
+        .init_account(
+            account,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 0,
+                code_hash: code.hash_slow(),
+                code: Some(code),
+            },
+            None,
+            false,
+        )
+        .map_err(|e| {
+            SimulationError::FatalError(format!("stateless contract init_account failed: {e:?}"))
+        })?;
     Ok(())
 }
 

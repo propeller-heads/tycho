@@ -4,7 +4,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{Address, Bytes, Keccak256, U256},
+    primitives::{Address, Keccak256, U256},
     sol_types::SolValue,
 };
 use itertools::Itertools;
@@ -21,7 +21,7 @@ use super::{
     models::Capability,
     state::EVMPoolState,
     tycho_simulation_contract::TychoSimulationContract,
-    utils::get_code_for_contract,
+    utils::init_stateless_contract,
 };
 use crate::evm::{
     engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface},
@@ -296,39 +296,20 @@ where
 
         if let Some(stateless_contracts) = &self.stateless_contracts {
             for (address, bytecode) in stateless_contracts.iter() {
-                let mut addr_str = address.clone();
-                let (code, code_hash) = if bytecode.is_none() {
-                    if addr_str.starts_with("call") {
-                        addr_str = self
-                            .get_address_from_call(&engine, &addr_str)?
-                            .to_string();
-                    }
-                    let code = get_code_for_contract(&addr_str, None).await?;
-                    (Some(code.clone()), code.hash_slow())
+                let address = if address.starts_with("call") {
+                    self.get_address_from_call(&engine, address)?
+                        .to_string()
                 } else {
-                    let code =
-                        Bytecode::new_raw(Bytes::from(bytecode.clone().ok_or_else(|| {
-                            SimulationError::FatalError(
-                                "Failed to get default engine: Byte code from stateless contracts is None".into(),
-                            )
-                        })?));
-                    (Some(code.clone()), code.hash_slow())
+                    address.clone()
                 };
-                let account_address: Address = addr_str.parse().map_err(|_| {
-                    SimulationError::FatalError(format!(
-                        "Failed to get default engine: Couldn't parse address string {address}"
-                    ))
-                })?;
-                engine.state.init_account(
-                    Address(*account_address),
-                    AccountInfo { balance: Default::default(), nonce: 0, code_hash, code },
-                    None,
-                    false,
-                ).map_err(|err| {
-                    SimulationError::FatalError(format!(
-                        "Failed to get default engine: Failed to init stateless contract account: {err:?}"
-                    ))
-                })?;
+                init_stateless_contract(
+                    &engine,
+                    &TychoBytes::from(address.into_bytes()),
+                    bytecode
+                        .as_ref()
+                        .map(|code| TychoBytes::from(code.clone()))
+                        .as_ref(),
+                )?;
             }
         }
         Ok(engine)

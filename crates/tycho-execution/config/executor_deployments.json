@@ -152,6 +152,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
+    },
+    "vm:tessera": {
+      "contract": "TesseraExecutor",
+      "args": ["0x55555522005BcAE1c2424D474BfD5ed477749E3e"]
     }
   },
   "unichain": {
