@@ -842,19 +842,9 @@ pub struct ComponentSnapshot {
     pub updated_at: WriteTimestamp,
 }
 
-/// Where one extractor's stream resumes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CursorSnapshot {
-    pub extractor: String,
-    pub cursor: Vec<u8>,
-    pub block_hash: BlockHash,
-    pub block_number: u64,
-}
-
 /// All live state of one chain, read from one database snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
-    pub cursors: Vec<CursorSnapshot>,
 }
