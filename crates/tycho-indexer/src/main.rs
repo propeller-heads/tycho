@@ -532,7 +532,7 @@ async fn create_indexing_tasks(
             .first()
             .expect("No chain provided");
         info!(mode = ?global_args.entity_cache_mode, "Loading the entity cache");
-        let _cache = EntityCache::load(&cached_gw, chain)
+        let _cache = EntityCache::load(&cached_gw, &chain)
             .await
             .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
         // TODO(ENG-6293): hand the cache to the services as the window sink and the read source.

@@ -1319,10 +1319,31 @@ impl Gateway for CachedGateway {}
 
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
-    /// Reads the snapshot on one pooled connection in one `REPEATABLE READ`, read-only
-    /// transaction.
-    async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError> {
-        super::snapshot::read_state_snapshot(&self.state_gateway, &self.pool, chain).await
+    /// Reads on one pooled connection in one read-only `REPEATABLE READ` transaction, so every
+    /// part of the result comes from the same database snapshot.
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
+        let mut conn = self.pool.get().await.map_err(|e| {
+            StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
+        })?;
+        conn.build_transaction()
+            .read_only()
+            .repeatable_read()
+            .run(|conn| {
+                async move {
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots(chain, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
     }
 }
 
