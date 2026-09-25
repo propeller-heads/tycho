@@ -54,7 +54,7 @@ use tycho_common::{
         protocol::{ComponentBalance, ProtocolComponentStateDelta},
         Address,
     },
-    storage::{BlockOrTimestamp, StorageError},
+    storage::{BlockIdentifier, BlockOrTimestamp, StorageError},
     Bytes,
 };
 
@@ -445,16 +445,45 @@ impl DeltaWindow {
         Ok(patch)
     }
 
-    /// Resolves a requested version to a servable window block.
+    /// Resolves a requested version to a servable window block, from memory only.
     ///
-    /// A timestamp newer than the tip clamps to the tip. A timestamp between two buffered blocks
-    /// rounds up to the first block whose timestamp is not older than the request, like
-    /// [`ReorgBuffer::get_block_range`]. Versions below the floor report
-    /// [`WindowResolution::BelowFloor`]; block numbers above the tip report
-    /// [`WindowResolution::AboveTip`].
-    pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
+    /// | Version                                    | Resolution        |
+    /// |--------------------------------------------|-------------------|
+    /// | Timestamp newer than the tip (the default) | `InWindow(tip)`   |
+    /// | Number, hash or timestamp in the window    | `InWindow(block)` |
+    /// | Number or timestamp below the floor        | `BelowFloor`      |
+    /// | Number above the tip                       | `AboveTip`        |
+    /// | Hash the window does not hold              | `BelowFloor`      |
+    /// | `Latest`                                   | `InWindow(tip)`   |
+    ///
+    /// A timestamp between two buffered blocks rounds up to the first block whose timestamp is
+    /// not older than the request, like [`ReorgBuffer::get_block_range`]. An unknown hash reports
+    /// `BelowFloor` because only the database can tell an old hash from one that never existed.
+    /// An empty window reports `BelowFloor` for every version.
+    pub(crate) fn resolve(&self, version: &BlockOrTimestamp) -> WindowResolution {
         let (Some(oldest), Some(tip)) = (self.buffer.oldest(), self.buffer.newest()) else {
             return WindowResolution::BelowFloor;
+        };
+        let version = match version {
+            BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
+                return self
+                    .blocks(None, None)
+                    .ok()
+                    .and_then(|mut blocks| blocks.find(|b| &b.block.hash == hash))
+                    .map_or(WindowResolution::BelowFloor, |b| {
+                        WindowResolution::InWindow(b.block.clone())
+                    });
+            }
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(_)) => {
+                return WindowResolution::InWindow(tip.block.clone());
+            }
+            BlockOrTimestamp::Block(BlockIdentifier::Number((_, number))) => {
+                let Ok(number) = u64::try_from(*number) else {
+                    return WindowResolution::BelowFloor;
+                };
+                BlockNumberOrTimestamp::Number(number)
+            }
+            BlockOrTimestamp::Timestamp(ts) => BlockNumberOrTimestamp::Timestamp(*ts),
         };
         if version.less_than(&oldest.block) {
             return WindowResolution::BelowFloor;
@@ -476,24 +505,6 @@ impl DeltaWindow {
             Some(block) => WindowResolution::InWindow(block),
             None => WindowResolution::AboveTip,
         }
-    }
-
-    /// Resolves a request's version to a servable window block, from memory only.
-    ///
-    /// | Version                                    | Resolution           |
-    /// |--------------------------------------------|----------------------|
-    /// | Timestamp newer than the tip (the default) | `InWindow(tip)`      |
-    /// | Number, hash or timestamp in the window    | `InWindow(block)`    |
-    /// | Number or timestamp below the floor        | `BelowFloor`         |
-    /// | Number above the tip                       | `AboveTip`           |
-    /// | Hash the window does not hold              | `BelowFloor`         |
-    /// | `Latest`                                   | `InWindow(tip)`      |
-    ///
-    /// Numbers and timestamps follow [`DeltaWindow::resolve`]. An unknown hash reports
-    /// `BelowFloor` because only the database can tell an old hash from one that never existed.
-    pub(crate) fn resolve_version(&self, version: &BlockOrTimestamp) -> WindowResolution {
-        let _ = version;
-        todo!("ENG-6306")
     }
 }
 
@@ -692,11 +703,11 @@ mod test {
         assert_eq!(latest.number, 42);
         assert_eq!(latest.chain, Chain::Arc);
         assert_eq!(
-            w.resolve(BlockNumberOrTimestamp::Number(42)),
+            w.resolve(&BlockOrTimestamp::Block(BlockIdentifier::Number((Chain::Arc, 42)))),
             WindowResolution::InWindow(latest.clone())
         );
         assert_eq!(
-            w.resolve(BlockNumberOrTimestamp::Timestamp(timestamp + chrono::Duration::seconds(1))),
+            w.resolve(&BlockOrTimestamp::Timestamp(timestamp + chrono::Duration::seconds(1))),
             WindowResolution::InWindow(latest)
         );
     }
@@ -1009,45 +1020,58 @@ mod test {
         assert_eq!(w.floor(), Some(testing::block(4)));
     }
 
+    fn number(n: i64) -> BlockOrTimestamp {
+        BlockOrTimestamp::Block(BlockIdentifier::Number((Chain::Ethereum, n)))
+    }
+
     #[rstest]
-    #[case::number_in_window(
-        BlockNumberOrTimestamp::Number(5),
+    #[case::number_in_window(number(5), WindowResolution::InWindow(testing::block(5)))]
+    #[case::number_below_floor(number(0), WindowResolution::BelowFloor)]
+    #[case::negative_number(number(-1), WindowResolution::BelowFloor)]
+    #[case::number_above_tip(number(11), WindowResolution::AboveTip)]
+    #[case::hash_in_window(
+        BlockOrTimestamp::Block(BlockIdentifier::Hash(testing::block(5).hash)),
         WindowResolution::InWindow(testing::block(5))
     )]
-    #[case::number_below_floor(BlockNumberOrTimestamp::Number(0), WindowResolution::BelowFloor)]
-    #[case::number_above_tip(BlockNumberOrTimestamp::Number(11), WindowResolution::AboveTip)]
+    #[case::hash_not_in_window(
+        BlockOrTimestamp::Block(BlockIdentifier::Hash(testing::block(11).hash)),
+        WindowResolution::BelowFloor
+    )]
+    #[case::latest(
+        BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+        WindowResolution::InWindow(testing::block(10))
+    )]
     #[case::timestamp_at_block(
-        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts),
+        BlockOrTimestamp::Timestamp(testing::block(5).ts),
         WindowResolution::InWindow(testing::block(5))
     )]
     #[case::timestamp_rounds_up(
-        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
+        BlockOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
         WindowResolution::InWindow(testing::block(6))
     )]
     #[case::timestamp_after_tip_clamps(
-        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
+        BlockOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
         WindowResolution::InWindow(testing::block(10))
     )]
     #[case::timestamp_before_floor(
-        BlockNumberOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
+        BlockOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
         WindowResolution::BelowFloor
     )]
     fn resolve_maps_versions_onto_the_window(
-        #[case] version: BlockNumberOrTimestamp,
+        #[case] version: BlockOrTimestamp,
         #[case] expected: WindowResolution,
     ) {
         let mut w = window(3, 1);
         fill(&mut w, 1..=10, 10, Some(5));
 
-        assert_eq!(w.resolve(version), expected);
+        assert_eq!(w.resolve(&version), expected);
     }
 
-    #[test]
-    fn resolve_on_an_empty_window_is_below_floor() {
-        assert_eq!(
-            window(3, 1).resolve(BlockNumberOrTimestamp::Number(1)),
-            WindowResolution::BelowFloor
-        );
+    #[rstest]
+    #[case::number(number(1))]
+    #[case::latest(BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)))]
+    fn resolve_on_an_empty_window_is_below_floor(#[case] version: BlockOrTimestamp) {
+        assert_eq!(window(3, 1).resolve(&version), WindowResolution::BelowFloor);
     }
 
     #[test]
