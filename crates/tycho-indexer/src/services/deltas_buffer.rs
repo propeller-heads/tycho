@@ -123,6 +123,11 @@ impl PendingDeltas {
         Self { windows, sink }
     }
 
+    /// Every window, keyed by protocol system. The windows are shared, not copied.
+    pub(crate) fn windows(&self) -> &HashMap<String, Arc<Mutex<DeltaWindow>>> {
+        &self.windows
+    }
+
     /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
     /// the window held is lost: the restarted extractor replays every block above its database
     /// cursor.
