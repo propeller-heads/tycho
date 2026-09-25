@@ -419,7 +419,7 @@ mod test_serial_db {
         c0: i64,
     }
 
-    /// Two live contracts, one deleted contract, one token-only account.
+    /// Two live contracts, one deleted contract, two token accounts without code.
     async fn setup_accounts(conn: &mut AsyncPgConnection) -> Fixture {
         let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
         let blk = db_fixtures::insert_blocks(conn, chain_id).await;
@@ -559,6 +559,29 @@ mod test_serial_db {
         .execute(conn)
         .await
         .unwrap();
+        // p4: created at block 1, one balance at block 2, no attributes
+        let p4 = db_fixtures::insert_protocol_component(
+            conn,
+            "p4",
+            f.chain_id,
+            zigzag,
+            pool_type,
+            f.txn[0],
+            Some(vec![f.usdc]),
+            None,
+        )
+        .await;
+        db_fixtures::insert_component_balance(
+            conn,
+            Bytes::from(7u64),
+            Bytes::default(),
+            7.0,
+            f.usdc,
+            f.txn[3],
+            p4,
+            None,
+        )
+        .await;
     }
 
     fn by_address(accounts: Vec<AccountSnapshot>) -> HashMap<Bytes, AccountSnapshot> {
@@ -568,14 +591,89 @@ mod test_serial_db {
             .collect()
     }
 
+    fn expected_c0() -> AccountSnapshot {
+        let ts = db_fixtures::yesterday_midnight();
+        let ts_p1 = db_fixtures::yesterday_half_past_midnight();
+        let address = Bytes::from_str(C0).unwrap();
+        let usdc = Bytes::from_str(USDC).unwrap();
+        let slot0 = Bytes::from(0u64).lpad(32, 0);
+        let slot2 = Bytes::from(2u64).lpad(32, 0);
+        let code = Bytes::from("C0C0C0");
+        let account = Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "c0".to_string(),
+            HashMap::from([
+                (slot0.clone(), Bytes::from(2u64).lpad(32, 0)),
+                (slot2.clone(), Bytes::from(1u64).lpad(32, 0)),
+            ]),
+            Bytes::from(101u64).lpad(32, 0),
+            HashMap::from([(
+                usdc.clone(),
+                AccountBalance::new(
+                    address.clone(),
+                    usdc.clone(),
+                    Bytes::from(1000u64).lpad(32, 0),
+                    Bytes::zero(32),
+                ),
+            )]),
+            code.clone(),
+            keccak256(&code).into(),
+            Bytes::zero(32),
+            Bytes::from_str("0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945")
+                .unwrap(),
+            None,
+        );
+        AccountSnapshot {
+            account,
+            written_at: AccountWriteTimestamps {
+                slots: HashMap::from([
+                    (slot0, WriteTimestamp::new(ts_p1, 2)),
+                    (slot2, WriteTimestamp::new(ts, 1)),
+                ]),
+                native_balance: WriteTimestamp::new(ts_p1, 2),
+                code: WriteTimestamp::new(ts, 1),
+                token_balances: HashMap::from([(usdc, WriteTimestamp::new(ts, 1))]),
+            },
+        }
+    }
+
+    fn expected_c1() -> AccountSnapshot {
+        let ts_p1 = db_fixtures::yesterday_half_past_midnight();
+        let address = Bytes::from_str(C1).unwrap();
+        let slot0 = Bytes::from(0u64).lpad(32, 0);
+        let code = Bytes::from("C1C1C1");
+        let account = Account::new(
+            Chain::Ethereum,
+            address,
+            "c1".to_string(),
+            HashMap::from([(slot0.clone(), Bytes::from(128u64).lpad(32, 0))]),
+            Bytes::from(50u64).lpad(32, 0),
+            HashMap::new(),
+            code.clone(),
+            keccak256(&code).into(),
+            Bytes::zero(32),
+            Bytes::from_str("0x3108322284d0a89a7accb288d1a94384d499504fe7e04441b0706c7628dee7b7")
+                .unwrap(),
+            None,
+        );
+        AccountSnapshot {
+            account,
+            written_at: AccountWriteTimestamps {
+                slots: HashMap::from([(slot0, WriteTimestamp::new(ts_p1, 2))]),
+                native_balance: WriteTimestamp::new(ts_p1, 2),
+                code: WriteTimestamp::new(ts_p1, 2),
+                token_balances: HashMap::new(),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn account_snapshots_return_live_accounts_with_their_write_timestamps_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             setup_accounts(&mut conn).await;
             let gw = PostgresGateway::from_connection(&mut conn).await;
-            let ts = db_fixtures::yesterday_midnight();
-            let ts_p1 = db_fixtures::yesterday_half_past_midnight();
 
             let accounts = by_address(
                 gw.account_snapshots(&Chain::Ethereum, &mut conn)
@@ -583,47 +681,12 @@ mod test_serial_db {
                     .unwrap(),
             );
 
-            assert_eq!(accounts.len(), 2, "c2 is deleted, token accounts have no code");
-            let c0 = &accounts[&Bytes::from_str(C0).unwrap()];
-            assert_eq!(c0.account.title, "c0");
-            assert_eq!(c0.account.code, Bytes::from("C0C0C0"));
-            assert_eq!(c0.account.code_hash, Bytes::from(keccak256(Bytes::from("C0C0C0"))));
             assert_eq!(
-                c0.account.code_modify_tx,
-                Bytes::from_str(
-                    "0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945"
-                )
-                .unwrap()
+                accounts,
+                by_address(vec![expected_c0(), expected_c1()]),
+                "c2 is deleted, token accounts have no code, the native balance is not a token \
+                 balance, the live slot version wins"
             );
-            assert_eq!(c0.written_at.code, WriteTimestamp::new(ts, 1));
-            assert_eq!(c0.account.native_balance, Bytes::from(101u64).lpad(32, 0));
-            assert_eq!(c0.written_at.native_balance, WriteTimestamp::new(ts_p1, 2));
-            assert_eq!(c0.account.balance_modify_tx, Bytes::zero(32));
-            assert_eq!(c0.account.creation_tx, None);
-            let slot0 = Bytes::from(0u64).lpad(32, 0);
-            let slot2 = Bytes::from(2u64).lpad(32, 0);
-            assert_eq!(
-                c0.account.slots[&slot0],
-                Bytes::from(2u64).lpad(32, 0),
-                "live version wins"
-            );
-            assert_eq!(c0.written_at.slots[&slot0], WriteTimestamp::new(ts_p1, 2));
-            assert_eq!(c0.written_at.slots[&slot2], WriteTimestamp::new(ts, 1));
-            let usdc = Bytes::from_str(USDC).unwrap();
-            assert_eq!(c0.account.token_balances[&usdc].balance, Bytes::from(1000u64).lpad(32, 0));
-            assert_eq!(c0.account.token_balances[&usdc].token, usdc);
-            assert_eq!(c0.account.token_balances[&usdc].account, c0.account.address);
-            assert_eq!(c0.account.token_balances[&usdc].modify_tx, Bytes::zero(32));
-            assert_eq!(c0.written_at.token_balances[&usdc], WriteTimestamp::new(ts, 1));
-            assert!(
-                !c0.account
-                    .token_balances
-                    .contains_key(&Bytes::zero(20)),
-                "the native balance is not a token balance"
-            );
-            let c1 = &accounts[&Bytes::from_str(C1).unwrap()];
-            assert_eq!(c1.account.slots.len(), 1);
-            assert!(c1.account.token_balances.is_empty());
         })
         .await;
     }
@@ -710,7 +773,7 @@ mod test_serial_db {
                 .map(|c| (c.state.component_id.clone(), c))
                 .collect();
 
-            assert_eq!(components.len(), 2, "p3 is deleted");
+            assert_eq!(components.len(), 3, "p3 is deleted");
             let p1 = &components["p1"];
             assert_eq!(p1.system, "ambient");
             assert_eq!(p1.state.attributes["reserve"], Bytes::from(2u64), "live version wins");
@@ -728,6 +791,14 @@ mod test_serial_db {
                 p2.updated_at,
                 WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
                 "creation block 2"
+            );
+            let p4 = &components["p4"];
+            assert!(p4.state.attributes.is_empty());
+            assert_eq!(p4.state.balances[&Bytes::from_str(USDC).unwrap()], Bytes::from(7u64));
+            assert_eq!(
+                p4.updated_at,
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
+                "the balance at block 2 is newer than the creation at block 1"
             );
         })
         .await;
@@ -747,7 +818,7 @@ mod test_serial_db {
                 .unwrap();
 
             assert_eq!(snapshot.accounts.len(), 2);
-            assert_eq!(snapshot.components.len(), 2);
+            assert_eq!(snapshot.components.len(), 3);
         })
         .await;
     }
@@ -885,7 +956,7 @@ mod test_serial_db {
                 .unwrap();
 
             assert_eq!(accounts.len(), 2, "reopened code, balance and account rows are live");
-            assert_eq!(components.len(), 2, "reopened component rows are live");
+            assert_eq!(components.len(), 3, "reopened component rows are live");
         })
         .await;
     }
