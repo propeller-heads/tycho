@@ -41,7 +41,7 @@ use tycho_common::{
         Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId,
         ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
-    storage::{StorageError, WriteTimestamp},
+    storage::{AccountWriteTimestamps, StorageError, WriteTimestamp},
     Bytes,
 };
 
@@ -113,35 +113,6 @@ fn write_timestamped<K: Eq + Hash, V: PartialEq>(
         Entry::Vacant(e) => {
             e.insert(Timestamped::new(value, at));
             WriteOutcome::Applied
-        }
-    }
-}
-
-/// Write timestamps of one loaded account's values, one per database row.
-#[derive(Debug, Clone)]
-pub(crate) struct AccountWriteTimestamps {
-    pub(crate) slots: HashMap<StoreKey, WriteTimestamp>,
-    pub(crate) native_balance: WriteTimestamp,
-    pub(crate) code: WriteTimestamp,
-    pub(crate) token_balances: HashMap<Address, WriteTimestamp>,
-}
-
-impl AccountWriteTimestamps {
-    /// One timestamp for every value of `account`.
-    pub(crate) fn uniform(account: &Account, at: WriteTimestamp) -> Self {
-        Self {
-            slots: account
-                .slots
-                .keys()
-                .map(|key| (key.clone(), at))
-                .collect(),
-            native_balance: at,
-            code: at,
-            token_balances: account
-                .token_balances
-                .keys()
-                .map(|token| (token.clone(), at))
-                .collect(),
         }
     }
 }

@@ -24,7 +24,10 @@ use tycho_common::{
         protocol::ProtocolComponentState,
         Address, Chain,
     },
-    storage::{AccountSnapshot, ComponentSnapshot, StateSnapshot, StorageError, WriteTimestamp},
+    storage::{
+        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, StorageError,
+        WriteTimestamp,
+    },
     Bytes,
 };
 
@@ -219,10 +222,12 @@ impl PostgresGateway {
             );
             snapshots.push(AccountSnapshot {
                 account,
-                slot_written_at,
-                native_balance_written_at,
-                code_written_at,
-                token_balance_written_at,
+                written_at: AccountWriteTimestamps {
+                    slots: slot_written_at,
+                    native_balance: native_balance_written_at,
+                    code: code_written_at,
+                    token_balances: token_balance_written_at,
+                },
             });
         }
         Ok(snapshots)
@@ -590,9 +595,9 @@ mod test_serial_db {
                 )
                 .unwrap()
             );
-            assert_eq!(c0.code_written_at, WriteTimestamp::new(ts, 1));
+            assert_eq!(c0.written_at.code, WriteTimestamp::new(ts, 1));
             assert_eq!(c0.account.native_balance, Bytes::from(101u64).lpad(32, 0));
-            assert_eq!(c0.native_balance_written_at, WriteTimestamp::new(ts_p1, 2));
+            assert_eq!(c0.written_at.native_balance, WriteTimestamp::new(ts_p1, 2));
             assert_eq!(c0.account.balance_modify_tx, Bytes::zero(32));
             assert_eq!(c0.account.creation_tx, None);
             let slot0 = Bytes::from(0u64).lpad(32, 0);
@@ -602,14 +607,14 @@ mod test_serial_db {
                 Bytes::from(2u64).lpad(32, 0),
                 "live version wins"
             );
-            assert_eq!(c0.slot_written_at[&slot0], WriteTimestamp::new(ts_p1, 2));
-            assert_eq!(c0.slot_written_at[&slot2], WriteTimestamp::new(ts, 1));
+            assert_eq!(c0.written_at.slots[&slot0], WriteTimestamp::new(ts_p1, 2));
+            assert_eq!(c0.written_at.slots[&slot2], WriteTimestamp::new(ts, 1));
             let usdc = Bytes::from_str(USDC).unwrap();
             assert_eq!(c0.account.token_balances[&usdc].balance, Bytes::from(1000u64).lpad(32, 0));
             assert_eq!(c0.account.token_balances[&usdc].token, usdc);
             assert_eq!(c0.account.token_balances[&usdc].account, c0.account.address);
             assert_eq!(c0.account.token_balances[&usdc].modify_tx, Bytes::zero(32));
-            assert_eq!(c0.token_balance_written_at[&usdc], WriteTimestamp::new(ts, 1));
+            assert_eq!(c0.written_at.token_balances[&usdc], WriteTimestamp::new(ts, 1));
             assert!(
                 !c0.account
                     .token_balances
