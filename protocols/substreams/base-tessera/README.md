@@ -36,7 +36,7 @@ production deployment and the remaining acceptance items below are outstanding.
 | Swap | Fixed deployment address, raw state/code | Slot 0 is Engine, slot 1 is Treasury, swap/view ABI |
 | Engine | Fixed deployment epoch, raw state/code | Sorted-token registry mapping at slot 8 and registration in discovery transaction |
 | Pair implementation | EIP-1967 slot → attribute 0 → bytecode reload | Pair proxy template and token slots 48/49 |
-| Pricing library | Pair slot 51 → attribute 1 → bytecode reload | Target is delegatecalled; state lives in Pair |
+| Pricing library | Pair slot 51 → attribute 1 → bytecode reload | Staticcalled by the implementation; reads no storage |
 | Write helper | Pair slot 52 → attribute 2 → bytecode reload | Empty swapData/tag 0 has zero fee |
 | Treasury | Swap slot 1 → owner attribute and balance bridge | Standard ERC20 and canonical WETH event accounting |
 | Adapter view decoding | Pair `poolState()` / token getters | Current static ABI and 20-order ladder used only for search bounds |
@@ -45,7 +45,8 @@ Engine replacement pauses components. A nonzero helper tag-0 fee also pauses aff
 components, because helper-owned state is not copied into the VM. To detect adopting
 an already-configured helper, the safety store remembers the single tag-0 mapping slot
 for candidate addresses from genesis; only assigned helpers trigger Tessera updates.
-These pauses fail closed and do not automatically resume when configuration changes back.
+The substreams emits these pauses as the `paused` attribute and never clears it. Consumers
+do not act on `paused` yet; removing paused components is left to a platform-wide change.
 Layout/ABI changes and new external stateful dependencies still require integration work.
 
 ## Limits and price
@@ -68,9 +69,12 @@ Price remains a finite difference of venue quotes. An exact-output quote selects
 input step large enough to represent at least 1,000 raw output units, reducing integer
 rounding noise. No native pricing logic is introduced.
 
-## Validation (2026-09-24)
+## Validation (2026-09-25)
 
-- Substreams: 9 unit tests; Clippy with warnings denied; release WASM and package build.
+- Substreams: 24 unit tests; Clippy with warnings denied; release WASM and package build.
+  Balance deltas, safety-store writes and protocol changes are tested through their pure
+  functions: seed suppression, rotation bridging, helper/fee/engine recording, dependency
+  attributes, pause conditions and pre-creation writes.
 - Genesis live replay: `[37518600, 37519400)`, three pairs discovered. All six final
   token/component balances matched treasury `balanceOf` exactly at 37,519,399.
 - Separate first-swap replay: `[37519370, 37519400)` completed; its four emitted
@@ -87,8 +91,13 @@ rounding noise. No native pricing logic is introduced.
 - Adapter fork: eight tests at 50,548,423 cover WETH/USDC exact-in and exact-out both
   ways, cbBTC limits/price both ways, depleted-ladder hint, stale block, wrong tokens,
   gas budget and two fills.
-- Router fork: real full router → Tessera executor → venue swap, including Rust-generated
-  calldata, empty swapData and exact recipient balance comparison.
+- Executor fork: eight `TesseraExecutorTest` cases cover constructor checks, decoding and
+  its length error, transfer data, funds address, a direct WETH→USDC swap settling the view
+  quote, and decoding the Rust-generated USDC→WETH fixture.
+- Router fork: real full router → Tessera executor → venue swap, once through `singleSwap`
+  with the encoder's swap data and once with the full Rust-generated router calldata
+  (`test_single_encoding_strategy_tessera_weth_usdc`). Both settle exactly the view quote
+  with empty swapData.
 - Rust: encoder's three tests; VM's six targeted delta tests; two offline Tessera consumer
   tests using actual returned `new_state` and advancing the actual indexed block.
 - Execution crate's complete library suite: 200 passed, 3 ignored.
@@ -133,8 +142,10 @@ cargo test -p tycho-simulation --lib evm::protocol::vm::state::tests::test_delta
 cargo test -p tycho-execution --lib tessera
 ```
 
-Run the router fork from `crates/tycho-execution/contracts` with
-`forge test --match-contract TesseraRouterTest -vv` (requires `BASE_RPC_URL`; set it to the Base RPC endpoint).
+Regenerate the router calldata with
+`cargo test -p tycho-execution --test protocol_integration_tests tessera`, then run the
+executor and router forks from `crates/tycho-execution/contracts` with
+`forge test --match-path test/protocols/Tessera.t.sol -vv` (requires `BASE_RPC_URL`).
 
 ## Standards review
 
