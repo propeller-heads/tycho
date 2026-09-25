@@ -822,19 +822,6 @@ impl From<&Block> for WriteTimestamp {
     }
 }
 
-/// Row counts of the live state one snapshot covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SnapshotTotals {
-    /// Accounts with a live code row.
-    pub accounts: u64,
-    /// Live contract storage rows.
-    pub slots: u64,
-    /// Components that are not deleted.
-    pub components: u64,
-    /// Live protocol state rows.
-    pub attributes: u64,
-}
-
 /// One account's live state with the write stamp of every value: the block of the row's
 /// `modify_tx`.
 #[derive(Debug, Clone, PartialEq)]
@@ -867,7 +854,6 @@ pub struct CursorSnapshot {
 /// All live state of one chain, read from one database snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
-    pub totals: SnapshotTotals,
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
     pub cursors: Vec<CursorSnapshot>,
