@@ -11,7 +11,10 @@ use crate::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock},
     },
-    rfq::{constants::get_hashflow_auth, models::TimestampHeader},
+    rfq::{
+        constants::get_hashflow_auth,
+        models::{QuoteRule, TimestampHeader},
+    },
 };
 
 impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
@@ -20,7 +23,8 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
     /// Builds the venue state from the component's `books` attribute, a JSON array of every
     /// market maker's levels per pair. A missing attribute is a venue with no levels. Every
     /// token the component carries must be in `all_tokens`, and every book must name two of
-    /// them.
+    /// them. The `quote_rule` static attribute sets the reuse rule; absent, every maker quotes
+    /// once per route.
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _timestamp_header: TimestampHeader,
@@ -53,6 +57,12 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
             }
         }
 
+        let quote_rule = QuoteRule::from_attributes(
+            &snapshot.component.static_attributes,
+            QuoteRule::OncePerMaker,
+        )
+        .map_err(InvalidSnapshotError::ValueError)?;
+
         // Create HashFlow client with authentication from environment variables
         let auth = get_hashflow_auth().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Hashflow authentication: {e}"))
@@ -65,6 +75,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
                     .cloned()
                     .collect::<HashSet<_>>(),
             )
+            .quote_rule(quote_rule)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!(
@@ -72,7 +83,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
                 ))
             })?;
 
-        Ok(HashflowState::new(books, tokens, client))
+        Ok(HashflowState::new(books, tokens, quote_rule, client))
     }
 }
 
@@ -133,7 +144,7 @@ mod tests {
     fn create_test_books() -> serde_json::Value {
         serde_json::json!([
             {
-                "mm": "mm_a",
+                "mm": "test_market_maker",
                 "pair": { "baseToken": wbtc().address.to_string(), "quoteToken": usdc().address.to_string() },
                 "levels": [{ "q": "1.5", "p": "65000.0" }, { "q": "2.0", "p": "64950.0" }]
             },
@@ -143,7 +154,7 @@ mod tests {
                 "levels": [{ "q": "0.5", "p": "65100.0" }]
             },
             {
-                "mm": "mm_a",
+                "mm": "test_market_maker",
                 "pair": { "baseToken": weth().address.to_string(), "quoteToken": usdc().address.to_string() },
                 "levels": [{ "q": "10", "p": "3000.0" }]
             }
@@ -165,13 +176,13 @@ mod tests {
         let snapshot = ComponentWithState {
             state: ProtocolComponentState {
                 attributes: state_attributes,
-                component_id: "hashflow".to_string(),
+                component_id: "hashflow_wbtc_usdc".to_string(),
                 balances: HashMap::new(),
             },
             component: ProtocolComponent {
-                id: "hashflow".to_string(),
-                protocol_system: "rfq:hashflow".to_string(),
-                protocol_type_name: "hashflow_pool".to_string(),
+                id: "hashflow_wbtc_usdc".to_string(),
+                protocol_system: "hashflow".to_string(),
+                protocol_type_name: "hashflow".to_string(),
                 chain: Chain::Ethereum,
                 tokens: vec![wbtc().address, usdc().address, weth().address],
                 contract_addresses: Vec::new(),
@@ -208,9 +219,10 @@ mod tests {
             .expect("create state from snapshot");
 
         assert_eq!(state.tokens.len(), 3);
+        assert_eq!(state.quote_rule, QuoteRule::OncePerMaker);
         assert!(state.used_market_makers.is_empty());
         assert_eq!(state.books.len(), 3);
-        assert_eq!(state.books[0].market_maker, "mm_a");
+        assert_eq!(state.books[0].market_maker, "test_market_maker");
         assert_eq!(state.books[0].pair.base_token, wbtc().address);
         assert_eq!(state.books[0].pair.quote_token, usdc().address);
         assert_eq!(state.books[0].levels.len(), 2);
@@ -218,6 +230,17 @@ mod tests {
         assert_eq!(state.books[0].levels[0].price, 65000.0);
         assert_eq!(state.books[1].market_maker, "mm_b");
         assert_eq!(state.books[2].pair.base_token, weth().address);
+    }
+
+    #[tokio::test]
+    async fn test_try_from_quote_rule_attribute() {
+        let (mut snapshot, tokens) = create_test_snapshot();
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"once_per_venue".to_vec().into());
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert_eq!(state.quote_rule, QuoteRule::OncePerVenue);
     }
 
     #[tokio::test]

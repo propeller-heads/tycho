@@ -9,12 +9,16 @@ use crate::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock},
     },
-    rfq::models::TimestampHeader,
+    rfq::models::{QuoteRule, TimestampHeader},
 };
 
 impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeState {
     type Error = InvalidSnapshotError;
 
+    /// Builds the venue state from the component's `books` attribute, a JSON array of one book
+    /// per pair. A missing attribute is a venue with no books. Every token the component carries
+    /// must be in `all_tokens`. The `quote_rule` static attribute sets the reuse rule; absent,
+    /// the venue quotes once per route.
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _timestamp_header: TimestampHeader,
@@ -22,42 +26,26 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeState {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let state_attrs = snapshot.state.attributes;
-
-        if snapshot.component.tokens.len() != 2 {
-            return Err(InvalidSnapshotError::ValueError(
-                "Component must have 2 tokens (base and quote)".to_string(),
-            ));
+        let mut tokens = HashMap::new();
+        for address in &snapshot.component.tokens {
+            let token = all_tokens.get(address).ok_or_else(|| {
+                InvalidSnapshotError::ValueError(format!("Token not found: {address}"))
+            })?;
+            tokens.insert(address.clone(), token.clone());
         }
 
-        let base_token_address = &snapshot.component.tokens[0];
-        let quote_token_address = &snapshot.component.tokens[1];
+        let books: Vec<NativePriceData> = match snapshot.state.attributes.get("books") {
+            Some(books) => serde_json::from_slice(books).map_err(|e| {
+                InvalidSnapshotError::ValueError(format!("Invalid books JSON: {e}"))
+            })?,
+            None => Vec::new(),
+        };
 
-        let base_token = all_tokens
-            .get(base_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Base token not found: {base_token_address}"
-                ))
-            })?
-            .clone();
-
-        let quote_token = all_tokens
-            .get(quote_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Quote token not found: {quote_token_address}"
-                ))
-            })?
-            .clone();
-
-        // Parse the Relay orderbook snapshot stored by the stream.
-        let book_data = state_attrs
-            .get("book")
-            .ok_or_else(|| InvalidSnapshotError::MissingAttribute("book".to_string()))?;
-
-        let book: NativePriceData = serde_json::from_slice(book_data)
-            .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid book JSON: {e}")))?;
+        let quote_rule = QuoteRule::from_attributes(
+            &snapshot.component.static_attributes,
+            QuoteRule::OncePerVenue,
+        )
+        .map_err(InvalidSnapshotError::ValueError)?;
 
         let client_builder =
             NativeClientBuilder::from_env(snapshot.component.chain).map_err(|e| {
@@ -65,22 +53,28 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeState {
                     "Failed to get Native Relay authentication: {e}"
                 ))
             })?;
-
         let client = client_builder
-            .tokens(HashSet::from([base_token.address.clone(), quote_token.address.clone()]))
+            .tokens(
+                tokens
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            )
+            .quote_rule(quote_rule)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!("Couldn't create NativeClient: {e}"))
             })?;
 
-        NativeState::new(base_token, quote_token, book, client)
+        // `new` validates every book, so a book naming a token the component lacks is refused.
+        NativeState::new(books, tokens, quote_rule, client)
             .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, env};
+    use std::env;
 
     use tycho_common::models::{
         protocol::{ProtocolComponent, ProtocolComponentState},
@@ -118,32 +112,43 @@ mod tests {
         )
     }
 
-    fn create_test_book() -> NativePriceData {
+    fn wbtc() -> Token {
+        Token::new(
+            &hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599")
+                .unwrap()
+                .into(),
+            "WBTC",
+            8,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn book(base: &Token, quote: &Token, bid: f64, ask: f64) -> NativePriceData {
         NativePriceData {
-            base_address: weth().address,
-            quote_address: usdc().address,
+            base_address: base.address.clone(),
+            quote_address: quote.address.clone(),
             minimum_in_base: 0.0,
             minimum_in_quote: 0.0,
             minimum_out_base: 0.0,
             minimum_out_quote: 0.0,
-            bids: vec![NativePriceLevel { price: 3000.0, quantity: 1.5 }],
-            asks: vec![NativePriceLevel { price: 3001.0, quantity: 2.0 }],
+            bids: vec![NativePriceLevel { quantity: 1.5, price: bid }],
+            asks: vec![NativePriceLevel { quantity: 2.0, price: ask }],
         }
     }
 
     fn create_test_snapshot() -> (ComponentWithState, HashMap<Bytes, Token>) {
-        let weth_token = weth();
-        let usdc_token = usdc();
-        let book = create_test_book();
-
-        let mut tokens = HashMap::new();
-        tokens.insert(weth_token.address.clone(), weth_token.clone());
-        tokens.insert(usdc_token.address.clone(), usdc_token.clone());
-
-        let mut state_attributes = HashMap::new();
-
-        let book_json = serde_json::to_vec(&book).expect("Failed to serialize book");
-        state_attributes.insert("book".to_string(), book_json.into());
+        env::set_var("NATIVE_API_KEY", "test_key");
+        let tokens: HashMap<Bytes, Token> = [weth(), usdc(), wbtc()]
+            .into_iter()
+            .map(|token| (token.address.clone(), token))
+            .collect();
+        let books =
+            vec![book(&weth(), &usdc(), 3000.0, 3010.0), book(&wbtc(), &usdc(), 65000.0, 65100.0)];
+        let books_json = serde_json::to_vec(&books).expect("Failed to serialize books");
+        let state_attributes = HashMap::from([("books".to_string(), books_json.into())]);
 
         let snapshot = ComponentWithState {
             state: ProtocolComponentState {
@@ -156,80 +161,100 @@ mod tests {
                 protocol_system: "rfq:native".to_string(),
                 protocol_type_name: "native_relay_pool".to_string(),
                 chain: Chain::Ethereum,
-                tokens: vec![weth_token.address.clone(), usdc_token.address.clone()],
+                tokens: vec![weth().address, usdc().address, wbtc().address],
                 contract_addresses: Vec::new(),
                 static_attributes: HashMap::new(),
                 change: ChangeType::Creation,
                 creation_tx: Bytes::default(),
                 created_at: chrono::NaiveDateTime::default(),
             },
-            component_tvl: Some(4500.0),
+            component_tvl: None,
             entrypoints: Vec::new(),
         };
-
         (snapshot, tokens)
+    }
+
+    async fn decode(
+        snapshot: ComponentWithState,
+        tokens: &HashMap<Bytes, Token>,
+    ) -> Result<NativeState, InvalidSnapshotError> {
+        NativeState::try_from_with_header(
+            snapshot,
+            TimestampHeader { timestamp: 1703097600u64 },
+            &HashMap::new(),
+            tokens,
+            &DecoderContext::new(),
+        )
+        .await
     }
 
     #[tokio::test]
     async fn test_try_from_with_header() {
-        env::set_var("NATIVE_API_KEY", "test-api-key");
-
         let (snapshot, tokens) = create_test_snapshot();
+        let state = decode(snapshot, &tokens)
+            .await
+            .expect("create state from snapshot");
 
-        let result = NativeState::try_from_with_header(
-            snapshot,
-            TimestampHeader { timestamp: 1703097600u64 },
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await
-        .expect("create state from snapshot");
-
-        assert_eq!(result.base_token.symbol, "WETH");
-        assert_eq!(result.quote_token.symbol, "USDC");
-        assert_eq!(result.book.bids.len(), 1);
-        assert_eq!(result.book.asks.len(), 1);
-        assert_eq!(result.book.bids[0].price, 3000.0);
-        assert_eq!(result.book.bids[0].quantity, 1.5);
+        assert_eq!(state.tokens.len(), 3);
+        assert_eq!(state.quote_rule, QuoteRule::OncePerVenue);
+        assert!(!state.used);
+        assert_eq!(state.books.len(), 2);
+        assert_eq!(state.books[0].base_address, weth().address);
+        assert_eq!(state.books[0].bids[0].price, 3000.0);
+        assert_eq!(state.books[0].bids[0].quantity, 1.5);
+        assert_eq!(state.books[0].asks[0].price, 3010.0);
+        assert_eq!(state.books[1].base_address, wbtc().address);
     }
 
     #[tokio::test]
-    async fn test_try_from_missing_book() {
+    async fn test_try_from_quote_rule_attribute() {
         let (mut snapshot, tokens) = create_test_snapshot();
-        // Remove the book completely to simulate a missing attribute
-        snapshot.state.attributes.remove("book");
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"none".to_vec().into());
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert_eq!(state.quote_rule, QuoteRule::None);
+    }
 
-        let result = NativeState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-
-        assert!(matches!(
-            result.unwrap_err(),
-            InvalidSnapshotError::MissingAttribute(attribute) if attribute == "book"
-        ));
+    #[tokio::test]
+    async fn test_try_from_missing_books() {
+        let (mut snapshot, tokens) = create_test_snapshot();
+        snapshot
+            .state
+            .attributes
+            .remove("books");
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert!(state.books.is_empty());
     }
 
     #[tokio::test]
     async fn test_try_from_missing_token() {
+        let (snapshot, mut tokens) = create_test_snapshot();
+        tokens.remove(&wbtc().address);
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_try_from_book_names_token_the_component_lacks() {
         let (mut snapshot, tokens) = create_test_snapshot();
-        // Remove the second token
         snapshot.component.tokens.pop();
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
+    }
 
-        let result = NativeState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-
+    #[tokio::test]
+    async fn test_try_from_invalid_books_json() {
+        let (mut snapshot, tokens) = create_test_snapshot();
+        snapshot.state.attributes.insert(
+            "books".to_string(),
+            "invalid json"
+                .as_bytes()
+                .to_vec()
+                .into(),
+        );
+        let result = decode(snapshot, &tokens).await;
         assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
     }
 }

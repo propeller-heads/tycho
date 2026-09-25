@@ -4,7 +4,9 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::LiquoriceClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError, models::QuoteRule, protocols::utils::default_quote_tokens_for_chain,
+};
 
 pub struct LiquoriceClientBuilder {
     chain: Chain,
@@ -16,6 +18,7 @@ pub struct LiquoriceClientBuilder {
     poll_time: Duration,
     quote_timeout: Duration,
     quote_expiry_secs: u64,
+    quote_rule: QuoteRule,
 }
 
 impl LiquoriceClientBuilder {
@@ -30,7 +33,14 @@ impl LiquoriceClientBuilder {
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
             quote_expiry_secs: 300,
+            quote_rule: QuoteRule::OncePerMaker,
         }
+    }
+
+    /// How often one route may take quotes from Liquorice. Every maker once, by default.
+    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
+        self.quote_rule = quote_rule;
+        self
     }
 
     pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
@@ -82,6 +92,7 @@ impl LiquoriceClientBuilder {
             self.poll_time,
             self.quote_timeout,
             self.quote_expiry_secs,
+            self.quote_rule,
         )
     }
 }

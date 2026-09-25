@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
     time::SystemTime,
 };
@@ -28,7 +28,7 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{QuoteRule, TimestampHeader},
         protocols::bebop::models::{
             BebopOrderToSign, BebopPriceData, BebopPricingUpdate, BebopQuoteResponse,
         },
@@ -77,6 +77,13 @@ pub struct BebopClient {
     origin_target: Option<Bytes>,
     /// Stable identifier for the upstream flow source when aggregating multiple sources.
     origin_source: Option<String>,
+    /// How often one route may take quotes from Bebop.
+    #[serde(default = "once_per_venue")]
+    quote_rule: QuoteRule,
+}
+
+fn once_per_venue() -> QuoteRule {
+    QuoteRule::OncePerVenue
 }
 
 impl BebopClient {
@@ -95,6 +102,7 @@ impl BebopClient {
         origin_address: Option<Bytes>,
         origin_target: Option<Bytes>,
         origin_source: Option<String>,
+        quote_rule: QuoteRule,
     ) -> Result<Self, RFQError> {
         let url = chain_to_bebop_url(chain)?;
         Ok(Self {
@@ -109,63 +117,119 @@ impl BebopClient {
             origin_address,
             origin_target,
             origin_source,
+            quote_rule,
         })
     }
 
-    fn create_component_with_state(
+    /// The id of this chain's venue component. One per chain, for the venue's life.
+    pub fn component_id(&self) -> String {
+        format!("{}", keccak256(format!("bebop_{}", self.chain.id()).as_bytes()))
+    }
+
+    /// The venue component for one pricing update: every book whose tokens are indexed and
+    /// whose TVL clears the threshold. `None` when no book clears it.
+    ///
+    /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
+    /// attribute lists the directed pairs that have levels, 40 bytes each (token in, then token
+    /// out): a book's bids serve its base token in, its asks its quote token in. Its
+    /// `quote_rule` static attribute is the reuse rule. Its `books` state attribute is the books
+    /// as JSON, sorted by base and quote.
+    fn venue_component(
         &self,
-        component_id: String,
-        tokens: Vec<tycho_common::Bytes>,
-        price_data: &BebopPriceData,
-        tvl: f64,
-    ) -> ComponentWithState {
+        update: &BebopPricingUpdate,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for price_data in &update.pairs {
+            let base_bytes = Bytes::from(price_data.base.clone());
+            let quote_bytes = Bytes::from(price_data.quote.clone());
+            if !(self.tokens.contains(&base_bytes) && self.tokens.contains(&quote_bytes)) {
+                continue;
+            }
+            // A quote token outside the approved set is priced through a pair that holds one of
+            // them, so every book's TVL is in the same unit.
+            let mut quote_price_data: Option<&BebopPriceData> = None;
+            if !self.quote_tokens.contains(&quote_bytes) {
+                for approved_quote_token in &self.quote_tokens {
+                    if let Some(quote_data) =
+                        update.pairs.iter().find(|p| {
+                            (p.base == quote_bytes.as_ref() &&
+                                p.quote == approved_quote_token.as_ref()) ||
+                                (p.quote == quote_bytes.as_ref() &&
+                                    p.base == approved_quote_token.as_ref())
+                        })
+                    {
+                        quote_price_data = Some(quote_data);
+                        break;
+                    }
+                }
+                if quote_price_data.is_none() {
+                    warn!("Quote token {} does not have price levels in approved quote token. Skipping.", hex::encode(&quote_bytes));
+                    continue;
+                }
+            }
+            let book_tvl = price_data.calculate_tvl(quote_price_data);
+            if book_tvl < self.tvl {
+                continue;
+            }
+            tvl += book_tvl;
+            books.push(price_data.clone());
+        }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| (&a.base, &a.quote).cmp(&(&b.base, &b.quote)));
+
+        let mut tokens = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
+        for book in &books {
+            tokens.insert(Bytes::from(book.base.clone()));
+            tokens.insert(Bytes::from(book.quote.clone()));
+            if !book.bids.is_empty() {
+                pairs.insert((book.base.clone(), book.quote.clone()));
+            }
+            if !book.asks.is_empty() {
+                pairs.insert((book.quote.clone(), book.base.clone()));
+            }
+        }
+        let mut pairs_attribute = Vec::with_capacity(pairs.len() * 40);
+        for (token_in, token_out) in &pairs {
+            pairs_attribute.extend_from_slice(token_in);
+            pairs_attribute.extend_from_slice(token_out);
+        }
+
+        let component_id = self.component_id();
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "bebop_pool".to_string(),
             chain: self.chain,
-            tokens,
+            tokens: tokens.into_iter().collect(),
             contract_addresses: vec![], // empty for RFQ
-            static_attributes: Default::default(),
-            change: Default::default(),
-            creation_tx: Default::default(),
-            created_at: Default::default(),
+            static_attributes: HashMap::from([
+                ("pairs".to_string(), pairs_attribute.into()),
+                (
+                    QuoteRule::ATTRIBUTE.to_string(),
+                    self.quote_rule
+                        .as_str()
+                        .as_bytes()
+                        .to_vec()
+                        .into(),
+                ),
+            ]),
+            ..Default::default()
         };
 
-        let mut attributes = HashMap::new();
+        let books_json = serde_json::to_vec(&books)
+            .map_err(|e| RFQError::ParsingError(format!("Failed to serialize Bebop books: {e}")))?;
+        let attributes = HashMap::from([("books".to_string(), books_json.into())]);
 
-        // Store all bids and asks as JSON strings, since we cannot store arrays
-        // Convert flat arrays [price1, size1, price2, size2, ...] to pairs [(price1, size1),
-        // (price2, size2), ...]
-        if !price_data.bids.is_empty() {
-            let bids_pairs: Vec<(f32, f32)> = price_data
-                .bids
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let bids_json = serde_json::to_string(&bids_pairs).unwrap_or_default();
-            attributes.insert("bids".to_string(), bids_json.as_bytes().to_vec().into());
-        }
-        if !price_data.asks.is_empty() {
-            let asks_pairs: Vec<(f32, f32)> = price_data
-                .asks
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|chunk| (chunk[0], chunk[1]))
-                .collect();
-            let asks_json = serde_json::to_string(&asks_pairs).unwrap_or_default();
-            attributes.insert("asks".to_string(), asks_json.as_bytes().to_vec().into());
-        }
-
-        ComponentWithState {
+        Ok(Some(ComponentWithState {
             state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
-        }
+        }))
     }
 
     fn process_quote_response(
@@ -272,14 +336,12 @@ impl RFQClient for BebopClient {
     fn stream(
         &self,
     ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let tokens = self.tokens.clone();
         let url = self.price_ws.clone();
-        let tvl_threshold = self.tvl;
         let authorization = format!("Bearer {}", self.ws_key);
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_component: Option<ProtocolComponent> = None;
             let mut consecutive_failures = 0;
             const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
@@ -330,75 +392,26 @@ impl RFQClient for BebopClient {
                                     // connection works, so only pricing data clears the counter.
                                     consecutive_failures = 0;
 
-                                    let mut new_components = HashMap::new();
-
-                                    // Process all pairs directly from protobuf
-                                    for price_data in &protobuf_update.pairs {
-                                        let base_bytes = Bytes::from(price_data.base.clone());
-                                        let quote_bytes = Bytes::from(price_data.quote.clone());
-                                        if tokens.contains(&base_bytes) && tokens.contains(&quote_bytes) {
-                                            let pair_tokens = vec![
-                                                base_bytes.clone(), quote_bytes.clone()
-                                            ];
-
-                                            let mut quote_price_data: Option<&BebopPriceData> = None;
-                                            // The quote token is not one of the approved quote tokens
-                                            // Get the price, so we can normalize our TVL calculation
-                                            if !client.quote_tokens.contains(&quote_bytes) {
-                                                for approved_quote_token in &client.quote_tokens {
-                                                    // Look for a pair containing both our quote token and an approved token
-                                                    // Can be either QUOTE/APPROVED or APPROVED/QUOTE
-                                                    if let Some(quote_data) = protobuf_update.pairs.iter()
-                                                        .find(|p| {
-                                                            (p.base == quote_bytes.as_ref() && p.quote == approved_quote_token.as_ref()) ||
-                                                            (p.quote == quote_bytes.as_ref() && p.base == approved_quote_token.as_ref())
-                                                        }) {
-                                                        quote_price_data = Some(quote_data);
-                                                        break;
-                                                    }
-                                                }
-
-                                                // Quote token doesn't have price levels in approved quote tokens.
-                                                // Skip.
-                                                if quote_price_data.is_none() {
-                                                    warn!("Quote token {} does not have price levels in approved quote token. Skipping.", hex::encode(&quote_bytes));
-                                                    continue;
-                                                }
+                                    let mut states = HashMap::new();
+                                    let mut removed_components = HashMap::new();
+                                    match client.venue_component(&protobuf_update)? {
+                                        Some(component_with_state) => {
+                                            current_component = Some(component_with_state.component.clone());
+                                            states.insert(component_with_state.component.id.clone(), component_with_state);
+                                        }
+                                        // The venue lost its last book, so the component leaves the market.
+                                        None => {
+                                            if let Some(component) = current_component.take() {
+                                                removed_components.insert(component.id.clone(), component);
                                             }
-
-                                            let tvl = price_data.calculate_tvl(quote_price_data);
-                                            if tvl < tvl_threshold {
-                                                continue;
-                                            }
-
-                                            let pair_str = format!("bebop_{}/{}", hex::encode(&base_bytes), hex::encode(&quote_bytes));
-                                            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-                                            let component_with_state = client.create_component_with_state(
-                                                component_id.clone(),
-                                                pair_tokens,
-                                                price_data,
-                                                tvl
-                                            );
-                                            new_components.insert(component_id, component_with_state);
                                         }
                                     }
 
-                                    // Find components that were removed (existed before but not in this update)
-                                    // This includes components with no bids or asks, since they are filtered
-                                    // out by the tvl threshold.
-                                    let removed_components: HashMap<String, ProtocolComponent> = current_components
-                                        .iter()
-                                        .filter(|&(id, _)| !new_components.contains_key(id))
-                                        .map(|(k, v)| (k.clone(), v.component.clone()))
-                                        .collect();
-
-                                    // Update our current state
-                                    current_components = new_components.clone();
-
                                     let snapshot = Snapshot {
-                                        states: new_components,
+                                        states,
                                         vm_storage: HashMap::new(),
                                     };
+
                                     let timestamp = SystemTime::now().duration_since(
                                         SystemTime::UNIX_EPOCH
                                     ).map_err(
@@ -622,6 +635,7 @@ mod tests {
             None,
             None,
             None,
+            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -651,29 +665,25 @@ mod tests {
                         assert!(!snapshot.states.is_empty());
 
                         println!("Received {} components in this message", snapshot.states.len());
+                        assert_eq!(snapshot.states.len(), 1, "one venue component per chain");
                         for (id, component_with_state) in &snapshot.states {
+                            assert_eq!(id, &client.component_id());
                             assert_eq!(
                                 component_with_state
                                     .component
                                     .protocol_system,
                                 "rfq:bebop"
                             );
-                            assert_eq!(
-                                component_with_state
-                                    .component
-                                    .protocol_type_name,
-                                "bebop_pool"
-                            );
                             assert_eq!(component_with_state.component.chain, Chain::Ethereum);
-
-                            let attributes = &component_with_state.state.attributes;
-
-                            // Check that bids and asks exist and have non-empty byte strings
-                            assert!(attributes.contains_key("bids"));
-                            assert!(attributes.contains_key("asks"));
-                            assert!(!attributes["bids"].is_empty());
-                            assert!(!attributes["asks"].is_empty());
-
+                            let books: Vec<BebopPriceData> = serde_json::from_slice(
+                                &component_with_state.state.attributes["books"],
+                            )
+                            .unwrap();
+                            assert!(!books.is_empty());
+                            let pairs = &component_with_state
+                                .component
+                                .static_attributes["pairs"];
+                            assert_eq!(pairs.len() % 40, 0);
                             if let Some(tvl) = component_with_state.component_tvl {
                                 assert!(tvl >= 0.0);
                                 println!("Component {id} TVL: ${tvl:.2}");
@@ -792,6 +802,7 @@ mod tests {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            quote_rule: QuoteRule::OncePerVenue,
         };
 
         let start_time = std::time::Instant::now();
@@ -868,6 +879,7 @@ mod tests {
             Some(Bytes::from_str("0x00000000219ab540356cBB839Cbe05303d7705Fa").unwrap()),
             Some(router.clone()),
             Some("tycho-test".to_string()),
+            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -935,6 +947,7 @@ mod tests {
             Some(Bytes::from_str("0x00000000219ab540356cBB839Cbe05303d7705Fa").unwrap()),
             Some(router.clone()),
             Some("tycho-test".to_string()),
+            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1145,6 +1158,7 @@ mod tests {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            quote_rule: QuoteRule::OncePerVenue,
         }
     }
 
@@ -1161,6 +1175,78 @@ mod tests {
             sender: router.clone(),
             receiver: router,
         }
+    }
+
+    fn price_data(base: &Bytes, quote: &Bytes, bids: &[f32], asks: &[f32]) -> BebopPriceData {
+        BebopPriceData {
+            base: base.to_vec(),
+            quote: quote.to_vec(),
+            last_update_ts: 1,
+            bids: bids.to_vec(),
+            asks: asks.to_vec(),
+        }
+    }
+
+    /// WETH and WBTC quoted against USDC, with USDC as the TVL quote token.
+    fn venue_test_client() -> (BebopClient, Bytes, Bytes, Bytes) {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let mut client =
+            create_test_bebop_client("http://unused/quote".to_string(), Duration::from_secs(1));
+        client.tokens = HashSet::from([weth.clone(), wbtc.clone(), usdc.clone()]);
+        client.quote_tokens = HashSet::from([usdc.clone()]);
+        client.tvl = 100.0;
+        (client, weth, wbtc, usdc)
+    }
+
+    #[test]
+    fn test_venue_component() {
+        let (client, weth, wbtc, usdc) = venue_test_client();
+        let update = BebopPricingUpdate {
+            pairs: vec![
+                price_data(&weth, &usdc, &[3000.0, 1.0], &[]),
+                price_data(&wbtc, &usdc, &[65.0, 0.001], &[65.0, 0.001]),
+            ],
+        };
+
+        let component = client
+            .venue_component(&update)
+            .unwrap()
+            .expect("the WETH book clears the threshold");
+
+        assert_eq!(component.component.id, client.component_id());
+        // Bid TVL 3000, ask TVL 0, averaged. The WBTC book is below the threshold.
+        assert_eq!(component.component_tvl, Some(1500.0));
+        let mut expected_tokens = vec![weth.clone(), usdc.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        let mut expected_pairs = weth.to_vec();
+        expected_pairs.extend_from_slice(&usdc);
+        assert_eq!(
+            component.component.static_attributes["pairs"].to_vec(),
+            expected_pairs,
+            "bids only, so WETH in and USDC out is the one pair"
+        );
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_venue"
+        );
+        let books: Vec<BebopPriceData> =
+            serde_json::from_slice(&component.state.attributes["books"]).unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].base, weth.to_vec());
+    }
+
+    #[test]
+    fn test_venue_component_without_books() {
+        let (client, _, wbtc, usdc) = venue_test_client();
+        let update =
+            BebopPricingUpdate { pairs: vec![price_data(&wbtc, &usdc, &[65.0, 0.001], &[])] };
+        assert!(client
+            .venue_component(&update)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1313,6 +1399,7 @@ mod tests {
                 Bytes::from_str("0xdA892C989d07A18B5DD3F392d949f00dF15C5736").unwrap(),
             ),
             origin_source: Some("tycho".to_string()),
+            quote_rule: QuoteRule::OncePerVenue,
         };
 
         let serialized = serde_json::to_string(&original).unwrap();

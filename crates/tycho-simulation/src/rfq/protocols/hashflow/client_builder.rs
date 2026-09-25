@@ -4,7 +4,9 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::HashflowClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError, models::QuoteRule, protocols::utils::default_quote_tokens_for_chain,
+};
 
 /// `HashflowClientBuilder` is a builder pattern implementation for creating instances of
 /// `HashflowClient`.
@@ -39,6 +41,7 @@ pub struct HashflowClientBuilder {
     quote_tokens: Option<HashSet<Bytes>>,
     poll_time: Duration,
     quote_timeout: Duration,
+    quote_rule: QuoteRule,
 }
 
 impl HashflowClientBuilder {
@@ -52,7 +55,14 @@ impl HashflowClientBuilder {
             quote_tokens: None,
             poll_time: Duration::from_secs(5), // Default 5 second polling
             quote_timeout: Duration::from_secs(5), // Default 5 second timeout
+            quote_rule: QuoteRule::OncePerMaker,
         }
+    }
+
+    /// How often one route may take quotes from Hashflow. Every maker once, by default.
+    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
+        self.quote_rule = quote_rule;
+        self
     }
 
     /// Set the tokens for which to monitor prices
@@ -103,6 +113,7 @@ impl HashflowClientBuilder {
             self.auth_key,
             self.poll_time,
             self.quote_timeout,
+            self.quote_rule,
         )
     }
 }
