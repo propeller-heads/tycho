@@ -22,6 +22,50 @@ pub struct HashflowMarketMakerLevels {
     pub levels: Vec<HashflowPriceLevel>,
 }
 
+/// One market maker's levels on one directed pair, as the venue state and its component
+/// attribute carry them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HashflowMakerLevels {
+    #[serde(rename = "mm")]
+    pub market_maker: String,
+    pub pair: HashflowPair,
+    pub levels: Vec<HashflowPriceLevel>,
+}
+
+impl HashflowMakerLevels {
+    /// Total quote token the levels hold, in whole units.
+    pub fn calculate_tvl(&self) -> f64 {
+        self.levels
+            .iter()
+            .map(|level| level.quantity * level.price)
+            .sum()
+    }
+
+    /// Quote token amount for `amount_in` base tokens, and the base tokens the levels could not
+    /// fill.
+    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
+        get_amount_out_from_levels(&self.levels, amount_in)
+    }
+}
+
+/// Consumes the levels in order until `amount_in` is filled or the levels run out. Returns
+/// (amount_out, remaining_amount_in).
+fn get_amount_out_from_levels(levels: &[HashflowPriceLevel], amount_in: f64) -> (f64, f64) {
+    let mut remaining_amount_in = amount_in;
+    let mut total_amount_out = 0.0;
+
+    for level in levels {
+        if remaining_amount_in <= 0.0 {
+            break;
+        };
+        let amount_to_fill = remaining_amount_in.min(level.quantity);
+        total_amount_out += amount_to_fill * level.price;
+        remaining_amount_in -= amount_to_fill;
+    }
+
+    (total_amount_out, remaining_amount_in)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashflowPair {
     #[serde(rename = "baseToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
@@ -122,20 +166,7 @@ impl HashflowMarketMakerLevels {
     /// - `amount_out`: The total quote tokens that can be obtained
     /// - `remaining_amount_in`: Any remaining base tokens that couldn't be filled
     pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        let mut remaining_amount_in = amount_in;
-        let mut total_amount_out = 0.0;
-
-        for level in &self.levels {
-            if remaining_amount_in <= 0.0 {
-                break;
-            };
-
-            let amount_to_fill = remaining_amount_in.min(level.quantity);
-            total_amount_out += amount_to_fill * level.price;
-            remaining_amount_in -= amount_to_fill;
-        }
-
-        (total_amount_out, remaining_amount_in)
+        get_amount_out_from_levels(&self.levels, amount_in)
     }
 }
 
@@ -185,6 +216,18 @@ pub struct HashflowRFQ {
     pub trader: String,
     #[serde(rename = "effectiveTrader")]
     pub effective_trader: Option<String>,
+    /// The only market makers Hashflow asks. `None` asks every maker.
+    #[serde(rename = "marketMakers", skip_serializing_if = "Option::is_none")]
+    pub market_makers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<HashflowRFQOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashflowRFQOptions {
+    /// Without this Hashflow answers a declined request with a quote from another maker.
+    #[serde(rename = "doNotRetryWithOtherMakers")]
+    pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

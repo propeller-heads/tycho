@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
     time::SystemTime,
 };
@@ -23,10 +23,11 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{QuoteRule, TimestampHeader},
         protocols::hashflow::models::{
-            HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
-            HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse, HashflowRFQ,
+            HashflowChain, HashflowMakerLevels, HashflowMarketMakerLevels,
+            HashflowMarketMakersResponse, HashflowPriceLevelsResponse, HashflowQuoteRequest,
+            HashflowQuoteResponse, HashflowRFQ, HashflowRFQOptions,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -51,6 +52,9 @@ pub struct HashflowClient {
     quote_tokens: HashSet<Bytes>,
     poll_time: Duration,
     quote_timeout: Duration,
+    /// How often one route may take quotes from Hashflow.
+    #[serde(default)]
+    quote_rule: QuoteRule,
 }
 
 impl HashflowClient {
@@ -66,6 +70,7 @@ impl HashflowClient {
         auth_key: String,
         poll_time: Duration,
         quote_timeout: Duration,
+        quote_rule: QuoteRule,
     ) -> Result<Self, RFQError> {
         Ok(Self {
             chain,
@@ -79,6 +84,7 @@ impl HashflowClient {
             quote_tokens,
             poll_time,
             quote_timeout,
+            quote_rule,
         })
     }
 
@@ -116,39 +122,145 @@ impl HashflowClient {
         Ok(0.0)
     }
 
-    fn create_component_with_state(
+    /// The id of this chain's venue component. One per chain, for the venue's life.
+    pub fn component_id(&self) -> String {
+        format!("{}", keccak256(format!("hashflow_{}", self.chain.id()).as_bytes()))
+    }
+
+    /// The venue component for one poll: every market maker's levels on every pair whose tokens
+    /// are indexed and whose TVL clears the threshold. `None` when no book clears it.
+    ///
+    /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
+    /// attribute lists the directed pairs that have a book, 40 bytes each (base then quote), so
+    /// a consumer can connect those pairs and not every pair of its tokens. Its `quote_rule`
+    /// static attribute is the reuse rule. Its `books` state attribute is the books as JSON,
+    /// sorted by maker, base and quote.
+    fn venue_component(
         &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        mm_name: &str,
-        mm_level: &HashflowMarketMakerLevels,
-        tvl: f64,
-    ) -> ComponentWithState {
+        levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for (mm_name, mm_levels) in levels_by_mm {
+            for mm_level in mm_levels {
+                let base_token = &mm_level.pair.base_token;
+                let quote_token = &mm_level.pair.quote_token;
+                if !(self.tokens.contains(base_token) && self.tokens.contains(quote_token)) {
+                    continue;
+                }
+                let normalized_tvl = self.normalize_tvl(
+                    mm_level.calculate_tvl(),
+                    quote_token.clone(),
+                    levels_by_mm,
+                )?;
+                if normalized_tvl < self.tvl {
+                    info!(
+                        "Filtering out {mm_name} on {base_token}/{quote_token} due to low TVL: {:.2} < {:.2}",
+                        normalized_tvl, self.tvl
+                    );
+                    continue;
+                }
+                tvl += normalized_tvl;
+                books.push(HashflowMakerLevels {
+                    market_maker: mm_name.clone(),
+                    pair: mm_level.pair.clone(),
+                    levels: mm_level.levels.clone(),
+                });
+            }
+        }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| {
+            (&a.market_maker, &a.pair.base_token, &a.pair.quote_token).cmp(&(
+                &b.market_maker,
+                &b.pair.base_token,
+                &b.pair.quote_token,
+            ))
+        });
+
+        let mut tokens = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
+        for book in &books {
+            tokens.insert(book.pair.base_token.clone());
+            tokens.insert(book.pair.quote_token.clone());
+            pairs.insert((book.pair.base_token.clone(), book.pair.quote_token.clone()));
+        }
+        let mut pairs_attribute = Vec::with_capacity(pairs.len() * 40);
+        for (base_token, quote_token) in &pairs {
+            pairs_attribute.extend_from_slice(base_token);
+            pairs_attribute.extend_from_slice(quote_token);
+        }
+
+        let component_id = self.component_id();
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "hashflow_pool".to_string(),
             chain: self.chain,
-            tokens,
+            tokens: tokens.into_iter().collect(),
             contract_addresses: vec![], // empty for RFQ
+            static_attributes: HashMap::from([
+                ("pairs".to_string(), pairs_attribute.into()),
+                (
+                    QuoteRule::ATTRIBUTE.to_string(),
+                    self.quote_rule
+                        .as_str()
+                        .as_bytes()
+                        .to_vec()
+                        .into(),
+                ),
+            ]),
             ..Default::default()
         };
 
-        let mut attributes = HashMap::new();
+        let books_json = serde_json::to_vec(&books).map_err(|e| {
+            RFQError::ParsingError(format!("Failed to serialize Hashflow books: {e}"))
+        })?;
+        let attributes = HashMap::from([("books".to_string(), books_json.into())]);
 
-        // Store price levels as JSON string
-        if !mm_level.levels.is_empty() {
-            let levels_json = serde_json::to_string(&mm_level.levels).unwrap_or_default();
-            attributes.insert("levels".to_string(), levels_json.as_bytes().to_vec().into());
-        }
-        attributes.insert("mm".to_string(), mm_name.as_bytes().to_vec().into());
-
-        ComponentWithState {
+        Ok(Some(ComponentWithState {
             state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
-        }
+        }))
+    }
+
+    /// Requests a firm quote, from `market_maker` alone when one is named.
+    ///
+    /// A named maker is asked with `doNotRetryWithOtherMakers`, so a declined request is an
+    /// error and not a quote from a maker the caller did not choose.
+    pub async fn request_binding_quote_from(
+        &self,
+        params: &GetAmountOutParams,
+        market_maker: Option<&str>,
+    ) -> Result<SignedQuote, RFQError> {
+        let hashflow_chain = HashflowChain::from(self.chain);
+        // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
+        // scopes its strictly increasing quote nonces to — so quotes never invalidate each
+        // other, at the cost of a cold nonce storage slot on Hashflow's router (~17k gas per
+        // swap). The receiver executes the trade on-chain, so it is Hashflow's trader.
+        let effective_trader = Bytes::from(Address::random().to_vec());
+        let quote_request = HashflowQuoteRequest {
+            source: self.auth_user.clone(),
+            base_chain: hashflow_chain.clone(),
+            quote_chain: hashflow_chain,
+            rfqs: vec![HashflowRFQ {
+                base_token: params.token_in.to_string(),
+                quote_token: params.token_out.to_string(),
+                base_token_amount: Some(params.amount_in.to_string()),
+                quote_token_amount: None,
+                trader: params.receiver.to_string(),
+                effective_trader: Some(effective_trader.to_string()),
+                market_makers: market_maker.map(|mm| vec![mm.to_string()]),
+                options: market_maker
+                    .map(|_| HashflowRFQOptions { do_not_retry_with_other_makers: true }),
+            }],
+            calldata: false,
+        };
+        self.send_quote_request(params, &quote_request, &effective_trader)
+            .await
     }
 
     async fn fetch_market_makers(&mut self) -> Result<Vec<String>, RFQError> {
@@ -256,7 +368,7 @@ impl RFQClient for HashflowClient {
         let mut client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_component: Option<ProtocolComponent> = None;
             let mut ticker = interval(client.poll_time);
 
             info!("Starting Hashflow price levels polling every {} seconds", client.poll_time.as_secs());
@@ -279,63 +391,27 @@ impl RFQClient for HashflowClient {
 
                 match client.fetch_price_levels(&market_makers).await {
                     Ok(levels_by_mm) => {
-                        let mut new_components = HashMap::new();
-
                         info!("Fetched price levels from {} market makers", levels_by_mm.len());
-                        // Process all market maker levels
-                        for (mm_name, mm_levels) in levels_by_mm.iter() {
-                            for mm_level in mm_levels {
-                                let base_token = &mm_level.pair.base_token;
-                                let quote_token = &mm_level.pair.quote_token;
-
-                                // Check if both tokens are in our tokens set
-                                if client.tokens.contains(base_token) && client.tokens.contains(quote_token) {
-                                    let tokens = vec![base_token.clone(), quote_token.clone()];
-                                    let tvl = mm_level.calculate_tvl();
-
-                                    // Apply TVL normalization if needed
-                                    let normalized_tvl = client.normalize_tvl(
-                                        tvl,
-                                        mm_level.pair.quote_token.clone(),
-                                        &levels_by_mm,
-                                    )?;
-
-                                    // Hash the pair for component id
-                                    let pair_str = format!("hashflow_{}/{}", hex::encode(base_token), hex::encode(quote_token));
-                                    let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-
-                                    if normalized_tvl < client.tvl {
-                                        info!("Filtering out component {} due to low TVL: {:.2} < {:.2}",
-                                              component_id, normalized_tvl, client.tvl);
-                                        continue;
-                                    }
-
-                                    let component_with_state = client.create_component_with_state(
-                                        component_id.clone(),
-                                        tokens,
-                                        mm_name,
-                                        mm_level,
-                                        normalized_tvl
-                                    );
-                                    new_components.insert(component_id, component_with_state);
+                        let mut states = HashMap::new();
+                        let mut removed_components = HashMap::new();
+                        match client.venue_component(&levels_by_mm)? {
+                            Some(component_with_state) => {
+                                current_component = Some(component_with_state.component.clone());
+                                states.insert(component_with_state.component.id.clone(), component_with_state);
+                            }
+                            // The venue lost its last book, so the component leaves the market.
+                            None => {
+                                if let Some(component) = current_component.take() {
+                                    removed_components.insert(component.id.clone(), component);
                                 }
                             }
                         }
 
-                        // Find components that were removed
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
-                            .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
-                            .collect();
-
-                        // Update current state
-                        current_components = new_components.clone();
-
                         let snapshot = Snapshot {
-                            states: new_components,
+                            states,
                             vm_storage: HashMap::new(),
                         };
+
                         let timestamp = SystemTime::now().duration_since(
                             SystemTime::UNIX_EPOCH
                         ).map_err(
@@ -364,27 +440,18 @@ impl RFQClient for HashflowClient {
         &self,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
-        let hashflow_chain = HashflowChain::from(self.chain);
-        // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
-        // scopes its strictly increasing quote nonces to — so quotes never invalidate each
-        // other, at the cost of a cold nonce storage slot on Hashflow's router (~17k gas per
-        // swap). The receiver executes the trade on-chain, so it is Hashflow's trader.
-        let effective_trader = Bytes::from(Address::random().to_vec());
-        let quote_request = HashflowQuoteRequest {
-            source: self.auth_user.clone(),
-            base_chain: hashflow_chain.clone(),
-            quote_chain: hashflow_chain,
-            rfqs: vec![HashflowRFQ {
-                base_token: params.token_in.to_string(),
-                quote_token: params.token_out.to_string(),
-                base_token_amount: Some(params.amount_in.to_string()),
-                quote_token_amount: None,
-                trader: params.receiver.to_string(),
-                effective_trader: Some(effective_trader.to_string()),
-            }],
-            calldata: false,
-        };
+        self.request_binding_quote_from(params, None)
+            .await
+    }
+}
 
+impl HashflowClient {
+    async fn send_quote_request(
+        &self,
+        params: &GetAmountOutParams,
+        quote_request: &HashflowQuoteRequest,
+        effective_trader: &Bytes,
+    ) -> Result<SignedQuote, RFQError> {
         let url = self.quote_endpoint.clone();
 
         let start_time = std::time::Instant::now();
@@ -512,7 +579,7 @@ impl RFQClient for HashflowClient {
                         }
                         // We assume there will be only one quote request at a time
                         let quote = quotes[0].clone();
-                        quote.validate(params, &effective_trader)?;
+                        quote.validate(params, effective_trader)?;
 
                         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
                         quote_attributes.insert("pool".to_string(), quote.quote_data.pool);
@@ -715,6 +782,7 @@ mod tests {
             "test_key".to_string(),
             Duration::from_secs(5),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap()
     }
@@ -744,6 +812,7 @@ mod tests {
             auth.key,
             Duration::from_secs(1),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap();
 
@@ -769,19 +838,16 @@ mod tests {
                         println!("Received {} components in this message (Total so far: {})",
                                 snapshot.states.len(), total_components_received);
 
+                        assert!(snapshot.states.len() <= 1, "one venue component per chain");
                         for (id, component_with_state) in &snapshot.states {
-                            let attributes = &component_with_state.state.attributes;
-                            let levels: &Bytes = attributes.get("levels").unwrap();
-                            // Check that levels exist
-                            if attributes.contains_key("levels") {
-                                println!("{levels:?}");
-                                assert!(!attributes["levels"].is_empty());
-                            }
-                            // Check that mm name exist
-                            if attributes.contains_key("mm") {
-                                assert!(!attributes["mm"].is_empty());
-                            }
-
+                            assert_eq!(id, &client.component_id());
+                            let books: Vec<HashflowMakerLevels> = serde_json::from_slice(
+                                &component_with_state.state.attributes["books"],
+                            )
+                            .unwrap();
+                            assert!(!books.is_empty());
+                            let pairs = &component_with_state.component.static_attributes["pairs"];
+                            assert_eq!(pairs.len() % 40, 0);
                             if let Some(tvl) = component_with_state.component_tvl {
                                 assert!(tvl >= 1.0);
                                 println!("Component {id} TVL: ${tvl:.2}");
@@ -830,6 +896,7 @@ mod tests {
             auth_key,
             Duration::from_secs(0),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap();
 
@@ -995,6 +1062,7 @@ mod tests {
             quote_tokens: HashSet::new(),
             poll_time: Duration::from_secs(0),
             quote_timeout,
+            quote_rule: QuoteRule::OncePerMaker,
         }
     }
 
@@ -1075,6 +1143,106 @@ mod tests {
             first,
             "quote attributes do not carry the requested effective trader"
         );
+    }
+
+    #[tokio::test]
+    async fn test_request_binding_quote_names_the_maker() {
+        let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
+        let client = create_test_hashflow_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+        let params = create_test_quote_params();
+
+        client
+            .request_binding_quote_from(&params, Some("mm1"))
+            .await
+            .unwrap();
+        client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        let requests = request_log.lock().unwrap();
+        assert!(requests[0].contains("\"marketMakers\":[\"mm1\"]"), "{}", requests[0]);
+        assert!(requests[0].contains("\"doNotRetryWithOtherMakers\":true"), "{}", requests[0]);
+        assert!(!requests[1].contains("marketMakers"), "{}", requests[1]);
+        assert!(!requests[1].contains("options"), "{}", requests[1]);
+    }
+
+    fn levels(pair: (&Bytes, &Bytes), levels: &[(f64, f64)]) -> HashflowMarketMakerLevels {
+        HashflowMarketMakerLevels {
+            pair: HashflowPair { base_token: pair.0.clone(), quote_token: pair.1.clone() },
+            levels: levels
+                .iter()
+                .map(|&(quantity, price)| HashflowPriceLevel { quantity, price })
+                .collect(),
+        }
+    }
+
+    /// WETH and WBTC quoted against USDC by two makers, with USDC as the TVL quote token.
+    fn venue_test_client() -> (HashflowClient, Bytes, Bytes, Bytes) {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let mut client =
+            create_test_hashflow_client("http://unused/rfq".to_string(), Duration::from_secs(1));
+        client.tokens = HashSet::from([weth.clone(), wbtc.clone(), usdc.clone()]);
+        client.quote_tokens = HashSet::from([usdc.clone()]);
+        client.tvl = 100.0;
+        (client, weth, wbtc, usdc)
+    }
+
+    #[test]
+    fn test_venue_component() {
+        let (client, weth, wbtc, usdc) = venue_test_client();
+        let levels_by_mm = HashMap::from([
+            (
+                "mm_b".to_string(),
+                vec![
+                    levels((&weth, &usdc), &[(1.0, 3000.0)]),
+                    levels((&wbtc, &usdc), &[(0.001, 65.0)]),
+                ],
+            ),
+            ("mm_a".to_string(), vec![levels((&weth, &usdc), &[(2.0, 3000.0)])]),
+        ]);
+
+        let component = client
+            .venue_component(&levels_by_mm)
+            .unwrap()
+            .expect("two books clear the threshold");
+
+        assert_eq!(component.component.id, client.component_id());
+        assert_eq!(component.component_tvl, Some(9000.0), "the WBTC book is below the threshold");
+        let mut expected_tokens = vec![weth.clone(), usdc.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        let mut expected_pairs = weth.to_vec();
+        expected_pairs.extend_from_slice(&usdc);
+        assert_eq!(component.component.static_attributes["pairs"].to_vec(), expected_pairs);
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_maker"
+        );
+
+        let books: Vec<HashflowMakerLevels> =
+            serde_json::from_slice(&component.state.attributes["books"]).unwrap();
+        assert_eq!(books.len(), 2);
+        assert_eq!(books[0].market_maker, "mm_a", "books are sorted by maker");
+        assert_eq!(books[0].levels[0].quantity, 2.0);
+        assert_eq!(books[1].market_maker, "mm_b");
+        assert_eq!(books[1].pair.base_token, weth);
+    }
+
+    #[test]
+    fn test_venue_component_without_books() {
+        let (client, _, wbtc, usdc) = venue_test_client();
+        let levels_by_mm =
+            HashMap::from([("mm_a".to_string(), vec![levels((&wbtc, &usdc), &[(0.001, 65.0)])])]);
+        assert!(client
+            .venue_component(&levels_by_mm)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1222,6 +1390,7 @@ mod tests {
             quote_tokens: HashSet::from([quote_token.clone()]),
             poll_time: Duration::from_secs(10),
             quote_timeout: Duration::from_millis(5500),
+            quote_rule: QuoteRule::OncePerMaker,
         };
 
         let serialized = serde_json::to_string(&original).unwrap();

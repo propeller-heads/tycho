@@ -31,7 +31,15 @@ for any protocol indexed by Tycho.
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
-  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
+  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP. Hashflow,
+  Liquorice, Bebop and Native stream one component per chain holding every book (`books` state
+  attribute, quoted pairs in the `pairs` static attribute). `rfq::models::QuoteRule` says how
+  often one route may quote the venue; each client builder sets it (`quote_rule`) and the
+  component carries it as the `quote_rule` static attribute. A swap records what it used in
+  `new_state`: Hashflow and Liquorice the market maker (`OncePerMaker` by default, and
+  `request_signed_quote` takes that maker's quote alone), Bebop and Native the venue
+  (`OncePerVenue` by default, since neither names a maker). Metric stays one component per pool:
+  its executor takes the pool from the component id, and there is no quote to name it
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are

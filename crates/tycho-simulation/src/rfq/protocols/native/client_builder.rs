@@ -5,7 +5,8 @@ use tycho_common::{models::Chain, Bytes};
 
 use super::client::NativeClient;
 use crate::rfq::{
-    constants::get_native_auth, errors::RFQError, protocols::utils::default_quote_tokens_for_chain,
+    constants::get_native_auth, errors::RFQError, models::QuoteRule,
+    protocols::utils::default_quote_tokens_for_chain,
 };
 
 pub struct NativeClientBuilder {
@@ -16,6 +17,7 @@ pub struct NativeClientBuilder {
     quote_tokens: Option<HashSet<Bytes>>,
     poll_time: Duration,
     quote_timeout: Duration,
+    quote_rule: QuoteRule,
 }
 
 impl NativeClientBuilder {
@@ -28,7 +30,15 @@ impl NativeClientBuilder {
             quote_tokens: None,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
+            quote_rule: QuoteRule::OncePerVenue,
         }
+    }
+
+    /// How often one route may take quotes from Native. Once, by default. Native names no market
+    /// maker, so [`QuoteRule::OncePerMaker`] is refused at build.
+    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
+        self.quote_rule = quote_rule;
+        self
     }
 
     pub fn from_env(chain: Chain) -> Result<Self, RFQError> {
@@ -62,6 +72,11 @@ impl NativeClientBuilder {
     }
 
     pub fn build(self) -> Result<NativeClient, RFQError> {
+        if self.quote_rule == QuoteRule::OncePerMaker {
+            return Err(RFQError::InvalidInput(
+                "Native names no market maker; use QuoteRule::OncePerVenue or None".into(),
+            ));
+        }
         let quote_tokens = match self.quote_tokens {
             Some(tokens) => tokens,
             None => default_quote_tokens_for_chain(&self.chain)?,
@@ -75,6 +90,7 @@ impl NativeClientBuilder {
             quote_tokens,
             self.poll_time,
             self.quote_timeout,
+            self.quote_rule,
         )
     }
 }

@@ -4,19 +4,27 @@ use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    client_builder::LiquoriceClientBuilder, models::LiquoriceTokenPairPrice, state::LiquoriceState,
+    client_builder::LiquoriceClientBuilder, models::LiquoriceMakerLevels, state::LiquoriceState,
 };
 use crate::{
     protocol::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock},
     },
-    rfq::{constants::get_liquorice_auth, models::TimestampHeader},
+    rfq::{
+        constants::get_liquorice_auth,
+        models::{QuoteRule, TimestampHeader},
+    },
 };
 
 impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
     type Error = InvalidSnapshotError;
 
+    /// Builds the venue state from the component's `books` attribute, a JSON array of every
+    /// market maker's levels per pair. A missing attribute is a venue with no levels. Every
+    /// token the component carries must be in `all_tokens`, and every book must name two of
+    /// them. The `quote_rule` static attribute sets the reuse rule; absent, every maker quotes
+    /// once per route.
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _timestamp_header: TimestampHeader,
@@ -24,51 +32,49 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let state_attrs = snapshot.state.attributes;
-
-        if snapshot.component.tokens.len() != 2 {
-            return Err(InvalidSnapshotError::ValueError(
-                "Component must have 2 tokens (base and quote)".to_string(),
-            ));
+        let mut tokens = HashMap::new();
+        for address in &snapshot.component.tokens {
+            let token = all_tokens.get(address).ok_or_else(|| {
+                InvalidSnapshotError::ValueError(format!("Token not found: {address}"))
+            })?;
+            tokens.insert(address.clone(), token.clone());
         }
 
-        let base_token_address = &snapshot.component.tokens[0];
-        let quote_token_address = &snapshot.component.tokens[1];
+        let books: Vec<LiquoriceMakerLevels> = match snapshot.state.attributes.get("books") {
+            Some(books) => serde_json::from_slice(books).map_err(|e| {
+                InvalidSnapshotError::ValueError(format!("Invalid books JSON: {e}"))
+            })?,
+            None => Vec::new(),
+        };
+        for book in &books {
+            for address in [&book.price.base_token, &book.price.quote_token] {
+                if !tokens.contains_key(address) {
+                    return Err(InvalidSnapshotError::ValueError(format!(
+                        "Book of {} names token {address}, which the component does not carry",
+                        book.market_maker
+                    )));
+                }
+            }
+        }
 
-        let base_token = all_tokens
-            .get(base_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Base token not found: {base_token_address}"
-                ))
-            })?
-            .clone();
-
-        let quote_token = all_tokens
-            .get(quote_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Quote token not found: {quote_token_address}"
-                ))
-            })?
-            .clone();
-
-        let empty_prices_map: Bytes = "{}".as_bytes().to_vec().into();
-        let prices_data = state_attrs
-            .get("prices")
-            .unwrap_or(&empty_prices_map);
-
-        let prices_by_mm: HashMap<String, LiquoriceTokenPairPrice> =
-            serde_json::from_slice(prices_data).map_err(|e| {
-                InvalidSnapshotError::ValueError(format!("Invalid prices JSON: {e}"))
-            })?;
+        let quote_rule = QuoteRule::from_attributes(
+            &snapshot.component.static_attributes,
+            QuoteRule::OncePerMaker,
+        )
+        .map_err(InvalidSnapshotError::ValueError)?;
 
         let auth = get_liquorice_auth().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Liquorice authentication: {e}"))
         })?;
 
         let client = LiquoriceClientBuilder::new(snapshot.component.chain, auth.solver, auth.key)
-            .tokens(HashSet::from([base_token_address.clone(), quote_token_address.clone()]))
+            .tokens(
+                tokens
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            )
+            .quote_rule(quote_rule)
             .build()
             .map_err(|e| {
                 InvalidSnapshotError::MissingAttribute(format!(
@@ -76,7 +82,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
                 ))
             })?;
 
-        Ok(LiquoriceState::new(base_token, quote_token, prices_by_mm, client))
+        Ok(LiquoriceState::new(books, tokens, quote_rule, client))
     }
 }
 
@@ -119,34 +125,64 @@ mod tests {
         )
     }
 
-    fn create_test_price_levels() -> serde_json::Value {
-        serde_json::json!({
-            "test_market_maker": {
-                "baseToken": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-                "quoteToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-                "levels": [
-                    ["65000.0", "1.5"],
-                    ["64950.0", "2.0"],
-                    ["65100.0", "0.5"]
-                ],
-                "updatedAt": null
+    fn weth() -> Token {
+        Token::new(
+            &hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+                .unwrap()
+                .into(),
+            "WETH",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    /// Two makers on WBTC/USDC and one of them on WETH/USDC.
+    fn create_test_books() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "mm": "test_market_maker",
+                "price": {
+                    "baseToken": wbtc().address.to_string(),
+                    "quoteToken": usdc().address.to_string(),
+                    "levels": [["65000.0", "1.5"], ["64950.0", "2.0"]],
+                    "updatedAt": null
+                }
+            },
+            {
+                "mm": "mm_b",
+                "price": {
+                    "baseToken": wbtc().address.to_string(),
+                    "quoteToken": usdc().address.to_string(),
+                    "levels": [["65100.0", "0.5"]],
+                    "updatedAt": null
+                }
+            },
+            {
+                "mm": "test_market_maker",
+                "price": {
+                    "baseToken": weth().address.to_string(),
+                    "quoteToken": usdc().address.to_string(),
+                    "levels": [["3000.0", "10"]],
+                    "updatedAt": null
+                }
             }
-        })
+        ])
     }
 
     fn create_test_snapshot() -> (ComponentWithState, HashMap<Bytes, Token>) {
-        let wbtc_token = wbtc();
-        let usdc_token = usdc();
-        let price_levels = create_test_price_levels();
+        env::set_var("LIQUORICE_USER", "test_solver");
+        env::set_var("LIQUORICE_KEY", "test_key");
+        let tokens: HashMap<Bytes, Token> = [wbtc(), usdc(), weth()]
+            .into_iter()
+            .map(|token| (token.address.clone(), token))
+            .collect();
 
-        let mut tokens = HashMap::new();
-        tokens.insert(wbtc_token.address.clone(), wbtc_token.clone());
-        tokens.insert(usdc_token.address.clone(), usdc_token.clone());
-
-        let mut state_attributes = HashMap::new();
-
-        let prices_json = serde_json::to_vec(&price_levels).expect("Failed to serialize prices");
-        state_attributes.insert("prices".to_string(), prices_json.into());
+        let books_json =
+            serde_json::to_vec(&create_test_books()).expect("Failed to serialize books");
+        let state_attributes = HashMap::from([("books".to_string(), books_json.into())]);
 
         let snapshot = ComponentWithState {
             state: ProtocolComponentState {
@@ -159,7 +195,7 @@ mod tests {
                 protocol_system: "liquorice".to_string(),
                 protocol_type_name: "liquorice".to_string(),
                 chain: Chain::Ethereum,
-                tokens: vec![wbtc_token.address.clone(), usdc_token.address.clone()],
+                tokens: vec![wbtc().address, usdc().address, weth().address],
                 contract_addresses: Vec::new(),
                 static_attributes: HashMap::new(),
                 change: ChangeType::Creation,
@@ -169,152 +205,94 @@ mod tests {
             component_tvl: None,
             entrypoints: Vec::new(),
         };
-
         (snapshot, tokens)
+    }
+
+    async fn decode(
+        snapshot: ComponentWithState,
+        tokens: &HashMap<Bytes, Token>,
+    ) -> Result<LiquoriceState, InvalidSnapshotError> {
+        LiquoriceState::try_from_with_header(
+            snapshot,
+            TimestampHeader { timestamp: 1703097600u64 },
+            &HashMap::new(),
+            tokens,
+            &DecoderContext::new(),
+        )
+        .await
     }
 
     #[tokio::test]
     async fn test_try_from_with_header() {
-        env::set_var("LIQUORICE_USER", "test_solver");
-        env::set_var("LIQUORICE_KEY", "test_key");
-
         let (snapshot, tokens) = create_test_snapshot();
+        let state = decode(snapshot, &tokens)
+            .await
+            .expect("create state from snapshot");
 
-        let result = LiquoriceState::try_from_with_header(
-            snapshot,
-            TimestampHeader { timestamp: 1703097600u64 },
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await
-        .expect("create state from snapshot");
-
-        assert_eq!(result.base_token.symbol, "WBTC");
-        assert_eq!(result.quote_token.symbol, "USDC");
-        assert!(result
-            .prices_by_mm
-            .contains_key("test_market_maker"));
-        let mm_price = &result.prices_by_mm["test_market_maker"];
-        assert_eq!(mm_price.levels.len(), 3);
-        assert_eq!(mm_price.levels[0].quantity, 1.5);
-        assert_eq!(mm_price.levels[0].price, 65000.0);
-        assert_eq!(mm_price.levels[1].quantity, 2.0);
-        assert_eq!(mm_price.levels[1].price, 64950.0);
-        assert_eq!(mm_price.levels[2].quantity, 0.5);
-        assert_eq!(mm_price.levels[2].price, 65100.0);
+        assert_eq!(state.tokens.len(), 3);
+        assert_eq!(state.quote_rule, QuoteRule::OncePerMaker);
+        assert!(state.used_market_makers.is_empty());
+        assert_eq!(state.books.len(), 3);
+        assert_eq!(state.books[0].market_maker, "test_market_maker");
+        assert_eq!(state.books[0].price.base_token, wbtc().address);
+        assert_eq!(state.books[0].price.levels.len(), 2);
+        assert_eq!(state.books[0].price.levels[0].price, 65000.0);
+        assert_eq!(state.books[0].price.levels[0].quantity, 1.5);
+        assert_eq!(state.books[1].market_maker, "mm_b");
+        assert_eq!(state.books[2].price.base_token, weth().address);
     }
 
     #[tokio::test]
-    async fn test_try_from_missing_prices() {
-        env::set_var("LIQUORICE_USER", "test_solver");
-        env::set_var("LIQUORICE_KEY", "test_key");
+    async fn test_try_from_quote_rule_attribute() {
+        let (mut snapshot, tokens) = create_test_snapshot();
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"none".to_vec().into());
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert_eq!(state.quote_rule, QuoteRule::None);
+    }
 
+    #[tokio::test]
+    async fn test_try_from_missing_books() {
         let (mut snapshot, tokens) = create_test_snapshot();
         snapshot
             .state
             .attributes
-            .remove("prices");
-
-        let result = LiquoriceState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await
-        .expect("create state with missing prices should default to empty prices");
-
-        assert_eq!(result.base_token.symbol, "WBTC");
-        assert_eq!(result.quote_token.symbol, "USDC");
-        assert!(result.prices_by_mm.is_empty());
+            .remove("books");
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert!(state.books.is_empty());
     }
 
     #[tokio::test]
     async fn test_try_from_missing_token() {
-        env::set_var("LIQUORICE_USER", "test_solver");
-        env::set_var("LIQUORICE_KEY", "test_key");
+        let (snapshot, mut tokens) = create_test_snapshot();
+        tokens.remove(&weth().address);
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
+    }
 
+    #[tokio::test]
+    async fn test_try_from_book_names_token_the_component_lacks() {
         let (mut snapshot, tokens) = create_test_snapshot();
         snapshot.component.tokens.pop();
-
-        let result = LiquoriceState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
-    }
-
-    #[tokio::test]
-    async fn test_try_from_too_many_tokens() {
-        env::set_var("LIQUORICE_USER", "test_solver");
-        env::set_var("LIQUORICE_KEY", "test_key");
-
-        let (mut snapshot, mut tokens) = create_test_snapshot();
-
-        let dai_token = Token::new(
-            &hex::decode("6b175474e89094c44da98b954eedeac495271d0f")
-                .unwrap()
-                .into(),
-            "DAI",
-            18,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
+        let result = decode(snapshot, &tokens).await;
+        assert!(
+            matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(msg) if msg.contains("does not carry"))
         );
-
-        tokens.insert(dai_token.address.clone(), dai_token.clone());
-        snapshot
-            .component
-            .tokens
-            .push(dai_token.address);
-
-        let result = LiquoriceState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
     }
 
     #[tokio::test]
-    async fn test_try_from_invalid_prices_json() {
-        env::set_var("LIQUORICE_USER", "test_solver");
-        env::set_var("LIQUORICE_KEY", "test_key");
-
+    async fn test_try_from_invalid_books_json() {
         let (mut snapshot, tokens) = create_test_snapshot();
-
         snapshot.state.attributes.insert(
-            "prices".to_string(),
+            "books".to_string(),
             "invalid json"
                 .as_bytes()
                 .to_vec()
                 .into(),
         );
-
-        let result = LiquoriceState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-
-        assert!(result.is_err());
+        let result = decode(snapshot, &tokens).await;
         assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
     }
 }
