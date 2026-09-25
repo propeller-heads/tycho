@@ -30,9 +30,8 @@ use tycho_common::{
 
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 
-/// Ids of the live contracts of a chain: accounts that are not deleted and have a live code
-/// row.
-fn contract_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
+/// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
+fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     schema::account::table
         .filter(schema::account::chain_id.eq(chain_id))
         .filter(
@@ -55,7 +54,7 @@ fn contract_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigIn
         .into_boxed()
 }
 
-/// Ids of the components of a chain that are not deleted.
+/// Subquery for the ids of the components of a chain that are not deleted.
 fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
     schema::protocol_component::table
         .filter(schema::protocol_component::chain_id.eq(chain_id))
@@ -69,14 +68,15 @@ fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'stati
 }
 
 impl PostgresGateway {
-    /// Every live contract of `chain` with its code, balances and slots, each value timestamped
-    /// with the block of its row's `modify_tx`. Order is unspecified.
+    /// Every live account of `chain` (one with a live code row) with its code, balances and
+    /// slots, each value timestamped with the block of its row's `modify_tx`. Order is
+    /// unspecified.
     ///
     /// # Errors
     ///
     /// `StorageError::NotFound("native_balance", address)` when a contract has no live native
     /// balance row, the same error `get_contracts` returns.
-    pub(crate) async fn snapshot_accounts(
+    pub(crate) async fn account_snapshots(
         &self,
         chain: &Chain,
         conn: &mut AsyncPgConnection,
@@ -112,12 +112,13 @@ impl PostgresGateway {
             .await
             .map_err(PostgresError::from)?;
 
-        let mut balances: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> = HashMap::new();
-        for (account_id, token_id, token, balance, valid_from, number) in
+        let mut balances_by_account: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> =
+            HashMap::new();
+        for (account_id, token_id, token, balance, valid_from, block_number) in
             schema::account_balance::table
                 .inner_join(schema::token::table.inner_join(schema::account::table))
                 .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::account_balance::account_id.eq_any(contract_ids(chain_id)))
+                .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id)))
                 .filter(
                     schema::account_balance::valid_to
                         .is_null()
@@ -135,16 +136,22 @@ impl PostgresGateway {
                 .await
                 .map_err(PostgresError::from)?
         {
-            balances
+            balances_by_account
                 .entry(account_id)
                 .or_default()
-                .push((token_id, token, balance, WriteTimestamp::new(valid_from, number as u64)));
+                .push((
+                    token_id,
+                    token,
+                    balance,
+                    WriteTimestamp::new(valid_from, block_number as u64),
+                ));
         }
 
-        let mut slots: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> = HashMap::new();
-        for (account_id, slot, value, valid_from, number) in schema::contract_storage::table
+        let mut slots_by_account: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> =
+            HashMap::new();
+        for (account_id, slot, value, valid_from, block_number) in schema::contract_storage::table
             .inner_join(schema::transaction::table.inner_join(schema::block::table))
-            .filter(schema::contract_storage::account_id.eq_any(contract_ids(chain_id)))
+            .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id)))
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .select((
                 schema::contract_storage::account_id,
@@ -157,13 +164,13 @@ impl PostgresGateway {
             .await
             .map_err(PostgresError::from)?
         {
-            slots
+            slots_by_account
                 .entry(account_id)
                 .or_default()
-                .push((slot, value, WriteTimestamp::new(valid_from, number as u64)));
+                .push((slot, value, WriteTimestamp::new(valid_from, block_number as u64)));
         }
 
-        let mut out = Vec::with_capacity(accounts.len());
+        let mut snapshots = Vec::with_capacity(accounts.len());
         for (id, address, title, code, code_hash, code_valid_from, code_block_number, code_tx) in
             accounts
         {
@@ -171,31 +178,37 @@ impl PostgresGateway {
             let mut native_balance = None;
             let mut token_balances = HashMap::new();
             let mut token_balance_written_at = HashMap::new();
-            for (token_id, token, balance, written_at) in balances.remove(&id).unwrap_or_default() {
+            for (token_id, token, balance, written_at) in balances_by_account
+                .remove(&id)
+                .unwrap_or_default()
+            {
                 if token_id == native_token_id {
                     native_balance = Some((balance, written_at));
                     continue;
                 }
                 token_balances.insert(
                     token.clone(),
-                    AccountBalance::new(address.clone(), token.clone(), balance, Bytes::default()),
+                    AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32)),
                 );
                 token_balance_written_at.insert(token, written_at);
             }
             let (native_balance, native_balance_written_at) = native_balance.ok_or_else(|| {
                 StorageError::NotFound("native_balance".to_string(), address.to_string())
             })?;
-            let mut account_slots = HashMap::new();
+            let mut slots = HashMap::new();
             let mut slot_written_at = HashMap::new();
-            for (slot, value, written_at) in slots.remove(&id).unwrap_or_default() {
-                account_slots.insert(slot.clone(), value.unwrap_or_default());
+            for (slot, value, written_at) in slots_by_account
+                .remove(&id)
+                .unwrap_or_default()
+            {
+                slots.insert(slot.clone(), value.unwrap_or_default());
                 slot_written_at.insert(slot, written_at);
             }
             let account = Account::new(
                 *chain,
                 address,
                 title,
-                account_slots,
+                slots,
                 native_balance,
                 token_balances,
                 code,
@@ -204,7 +217,7 @@ impl PostgresGateway {
                 code_tx,
                 None,
             );
-            out.push(AccountSnapshot {
+            snapshots.push(AccountSnapshot {
                 account,
                 slot_written_at,
                 native_balance_written_at,
@@ -212,13 +225,13 @@ impl PostgresGateway {
                 token_balance_written_at,
             });
         }
-        Ok(out)
+        Ok(snapshots)
     }
 
     /// Every component of `chain` that is not deleted, with its live attributes and balances,
-    /// stamped with the newest write among its rows or, for a component without rows, the block
-    /// of its `creation_tx`. Order is unspecified.
-    pub(crate) async fn snapshot_components(
+    /// timestamped with the newest write among its rows or, for a component without rows, the
+    /// block of its `creation_tx`. Order is unspecified.
+    pub(crate) async fn component_snapshots(
         &self,
         chain: &Chain,
         conn: &mut AsyncPgConnection,
@@ -252,8 +265,9 @@ impl PostgresGateway {
                 .await
                 .map_err(PostgresError::from)?;
 
-        let mut attributes: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> = HashMap::new();
-        for (component_id, name, value, valid_from, number) in schema::protocol_state::table
+        let mut attributes_by_component: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> =
+            HashMap::new();
+        for (component_id, name, value, valid_from, block_number) in schema::protocol_state::table
             .inner_join(schema::transaction::table.inner_join(schema::block::table))
             .filter(schema::protocol_state::protocol_component_id.eq_any(component_ids(chain_id)))
             .filter(schema::protocol_state::valid_to.eq(MAX_TS))
@@ -268,60 +282,66 @@ impl PostgresGateway {
             .await
             .map_err(PostgresError::from)?
         {
-            attributes
+            attributes_by_component
                 .entry(component_id)
                 .or_default()
-                .push((name, value, WriteTimestamp::new(valid_from, number as u64)));
+                .push((name, value, WriteTimestamp::new(valid_from, block_number as u64)));
         }
 
-        let mut balances: HashMap<i64, Vec<(Address, Bytes, WriteTimestamp)>> = HashMap::new();
-        for (component_id, token, balance, valid_from, number) in schema::component_balance::table
-            .inner_join(schema::token::table.inner_join(schema::account::table))
-            .inner_join(schema::transaction::table.inner_join(schema::block::table))
-            .filter(
-                schema::component_balance::protocol_component_id.eq_any(component_ids(chain_id)),
-            )
-            .filter(schema::component_balance::valid_to.eq(MAX_TS))
-            .select((
-                schema::component_balance::protocol_component_id,
-                schema::account::address,
-                schema::component_balance::new_balance,
-                schema::component_balance::valid_from,
-                schema::block::number,
-            ))
-            .get_results::<(i64, Address, Bytes, NaiveDateTime, i64)>(conn)
-            .await
-            .map_err(PostgresError::from)?
+        let mut balances_by_component: HashMap<i64, Vec<(Address, Bytes, WriteTimestamp)>> =
+            HashMap::new();
+        for (component_id, token, balance, valid_from, block_number) in
+            schema::component_balance::table
+                .inner_join(schema::token::table.inner_join(schema::account::table))
+                .inner_join(schema::transaction::table.inner_join(schema::block::table))
+                .filter(
+                    schema::component_balance::protocol_component_id
+                        .eq_any(component_ids(chain_id)),
+                )
+                .filter(schema::component_balance::valid_to.eq(MAX_TS))
+                .select((
+                    schema::component_balance::protocol_component_id,
+                    schema::account::address,
+                    schema::component_balance::new_balance,
+                    schema::component_balance::valid_from,
+                    schema::block::number,
+                ))
+                .get_results::<(i64, Address, Bytes, NaiveDateTime, i64)>(conn)
+                .await
+                .map_err(PostgresError::from)?
         {
-            balances
+            balances_by_component
                 .entry(component_id)
                 .or_default()
-                .push((token, balance, WriteTimestamp::new(valid_from, number as u64)));
+                .push((token, balance, WriteTimestamp::new(valid_from, block_number as u64)));
         }
 
-        let mut out = Vec::with_capacity(components.len());
-        for (id, external_id, system, created_ts, created_number) in components {
-            let mut updated_at = WriteTimestamp::new(created_ts, created_number as u64);
-            let mut attrs = HashMap::new();
-            for (name, value, written_at) in attributes
+        let mut snapshots = Vec::with_capacity(components.len());
+        for (id, external_id, system, created_ts, created_block_number) in components {
+            let mut updated_at = WriteTimestamp::new(created_ts, created_block_number as u64);
+            let mut attributes = HashMap::new();
+            for (name, value, written_at) in attributes_by_component
                 .remove(&id)
                 .unwrap_or_default()
             {
                 updated_at = updated_at.max(written_at);
-                attrs.insert(name, value);
+                attributes.insert(name, value);
             }
-            let mut bals = HashMap::new();
-            for (token, balance, written_at) in balances.remove(&id).unwrap_or_default() {
+            let mut balances = HashMap::new();
+            for (token, balance, written_at) in balances_by_component
+                .remove(&id)
+                .unwrap_or_default()
+            {
                 updated_at = updated_at.max(written_at);
-                bals.insert(token, balance);
+                balances.insert(token, balance);
             }
-            out.push(ComponentSnapshot {
+            snapshots.push(ComponentSnapshot {
                 system,
-                state: ProtocolComponentState::new(&external_id, attrs, bals),
+                state: ProtocolComponentState { component_id: external_id, attributes, balances },
                 updated_at,
             });
         }
-        Ok(out)
+        Ok(snapshots)
     }
 
     /// All live state of `chain`, read inside the caller's transaction.
@@ -332,10 +352,10 @@ impl PostgresGateway {
     ) -> Result<StateSnapshot, StorageError> {
         Ok(StateSnapshot {
             accounts: self
-                .snapshot_accounts(chain, conn)
+                .account_snapshots(chain, conn)
                 .await?,
             components: self
-                .snapshot_components(chain, conn)
+                .component_snapshots(chain, conn)
                 .await?,
         })
     }
@@ -544,7 +564,7 @@ mod test_serial_db {
     }
 
     #[tokio::test]
-    async fn snapshot_accounts_returns_live_contracts_with_their_write_stamps_serial_db() {
+    async fn account_snapshots_return_live_accounts_with_their_write_timestamps_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             setup_accounts(&mut conn).await;
@@ -553,7 +573,7 @@ mod test_serial_db {
             let ts_p1 = db_fixtures::yesterday_half_past_midnight();
 
             let accounts = by_address(
-                gw.snapshot_accounts(&Chain::Ethereum, &mut conn)
+                gw.account_snapshots(&Chain::Ethereum, &mut conn)
                     .await
                     .unwrap(),
             );
@@ -588,7 +608,7 @@ mod test_serial_db {
             assert_eq!(c0.account.token_balances[&usdc].balance, Bytes::from(1000u64).lpad(32, 0));
             assert_eq!(c0.account.token_balances[&usdc].token, usdc);
             assert_eq!(c0.account.token_balances[&usdc].account, c0.account.address);
-            assert_eq!(c0.account.token_balances[&usdc].modify_tx, Bytes::default());
+            assert_eq!(c0.account.token_balances[&usdc].modify_tx, Bytes::zero(32));
             assert_eq!(c0.token_balance_written_at[&usdc], WriteTimestamp::new(ts, 1));
             assert!(
                 !c0.account
@@ -604,7 +624,7 @@ mod test_serial_db {
     }
 
     #[tokio::test]
-    async fn snapshot_accounts_reads_a_null_slot_as_zero_serial_db() {
+    async fn account_snapshots_read_a_null_slot_as_zero_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let f = setup_accounts(&mut conn).await;
@@ -626,7 +646,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let accounts = by_address(
-                gw.snapshot_accounts(&Chain::Ethereum, &mut conn)
+                gw.account_snapshots(&Chain::Ethereum, &mut conn)
                     .await
                     .unwrap(),
             );
@@ -642,7 +662,7 @@ mod test_serial_db {
     }
 
     #[tokio::test]
-    async fn snapshot_accounts_fails_without_a_native_balance_serial_db() {
+    async fn account_snapshots_fail_without_a_native_balance_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let f = setup_accounts(&mut conn).await;
@@ -657,7 +677,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let err = gw
-                .snapshot_accounts(&Chain::Ethereum, &mut conn)
+                .account_snapshots(&Chain::Ethereum, &mut conn)
                 .await
                 .unwrap_err();
 
@@ -670,7 +690,7 @@ mod test_serial_db {
     }
 
     #[tokio::test]
-    async fn snapshot_components_returns_live_state_stamped_with_the_newest_write_serial_db() {
+    async fn component_snapshots_return_live_state_timestamped_with_the_newest_write_serial_db() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let f = setup_accounts(&mut conn).await;
@@ -678,7 +698,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let components: HashMap<String, ComponentSnapshot> = gw
-                .snapshot_components(&Chain::Ethereum, &mut conn)
+                .component_snapshots(&Chain::Ethereum, &mut conn)
                 .await
                 .unwrap()
                 .into_iter()
@@ -768,7 +788,7 @@ mod test_serial_db {
                 .run(|conn| {
                     async {
                         let before = gw
-                            .snapshot_accounts(&Chain::Ethereum, conn)
+                            .account_snapshots(&Chain::Ethereum, conn)
                             .await
                             .map_err(PostgresError::from)?;
                         assert_eq!(before.len(), 2);
@@ -781,7 +801,7 @@ mod test_serial_db {
                             &[(9, 9, None)],
                         )
                         .await;
-                        gw.snapshot_accounts(&Chain::Ethereum, conn)
+                        gw.account_snapshots(&Chain::Ethereum, conn)
                             .await
                             .map_err(PostgresError::from)
                     }
@@ -798,7 +818,7 @@ mod test_serial_db {
 
             let mut fresh = pool.get().await.unwrap();
             let after = gw
-                .snapshot_accounts(&Chain::Ethereum, &mut fresh)
+                .account_snapshots(&Chain::Ethereum, &mut fresh)
                 .await
                 .unwrap();
             let c0_after = after
@@ -851,11 +871,11 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
 
             let accounts = gw
-                .snapshot_accounts(&Chain::Ethereum, &mut conn)
+                .account_snapshots(&Chain::Ethereum, &mut conn)
                 .await
                 .unwrap();
             let components = gw
-                .snapshot_components(&Chain::Ethereum, &mut conn)
+                .component_snapshots(&Chain::Ethereum, &mut conn)
                 .await
                 .unwrap();
 
