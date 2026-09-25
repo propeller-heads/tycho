@@ -16,6 +16,7 @@ postgres/
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
+├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 └── schema.rs           — auto-generated Diesel table! macros
