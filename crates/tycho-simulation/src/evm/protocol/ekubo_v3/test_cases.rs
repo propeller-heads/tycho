@@ -35,7 +35,7 @@ use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
     },
     pool::{
         boosted_fees::BoostedFeesPool,
@@ -1069,7 +1069,7 @@ pub fn signed_exclusive_swap() -> TestCase {
         config: EvmConcentratedPoolConfig {
             fee: 0,
             pool_type_config: TickSpacing(10),
-            extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+            extension: SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS,
         },
     };
 

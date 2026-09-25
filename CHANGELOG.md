@@ -1,3 +1,70 @@
+## [0.425.0](https://github.com/propeller-heads/tycho/compare/0.424.1...0.425.0) (2026-09-24)
+
+
+### Features
+
+* **indexer:** add EntityCache skeleton for the entity store ([0b04a01](https://github.com/propeller-heads/tycho/commit/0b04a01859a6e970374722eb85327458767bda36))
+* **indexer:** add Tagged values with a not-older write rule ([fbbb818](https://github.com/propeller-heads/tycho/commit/fbbb818be5a7d7211c83a763b34bdd2e5095fe80))
+* **indexer:** build CachedAccount from snapshots and creation deltas ([3b84fd3](https://github.com/propeller-heads/tycho/commit/3b84fd3b2707db01571e42d3c23ccf67d236579d))
+* **indexer:** fold account changes into the EntityCache ([de3c728](https://github.com/propeller-heads/tycho/commit/de3c72885d02d3e1aeca75ce162f35f5b0c0f72f))
+* **indexer:** fold account deltas and balances into CachedAccount ([73bbbb8](https://github.com/propeller-heads/tycho/commit/73bbbb870f8d1f1acd4a15ead00ad43231bf7a25))
+* **indexer:** fold component changes into the EntityCache ([83129d3](https://github.com/propeller-heads/tycho/commit/83129d3175311883c3e817657f8ca1e6ccb1070f))
+* **indexer:** implement CachedComponentState with one write time per entry ([6993405](https://github.com/propeller-heads/tycho/commit/69934050f96a6a0ed860f1d12488d44144cc3b5b))
+* **indexer:** key EntityCache component states by protocol system ([b6c13ab](https://github.com/propeller-heads/tycho/commit/b6c13ab610e40d2c0f996d564de6d6205cefe588))
+* **indexer:** order cache writes by block timestamp then number ([0f5eee9](https://github.com/propeller-heads/tycho/commit/0f5eee9d8dca3cb268e3eabad0c1612ba0411e92))
+* **indexer:** publish EntityCache entry counts and measured size ([ef653d4](https://github.com/propeller-heads/tycho/commit/ef653d406eca60708c939aa3bbbf435a4668bf3c))
+
+
+### Bug Fixes
+
+* **indexer:** keep a cached account on a deletion delta and warn ([758614a](https://github.com/propeller-heads/tycho/commit/758614abe1e58d316705e846e2cf53d3f1af2f34))
+* **indexer:** remove only on a strictly newer block ([8fc5e9a](https://github.com/propeller-heads/tycho/commit/8fc5e9a9ba627a6394c61b525a4c7dc1842a1f56))
+* **indexer:** skip a write from a block already applied ([b3bf3fe](https://github.com/propeller-heads/tycho/commit/b3bf3fe8bb5d7180f8c3fa77da752bbeb04f2abb))
+* **indexer:** skip cache removals older than the entry ([edcb186](https://github.com/propeller-heads/tycho/commit/edcb1866edd8df06594c95ae095509404b75bb34))
+* **indexer:** warn once per account on a same-block disagreement ([50e9251](https://github.com/propeller-heads/tycho/commit/50e9251b1a9e8c9d5ac529c0ca771d2b0ad3e1bd))
+* **indexer:** warn when a component fold skips an applied block ([1da09c0](https://github.com/propeller-heads/tycho/commit/1da09c03639d819bafcaf4d7d73bd97d471bda13))
+* **indexer:** warn when a created component is already cached ([9a3809c](https://github.com/propeller-heads/tycho/commit/9a3809c1e558b9e3f87f3fda09ecdacac588ac22))
+* **indexer:** warn when a fold skips an unknown entity ([9d0f7c7](https://github.com/propeller-heads/tycho/commit/9d0f7c77da34ef0e44d83c97278bbc94e161acdd))
+* **indexer:** warn when a same-block write carries a different value ([8fba1b6](https://github.com/propeller-heads/tycho/commit/8fba1b690d2fd8776cd5f4cca132f744ad34219d))
+
+## [0.424.1](https://github.com/propeller-heads/tycho/compare/0.424.0...0.424.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **liquorice:** fall back to legacy solver/authorization headers on 401 ([15ac01d](https://github.com/propeller-heads/tycho/commit/15ac01dac2c5f198d3b41c3d3212ce7d9aa94504))
+* **liquorice:** use Basic auth header instead of separate solver/key headers ([7a82c35](https://github.com/propeller-heads/tycho/commit/7a82c3511919059b8dc7a1f019cc7213ec460d87))
+* **liquorice:** use Basic auth header instead of separate solver/key headers ([#1325](https://github.com/propeller-heads/tycho/issues/1325)) ([771ff44](https://github.com/propeller-heads/tycho/commit/771ff441360303b4da37ece81ec1fa38a744aa4b))
+
+## [0.424.0](https://github.com/propeller-heads/tycho/compare/0.423.0...0.424.0) (2026-09-24)
+
+
+### Features
+
+* **execution:** record the deployed Native RFQ executors ([54727d5](https://github.com/propeller-heads/tycho/commit/54727d512e27f3e544a685cae127065c190ab4d7))
+* **native:** Robinhood support, quote tokens, and deployed executors ([#1492](https://github.com/propeller-heads/tycho/issues/1492)) ([d80945b](https://github.com/propeller-heads/tycho/commit/d80945ba3bd740ff62ce2c1533e6ae7ccdbe0481))
+* **native:** support Robinhood Chain ([676a353](https://github.com/propeller-heads/tycho/commit/676a353b958d3301fe2a0f99395dece9ac630327))
+* **rfq:** add default quote tokens for Arbitrum, BSC and Robinhood ([4acace9](https://github.com/propeller-heads/tycho/commit/4acace9c8036f48f739212093552108cd16eb3b4))
+
+## [0.423.0](https://github.com/propeller-heads/tycho/compare/0.422.1...0.423.0) (2026-09-23)
+
+
+### Features
+
+* **execution:** add the deployed Robinhood EkuboV3 executor address ([c916dc6](https://github.com/propeller-heads/tycho/commit/c916dc674a0869eed33a5fa3b90ff8d28b9b64ea))
+* **execution:** set Robinhood SignedExclusiveSwap address ([e89041d](https://github.com/propeller-heads/tycho/commit/e89041dec819e6a71ff1058963efa74044221c27))
+* recognise the Robinhood SignedExclusiveSwap deployment ([f76adcb](https://github.com/propeller-heads/tycho/commit/f76adcb1f831d102ff8f8a3d0e2e59234ccacc14))
+* take the SignedExclusiveSwap address as a constructor arg ([cf56d04](https://github.com/propeller-heads/tycho/commit/cf56d04cc7acd998904b16d93ec2198cd8e14e46))
+* take the SignedExclusiveSwap address as a constructor arg ([#1463](https://github.com/propeller-heads/tycho/issues/1463)) ([273c102](https://github.com/propeller-heads/tycho/commit/273c10228ae933032f68908dd668b10991006169))
+
+## [0.422.1](https://github.com/propeller-heads/tycho/compare/0.422.0...0.422.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **simulation:** forward snapshot entrypoints to pending indexers ([8b490ca](https://github.com/propeller-heads/tycho/commit/8b490ca9edaefa1745a7353bf65ab88a4f42ee5e))
+* **simulation:** forward snapshot entrypoints to pending indexers ([#1482](https://github.com/propeller-heads/tycho/issues/1482)) ([204a026](https://github.com/propeller-heads/tycho/commit/204a026d3e002061213a76f14b1aec63252d1e8b))
+
 ## [0.422.0](https://github.com/propeller-heads/tycho/compare/0.421.1...0.422.0) (2026-09-23)
 
 

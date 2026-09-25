@@ -14,13 +14,17 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>sushiswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>pancakeswap_v2</code></td><td>Native (<code>PancakeswapV2State</code>)</td><td>1 μs (0.001 ms)</td><td>Ethereum, BSC</td><td></td></tr>
 <tr><td><code>pancakeswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Ethereum, Base, Arbitrum, BSC</td><td></td></tr>
+<tr><td><code>sushiswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>robinswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>ramses_v3</code></td><td>Native (<code>RamsesV3State</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
-<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
+<tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum, Robinhood</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>aerodrome_v1</code></td><td>Native (<code>AerodromeV1State</code>)</td><td>3 μs (0.003 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td>Dynamic-fee pools untouched so far in the execution block quote the worse of the initial and dynamic fee, so the output is never over-quoted. If your submission path lands the swap first in the block, opt in per registration: <code>exchange_with_decoder_context</code> with <code>DecoderContext::new().assume_first_in_block(true)</code>.</td></tr>
 <tr><td><code>velodrome_slipstreams</code></td><td><p>Native</p><p>(<code>VelodromeSlipstreamsState</code>)</p></td><td>-</td><td>Unichain</td><td></td></tr>
+<tr><td><code>up_v3</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>7 μs (0.007 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
 <tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
@@ -103,6 +107,11 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
+                .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
         }
         _ => {}
     }

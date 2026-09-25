@@ -43,16 +43,11 @@ address payable constant CORE_ADDRESS =
 ICore constant CORE = ICore(CORE_ADDRESS);
 address constant MEV_CAPTURE_ADDRESS =
     0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be;
-// Signed Ekubo V3 (SignedExclusiveSwap) pools set their pool
-// config extension to this address; the executor detects a signed hop by
-// comparing each hop's poolConfig.extension() against it and routes that hop
-// through the signed path.
-address constant SIGNED_EXCLUSIVE_SWAP_ADDRESS =
-    0x55b703eED01b35641963da2FB2E14885993605A3;
 
-/// Chain-agnostic Ekubo V3 executor. Extensions deployed at the same
-/// deterministic address on every chain (MEVCapture, SignedExclusiveSwap)
-/// are handled here. Deployment-specific extensions (Ve33) live in per-chain
+/// Chain-agnostic Ekubo V3 executor. The MEVCapture extension, deployed at the
+/// same deterministic address on every chain, is handled here.
+/// SignedExclusiveSwap is deployed per chain, so its address is a constructor
+/// argument. Deployment-specific extensions (Ve33) live in per-chain
 /// executors, which override `_swapHop` — and `_hopEnd` when their hops carry
 /// a self-describing tail — so a deployed executor only contains extra code
 /// reachable on its chain.
@@ -60,6 +55,13 @@ contract EkuboV3Executor is IExecutor, ICallback {
     error EkuboV3Executor__InvalidDataLength();
     error EkuboV3Executor__CoreOnly();
     error EkuboV3Executor__UnknownCallback();
+    error EkuboV3Executor__ZeroSignedExclusiveSwapAddress();
+
+    /// Signed Ekubo V3 (SignedExclusiveSwap) pools set their pool config
+    /// extension to this address; the executor detects a signed hop by
+    /// comparing each hop's poolConfig.extension() against it and routes that
+    /// hop through the signed path.
+    address public immutable signedExclusiveSwap;
 
     uint256 private constant _POOL_DATA_OFFSET = 56;
     uint256 internal constant _HOP_BYTE_LEN = 52;
@@ -74,6 +76,13 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
     using SafeERC20 for IERC20;
 
+    constructor(address signedExclusiveSwap_) {
+        if (signedExclusiveSwap_ == address(0)) {
+            revert EkuboV3Executor__ZeroSignedExclusiveSwapAddress();
+        }
+        signedExclusiveSwap = signedExclusiveSwap_;
+    }
+
     modifier coreOnly() {
         if (msg.sender != CORE_ADDRESS) revert EkuboV3Executor__CoreOnly();
         _;
@@ -81,7 +90,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
 
     function getTransferData(bytes calldata data)
         external
-        pure
+        view
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -216,7 +225,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
         returns (PoolBalanceUpdate balanceUpdate, uint256 nextOffset)
     {
         address extension = poolKey.config.extension();
-        if (extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
+        if (extension == signedExclusiveSwap) {
             // Signed hop tail: meta(32) | minBU(32) | sigLen(2) | sig(sigLen).
             // _hopEnd bounds-checks the tail and returns the offset past it.
             nextOffset = _hopEnd(swapData, offset, poolKey.config);
@@ -225,7 +234,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
             // slither-disable-next-line calls-loop
             (balanceUpdate,) = abi.decode(
                 CORE.forward(
-                    SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+                    signedExclusiveSwap,
                     abi.encode(
                         poolKey,
                         swapParameters,
@@ -265,11 +274,11 @@ contract EkuboV3Executor is IExecutor, ICallback {
     /// bounds-check them against `data.length`.
     function _hopEnd(bytes calldata data, uint256 offset, PoolConfig poolConfig)
         internal
-        pure
+        view
         virtual
         returns (uint256)
     {
-        if (poolConfig.extension() != SIGNED_EXCLUSIVE_SWAP_ADDRESS) {
+        if (poolConfig.extension() != signedExclusiveSwap) {
             return offset;
         }
 
