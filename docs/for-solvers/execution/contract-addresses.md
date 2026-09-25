@@ -1,4 +1,33 @@
-# Contract Addresses
+# Router Registry and Contract Addresses
+
+PropellerHeads designates every chain marked **active** below as a Designated Router deployment for Fynd License 1.0. Every Fynd settlement must target the active TychoRouterV3 for its chain. The router's FeeCalculator is a mandatory dependency. A route must use the listed executor for every protocol operation that it performs.
+
+The <a href="https://raw.githubusercontent.com/propeller-heads/tycho/main/crates/tycho-execution/config/deployment_registry.json" target="_blank" rel="noopener noreferrer">machine-readable deployment registry</a> contains the same active router, FeeCalculator, and executor addresses, together with effective dates, scheduled successors, and superseded deployments. GitHub preserves the <a href="https://github.com/propeller-heads/tycho/commits/main/crates/tycho-execution/config/deployment_registry.json" target="_blank" rel="noopener noreferrer">registry version history</a>. Send legal and continuity notices to legal@propellerheads.xyz.
+
+Protocol-specific routes may also depend on constructor or integration addresses recorded in <a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/config/executor_deployments.json" target="_blank" rel="noopener noreferrer">executor_deployments.json</a> and <a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/config/protocol_specific_addresses.json" target="_blank" rel="noopener noreferrer">protocol_specific_addresses.json</a>. Each active deployment pins these files through its `dependency_snapshot`. Those dependencies apply only when the route uses the corresponding protocol.
+
+## Current designation
+
+| Network | Status | Effective date | Migration deadline |
+| --- | --- | --- | --- |
+| Ethereum | Active | 1 September 2026 | None |
+| Base | Active | 1 September 2026 | None |
+| Unichain | Active | 1 September 2026 | None |
+| Arbitrum | Active | 1 September 2026 | None |
+| BSC | Active | 1 September 2026 | None |
+| Polygon | Active | 1 September 2026 | None |
+| Plasma | Active | 1 September 2026 | None |
+| Robinhood | Active | 1 September 2026 | None |
+
+## Scheduled successors
+
+No chain currently has a scheduled successor. The registry keeps the current deployment active throughout a notice period and records a complete successor snapshot separately. At the successor's effective timestamp, the successor becomes the Designated Router and its migration deadline expires.
+
+For notices published on or after 22 September 2026, PropellerHeads provides at least 30 days' notice. A shorter period requires the registry to identify a material security risk and state the reason. Any change to a router, FeeCalculator, executor set, or pinned protocol-specific dependency counts as a successor change.
+
+## Migration history
+
+Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea5808f9e82a9078583fd839c9" target="_blank" rel="noopener noreferrer"><code>91b7f151</code></a> introduced the deployment that took effect on 1 August 2026. Commit <a href="https://github.com/propeller-heads/tycho/commit/8cfd100c1da5b6e367417c281859496f189a9388" target="_blank" rel="noopener noreferrer"><code>8cfd100c</code></a> introduced the deployment that superseded it on 1 September 2026 across all eight chains. These deployments predate the notice policy. The machine-readable registry records both address sets. Structured registry history starts on 1 August 2026; the Router V2 tables below and Git history preserve earlier deployments.
 
 ## Ethereum
 
@@ -31,6 +60,10 @@
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/382818fc89655ebf5f3b673a35937c1395f5d0e3/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol" target="_blank" rel="noopener noreferrer">PropAMMExecutor</a></td><td><a href="https://etherscan.io/address/0xc196f22d69d41A2B1DbF6ef8d28C09bc2CA4E4fa" target="_blank" rel="noopener noreferrer">0xc196f22d69d41A2B1DbF6ef8d28C09bc2CA4E4fa</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/382818fc89655ebf5f3b673a35937c1395f5d0e3/crates/tycho-execution/contracts/src/executors/LiquidityPartyExecutor.sol" target="_blank" rel="noopener noreferrer">LiquidityPartyExecutor</a></td><td><a href="https://etherscan.io/address/0x95cA663A10736A748981139F3071cdb21BAAC954" target="_blank" rel="noopener noreferrer">0x95cA663A10736A748981139F3071cdb21BAAC954</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/229c83437b06f02bd3e5ad5649b6b719e7ded0bc/crates/tycho-execution/contracts/src/executors/SkyExecutor.sol" target="_blank" rel="noopener noreferrer">SkyExecutor</a></td><td><a href="https://etherscan.io/address/0x03AD6010948Ac034c0BbF7E449217798B4504E1D" target="_blank" rel="noopener noreferrer">0x03AD6010948Ac034c0BbF7E449217798B4504E1D</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://etherscan.io/address/0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522" target="_blank" rel="noopener noreferrer">0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/LidoV4Executor.sol" target="_blank" rel="noopener noreferrer">LidoV4Executor</a></td><td><a href="https://etherscan.io/address/0xbf33aa159aF2d96f4A10937B83Da8409264A760f" target="_blank" rel="noopener noreferrer">0xbf33aa159aF2d96f4A10937B83Da8409264A760f</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/EtherfiExecutor.sol" target="_blank" rel="noopener noreferrer">EtherfiExecutor</a></td><td><a href="https://etherscan.io/address/0xA96354Bb15c3914d33332C6b898f801BabE7B814" target="_blank" rel="noopener noreferrer">0xA96354Bb15c3914d33332C6b898f801BabE7B814</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/FallbackExecutor.sol" target="_blank" rel="noopener noreferrer">FallbackExecutor</a></td><td><a href="https://etherscan.io/address/0x355d1D7bd40330c235e1132de8D2314b956584c9" target="_blank" rel="noopener noreferrer">0x355d1D7bd40330c235e1132de8D2314b956584c9</a></td></tr>
 </tbody></table>
 
 ## Base
@@ -49,7 +82,8 @@
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/AerodromeV1Executor.sol" target="_blank" rel="noopener noreferrer">AerodromeV1Executor</a></td><td><a href="https://basescan.org/address/0x76eeB7E737FDf441E0437F7051b4e0b84808c10a" target="_blank" rel="noopener noreferrer">0x76eeB7E737FDf441E0437F7051b4e0b84808c10a</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol" target="_blank" rel="noopener noreferrer">LunarBaseExecutor</a></td><td><a href="https://basescan.org/address/0xf435299a20c1405c957C3F407cc3E9b9df76ee7b" target="_blank" rel="noopener noreferrer">0xf435299a20c1405c957C3F407cc3E9b9df76ee7b</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/22b4871b7e6cd1c26f84b27c5f1813d39e98a478/crates/tycho-execution/contracts/src/executors/MetricExecutor.sol" target="_blank" rel="noopener noreferrer">MetricExecutor</a></td><td><a href="https://basescan.org/address/0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2" target="_blank" rel="noopener noreferrer">0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2</a></td></tr>
-
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://basescan.org/address/0x4Ee002261A676D351705934c1bE26667d3f027bc" target="_blank" rel="noopener noreferrer">0x4Ee002261A676D351705934c1bE26667d3f027bc</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/FallbackExecutor.sol" target="_blank" rel="noopener noreferrer">FallbackExecutor</a></td><td><a href="https://basescan.org/address/0x08f22285d13533d68aA8bE5949536322DB3538De" target="_blank" rel="noopener noreferrer">0x08f22285d13533d68aA8bE5949536322DB3538De</a></td></tr>
 </tbody></table>
 
 ## Unichain
@@ -75,7 +109,7 @@
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/4a6b84751d1808eb6356aef7aefee053a4de275e/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">PancakeswapV3Executor</a></td><td><a href="https://arbiscan.io/address/0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9" target="_blank" rel="noopener noreferrer">0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/4a6b84751d1808eb6356aef7aefee053a4de275e/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://arbiscan.io/address/0xdb696336F7A5F9048252664A3475C194dAe0e62f" target="_blank" rel="noopener noreferrer">0xdb696336F7A5F9048252664A3475C194dAe0e62f</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol" target="_blank" rel="noopener noreferrer">NativeWrapExecutor</a></td><td><a href="https://arbiscan.io/address/0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab" target="_blank" rel="noopener noreferrer">0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab</a></td></tr>
-
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://arbiscan.io/address/0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125" target="_blank" rel="noopener noreferrer">0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125</a></td></tr>
 </tbody></table>
 
 ## BSC
@@ -89,7 +123,7 @@
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">PancakeswapV3Executor</a></td><td><a href="https://bscscan.com/address/0x067fBaf88ee89DC2A4368c6DfF7237FF84522577" target="_blank" rel="noopener noreferrer">0x067fBaf88ee89DC2A4368c6DfF7237FF84522577</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://bscscan.com/address/0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed" target="_blank" rel="noopener noreferrer">0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/39c73600a1a4dd3a83b3c2d91c746a2df8f1679d/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol" target="_blank" rel="noopener noreferrer">NativeWrapExecutor</a></td><td><a href="https://bscscan.com/address/0x8c41B3842D767Bb07818E9E82fB62964910a82Ef" target="_blank" rel="noopener noreferrer">0x8c41B3842D767Bb07818E9E82fB62964910a82Ef</a></td></tr>
-
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://bscscan.com/address/0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451" target="_blank" rel="noopener noreferrer">0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451</a></td></tr>
 </tbody></table>
 
 ## Polygon
@@ -128,9 +162,10 @@
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/3eb6a5d43541403874963b712bb5941da0bdf16b/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">RobinswapV3Executor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x33E8602FeDD1215CB04c865C66648DbA5b81fb75" target="_blank" rel="noopener noreferrer">0x33E8602FeDD1215CB04c865C66648DbA5b81fb75</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/3eb6a5d43541403874963b712bb5941da0bdf16b/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">RamsesV3Executor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x33E8602FeDD1215CB04c865C66648DbA5b81fb75" target="_blank" rel="noopener noreferrer">0x33E8602FeDD1215CB04c865C66648DbA5b81fb75</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/3eb6a5d43541403874963b712bb5941da0bdf16b/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366" target="_blank" rel="noopener noreferrer">0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366</a></td></tr>
-<tr><td><a href="https://github.com/propeller-heads/tycho/blob/bc2d4db197edb210e30b63c9cb1f102d65ba419c/crates/tycho-execution/contracts/src/executors/ekubo_v3/EkuboV3RobinhoodExecutor.sol" target="_blank" rel="noopener noreferrer">EkuboV3RobinhoodExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0xBd7B2A90C550f4F620F6A64C5a39e8265Afa39F1" target="_blank" rel="noopener noreferrer">0xBd7B2A90C550f4F620F6A64C5a39e8265Afa39F1</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/bc2d4db197edb210e30b63c9cb1f102d65ba419c/crates/tycho-execution/contracts/src/executors/ekubo_v3/EkuboV3RobinhoodExecutor.sol" target="_blank" rel="noopener noreferrer">EkuboV3RobinhoodExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F" target="_blank" rel="noopener noreferrer">0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/3eb6a5d43541403874963b712bb5941da0bdf16b/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol" target="_blank" rel="noopener noreferrer">NativeWrapExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F" target="_blank" rel="noopener noreferrer">0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/22b4871b7e6cd1c26f84b27c5f1813d39e98a478/crates/tycho-execution/contracts/src/executors/MetricExecutor.sol" target="_blank" rel="noopener noreferrer">MetricExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x8C18318338915839199271e7f006BEeAdBa2Dd0E" target="_blank" rel="noopener noreferrer">0x8C18318338915839199271e7f006BEeAdBa2Dd0E</a></td></tr>
+<tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D" target="_blank" rel="noopener noreferrer">0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D</a></td></tr>
 </tbody></table>
 
 ## Router V2

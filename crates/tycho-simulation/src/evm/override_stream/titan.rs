@@ -102,7 +102,7 @@ struct AccountState {
 }
 
 /// Default Titan pAMM quote-stream WebSocket endpoint serving all known pAMM venues.
-const TITAN_URL: &str = "wss://eu.rpc.titanbuilder.xyz/ws/pamm_quote_stream";
+const TITAN_URL: &str = "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream";
 /// Environment variable that overrides the default endpoint when no custom URL is passed.
 const TITAN_URL_ENV: &str = "TITAN_PAMM_STREAM_URL";
 

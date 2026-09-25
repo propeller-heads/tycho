@@ -1,3 +1,30 @@
+## [0.427.0](https://github.com/propeller-heads/tycho/compare/0.426.0...0.427.0) (2026-09-25)
+
+
+### Features
+
+* **scripts:** read the census stream endpoint from the env ([32b1d8a](https://github.com/propeller-heads/tycho/commit/32b1d8a4529f906b536e4ffffccbff0af56aa6dd))
+* **simulation:** read the price level endpoint from an env var ([745fde2](https://github.com/propeller-heads/tycho/commit/745fde2637bf10525dcdd310d2bf6681e4f17ef3))
+
+
+### Bug Fixes
+
+* **simulation:** point the Titan pAMM streams at the data host ([1a31d09](https://github.com/propeller-heads/tycho/commit/1a31d09f0e14567a1dbc85b945054344236a4119))
+* **simulation:** point the Titan pAMM streams at the data host ([#1502](https://github.com/propeller-heads/tycho/issues/1502)) ([80ac861](https://github.com/propeller-heads/tycho/commit/80ac861dd573f1033d30c12a7e0d1235a6ba45a2))
+
+## [0.426.0](https://github.com/propeller-heads/tycho/compare/0.425.0...0.426.0) (2026-09-25)
+
+
+### Features
+
+* add versioned deployment registry ([4f89655](https://github.com/propeller-heads/tycho/commit/4f89655dfe1a5be2047e44b058e12f63cdfd3b86))
+* add versioned deployment registry ([#1477](https://github.com/propeller-heads/tycho/issues/1477)) ([438ce08](https://github.com/propeller-heads/tycho/commit/438ce085714159f4844514818bc44c2f468dc176))
+
+
+### Bug Fixes
+
+* resolve code review findings for PR [#1477](https://github.com/propeller-heads/tycho/issues/1477) ([613f259](https://github.com/propeller-heads/tycho/commit/613f2591c012dde425c7e96c0814ac0429e3e04b))
+
 ## [0.425.0](https://github.com/propeller-heads/tycho/compare/0.424.1...0.425.0) (2026-09-24)
 
 
