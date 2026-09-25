@@ -112,23 +112,10 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
     true
 }
 
-/// Oracle rate providers the hybrid `CurveState` quotes correctly, as `(oracle, method id)` pairs
-/// in lower case, matched against a pool's `oracles` and `method_ids` static attributes.
-///
-/// An entry must meet two conditions. First, the provider returns the same rate to a quote as to
-/// a swap: it does not branch on the caller or the gas price, and nobody outside the issuer can
-/// set its value. Second, DCI captures every storage slot the rate read touches, so the pool is
-/// re-emitted when the rate changes and the locally indexed rate is never stale.
-const TRUSTED_CURVE_RATE_ORACLES: [(&str, &str); 1] = [
-    // weETH `getRate()` on Ethereum: the rate is ether.fi's own share accounting. The weETH/WETH
-    // NG pool quoted wei-exact against `get_dy` over 1000 blocks, rate updates included.
-    ("0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce"),
-];
-
 /// Filters `vm:curve` components to those the hybrid `CurveState` can quote correctly.
 ///
 /// Excludes pools with rate-bearing or rebasing coins, unless every such coin is an oracle coin
-/// whose rate provider is in `TRUSTED_CURVE_RATE_ORACLES`. Such a coin prices through a per-block
+/// whose rate provider is on a trusted list. Such a coin prices through a per-block
 /// rate (an oracle, an ERC4626 vault, or an in-place rebase exposed via `stored_rates`) whose
 /// source is an external contract. The hybrid reads that rate via VM getters against the locally
 /// indexed storage. If DCI does not capture every slot the rate read touches, the hybrid gets a
@@ -189,6 +176,18 @@ fn attr_json_list_non_empty(attrs: &HashMap<String, Bytes>, key: &str) -> bool {
 /// (`"0x"`/`"0x00"` = standard; `"0x01"` oracle, `"0x02"` rebasing, `"0x03"` ERC4626). A pool
 /// without `asset_types` has only standard coins.
 fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
+    // Oracle rate providers as `(oracle, method id)` pairs, matched against the pool's `oracles`
+    // and `method_ids` static attributes. An entry must return the same rate to a quote as to a
+    // swap (no branch on the caller or the gas price, no value set from outside the issuer), and
+    // DCI must capture every storage slot the rate read touches, so the pool is re-emitted when
+    // the rate changes.
+    const TRUSTED_RATE_ORACLES: [(&str, &str); 1] = [
+        // weETH `getRate()` on Ethereum: the rate is ether.fi's own share accounting. The
+        // weETH/WETH NG pool quoted wei-exact against `get_dy` over 1000 blocks, rate updates
+        // included.
+        ("0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce"),
+    ];
+
     let Some(types) = attr_json_list(attrs, "asset_types") else {
         return false;
     };
@@ -198,27 +197,23 @@ fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
         let asset_type = entry
             .trim_start_matches("0x")
             .trim_start_matches('0');
-        match asset_type {
-            "" => {}
-            "1" if is_trusted_rate_oracle(oracles.get(index), method_ids.get(index)) => {}
-            _ => return true,
+        if asset_type.is_empty() {
+            continue;
+        }
+        let (Some(oracle), Some(method_id)) = (oracles.get(index), method_ids.get(index)) else {
+            return true;
+        };
+        let trusted = TRUSTED_RATE_ORACLES
+            .iter()
+            .any(|(trusted_oracle, trusted_method_id)| {
+                oracle.eq_ignore_ascii_case(trusted_oracle) &&
+                    method_id.eq_ignore_ascii_case(trusted_method_id)
+            });
+        if asset_type != "1" || !trusted {
+            return true;
         }
     }
     false
-}
-
-/// True when `(oracle, method_id)` is in `TRUSTED_CURVE_RATE_ORACLES`, ignoring case. A missing
-/// value is never trusted.
-fn is_trusted_rate_oracle(oracle: Option<&String>, method_id: Option<&String>) -> bool {
-    let (Some(oracle), Some(method_id)) = (oracle, method_id) else {
-        return false;
-    };
-    TRUSTED_CURVE_RATE_ORACLES
-        .iter()
-        .any(|(trusted_oracle, trusted_method_id)| {
-            oracle.eq_ignore_ascii_case(trusted_oracle) &&
-                method_id.eq_ignore_ascii_case(trusted_method_id)
-        })
 }
 
 /// Filters out ERC4626 vaults that cannot be quoted correctly.
@@ -326,60 +321,42 @@ mod tests {
         assert!(curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x00"]"#)])));
     }
 
-    #[test]
-    fn curve_excludes_untrusted_oracle_asset_type() {
-        // apyUSD/apxUSD: coin 0 is an oracle rate token with a provider outside the allowlist.
-        assert!(!curve_filter(&curve_component(&[
-            ("asset_types", r#"["0x01","0x00"]"#),
-            (
-                "oracles",
-                r#"["0x1111111111111111111111111111111111111111","0x0000000000000000000000000000000000000000"]"#
-            ),
-            ("method_ids", r#"["0x679aefce","0x00000000"]"#),
-        ])));
-        // Oracle coin without the oracle attributes.
-        assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x01","0x00"]"#)])));
+    fn oracle_pool(asset_type: &str, oracle: &str, method_id: &str) -> ComponentWithState {
+        let asset_types = format!(r#"["0x00","{asset_type}"]"#);
+        let oracles = format!(r#"["0x0000000000000000000000000000000000000000","{oracle}"]"#);
+        let method_ids = format!(r#"["0x00000000","{method_id}"]"#);
+        curve_component(&[
+            ("asset_types", asset_types.as_str()),
+            ("oracles", oracles.as_str()),
+            ("method_ids", method_ids.as_str()),
+        ])
     }
 
     #[test]
     fn curve_keeps_trusted_oracle_asset_type() {
         // weETH/WETH-ng: coin 1 prices through weETH `getRate()`. Checksummed input still matches.
-        assert!(curve_filter(&curve_component(&[
-            ("asset_types", r#"["0x00","0x01"]"#),
-            (
-                "oracles",
-                r#"["0x0000000000000000000000000000000000000000","0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee"]"#
-            ),
-            ("method_ids", r#"["0x00000000","0x679aefce"]"#),
-        ])));
+        assert!(curve_filter(&oracle_pool(
+            "0x01",
+            "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+            "0x679aefce"
+        )));
     }
 
     #[test]
-    fn curve_excludes_trusted_oracle_with_other_method() {
-        assert!(!curve_filter(&curve_component(&[
-            ("asset_types", r#"["0x00","0x01"]"#),
-            (
-                "oracles",
-                r#"["0x0000000000000000000000000000000000000000","0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee"]"#
-            ),
-            ("method_ids", r#"["0x00000000","0x12345678"]"#),
-        ])));
-    }
-
-    #[test]
-    fn curve_excludes_trusted_oracle_address_on_non_oracle_asset_type() {
-        // The allowlist covers oracle coins only: ERC4626 (0x03) and rebasing (0x02) stay out.
-        for asset_type in ["0x02", "0x03"] {
-            let asset_types = format!(r#"["0x00","{asset_type}"]"#);
-            assert!(!curve_filter(&curve_component(&[
-                ("asset_types", asset_types.as_str()),
-                (
-                    "oracles",
-                    r#"["0x0000000000000000000000000000000000000000","0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee"]"#
-                ),
-                ("method_ids", r#"["0x00000000","0x679aefce"]"#),
-            ])));
-        }
+    fn curve_excludes_untrusted_rate_coins() {
+        let weeth = "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee";
+        // Oracle outside the allowlist.
+        assert!(!curve_filter(&oracle_pool(
+            "0x01",
+            "0x1111111111111111111111111111111111111111",
+            "0x679aefce"
+        )));
+        // Trusted oracle, other method.
+        assert!(!curve_filter(&oracle_pool("0x01", weeth, "0x12345678")));
+        // The allowlist covers oracle coins only: ERC4626 stays out.
+        assert!(!curve_filter(&oracle_pool("0x03", weeth, "0x679aefce")));
+        // Oracle coin without the oracle attributes.
+        assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x01"]"#)])));
     }
 
     #[test]
