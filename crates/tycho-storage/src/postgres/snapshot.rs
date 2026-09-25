@@ -1,15 +1,19 @@
 //! One-shot read of all live state for the entity cache.
 //!
-//! Every query filters live rows directly: `valid_to = MAX_TS` on the partitioned tables,
-//! `valid_to IS NULL` on `contract_code` and `account_balance`. Versioned reads are not needed,
-//! because one live row per key is the versioning invariant, and they are much slower on tables
-//! this size. Rows are selected by a subquery, never by an id list: Postgres caps bind parameters
-//! at 65,535 and a chain can hold more components than that.
+//! Every query filters live rows directly. On the partitioned tables a live row has
+//! `valid_to = MAX_TS`. On `contract_code` and `account_balance`, and for `deleted_at` on
+//! `account` and `protocol_component`, a live row is `NULL` as written or `MAX_TS` as reopened by
+//! `revert_state`, so both count. Versioned reads are not needed, because one live row per key is
+//! the versioning invariant, and they are much slower on tables this size. Rows are selected by a
+//! subquery, never by an id list: Postgres caps bind parameters at 65,535 and a chain can hold
+//! more components than that.
 
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use diesel::{pg::Pg, sql_types::BigInt, ExpressionMethods, JoinOnDsl, QueryDsl};
+use diesel::{
+    pg::Pg, sql_types::BigInt, BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl,
+};
 use diesel_async::{
     pg::TransactionBuilder, pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt,
     AsyncPgConnection, RunQueryDsl,
@@ -31,11 +35,19 @@ use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 fn contract_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     schema::account::table
         .filter(schema::account::chain_id.eq(chain_id))
-        .filter(schema::account::deleted_at.is_null())
+        .filter(
+            schema::account::deleted_at
+                .is_null()
+                .or(schema::account::deleted_at.eq(MAX_TS)),
+        )
         .filter(
             schema::account::id.eq_any(
                 schema::contract_code::table
-                    .filter(schema::contract_code::valid_to.is_null())
+                    .filter(
+                        schema::contract_code::valid_to
+                            .is_null()
+                            .or(schema::contract_code::valid_to.eq(MAX_TS)),
+                    )
                     .select(schema::contract_code::account_id),
             ),
         )
@@ -47,7 +59,11 @@ fn contract_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigIn
 fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
     schema::protocol_component::table
         .filter(schema::protocol_component::chain_id.eq(chain_id))
-        .filter(schema::protocol_component::deleted_at.is_null())
+        .filter(
+            schema::protocol_component::deleted_at
+                .is_null()
+                .or(schema::protocol_component::deleted_at.eq(MAX_TS)),
+        )
         .select(schema::protocol_component::id)
         .into_boxed()
 }
@@ -83,7 +99,11 @@ impl PostgresGateway {
             schema::contract_code::table
                 .inner_join(schema::transaction::table.inner_join(schema::block::table))
                 .filter(schema::contract_code::account_id.eq_any(contract_ids(chain_id)))
-                .filter(schema::contract_code::valid_to.is_null())
+                .filter(
+                    schema::contract_code::valid_to
+                        .is_null()
+                        .or(schema::contract_code::valid_to.eq(MAX_TS)),
+                )
                 .select((
                     schema::contract_code::account_id,
                     schema::contract_code::code,
@@ -107,7 +127,11 @@ impl PostgresGateway {
                 .inner_join(schema::token::table.inner_join(schema::account::table))
                 .inner_join(schema::transaction::table.inner_join(schema::block::table))
                 .filter(schema::account_balance::account_id.eq_any(contract_ids(chain_id)))
-                .filter(schema::account_balance::valid_to.is_null())
+                .filter(
+                    schema::account_balance::valid_to
+                        .is_null()
+                        .or(schema::account_balance::valid_to.eq(MAX_TS)),
+                )
                 .select((
                     schema::account_balance::account_id,
                     schema::account_balance::token_id,
@@ -791,6 +815,57 @@ mod test_serial_db {
                 3,
                 "the committed slot is visible outside the snapshot"
             );
+        })
+        .await;
+    }
+
+    /// A revert reopens rows with `MAX_TS` instead of `NULL` (`revert_state`); they are live.
+    #[tokio::test]
+    async fn snapshot_reads_rows_reopened_by_a_revert_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            diesel::update(
+                schema::contract_code::table.filter(schema::contract_code::valid_to.is_null()),
+            )
+            .set(schema::contract_code::valid_to.eq(MAX_TS))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            diesel::update(
+                schema::account_balance::table.filter(schema::account_balance::valid_to.is_null()),
+            )
+            .set(schema::account_balance::valid_to.eq(MAX_TS))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            diesel::update(schema::account::table.filter(schema::account::deleted_at.is_null()))
+                .set(schema::account::deleted_at.eq(MAX_TS))
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            diesel::update(
+                schema::protocol_component::table
+                    .filter(schema::protocol_component::deleted_at.is_null()),
+            )
+            .set(schema::protocol_component::deleted_at.eq(MAX_TS))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let accounts = gw
+                .snapshot_accounts(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap();
+            let components = gw
+                .snapshot_components(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(accounts.len(), 2, "reopened code, balance and account rows are live");
+            assert_eq!(components.len(), 2, "reopened component rows are live");
         })
         .await;
     }
