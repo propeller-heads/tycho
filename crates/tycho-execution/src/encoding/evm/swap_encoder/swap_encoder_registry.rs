@@ -15,7 +15,7 @@ use crate::encoding::{
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
-            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
+            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder, flamm::FLAMMSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
@@ -210,6 +210,7 @@ impl SwapEncoderRegistry {
             "lunarbase" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "flamm" => Ok(Box::new(FLAMMSwapEncoder::new(executor_address, self.chain, config)?)),
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }

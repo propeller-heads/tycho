@@ -28,6 +28,7 @@ use tycho_simulation::{
                 balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter, erc4626_filter,
                 fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
+            flamm::{flamm_filter, FlammPoolState},
             fluid::FluidV1,
             lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
@@ -243,6 +244,7 @@ impl ProtocolStreamProcessor {
                 "aerodrome_slipstreams".to_string(),
                 "aerodrome_v1".to_string(),
                 "lunarbase".to_string(),
+                "flamm".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -452,6 +454,13 @@ impl ProtocolStreamProcessor {
             }
             "lunarbase" => {
                 stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
+            }
+            "flamm" => {
+                stream = stream.exchange::<FlammPoolState>(
+                    "flamm",
+                    tvl_filter.clone(),
+                    Some(flamm_filter),
+                );
             }
             "ring_swap_v2" => {
                 stream =

@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - 'protocols/substreams/**'
+      # base-flamm's e2e test asserts the package's own output equals this committed stream
+      # fixture, which it include_bytes! from the simulation crate
+      # (protocols/substreams/base-flamm/src/e2e_tests.rs:64-68), so a change to the fixture
+      # alone must still run that test.
+      - 'crates/tycho-simulation/src/evm/protocol/flamm/testdata/snapshots/**'
       - '!**/Cargo.lock'
   workflow_dispatch:
 
@@ -80,7 +85,11 @@ jobs:
         id: substreams-files-changed
         uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
         with:
-          files: protocols/substreams/**
+          # The second path is base-flamm's committed stream fixture, which lives in the
+          # simulation crate (see the trigger paths above).
+          files: |
+            protocols/substreams/**
+            crates/tycho-simulation/src/evm/protocol/flamm/testdata/snapshots/**
 
       - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
@@ -93,20 +102,60 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Get changed Substreams package names
+      # The shared substreams-check action greps the changed-file list for
+      # protocols/substreams/ under `set -o pipefail`, so it exits non-zero on the run this job
+      # now also triggers for: one whose only changed path is the fixture named above. Skip it
+      # then, and let the next step name the package.
+      - name: Check whether a package path changed
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
+        id: package_paths
+        shell: bash
+        env:
+          CHANGED_FILES: ${{ steps.substreams-files-changed.outputs.all_changed_files }}
+        run: |
+          any=false
+          for f in $CHANGED_FILES; do
+            case "$f" in
+              protocols/substreams/*) any=true ;;
+            esac
+          done
+          echo "any=$any" >> "$GITHUB_OUTPUT"
+
+      - name: Get changed Substreams package names
+        if: steps.package_paths.outputs.any == 'true'
         id: changed_packages
         uses: ./.github/actions/substreams-check
         with:
           changed-files: ${{ steps.substreams-files-changed.outputs.all_changed_files }}
+
+      # `substreams-check` derives package names from paths under protocols/substreams, so a
+      # change to a fixture a package reads from elsewhere in the repo names no package.
+      - name: Add packages whose tests read fixtures outside protocols/substreams
+        if: steps.substreams-files-changed.outputs.any_changed == 'true'
+        id: packages
+        shell: bash
+        env:
+          CHANGED_FILES: ${{ steps.substreams-files-changed.outputs.all_changed_files }}
+          PACKAGE_NAMES: ${{ steps.changed_packages.outputs.package_names }}
+        run: |
+          names="$PACKAGE_NAMES"
+          case " $CHANGED_FILES " in
+            *" crates/tycho-simulation/src/evm/protocol/flamm/testdata/snapshots/"*)
+              case " $names " in
+                *" base-flamm "*) ;;
+                *) names="$names base-flamm" ;;
+              esac
+              ;;
+          esac
+          echo "package_names=$names" >> "$GITHUB_OUTPUT"
 
       - name: Run tests
         if: steps.substreams-files-changed.outputs.any_changed == 'true'
         shell: bash
         run: |
           cd protocols/substreams
-          if [ -n "${{ steps.changed_packages.outputs.package_names }}" ]; then
-            for package in ${{ steps.changed_packages.outputs.package_names }}; do
+          if [ -n "${{ steps.packages.outputs.package_names }}" ]; then
+            for package in ${{ steps.packages.outputs.package_names }}; do
               echo "Running tests for package: $package"
               cargo build --package "$package" --target wasm32-unknown-unknown
               cargo test --package "$package"
