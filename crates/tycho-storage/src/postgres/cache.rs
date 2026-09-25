@@ -37,13 +37,15 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StorageError, Version,
-        WithTotal,
+        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
+        StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
 
-use super::{is_transaction_conflict, PostgresError, PostgresGateway};
+use super::{
+    is_transaction_conflict, snapshot::snapshot_transaction, PostgresError, PostgresGateway,
+};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -1316,6 +1318,34 @@ impl EntryPointGateway for CachedGateway {
 }
 
 impl Gateway for CachedGateway {}
+
+#[async_trait]
+impl StateSnapshotGateway for CachedGateway {
+    /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
+    /// result comes from the same database snapshot.
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
+        let mut conn = self.pool.get().await.map_err(|e| {
+            StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
+        })?;
+        snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots(chain, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
+    }
+}
 
 #[cfg(test)]
 mod test_serial_db {
