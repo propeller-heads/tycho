@@ -19,13 +19,17 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::protocols::hashflow::{client::HashflowClient, models::HashflowMakerLevels};
+use crate::rfq::{
+    models::QuoteRule,
+    protocols::hashflow::{client::HashflowClient, models::HashflowMakerLevels},
+};
 
 /// Hashflow's liquidity on one chain: every market maker's levels on every pair it quotes.
 ///
 /// A swap takes its quote from one market maker and marks that maker used in the state it
-/// returns. A later swap on that state takes its quote from another maker. Two firm quotes to one
-/// maker are not priced by each other, so a route never asks one maker twice.
+/// returns. What a later swap on that state may still take is the venue's [`QuoteRule`] rule:
+/// another maker, nothing, or anything. Two firm quotes to one maker are not priced by each
+/// other, so the default is another maker.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HashflowState {
     /// One entry per market maker and directed pair. The levels sell the pair's base token for
@@ -33,6 +37,7 @@ pub struct HashflowState {
     pub books: Vec<HashflowMakerLevels>,
     /// Every token a book names, by address.
     pub tokens: HashMap<Bytes, Token>,
+    pub quote_rule: QuoteRule,
     /// Market makers a swap on this state already took a quote from. Empty as streamed.
     pub used_market_makers: HashSet<String>,
     pub client: HashflowClient,
@@ -43,6 +48,7 @@ impl fmt::Debug for HashflowState {
         f.debug_struct("HashflowState")
             .field("books", &self.books.len())
             .field("tokens", &self.tokens.len())
+            .field("quote_rule", &self.quote_rule)
             .field("used_market_makers", &self.used_market_makers)
             .finish_non_exhaustive()
     }
@@ -60,9 +66,10 @@ impl HashflowState {
     pub fn new(
         books: Vec<HashflowMakerLevels>,
         tokens: HashMap<Bytes, Token>,
+        quote_rule: QuoteRule,
         client: HashflowClient,
     ) -> Self {
-        Self { books, tokens, used_market_makers: HashSet::new(), client }
+        Self { books, tokens, quote_rule, used_market_makers: HashSet::new(), client }
     }
 
     fn token(&self, address: &Bytes) -> Result<&Token, SimulationError> {
@@ -72,10 +79,9 @@ impl HashflowState {
     }
 
     /// The books a swap of `token_in` for `token_out` may take a quote from: the pair's books
-    /// with levels, from market makers this state has not used.
+    /// with levels, less what the reuse rule withholds after the makers this state has used.
     ///
-    /// A pair no book names is an invalid input. A pair whose books are all used or empty has no
-    /// liquidity.
+    /// A pair no book names is an invalid input. A pair with no book left has no liquidity.
     fn offers(
         &self,
         token_in: &Bytes,
@@ -88,10 +94,14 @@ impl HashflowState {
                 continue;
             }
             quoted = true;
-            if book.levels.is_empty() ||
-                self.used_market_makers
-                    .contains(&book.market_maker)
-            {
+            let withheld = match self.quote_rule {
+                QuoteRule::OncePerMaker => self
+                    .used_market_makers
+                    .contains(&book.market_maker),
+                QuoteRule::OncePerVenue => !self.used_market_makers.is_empty(),
+                QuoteRule::None => false,
+            };
+            if book.levels.is_empty() || withheld {
                 continue;
             }
             offers.push(book);
@@ -341,6 +351,7 @@ mod tests {
             "".to_string(),
             Duration::from_secs(0),
             Duration::from_secs(30),
+            QuoteRule::OncePerMaker,
         )
         .unwrap()
     }
@@ -364,20 +375,21 @@ mod tests {
         }
     }
 
-    /// Two makers on WETH/USDC and one on WBTC/USDC. `mm_b` pays more for a small amount and
-    /// runs out at 2 WETH; `mm_a` holds 7 WETH.
+    /// Two makers on WETH/USDC and one on WBTC/USDC. `test_mm_2` pays more for a small amount and
+    /// runs out at 2 WETH; `test_mm` holds 7 WETH.
     fn create_test_hashflow_state() -> HashflowState {
         HashflowState::new(
             vec![
-                book("mm_a", &weth(), &usdc(), &[(0.5, 3000.0), (1.5, 3000.0), (5.0, 2999.0)]),
-                book("mm_b", &weth(), &usdc(), &[(0.5, 3010.0), (1.5, 2990.0)]),
-                book("mm_a", &wbtc(), &usdc(), &[(1.0, 65000.0)]),
+                book("test_mm", &weth(), &usdc(), &[(0.5, 3000.0), (1.5, 3000.0), (5.0, 2999.0)]),
+                book("test_mm_2", &weth(), &usdc(), &[(0.5, 3010.0), (1.5, 2990.0)]),
+                book("test_mm", &wbtc(), &usdc(), &[(1.0, 65000.0)]),
             ],
             HashMap::from([
                 (weth().address, weth()),
                 (usdc().address, usdc()),
                 (wbtc().address, wbtc()),
             ]),
+            QuoteRule::OncePerMaker,
             empty_hashflow_client(),
         )
     }
@@ -409,7 +421,7 @@ mod tests {
             let mut state = create_test_hashflow_state();
             state
                 .used_market_makers
-                .insert("mm_b".to_string());
+                .insert("test_mm_2".to_string());
             assert_eq!(
                 state
                     .spot_price(&weth(), &usdc())
@@ -430,7 +442,8 @@ mod tests {
         #[test]
         fn every_maker_used() {
             let mut state = create_test_hashflow_state();
-            state.used_market_makers = HashSet::from(["mm_a".to_string(), "mm_b".to_string()]);
+            state.used_market_makers =
+                HashSet::from(["test_mm".to_string(), "test_mm_2".to_string()]);
             let result = state.spot_price(&weth(), &usdc());
             assert!(
                 matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
@@ -444,7 +457,7 @@ mod tests {
         #[test]
         fn best_paying_maker() {
             let state = create_test_hashflow_state();
-            // mm_b: 0.5 * 3010 = 1505. mm_a: 0.5 * 3000 = 1500.
+            // test_mm_2: 0.5 * 3010 = 1505. test_mm: 0.5 * 3000 = 1500.
             let result = state
                 .get_amount_out(weth_amount(0.5), &weth(), &usdc())
                 .unwrap();
@@ -463,12 +476,12 @@ mod tests {
                 .as_any()
                 .downcast_ref::<HashflowState>()
                 .unwrap();
-            assert_eq!(after_first.used_market_makers, HashSet::from(["mm_b".to_string()]));
+            assert_eq!(after_first.used_market_makers, HashSet::from(["test_mm_2".to_string()]));
 
             let second = after_first
                 .get_amount_out(weth_amount(0.5), &weth(), &usdc())
                 .unwrap();
-            assert_eq!(second.amount, usdc_amount(1500.0), "the second swap goes to mm_a");
+            assert_eq!(second.amount, usdc_amount(1500.0), "the second swap goes to test_mm");
             let after_second = second
                 .new_state
                 .as_any()
@@ -476,7 +489,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 after_second.used_market_makers,
-                HashSet::from(["mm_a".to_string(), "mm_b".to_string()])
+                HashSet::from(["test_mm".to_string(), "test_mm_2".to_string()])
             );
         }
 
@@ -485,7 +498,7 @@ mod tests {
             let mut state = create_test_hashflow_state();
             state
                 .used_market_makers
-                .insert("mm_a".to_string());
+                .insert("test_mm".to_string());
             let result = state.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc());
             assert!(
                 matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
@@ -493,9 +506,39 @@ mod tests {
         }
 
         #[test]
+        fn once_per_venue() {
+            let mut state = create_test_hashflow_state();
+            state.quote_rule = QuoteRule::OncePerVenue;
+            let first = state
+                .get_amount_out(weth_amount(0.5), &weth(), &usdc())
+                .unwrap();
+            let second =
+                first
+                    .new_state
+                    .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc());
+            assert!(
+                matches!(second, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+            );
+        }
+
+        #[test]
+        fn without_rule() {
+            let mut state = create_test_hashflow_state();
+            state.quote_rule = QuoteRule::None;
+            let first = state
+                .get_amount_out(weth_amount(0.5), &weth(), &usdc())
+                .unwrap();
+            let second = first
+                .new_state
+                .get_amount_out(weth_amount(0.5), &weth(), &usdc())
+                .unwrap();
+            assert_eq!(second.amount, usdc_amount(1505.0), "test_mm_2 quotes again");
+        }
+
+        #[test]
         fn full_fill_beats_partial_fill() {
             let state = create_test_hashflow_state();
-            // mm_b fills 2 of 3 WETH at better prices; mm_a fills all 3:
+            // test_mm_2 fills 2 of 3 WETH at better prices; test_mm fills all 3:
             // 0.5 * 3000 + 1.5 * 3000 + 1.0 * 2999 = 8999.
             let result = state
                 .get_amount_out(weth_amount(3.0), &weth(), &usdc())
@@ -540,7 +583,7 @@ mod tests {
             let (sell_limit, buy_limit) = state
                 .get_limits(weth().address, usdc().address)
                 .unwrap();
-            // mm_a: 7 WETH for 20995 USDC. mm_b: 2 WETH for 1505 + 4485 = 5990 USDC.
+            // test_mm: 7 WETH for 20995 USDC. test_mm_2: 2 WETH for 1505 + 4485 = 5990 USDC.
             assert_eq!(sell_limit, weth_amount(9.0));
             assert_eq!(buy_limit, usdc_amount(26985.0));
         }
@@ -550,7 +593,7 @@ mod tests {
             let mut state = create_test_hashflow_state();
             state
                 .used_market_makers
-                .insert("mm_b".to_string());
+                .insert("test_mm_2".to_string());
             let (sell_limit, buy_limit) = state
                 .get_limits(weth().address, usdc().address)
                 .unwrap();
@@ -573,7 +616,7 @@ mod tests {
         let state = create_test_hashflow_state();
         let mut used = state.clone();
         used.used_market_makers
-            .insert("mm_a".to_string());
+            .insert("test_mm".to_string());
         assert!(state.eq(&state.clone()));
         assert!(!state.eq(&used));
     }

@@ -13,6 +13,15 @@ pub struct LiquoricePriceLevelsResponse {
 }
 
 /// A market maker's pricing for a token pair with price levels
+/// One market maker's levels on one directed pair, as the venue state and its component
+/// attribute carry them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiquoriceMakerLevels {
+    #[serde(rename = "mm")]
+    pub market_maker: String,
+    pub price: LiquoriceTokenPairPrice,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiquoriceTokenPairPrice {
     #[serde(rename = "baseToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]

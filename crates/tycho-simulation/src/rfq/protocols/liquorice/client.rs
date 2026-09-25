@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,10 +27,10 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{QuoteRule, TimestampHeader},
         protocols::liquorice::models::{
-            LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
-            LiquoriceTokenPairPrice,
+            LiquoriceMakerLevels, LiquoricePriceLevelsResponse, LiquoriceQuoteRequest,
+            LiquoriceQuoteResponse, LiquoriceTokenPairPrice,
         },
     },
     tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
@@ -60,6 +60,9 @@ pub struct LiquoriceClient {
     /// `Authorization: Basic base64(solver:key)`, legacy accounts use the
     /// separate `solver` + `authorization` headers. We start with Basic and
     /// permanently fall back to the legacy scheme if it returns 401.
+    /// How often one route may take quotes from Liquorice.
+    #[serde(default)]
+    quote_rule: QuoteRule,
     #[serde(skip)]
     use_legacy_auth: Arc<AtomicBool>,
 }
@@ -78,6 +81,7 @@ impl LiquoriceClient {
         poll_time: Duration,
         quote_timeout: Duration,
         quote_expiry_secs: u64,
+        quote_rule: QuoteRule,
     ) -> Result<Self, RFQError> {
         Ok(Self {
             chain,
@@ -91,6 +95,7 @@ impl LiquoriceClient {
             poll_time,
             quote_timeout,
             quote_expiry_secs,
+            quote_rule,
             use_legacy_auth: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -162,39 +167,114 @@ impl LiquoriceClient {
         Ok(0.0)
     }
 
-    fn create_component_with_state(
+    /// The id of this chain's venue component. One per chain, for the venue's life.
+    pub fn component_id(&self) -> String {
+        format!("{}", keccak256(format!("liquorice_{}", self.chain.id()).as_bytes()))
+    }
+
+    /// The venue component for one poll: every market maker's levels on every pair whose tokens
+    /// are indexed and whose TVL clears the threshold. `None` when no book clears it.
+    ///
+    /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
+    /// attribute lists the directed pairs that have a book, 40 bytes each (base then quote). Its
+    /// `quote_rule` static attribute is the reuse rule. Its `books` state attribute is the books
+    /// as JSON, sorted by maker, base and quote.
+    fn venue_component(
         &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        prices_by_mm: &HashMap<String, LiquoriceTokenPairPrice>,
-        tvl: f64,
-    ) -> ComponentWithState {
+        prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for (mm_name, token_pair_prices) in prices_by_mm {
+            for token_pair_price in token_pair_prices {
+                let base_token = &token_pair_price.base_token;
+                let quote_token = &token_pair_price.quote_token;
+                if !self.tokens.contains(base_token) || !self.tokens.contains(quote_token) {
+                    continue;
+                }
+                let normalized_tvl = self.normalize_tvl(
+                    token_pair_price.calculate_tvl(),
+                    quote_token.clone(),
+                    prices_by_mm,
+                )?;
+                if normalized_tvl < self.tvl {
+                    info!(
+                        "Filtering out {mm_name} on {base_token}/{quote_token} due to low TVL: {:.2} < {:.2}",
+                        normalized_tvl, self.tvl
+                    );
+                    continue;
+                }
+                tvl += normalized_tvl;
+                books.push(LiquoriceMakerLevels {
+                    market_maker: mm_name.clone(),
+                    price: token_pair_price.clone(),
+                });
+            }
+        }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| {
+            (&a.market_maker, &a.price.base_token, &a.price.quote_token).cmp(&(
+                &b.market_maker,
+                &b.price.base_token,
+                &b.price.quote_token,
+            ))
+        });
+
+        let mut tokens = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
+        for book in &books {
+            tokens.insert(book.price.base_token.clone());
+            tokens.insert(book.price.quote_token.clone());
+            pairs.insert((book.price.base_token.clone(), book.price.quote_token.clone()));
+        }
+        let mut pairs_attribute = Vec::with_capacity(pairs.len() * 40);
+        for (base_token, quote_token) in &pairs {
+            pairs_attribute.extend_from_slice(base_token);
+            pairs_attribute.extend_from_slice(quote_token);
+        }
+
+        let component_id = self.component_id();
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
             protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
             protocol_type_name: "liquorice_pool".to_string(),
             chain: self.chain,
-            tokens,
+            tokens: tokens.into_iter().collect(),
             contract_addresses: vec![],
+            static_attributes: HashMap::from([
+                ("pairs".to_string(), pairs_attribute.into()),
+                (
+                    QuoteRule::ATTRIBUTE.to_string(),
+                    self.quote_rule
+                        .as_str()
+                        .as_bytes()
+                        .to_vec()
+                        .into(),
+                ),
+            ]),
             ..Default::default()
         };
 
-        let mut attributes = HashMap::new();
+        let books_json = serde_json::to_vec(&books).map_err(|e| {
+            RFQError::ParsingError(format!("Failed to serialize Liquorice books: {e}"))
+        })?;
+        let attributes = HashMap::from([("books".to_string(), books_json.into())]);
 
-        let prices_json = serde_json::to_string(&prices_by_mm).unwrap_or_default();
-        attributes.insert("prices".to_string(), prices_json.as_bytes().to_vec().into());
-
-        ComponentWithState {
+        Ok(Some(ComponentWithState {
             state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
             component: protocol_component,
             component_tvl: Some(tvl),
             entrypoints: vec![],
-        }
+        }))
     }
 
+    /// The best valid level of the response, from `market_maker` alone when one is named.
     fn process_quote_response(
         quote_response: LiquoriceQuoteResponse,
         params: &GetAmountOutParams,
+        market_maker: Option<&str>,
     ) -> Result<SignedQuote, RFQError> {
         if !quote_response.liquidity_available {
             debug!(quote_response = ?quote_response, "Liquorice quote response indicates no liquidity");
@@ -211,6 +291,7 @@ impl LiquoriceClient {
             .levels
             .iter()
             .filter(|level| level.validate(params).is_ok())
+            .filter(|level| market_maker.is_none_or(|maker| level.maker == maker))
             .filter_map(|level| {
                 BigUint::from_str(&level.quote_token_amount)
                     .ok()
@@ -343,7 +424,7 @@ impl RFQClient for LiquoriceClient {
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_component: Option<ProtocolComponent> = None;
             let mut ticker = interval(client.poll_time);
 
             info!("Starting Liquorice price levels polling every {} seconds", client.poll_time.as_secs());
@@ -354,76 +435,27 @@ impl RFQClient for LiquoriceClient {
 
                 match client.fetch_price_levels().await {
                     Ok(prices_by_mm) => {
-                        let mut new_components = HashMap::new();
-
-                        // Group qualifying MMs by token pair
-                        struct PricesWithTvl {
-                            // MM name -> price levels for the token pair
-                            mm_prices: HashMap<String, LiquoriceTokenPairPrice>,
-                            // The highest TVL among MMs for this token pair, used as the component's TVL
-                            tvl: f64,
-                        }
-                        let mut pair_mm_prices: HashMap<(Bytes, Bytes), PricesWithTvl> = HashMap::new();
-
                         info!("Fetched price levels from {} market makers", prices_by_mm.len());
-                        for (mm_name, token_pair_prices) in prices_by_mm.iter() {
-                            for token_pair_price in token_pair_prices {
-                                let base_token = &token_pair_price.base_token;
-                                let quote_token = &token_pair_price.quote_token;
-
-                                if !client.tokens.contains(base_token) || !client.tokens.contains(quote_token) {
-                                    continue;
+                        let mut states = HashMap::new();
+                        let mut removed_components = HashMap::new();
+                        match client.venue_component(&prices_by_mm)? {
+                            Some(component_with_state) => {
+                                current_component = Some(component_with_state.component.clone());
+                                states.insert(component_with_state.component.id.clone(), component_with_state);
+                            }
+                            // The venue lost its last book, so the component leaves the market.
+                            None => {
+                                if let Some(component) = current_component.take() {
+                                    removed_components.insert(component.id.clone(), component);
                                 }
-
-                                let tvl = token_pair_price.calculate_tvl();
-                                let normalized_tvl = client.normalize_tvl(
-                                    tvl,
-                                    token_pair_price.quote_token.clone(),
-                                    &prices_by_mm,
-                                )?;
-
-                                if normalized_tvl < client.tvl {
-                                    info!("Filtering out MM {} for pair {}/{} due to low TVL: {:.2} < {:.2}",
-                                          mm_name, hex::encode(base_token), hex::encode(quote_token),
-                                          normalized_tvl, client.tvl);
-                                    continue;
-                                }
-
-                                let entry = pair_mm_prices
-                                    .entry((base_token.clone(), quote_token.clone()))
-                                    .or_insert_with(|| PricesWithTvl { mm_prices: HashMap::new(), tvl: f64::NEG_INFINITY });
-                                entry.tvl = entry.tvl.max(normalized_tvl);
-                                entry.mm_prices.insert(mm_name.clone(), token_pair_price.clone());
                             }
                         }
 
-                        for ((base_token, quote_token), PricesWithTvl { mm_prices, tvl: component_tvl }) in pair_mm_prices {
-                            let pair_str = format!("liquorice_{}/{}", hex::encode(&base_token), hex::encode(&quote_token));
-                            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-
-                            let tokens = vec![base_token, quote_token];
-
-                            let component_with_state = client.create_component_with_state(
-                                component_id.clone(),
-                                tokens,
-                                &mm_prices,
-                                component_tvl,
-                            );
-                            new_components.insert(component_id, component_with_state);
-                        }
-
-                        let removed_components: HashMap<String, ProtocolComponent> = current_components
-                            .iter()
-                            .filter(|&(id, _)| !new_components.contains_key(id))
-                            .map(|(k, v)| (k.clone(), v.component.clone()))
-                            .collect();
-
-                        current_components = new_components.clone();
-
                         let snapshot = Snapshot {
-                            states: new_components,
+                            states,
                             vm_storage: HashMap::new(),
                         };
+
                         let timestamp = SystemTime::now().duration_since(
                             SystemTime::UNIX_EPOCH
                         ).map_err(
@@ -451,6 +483,18 @@ impl RFQClient for LiquoriceClient {
     async fn request_binding_quote(
         &self,
         params: &GetAmountOutParams,
+    ) -> Result<SignedQuote, RFQError> {
+        self.request_binding_quote_from(params, None)
+            .await
+    }
+}
+
+impl LiquoriceClient {
+    /// Requests a firm quote and takes the level of `market_maker` alone when one is named.
+    pub async fn request_binding_quote_from(
+        &self,
+        params: &GetAmountOutParams,
+        market_maker: Option<&str>,
     ) -> Result<SignedQuote, RFQError> {
         let expiry = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -593,7 +637,7 @@ impl RFQClient for LiquoriceClient {
                 }
             };
 
-            return Self::process_quote_response(quote_response, params);
+            return Self::process_quote_response(quote_response, params, market_maker);
         }
 
         Err(last_error.unwrap_or_else(|| {
@@ -673,6 +717,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(5),
             300,
+            QuoteRule::OncePerMaker,
         )
         .unwrap()
     }
@@ -729,6 +774,7 @@ mod tests {
             poll_time: Duration::from_secs(0),
             quote_timeout,
             quote_expiry_secs: 300,
+            quote_rule: QuoteRule::OncePerMaker,
             use_legacy_auth: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -781,7 +827,7 @@ mod tests {
             "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
             1_000_000_000_000_000_000,
         );
-        let result = LiquoriceClient::process_quote_response(response, &params);
+        let result = LiquoriceClient::process_quote_response(response, &params, None);
         assert!(
             matches!(result, Err(RFQError::QuoteNotFound(_))),
             "expected QuoteNotFound, got {:?}",
@@ -816,7 +862,7 @@ mod tests {
         };
         let params = make_params(token_in, token_out, amount_in);
 
-        let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
+        let quote = LiquoriceClient::process_quote_response(response, &params, None).unwrap();
 
         // partial_fill_offset: 4-byte big-endian encoding of 68
         let offset_bytes = quote.quote_attributes["partial_fill_offset"].clone();
@@ -854,8 +900,101 @@ mod tests {
         };
         let params = make_params(token_in, token_out, amount_in);
 
-        let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
+        let quote = LiquoriceClient::process_quote_response(response, &params, None).unwrap();
         assert_eq!(quote.amount_out, BigUint::from(3_500_000u64));
+    }
+
+    #[test]
+    fn test_process_quote_response_named_maker() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+        let amount_in = 1_000_000_000_000_000_000u64;
+        let mut other_maker =
+            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
+        other_maker.maker = "other-maker".to_string();
+        let named_maker =
+            make_quote_level(token_in, token_out, &amount_in.to_string(), "3000000", None);
+        let response = LiquoriceQuoteResponse {
+            rfq_id: "r1".to_string(),
+            liquidity_available: true,
+            levels: vec![other_maker, named_maker],
+        };
+        let params = make_params(token_in, token_out, amount_in);
+
+        let quote =
+            LiquoriceClient::process_quote_response(response.clone(), &params, Some("test-maker"))
+                .unwrap();
+        assert_eq!(quote.amount_out, BigUint::from(3_000_000u64), "the named maker's level wins");
+
+        let missing = LiquoriceClient::process_quote_response(response, &params, Some("absent"));
+        assert!(matches!(missing, Err(RFQError::QuoteNotFound(_))));
+    }
+
+    fn levels(base: &Bytes, quote: &Bytes, levels: &[(f64, f64)]) -> LiquoriceTokenPairPrice {
+        LiquoriceTokenPairPrice {
+            base_token: base.clone(),
+            quote_token: quote.clone(),
+            levels: levels
+                .iter()
+                .map(|&(price, quantity)| LiquoricePriceLevel { price, quantity })
+                .collect(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn test_venue_component() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let mut client =
+            create_test_liquorice_client("http://unused/rfq".to_string(), Duration::from_secs(1));
+        client.tokens = HashSet::from([weth.clone(), wbtc.clone(), usdc.clone()]);
+        client.quote_tokens = HashSet::from([usdc.clone()]);
+        client.tvl = 100.0;
+        let prices_by_mm = HashMap::from([
+            (
+                "mm_b".to_string(),
+                vec![
+                    levels(&weth, &usdc, &[(3000.0, 1.0)]),
+                    levels(&wbtc, &usdc, &[(65.0, 0.001)]),
+                ],
+            ),
+            ("mm_a".to_string(), vec![levels(&weth, &usdc, &[(3000.0, 2.0)])]),
+        ]);
+
+        let component = client
+            .venue_component(&prices_by_mm)
+            .unwrap()
+            .expect("two books clear the threshold");
+
+        assert_eq!(component.component.id, client.component_id());
+        assert_eq!(component.component_tvl, Some(9000.0), "the WBTC book is below the threshold");
+        let mut expected_tokens = vec![weth.clone(), usdc.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        let mut expected_pairs = weth.to_vec();
+        expected_pairs.extend_from_slice(&usdc);
+        assert_eq!(component.component.static_attributes["pairs"].to_vec(), expected_pairs);
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_maker"
+        );
+        let books: Vec<LiquoriceMakerLevels> =
+            serde_json::from_slice(&component.state.attributes["books"]).unwrap();
+        assert_eq!(books.len(), 2);
+        assert_eq!(books[0].market_maker, "mm_a", "books are sorted by maker");
+        assert_eq!(books[0].price.levels[0].quantity, 2.0);
+        assert_eq!(books[1].market_maker, "mm_b");
+
+        assert!(client
+            .venue_component(&HashMap::from([(
+                "mm_a".to_string(),
+                vec![levels(&wbtc, &usdc, &[(65.0, 0.001)])],
+            )]))
+            .unwrap()
+            .is_none());
     }
 
     fn create_test_quote_params() -> GetAmountOutParams {

@@ -17,34 +17,76 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::QuoteRule,
     protocols::bebop::{client::BebopClient, models::BebopPriceData},
 };
 
+/// Bebop's liquidity on one chain: one book per pair, bids and asks in one entry.
+///
+/// Bebop names no market maker and picks the makers behind a firm quote itself, so the state
+/// tracks the venue as a whole: under [`QuoteRule::OncePerVenue`] a swap marks the state used
+/// and a later swap on that state finds no liquidity.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BebopState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub price_data: BebopPriceData,
+    /// One entry per pair. Bids sell the pair's base token, asks buy it.
+    pub books: Vec<BebopPriceData>,
+    /// Every token a book names, by address.
+    pub tokens: HashMap<Bytes, Token>,
+    pub quote_rule: QuoteRule,
+    /// Whether a swap on this state already took Bebop's quote.
+    pub used: bool,
     pub client: BebopClient,
 }
 
 impl fmt::Debug for BebopState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BebopState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
+            .field("books", &self.books.len())
+            .field("tokens", &self.tokens.len())
+            .field("quote_rule", &self.quote_rule)
+            .field("used", &self.used)
             .finish_non_exhaustive()
     }
 }
 
 impl BebopState {
     pub fn new(
-        base_token: Token,
-        quote_token: Token,
-        price_data: BebopPriceData,
+        books: Vec<BebopPriceData>,
+        tokens: HashMap<Bytes, Token>,
+        quote_rule: QuoteRule,
         client: BebopClient,
     ) -> Self {
-        BebopState { base_token, quote_token, price_data, client }
+        BebopState { books, tokens, quote_rule, used: false, client }
+    }
+
+    /// Whether this state may still quote under its reuse rule.
+    fn available(&self) -> bool {
+        !(self.used && self.quote_rule == QuoteRule::OncePerVenue)
+    }
+
+    /// The book that trades `token_in` for `token_out`, and whether that sells its base token.
+    fn book(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<(&BebopPriceData, bool), SimulationError> {
+        for book in &self.books {
+            if book.base == token_in.as_ref() && book.quote == token_out.as_ref() {
+                return Ok((book, true));
+            }
+            if book.base == token_out.as_ref() && book.quote == token_in.as_ref() {
+                return Ok((book, false));
+            }
+        }
+        Err(SimulationError::RecoverableError(format!(
+            "Invalid token addresses: {token_in}, {token_out}"
+        )))
+    }
+
+    fn token(&self, address: &Bytes) -> Result<&Token, SimulationError> {
+        self.tokens.get(address).ok_or_else(|| {
+            SimulationError::RecoverableError(format!("Bebop does not quote token {address}"))
+        })
     }
 }
 
@@ -55,15 +97,17 @@ impl ProtocolSim for BebopState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        if !self.available() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
+        let (book, sell_base) = self.book(&base.address, &quote.address)?;
         // Since this method does not care about sell direction, we average the price of the best
         // bid and ask
-        let best_bid = self
-            .price_data
+        let best_bid = book
             .get_bids()
             .first()
             .map(|(price, _)| *price);
-        let best_ask = self
-            .price_data
+        let best_ask = book
             .get_asks()
             .first()
             .map(|(price, _)| *price);
@@ -78,19 +122,11 @@ impl ProtocolSim for BebopState {
             }
         };
 
-        // If the base/quote token addresses are the opposite of the pool tokens, we need to invert
-        // the price
-        if base.address == self.quote_token.address && quote.address == self.base_token.address {
-            Ok(1.0 / average_price)
-        } else if quote.address == self.quote_token.address &&
-            base.address == self.base_token.address
-        {
+        // The book prices its base token in its quote token, so the other direction inverts.
+        if sell_base {
             Ok(average_price)
         } else {
-            Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                base.address, quote.address
-            )))
+            Ok(1.0 / average_price)
         }
     }
 
@@ -100,24 +136,18 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let sell_base = if token_in == &self.base_token && token_out == &self.quote_token {
-            true
-        } else if token_in == &self.quote_token && token_out == &self.base_token {
-            false
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                token_in.address, token_out.address
-            )));
-        };
+        if !self.available() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
+        let (book, sell_base) = self.book(&token_in.address, &token_out.address)?;
+
         // if sell base is true -> use bids
         // if sell base is false -> use asks AND amount is in quote token so the levels need to be
         // adjusted
         let price_levels = if sell_base {
-            self.price_data.get_bids()
+            book.get_bids()
         } else {
-            self.price_data
-                .get_asks()
+            book.get_asks()
                 .iter()
                 .map(|(price, size)| (1.0 / price, price * size))
                 .collect()
@@ -130,16 +160,18 @@ impl ProtocolSim for BebopState {
         let amount_in = amount_in.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10f64.powi(token_in.decimals as i32);
-        let (amount_out, remaining_amount_in) = self
-            .price_data
-            .get_amount_out_from_levels(amount_in, price_levels);
+        let (amount_out, remaining_amount_in) =
+            book.get_amount_out_from_levels(amount_in, price_levels);
+
+        let mut new_state = self.clone();
+        new_state.used = true;
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
                 .ok_or_else(|| {
                     SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
                 })?,
             gas: BigUint::from(70_000u64), // Rough gas estimation
-            new_state: self.clone_box(),   // The state doesn't change after a swap
+            new_state: Box::new(new_state),
         };
 
         if remaining_amount_in > 0.0 {
@@ -147,7 +179,6 @@ impl ProtocolSim for BebopState {
                 format!("Pool has not enough liquidity to support complete swap. input amount: {amount_in}, consumed amount: {}", amount_in-remaining_amount_in),
                 Some(res)));
         }
-
         Ok(res)
     }
 
@@ -156,22 +187,16 @@ impl ProtocolSim for BebopState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        let (book, sell_base) = self.book(&sell_token, &buy_token)?;
+        let sell_decimals = self.token(&sell_token)?.decimals;
+        let buy_decimals = self.token(&buy_token)?.decimals;
+
         // If selling BASE for QUOTE, we need to look at [BASE/QUOTE].bids
         // If buying BASE with QUOTE, we need to look at [BASE/QUOTE].asks
-        let (sell_decimals, buy_decimals, price_levels) = if sell_token == self.base_token.address &&
-            buy_token == self.quote_token.address
-        {
-            (self.base_token.decimals, self.quote_token.decimals, self.price_data.get_bids())
-        } else if buy_token == self.base_token.address && sell_token == self.quote_token.address {
-            (self.quote_token.decimals, self.base_token.decimals, self.price_data.get_asks())
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {sell_token}, {buy_token}"
-            )));
-        };
+        let price_levels = if sell_base { book.get_bids() } else { book.get_asks() };
 
-        // If there are no price levels, return 0 for both limits
-        if price_levels.is_empty() {
+        // A used venue and an empty book alike hold nothing to sell.
+        if price_levels.is_empty() || !self.available() {
             return Ok((BigUint::from(0u64), BigUint::from(0u64)));
         }
 
@@ -184,17 +209,15 @@ impl ProtocolSim for BebopState {
             .map(|(price, amount)| price * amount)
             .sum();
 
-        let (total_sell_amount, total_buy_amount) =
-            if sell_token == self.base_token.address && buy_token == self.quote_token.address {
-                (total_base_amount, total_quote_amount)
-            } else {
-                (total_quote_amount, total_base_amount)
-            };
+        let (total_sell_amount, total_buy_amount) = if sell_base {
+            (total_base_amount, total_quote_amount)
+        } else {
+            (total_quote_amount, total_base_amount)
+        };
 
         let sell_limit =
             BigUint::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
         let buy_limit = BigUint::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
-
         Ok((sell_limit, buy_limit))
     }
 
@@ -224,9 +247,7 @@ impl ProtocolSim for BebopState {
             .as_any()
             .downcast_ref::<BebopState>()
         {
-            self.base_token == other_state.base_token &&
-                self.quote_token == other_state.quote_token &&
-                self.price_data == other_state.price_data
+            self.books == other_state.books && self.used == other_state.used
         } else {
             false
         }
@@ -310,41 +331,57 @@ mod tests {
             None,
             None,
             None,
+            QuoteRule::OncePerVenue,
         )
         .unwrap()
     }
 
-    fn create_test_bebop_state() -> BebopState {
-        BebopState {
-            base_token: wbtc(),
-            quote_token: usdc(),
-            price_data: BebopPriceData {
-                base: hex::decode("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(), // WBTC
-                quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
-                last_update_ts: 1703097600,
-                bids: vec![65000.0f32, 1.5f32, 64950.0f32, 2.0f32, 64900.0f32, 0.5f32],
-                asks: vec![65100.0f32, 1.0f32, 65150.0f32, 2.5f32, 65200.0f32, 1.5f32],
-            },
-            client: empty_bebop_client(),
+    fn book(base: &Token, quote: &Token, bids: &[f32], asks: &[f32]) -> BebopPriceData {
+        BebopPriceData {
+            base: base.address.to_vec(),
+            quote: quote.address.to_vec(),
+            last_update_ts: 1703097600,
+            bids: bids.to_vec(),
+            asks: asks.to_vec(),
         }
+    }
+
+    /// WBTC/USDC and WETH/USDC books, quoted once per route.
+    fn create_test_bebop_state() -> BebopState {
+        BebopState::new(
+            vec![
+                book(
+                    &wbtc(),
+                    &usdc(),
+                    &[65000.0, 1.5, 64950.0, 2.0, 64900.0, 0.5],
+                    &[65100.0, 1.0, 65150.0, 2.5, 65200.0, 1.5],
+                ),
+                book(&weth(), &usdc(), &[3000.0, 2.0, 2900.0, 2.5], &[3100.0, 1.5, 3000.0, 3.0]),
+            ],
+            HashMap::from([
+                (wbtc().address, wbtc()),
+                (usdc().address, usdc()),
+                (weth().address, weth()),
+            ]),
+            QuoteRule::OncePerVenue,
+            empty_bebop_client(),
+        )
     }
 
     #[test]
     fn test_spot_price_matching_base_and_quote() {
         let state = create_test_bebop_state();
-
-        // Test WBTC/USDC (base/quote) - should use average of best bid and ask
-        let price = state
-            .spot_price(&wbtc(), &usdc())
-            .unwrap();
-        assert_eq!(price, 65050.0);
+        assert_eq!(
+            state
+                .spot_price(&wbtc(), &usdc())
+                .unwrap(),
+            65050.0
+        );
     }
 
     #[test]
     fn test_spot_price_inverted_base_and_quote() {
         let state = create_test_bebop_state();
-
-        // Test USDC/WBTC (quote/base) - should use average of best bid and ask, then invert
         let price = state
             .spot_price(&usdc(), &wbtc())
             .unwrap();
@@ -355,104 +392,88 @@ mod tests {
     #[test]
     fn test_spot_price_empty_asks() {
         let mut state = create_test_bebop_state();
-        state.price_data.asks = vec![]; // Remove all asks
-
-        // Test WBTC/USDC with no asks - should use only best bid
-        let price = state
-            .spot_price(&wbtc(), &usdc())
-            .unwrap();
-        assert_eq!(price, 65000.0);
+        state.books[0].asks = vec![];
+        assert_eq!(
+            state
+                .spot_price(&wbtc(), &usdc())
+                .unwrap(),
+            65000.0
+        );
     }
 
     #[test]
     fn test_spot_price_empty_bids() {
         let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-                                        // Test WBTC/USDC with no bids - should use only best ask
-        let price = state
-            .spot_price(&wbtc(), &usdc())
-            .unwrap();
-        assert_eq!(price, 65100.0);
+        state.books[0].bids = vec![];
+        assert_eq!(
+            state
+                .spot_price(&wbtc(), &usdc())
+                .unwrap(),
+            65100.0
+        );
     }
 
     #[test]
     fn test_spot_price_no_liquidity() {
         let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-        state.price_data.asks = vec![]; // Remove all asks
-                                        // Test with no liquidity at all - should return error
-        let result = state.spot_price(&wbtc(), &usdc());
-        assert!(result.is_err());
+        state.books[0].bids = vec![];
+        state.books[0].asks = vec![];
+        assert!(state
+            .spot_price(&wbtc(), &usdc())
+            .is_err());
+    }
+
+    #[test]
+    fn test_spot_price_other_book() {
+        let state = create_test_bebop_state();
+        assert_eq!(
+            state
+                .spot_price(&weth(), &usdc())
+                .unwrap(),
+            3050.0
+        );
     }
 
     #[test]
     fn test_get_limits_sell_base_for_quote() {
         let state = create_test_bebop_state();
-
-        // Test selling WBTC for USDC (should use bids)
         let (wbtc_limit, usdc_limit) = state
-            .get_limits(wbtc().address.clone(), usdc().address.clone())
+            .get_limits(wbtc().address, usdc().address)
             .unwrap();
-
-        // Use bids: vec![(65000.0, 1.5), (64950.0, 2.0), (64900.0, 0.5)]
-
-        // Total WBTC available: 1.5 + 2.0 + 0.5 = 4.0 WBTC
-        let expected_wbtc_limit = BigUint::from(4u64) * BigUint::from(10u64).pow(8u32);
-
-        // Total USDC value: (65000*1.5) + (64950*2.0) + (64900*0.5) = 97500 + 129900 + 32450 =
-        // 259850
-        let expected_usdc_limit = BigUint::from(259850u64) * BigUint::from(10u64).pow(6u32);
-
-        assert_eq!(wbtc_limit, expected_wbtc_limit);
-        assert_eq!(usdc_limit, expected_usdc_limit);
+        // Bids: 1.5 + 2.0 + 0.5 = 4.0 WBTC for 97500 + 129900 + 32450 = 259850 USDC.
+        assert_eq!(wbtc_limit, BigUint::from(4u64) * BigUint::from(10u64).pow(8u32));
+        assert_eq!(usdc_limit, BigUint::from(259850u64) * BigUint::from(10u64).pow(6u32));
     }
 
     #[test]
     fn test_get_limits_buy_base_with_quote() {
         let state = create_test_bebop_state();
-
-        // Test buying WBTC with USDC (should use asks)
         let (usdc_limit, wbtc_limit) = state
-            .get_limits(usdc().address.clone(), wbtc().address.clone())
+            .get_limits(usdc().address, wbtc().address)
             .unwrap();
-
-        // Use asks: vec![(65100.0, 1.0), (65150.0, 2.5), (65200.0, 1.5)]
-
-        // Total USDC needed: (65100*1.0) + (65150*2.5) + (65200*1.5) = 65100 + 162875 + 97800 =
-        // 325775
-        let expected_usdc_limit = BigUint::from(325775u64) * BigUint::from(10u64).pow(6u32);
-
-        // Total WBTC available: 1.0 + 2.5 + 1.5 = 5.0 WBTC
-        let expected_wbtc_limit = BigUint::from(5u64) * BigUint::from(10u64).pow(8u32);
-
-        assert_eq!(usdc_limit, expected_usdc_limit);
-        assert_eq!(wbtc_limit, expected_wbtc_limit);
+        // Asks: 65100 + 162875 + 97800 = 325775 USDC for 1.0 + 2.5 + 1.5 = 5.0 WBTC.
+        assert_eq!(usdc_limit, BigUint::from(325775u64) * BigUint::from(10u64).pow(6u32));
+        assert_eq!(wbtc_limit, BigUint::from(5u64) * BigUint::from(10u64).pow(8u32));
     }
 
     #[test]
     fn test_get_limits_no_bids() {
         let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-
-        // Test selling WBTC for USDC with no bids - should return 0
+        state.books[0].bids = vec![];
         let (token_limit, quote_limit) = state
-            .get_limits(wbtc().address.clone(), usdc().address.clone())
+            .get_limits(wbtc().address, usdc().address)
             .unwrap();
-
         assert_eq!(token_limit, BigUint::from(0u64));
         assert_eq!(quote_limit, BigUint::from(0u64));
     }
 
     #[test]
-    fn test_get_limits_no_asks() {
+    fn test_get_limits_used_venue() {
         let mut state = create_test_bebop_state();
-        state.price_data.asks = vec![]; // Remove all asks
-
-        // Test buying WBTC with USDC with no asks - should return 0
+        state.used = true;
         let (token_limit, quote_limit) = state
-            .get_limits(usdc().address.clone(), wbtc().address.clone())
+            .get_limits(wbtc().address, usdc().address)
             .unwrap();
-
         assert_eq!(token_limit, BigUint::from(0u64));
         assert_eq!(quote_limit, BigUint::from(0u64));
     }
@@ -460,60 +481,71 @@ mod tests {
     #[test]
     fn test_get_limits_invalid_token_pair() {
         let state = create_test_bebop_state();
-
-        // Create a different token (not WBTC or USDC)
-        let eth = Token::new(
-            &hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
-                .unwrap()
-                .into(),
-            "ETH",
-            18,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
+        let result = state.get_limits(wbtc().address, weth().address);
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(msg)) if msg.contains("Invalid token addresses"))
         );
-
-        // Test with invalid token pair (ETH not in WBTC/USDC pool) - should return error
-        let result = state.get_limits(eth.address.clone(), usdc().address.clone());
-        assert!(result.is_err());
-
-        if let Err(SimulationError::RecoverableError(msg)) = result {
-            assert!(msg.contains("Invalid token addresses"));
-        } else {
-            panic!("Expected RecoverableError with invalid token addresses message");
-        }
     }
 
     #[test]
     fn test_get_amount_out() {
-        // WETH/USDC
-        let price_data = BebopPriceData {
-            base: hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(), // WETH
-            quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
-            last_update_ts: 1234567890,
-            bids: vec![3000.0f32, 2.0f32, 2900.0f32, 2.5f32],
-            asks: vec![3100.0f32, 1.5f32, 3000.0f32, 3.0f32],
-        };
+        let state = create_test_bebop_state();
 
-        let weth = weth();
-        let usdc = usdc();
-        let state = BebopState::new(weth.clone(), usdc.clone(), price_data, empty_bebop_client());
-
-        // swap 3 WETH -> USDC
+        // swap 3 WETH -> USDC: 6000 from level 1 + 2900 from level 2 = 8900 USDC
         let amount_out_result = state
-            .get_amount_out(BigUint::from_str("3_000000000000000000").unwrap(), &weth, &usdc)
+            .get_amount_out(BigUint::from_str("3_000000000000000000").unwrap(), &weth(), &usdc())
             .unwrap();
-
-        // 6000 from level 1 + 2900 from level 2 = 8900 USDC
         assert_eq!(amount_out_result.amount, BigUint::from_str("8900_000_000").unwrap());
 
-        // swap 7000 USDC -> WETH
+        // swap 7000 USDC -> WETH: 1.5 from level 1 + 0.78333 from level 2 = 2.283333 WETH
         let amount_out_result = state
-            .get_amount_out(BigUint::from_str("7000_000_000").unwrap(), &usdc, &weth)
+            .get_amount_out(BigUint::from_str("7000_000_000").unwrap(), &usdc(), &weth())
             .unwrap();
-
-        // 1.5 from level 1 + 0.78333 from level 2 = 2.283333 WETH
         assert_eq!(amount_out_result.amount, BigUint::from_str("2_283333333333333248").unwrap());
+    }
+
+    #[test]
+    fn test_get_amount_out_once_per_venue() {
+        let state = create_test_bebop_state();
+        let first = state
+            .get_amount_out(BigUint::from_str("1_000000000000000000").unwrap(), &weth(), &usdc())
+            .unwrap();
+        let after_first = first
+            .new_state
+            .as_any()
+            .downcast_ref::<BebopState>()
+            .unwrap();
+        assert!(after_first.used);
+
+        let second = after_first.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc());
+        assert!(
+            matches!(second, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+        );
+        assert!(after_first
+            .spot_price(&wbtc(), &usdc())
+            .is_err());
+    }
+
+    #[test]
+    fn test_get_amount_out_without_rule() {
+        let mut state = create_test_bebop_state();
+        state.quote_rule = QuoteRule::None;
+        let first = state
+            .get_amount_out(BigUint::from_str("1_000000000000000000").unwrap(), &weth(), &usdc())
+            .unwrap();
+        let second = first
+            .new_state
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .unwrap();
+        assert_eq!(second.amount, BigUint::from(65_000_000_000u64));
+    }
+
+    #[test]
+    fn test_eq_reads_used() {
+        let state = create_test_bebop_state();
+        let mut used = state.clone();
+        used.used = true;
+        assert!(state.eq(&state.clone()));
+        assert!(!state.eq(&used));
     }
 }

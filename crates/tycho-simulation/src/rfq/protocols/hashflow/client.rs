@@ -23,7 +23,7 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{QuoteRule, TimestampHeader},
         protocols::hashflow::models::{
             HashflowChain, HashflowMakerLevels, HashflowMarketMakerLevels,
             HashflowMarketMakersResponse, HashflowPriceLevelsResponse, HashflowQuoteRequest,
@@ -52,6 +52,9 @@ pub struct HashflowClient {
     quote_tokens: HashSet<Bytes>,
     poll_time: Duration,
     quote_timeout: Duration,
+    /// How often one route may take quotes from Hashflow.
+    #[serde(default)]
+    quote_rule: QuoteRule,
 }
 
 impl HashflowClient {
@@ -67,6 +70,7 @@ impl HashflowClient {
         auth_key: String,
         poll_time: Duration,
         quote_timeout: Duration,
+        quote_rule: QuoteRule,
     ) -> Result<Self, RFQError> {
         Ok(Self {
             chain,
@@ -80,6 +84,7 @@ impl HashflowClient {
             quote_tokens,
             poll_time,
             quote_timeout,
+            quote_rule,
         })
     }
 
@@ -127,8 +132,9 @@ impl HashflowClient {
     ///
     /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
     /// attribute lists the directed pairs that have a book, 40 bytes each (base then quote), so
-    /// a consumer can connect those pairs and not every pair of its tokens. Its `books` state
-    /// attribute is the books as JSON, sorted by maker, base and quote.
+    /// a consumer can connect those pairs and not every pair of its tokens. Its `quote_rule`
+    /// static attribute is the reuse rule. Its `books` state attribute is the books as JSON,
+    /// sorted by maker, base and quote.
     fn venue_component(
         &self,
         levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
@@ -194,7 +200,17 @@ impl HashflowClient {
             chain: self.chain,
             tokens: tokens.into_iter().collect(),
             contract_addresses: vec![], // empty for RFQ
-            static_attributes: HashMap::from([("pairs".to_string(), pairs_attribute.into())]),
+            static_attributes: HashMap::from([
+                ("pairs".to_string(), pairs_attribute.into()),
+                (
+                    QuoteRule::ATTRIBUTE.to_string(),
+                    self.quote_rule
+                        .as_str()
+                        .as_bytes()
+                        .to_vec()
+                        .into(),
+                ),
+            ]),
             ..Default::default()
         };
 
@@ -766,6 +782,7 @@ mod tests {
             "test_key".to_string(),
             Duration::from_secs(5),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap()
     }
@@ -795,6 +812,7 @@ mod tests {
             auth.key,
             Duration::from_secs(1),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap();
 
@@ -878,6 +896,7 @@ mod tests {
             auth_key,
             Duration::from_secs(0),
             Duration::from_secs(5),
+            QuoteRule::OncePerMaker,
         )
         .unwrap();
 
@@ -1043,6 +1062,7 @@ mod tests {
             quote_tokens: HashSet::new(),
             poll_time: Duration::from_secs(0),
             quote_timeout,
+            quote_rule: QuoteRule::OncePerMaker,
         }
     }
 
@@ -1200,6 +1220,10 @@ mod tests {
         let mut expected_pairs = weth.to_vec();
         expected_pairs.extend_from_slice(&usdc);
         assert_eq!(component.component.static_attributes["pairs"].to_vec(), expected_pairs);
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_maker"
+        );
 
         let books: Vec<HashflowMakerLevels> =
             serde_json::from_slice(&component.state.attributes["books"]).unwrap();
@@ -1366,6 +1390,7 @@ mod tests {
             quote_tokens: HashSet::from([quote_token.clone()]),
             poll_time: Duration::from_secs(10),
             quote_timeout: Duration::from_millis(5500),
+            quote_rule: QuoteRule::OncePerMaker,
         };
 
         let serialized = serde_json::to_string(&original).unwrap();
