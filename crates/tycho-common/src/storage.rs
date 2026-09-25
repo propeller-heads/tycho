@@ -880,5 +880,5 @@ pub struct StateSnapshot {
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block
     /// that wrote its row, all from one consistent read.
-    async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError>;
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError>;
 }

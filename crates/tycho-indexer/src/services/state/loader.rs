@@ -21,7 +21,7 @@ impl EntityCache {
     /// `StorageError` when the snapshot read fails. No cache exists after an error.
     pub async fn load(
         gateway: &impl StateSnapshotGateway,
-        chain: Chain,
+        chain: &Chain,
     ) -> Result<Self, StorageError> {
         let started = Instant::now();
         let snapshot = gateway.state_snapshot(chain).await?;
@@ -179,7 +179,7 @@ mod test {
 
     #[async_trait]
     impl StateSnapshotGateway for FixedGateway {
-        async fn state_snapshot(&self, _chain: Chain) -> Result<StateSnapshot, StorageError> {
+        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
             self.0
                 .lock()
                 .unwrap()
@@ -195,7 +195,7 @@ mod test {
             components: vec![component_snapshot(5)],
         }));
 
-        let cache = EntityCache::load(&gateway, Chain::Ethereum)
+        let cache = EntityCache::load(&gateway, &Chain::Ethereum)
             .await
             .unwrap();
 
@@ -206,7 +206,7 @@ mod test {
     async fn load_reports_a_failed_snapshot_read() {
         let gateway = FixedGateway::new(Err(StorageError::Unexpected("boom".to_string())));
 
-        let err = EntityCache::load(&gateway, Chain::Ethereum)
+        let err = EntityCache::load(&gateway, &Chain::Ethereum)
             .await
             .err()
             .expect("the load must fail");
@@ -217,7 +217,7 @@ mod test {
     #[tokio::test]
     async fn load_of_an_empty_snapshot_folds_normally() {
         let gateway = FixedGateway::new(Ok(StateSnapshot { accounts: vec![], components: vec![] }));
-        let cache = EntityCache::load(&gateway, Chain::Ethereum)
+        let cache = EntityCache::load(&gateway, &Chain::Ethereum)
             .await
             .unwrap();
 

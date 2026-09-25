@@ -14,10 +14,7 @@ use chrono::NaiveDateTime;
 use diesel::{
     pg::Pg, sql_types::BigInt, BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl,
 };
-use diesel_async::{
-    pg::TransactionBuilder, pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt,
-    AsyncPgConnection, RunQueryDsl,
-};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -25,8 +22,7 @@ use tycho_common::{
         Address, Chain,
     },
     storage::{
-        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, StorageError,
-        WriteTimestamp,
+        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StorageError, WriteTimestamp,
     },
     Bytes,
 };
@@ -348,63 +344,20 @@ impl PostgresGateway {
         }
         Ok(snapshots)
     }
-
-    /// All live state of `chain`, read inside the caller's transaction.
-    pub(crate) async fn state_snapshot(
-        &self,
-        chain: &Chain,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<StateSnapshot, StorageError> {
-        Ok(StateSnapshot {
-            accounts: self
-                .account_snapshots(chain, conn)
-                .await?,
-            components: self
-                .component_snapshots(chain, conn)
-                .await?,
-        })
-    }
-}
-
-/// The isolation level a state snapshot read runs under: `READ ONLY`, `REPEATABLE READ`.
-fn snapshot_transaction(conn: &mut AsyncPgConnection) -> TransactionBuilder<'_, AsyncPgConnection> {
-    conn.build_transaction()
-        .read_only()
-        .repeatable_read()
-}
-
-/// Reads the live state of `chain` in one `REPEATABLE READ`, read-only transaction on a pooled
-/// connection. Every part of the result comes from the same database snapshot.
-pub(crate) async fn read_state_snapshot(
-    gateway: &PostgresGateway,
-    pool: &Pool<AsyncPgConnection>,
-    chain: Chain,
-) -> Result<StateSnapshot, StorageError> {
-    let mut conn = pool.get().await.map_err(|err| {
-        StorageError::Unexpected(format!("No connection for the state snapshot: {err}"))
-    })?;
-    snapshot_transaction(&mut conn)
-        .run(|conn| {
-            async move {
-                gateway
-                    .state_snapshot(&chain, conn)
-                    .await
-                    .map_err(PostgresError::from)
-            }
-            .scope_boxed()
-        })
-        .await
-        .map_err(StorageError::from)
 }
 
 #[cfg(test)]
 mod test_serial_db {
     use std::str::FromStr;
 
-    use tycho_common::{keccak256, models::Chain, Bytes};
+    use diesel_async::{pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt};
+    use tokio::sync::mpsc;
+    use tycho_common::{keccak256, models::Chain, storage::StateSnapshotGateway, Bytes};
 
     use super::*;
-    use crate::postgres::{db_fixtures, testing::run_against_db, PostgresGateway};
+    use crate::postgres::{
+        cache::CachedGateway, db_fixtures, testing::run_against_db, PostgresGateway,
+    };
 
     const C0: &str = "6B175474E89094C44Da98b954EedeAC495271d0F";
     const C1: &str = "73BcE791c239c8010Cd3C857d96580037CCdd0EE";
@@ -589,6 +542,11 @@ mod test_serial_db {
             .into_iter()
             .map(|s| (s.account.address.clone(), s))
             .collect()
+    }
+
+    fn cached_gateway(pool: &Pool<AsyncPgConnection>, gw: PostgresGateway) -> CachedGateway {
+        let (tx, _rx) = mpsc::channel(1);
+        CachedGateway::new(tx, pool.clone(), gw)
     }
 
     fn expected_c0() -> AccountSnapshot {
@@ -813,7 +771,8 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
             drop(conn);
 
-            let snapshot = read_state_snapshot(&gw, &pool, Chain::Ethereum)
+            let snapshot = cached_gateway(&pool, gw)
+                .state_snapshot(&Chain::Ethereum)
                 .await
                 .unwrap();
 
@@ -840,7 +799,8 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut conn).await;
             drop(conn);
 
-            let snapshot = read_state_snapshot(&gw, &pool, Chain::Ethereum)
+            let snapshot = cached_gateway(&pool, gw)
+                .state_snapshot(&Chain::Ethereum)
                 .await
                 .unwrap();
 
@@ -860,7 +820,10 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut writer).await;
             let mut reader = pool.get().await.unwrap();
 
-            let accounts = snapshot_transaction(&mut reader)
+            let accounts = reader
+                .build_transaction()
+                .read_only()
+                .repeatable_read()
                 .run(|conn| {
                     async {
                         let before = gw
