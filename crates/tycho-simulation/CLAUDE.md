@@ -31,7 +31,11 @@ for any protocol indexed by Tycho.
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
-  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
+  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP. Hashflow
+  streams one component per chain holding every market maker's levels on every pair (`books`
+  attribute, quoted pairs in the `pairs` static attribute); `HashflowState::get_amount_out`
+  takes the best unused maker and marks it used in `new_state`, and `request_signed_quote`
+  names that maker so a route never asks one maker twice
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
