@@ -43,7 +43,9 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{is_transaction_conflict, PostgresError, PostgresGateway};
+use super::{
+    is_transaction_conflict, snapshot::snapshot_transaction, PostgresError, PostgresGateway,
+};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -1319,15 +1321,13 @@ impl Gateway for CachedGateway {}
 
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
-    /// Reads on one pooled connection in one read-only `REPEATABLE READ` transaction, so every
-    /// part of the result comes from the same database snapshot.
+    /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
+    /// result comes from the same database snapshot.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
         let mut conn = self.pool.get().await.map_err(|e| {
             StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
         })?;
-        conn.build_transaction()
-            .read_only()
-            .repeatable_read()
+        snapshot_transaction(&mut conn)
             .run(|conn| {
                 async move {
                     let accounts = self

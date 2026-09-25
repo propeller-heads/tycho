@@ -16,7 +16,7 @@ use chrono::NaiveDateTime;
 use diesel::{
     pg::Pg, sql_types::BigInt, BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl,
 };
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -30,6 +30,15 @@ use tycho_common::{
 };
 
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
+
+/// A read-only `REPEATABLE READ` transaction, so every read in it sees the same database snapshot.
+pub(crate) fn snapshot_transaction(
+    conn: &mut AsyncPgConnection,
+) -> TransactionBuilder<'_, AsyncPgConnection> {
+    conn.build_transaction()
+        .read_only()
+        .repeatable_read()
+}
 
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
 fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
@@ -838,10 +847,7 @@ mod test_serial_db {
             let gw = PostgresGateway::from_connection(&mut writer).await;
             let mut reader = pool.get().await.unwrap();
 
-            let accounts = reader
-                .build_transaction()
-                .read_only()
-                .repeatable_read()
+            let accounts = snapshot_transaction(&mut reader)
                 .run(|conn| {
                     async {
                         let before = gw
