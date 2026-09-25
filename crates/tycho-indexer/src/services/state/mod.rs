@@ -33,8 +33,10 @@ pub enum EntityCacheMode {
     /// No cache is loaded; every request reads the database.
     #[default]
     Off,
-    /// The cache is loaded and kept current; requests still read the database.
+    /// The cache is loaded at startup. Folding the windows into it and comparing it with the
+    /// database land in ENG-6293 and ENG-6295; requests read the database.
     Shadow,
-    /// The cache is loaded and kept current; requests read the cache where it can serve them.
+    /// The cache is loaded at startup. Folding the windows into it and serving from it land in
+    /// ENG-6293; requests read the database.
     Serve,
 }
