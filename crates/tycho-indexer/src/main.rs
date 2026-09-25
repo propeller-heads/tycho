@@ -494,13 +494,10 @@ async fn create_indexing_tasks(
         .enable_token_cache()
         .build()
         .await?;
-    let token_processor = EthereumTokenPreProcessor::new(
-        &rpc_client,
-        *chains
-            .first()
-            .expect("No chain provided"), //TODO: handle multichain?
-        settlement_contract,
-    );
+    let chain = *chains
+        .first()
+        .expect("No chain provided"); //TODO: handle multichain?
+    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -528,9 +525,6 @@ async fn create_indexing_tasks(
     // the snapshot sees the initialized accounts, nothing writes during the build, and no
     // request or fold can reach a half-built cache.
     if global_args.entity_cache_mode != EntityCacheMode::Off {
-        let chain = *chains
-            .first()
-            .expect("No chain provided");
         info!(mode = ?global_args.entity_cache_mode, "Loading the entity cache");
         let _cache = EntityCache::load(&cached_gw, &chain)
             .await

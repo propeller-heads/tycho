@@ -15,8 +15,8 @@
 //! entry.
 //!
 //! The folds coming out of the block windows are the only writer. The startup load builds the
-//! cache from a database snapshot before the extractors start. The cache never reads
-//! the database, and it never evicts — an entity missing from the cache does not exist.
+//! cache from a database snapshot before the extractors start. The cache never reads the
+//! database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
@@ -29,9 +29,11 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    time::Instant,
 };
 
-use tracing::warn;
+use metrics::gauge;
+use tracing::{info, warn};
 use tycho_common::{
     keccak256,
     models::{
@@ -41,7 +43,10 @@ use tycho_common::{
         Address, AttrStoreKey, Balance, Chain, ChangeType, Code, CodeHash, ComponentId,
         ProtocolSystem, StoreKey, StoreVal, TxHash,
     },
-    storage::{AccountWriteTimestamps, StorageError, WriteTimestamp},
+    storage::{
+        AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot,
+        StateSnapshotGateway, StorageError, WriteTimestamp,
+    },
     Bytes,
 };
 
@@ -152,7 +157,7 @@ pub(crate) struct CachedAccount {
 
 impl CachedAccount {
     /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
-    /// have a timestamp in `timestamps`; a missing one is a loader bug and panics.
+    /// have a timestamp in `timestamps`; a missing one is a snapshot bug and panics.
     pub(crate) fn from_snapshot(account: Account, timestamps: AccountWriteTimestamps) -> Self {
         let slots = account
             .slots
@@ -441,12 +446,56 @@ impl EntityCache {
         }
     }
 
-    /// A cache holding the given entries. Nothing is compared because nothing else exists yet.
-    pub(super) fn from_entries(
-        accounts: HashMap<Address, CachedAccount>,
-        components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
-    ) -> Self {
-        Self { state: RwLock::new(CacheState { accounts, components }) }
+    /// Builds the cache from the live state of `chain` in one snapshot read through `gateway`.
+    ///
+    /// # Errors
+    ///
+    /// `StorageError` when the snapshot read fails.
+    pub async fn load(
+        gateway: &impl StateSnapshotGateway,
+        chain: &Chain,
+    ) -> Result<Self, StorageError> {
+        let started = Instant::now();
+        let snapshot = gateway.state_snapshot(chain).await?;
+        let accounts = snapshot.accounts.len();
+        let components = snapshot.components.len();
+        let cache = Self::from_snapshot(snapshot);
+        let elapsed = started.elapsed();
+        gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
+        gauge!("entity_cache_accounts").set(accounts as f64);
+        gauge!("entity_cache_components").set(components as f64);
+        info!(accounts, components, ?elapsed, "Entity cache loaded");
+        Ok(cache)
+    }
+
+    /// Builds the cache from one snapshot: every account and component becomes an entry
+    /// timestamped with the block that wrote it.
+    pub(crate) fn from_snapshot(snapshot: StateSnapshot) -> Self {
+        let StateSnapshot { accounts, components } = snapshot;
+        let mut account_entries = HashMap::with_capacity(accounts.len());
+        for AccountSnapshot { account, written_at } in accounts {
+            account_entries
+                .insert(account.address.clone(), CachedAccount::from_snapshot(account, written_at));
+        }
+        let mut component_entries: HashMap<
+            ProtocolSystem,
+            HashMap<ComponentId, CachedComponentState>,
+        > = HashMap::new();
+        for ComponentSnapshot { system, state, updated_at } in components {
+            component_entries
+                .entry(system)
+                .or_default()
+                .insert(
+                    state.component_id.clone(),
+                    CachedComponentState::from_snapshot(state, updated_at),
+                );
+        }
+        Self {
+            state: RwLock::new(CacheState {
+                accounts: account_entries,
+                components: component_entries,
+            }),
+        }
     }
 
     /// Returns a read guard over the entries. Folds wait until it is dropped, so hold it only as
@@ -455,17 +504,6 @@ impl EntityCache {
         self.state
             .read()
             .expect("entity cache lock poisoned")
-    }
-
-    /// Number of cached accounts and of cached components across all systems.
-    pub(crate) fn entry_counts(&self) -> (usize, usize) {
-        let state = self.read();
-        let components = state
-            .components
-            .values()
-            .map(HashMap::len)
-            .sum();
-        (state.accounts.len(), components)
     }
 
     fn write_lock(&self) -> RwLockWriteGuard<'_, CacheState> {
@@ -626,13 +664,14 @@ impl FoldSink for EntityCache {
 mod test {
     use std::str::FromStr;
 
+    use async_trait::async_trait;
     use chrono::NaiveDateTime;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
     use crate::{
         extractor::models::fixtures,
-        testing::{self, with_state_delta},
+        testing::{self, aggregated_changes, with_state_delta},
     };
 
     const EXTRACTOR: &str = "ex";
@@ -803,7 +842,7 @@ mod test {
     }
 
     #[test]
-    fn write_skips_an_equal_tag() {
+    fn write_skips_an_equal_timestamp() {
         let mut slot = Timestamped::new(1u64, at(5));
 
         let outcome = slot.write(1, at(5));
@@ -813,7 +852,7 @@ mod test {
     }
 
     #[test]
-    fn write_skips_an_equal_tag_with_a_different_value() {
+    fn write_skips_an_equal_timestamp_with_a_different_value() {
         let mut slot = Timestamped::new(1u64, at(5));
 
         let outcome = slot.write(9, at(5));
@@ -833,7 +872,7 @@ mod test {
     }
 
     #[test]
-    fn write_tagged_inserts_a_missing_key_and_updates_a_present_one() {
+    fn write_timestamped_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Timestamped<u64>> = HashMap::new();
 
         let inserted = write_timestamped(&mut map, "a", 1, at(3));
@@ -894,7 +933,7 @@ mod test {
     }
 
     #[test]
-    fn account_apply_skips_an_equal_tag_write() {
+    fn account_apply_skips_an_equal_timestamp_write() {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
@@ -946,7 +985,7 @@ mod test {
     }
 
     #[test]
-    fn account_apply_native_balance_follows_the_tag_rule() {
+    fn account_apply_native_balance_follows_the_timestamp_rule() {
         let address = addr(1);
         let mut cached =
             CachedAccount::from_creation(&creation(&address, [], 10, "0x"), None, at(5));
@@ -979,7 +1018,7 @@ mod test {
     }
 
     #[test]
-    fn account_apply_balances_follow_the_tag_rule() {
+    fn account_apply_balances_follow_the_timestamp_rule() {
         let address = addr(1);
         let mut cached =
             CachedAccount::from_creation(&creation(&address, [], 0, "0x"), None, at(5));
@@ -1067,32 +1106,6 @@ mod test {
         let state = ProtocolComponentState::from(&cached);
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), at(6));
-    }
-
-    #[test]
-    fn snapshot_entries_read_back_by_address_and_by_system_and_id() {
-        let address = addr(1);
-        let loaded = account(&address);
-        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
-        let accounts = HashMap::from([(
-            address.clone(),
-            CachedAccount::from_snapshot(
-                loaded.clone(),
-                AccountWriteTimestamps::uniform(&loaded, at(1)),
-            ),
-        )]);
-        let components = HashMap::from([(
-            EXTRACTOR.to_string(),
-            HashMap::from([(
-                "c1".to_string(),
-                CachedComponentState::from_snapshot(state.clone(), at(1)),
-            )]),
-        )]);
-
-        let cache = EntityCache::from_entries(accounts, components);
-
-        assert_eq!(cached_account(&cache, &address), Some(loaded));
-        assert_eq!(cached_component(&cache, "c1"), Some(state));
     }
 
     #[test]
@@ -1482,5 +1495,106 @@ mod test {
         }
         assert_eq!(cached_account(&cache, &address), expected_account);
         assert_eq!(cached_component(&cache, "c1"), Some(expected_state));
+    }
+
+    fn account_snapshot(block: u64) -> AccountSnapshot {
+        let at = WriteTimestamp::from(&testing::block(block));
+        let bytecode = code("0x6000");
+        let account = Account::new(
+            Chain::Ethereum,
+            addr(1),
+            "a".to_string(),
+            HashMap::from([(slot(1), slot(1))]),
+            Bytes::from(10u64),
+            HashMap::new(),
+            bytecode.clone(),
+            keccak256(&bytecode).into(),
+            Bytes::zero(32),
+            Bytes::from("0x02"),
+            None,
+        );
+        let written_at = AccountWriteTimestamps::uniform(&account, at);
+        AccountSnapshot { account, written_at }
+    }
+
+    fn component_snapshot(block: u64) -> ComponentSnapshot {
+        ComponentSnapshot {
+            system: EXTRACTOR.to_string(),
+            state: ProtocolComponentState::new(
+                "c1",
+                HashMap::from([("x".to_string(), Bytes::from(1u64))]),
+                HashMap::new(),
+            ),
+            updated_at: WriteTimestamp::from(&testing::block(block)),
+        }
+    }
+
+    #[test]
+    fn from_snapshot_builds_entries_that_read_back() {
+        let snapshot = StateSnapshot {
+            accounts: vec![account_snapshot(5)],
+            components: vec![component_snapshot(5)],
+        };
+
+        let cache = EntityCache::from_snapshot(snapshot);
+
+        assert_eq!(cached_account(&cache, &addr(1)), Some(account_snapshot(5).account));
+        assert_eq!(cached_component(&cache, "c1"), Some(component_snapshot(5).state));
+    }
+
+    #[test]
+    fn from_snapshot_timestamps_entries_with_the_row_block() {
+        let snapshot = StateSnapshot { accounts: vec![], components: vec![component_snapshot(5)] };
+        let cache = EntityCache::from_snapshot(snapshot);
+        let x =
+            |cache: &EntityCache| cached_component(cache, "c1").map(|c| c.attributes["x"].clone());
+
+        cache
+            .fold(&with_state_delta(aggregated_changes(EXTRACTOR, 5, 5, Some(5)), "c1", 7))
+            .unwrap();
+        assert_eq!(x(&cache), Some(Bytes::from(1u64)), "block 5 is the row's own block");
+
+        let mut same_second =
+            with_state_delta(aggregated_changes(EXTRACTOR, 6, 6, Some(6)), "c1", 8);
+        same_second.block.ts = testing::block(5).ts;
+        cache.fold(&same_second).unwrap();
+        assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
+    }
+
+    /// Answers every `state_snapshot` call with the same result.
+    struct FixedGateway(Result<StateSnapshot, StorageError>);
+
+    #[async_trait]
+    impl StateSnapshotGateway for FixedGateway {
+        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
+            self.0.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn load_builds_the_cache_the_gateway_describes() {
+        let gateway = FixedGateway(Ok(StateSnapshot {
+            accounts: vec![account_snapshot(5)],
+            components: vec![component_snapshot(5)],
+        }));
+
+        let cache = EntityCache::load(&gateway, &Chain::Ethereum)
+            .await
+            .unwrap();
+
+        assert_eq!(cached_account(&cache, &addr(1)), Some(account_snapshot(5).account));
+        assert_eq!(cached_component(&cache, "c1"), Some(component_snapshot(5).state));
+    }
+
+    #[tokio::test]
+    async fn load_reports_a_failed_snapshot_read() {
+        let gateway = FixedGateway(Err(StorageError::Unexpected("boom".to_string())));
+
+        let err = EntityCache::load(&gateway, &Chain::Ethereum)
+            .await
+            .err()
+            .expect("the load must fail");
+
+        assert_eq!(err, StorageError::Unexpected("boom".to_string()));
     }
 }
