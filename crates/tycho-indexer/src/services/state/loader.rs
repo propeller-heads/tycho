@@ -3,7 +3,6 @@
 use std::{collections::HashMap, time::Instant};
 
 use metrics::gauge;
-use thiserror::Error;
 use tracing::{info, warn};
 use tycho_common::{
     models::{Address, Chain, ComponentId, ProtocolSystem},
@@ -13,14 +12,6 @@ use tycho_storage::postgres::cache::CachedGateway;
 
 use super::cache::{AccountWriteTimestamps, CachedAccount, CachedComponentState, EntityCache};
 
-#[derive(Debug, Error)]
-pub enum LoadError {
-    #[error("Snapshot read failed: {0}")]
-    Storage(#[from] StorageError),
-    #[error("Snapshot totals mismatch: {expected} {rows} rows in the snapshot, {loaded} loaded")]
-    Mismatch { rows: &'static str, expected: u64, loaded: u64 },
-}
-
 impl EntityCache {
     /// Builds the cache from the live state of `chain`: one database snapshot, read once through
     /// `gateway`. The gateway is used for the read and not kept; after this call the cache never
@@ -28,16 +19,15 @@ impl EntityCache {
     ///
     /// # Errors
     ///
-    /// `LoadError::Storage` when the snapshot read fails, `LoadError::Mismatch` when the row
-    /// totals disagree with what was built. No cache exists after an error.
+    /// `StorageError` when the snapshot read fails. No cache exists after an error.
     pub async fn load(
         gateway: &CachedGateway,
         chain: Chain,
         extractors: &[String],
-    ) -> Result<Self, LoadError> {
+    ) -> Result<Self, StorageError> {
         let started = Instant::now();
         let snapshot = gateway.state_snapshot(chain).await?;
-        let cache = Self::from_snapshot(snapshot, extractors)?;
+        let cache = Self::from_snapshot(snapshot, extractors);
         let elapsed = started.elapsed();
         let (accounts, components) = cache.entry_counts();
         gauge!("entity_cache_load_seconds").set(elapsed.as_secs_f64());
@@ -49,21 +39,11 @@ impl EntityCache {
 
     /// Builds the cache from one snapshot: every row becomes an entry stamped with the block that
     /// wrote it. `extractors` names the configured extractors whose cursors are reported.
-    ///
-    /// # Errors
-    ///
-    /// `LoadError::Mismatch` when the snapshot's row totals disagree with what was built.
-    pub(crate) fn from_snapshot(
-        snapshot: StateSnapshot,
-        extractors: &[String],
-    ) -> Result<Self, LoadError> {
-        let StateSnapshot { totals, accounts, components, cursors } = snapshot;
-        let mut slots = 0u64;
-        let mut attributes = 0u64;
+    pub(crate) fn from_snapshot(snapshot: StateSnapshot, extractors: &[String]) -> Self {
+        let StateSnapshot { accounts, components, cursors } = snapshot;
         let mut account_entries: HashMap<Address, CachedAccount> =
             HashMap::with_capacity(accounts.len());
         for row in accounts {
-            slots += row.account.slots.len() as u64;
             account_entries.insert(row.account.address.clone(), account_entry(row));
         }
         let mut component_entries: HashMap<
@@ -71,30 +51,14 @@ impl EntityCache {
             HashMap<ComponentId, CachedComponentState>,
         > = HashMap::new();
         for row in components {
-            attributes += row.state.attributes.len() as u64;
             component_entries
                 .entry(row.system.clone())
                 .or_default()
                 .insert(row.state.component_id.clone(), component_entry(row));
         }
-        let component_count = component_entries
-            .values()
-            .map(|c| c.len() as u64)
-            .sum::<u64>();
-        check("accounts", totals.accounts, account_entries.len() as u64)?;
-        check("slots", totals.slots, slots)?;
-        check("components", totals.components, component_count)?;
-        check("attributes", totals.attributes, attributes)?;
         report_cursors(extractors, &cursors);
-        Ok(Self::from_entries(account_entries, component_entries))
+        Self::from_entries(account_entries, component_entries)
     }
-}
-
-fn check(rows: &'static str, expected: u64, loaded: u64) -> Result<(), LoadError> {
-    if expected == loaded {
-        return Ok(());
-    }
-    Err(LoadError::Mismatch { rows, expected, loaded })
 }
 
 /// Logs where each configured extractor's stream resumes. A configured extractor without a
@@ -131,7 +95,7 @@ fn component_entry(row: ComponentSnapshot) -> CachedComponentState {
 mod test {
     use tycho_common::{
         models::{contract::Account, protocol::ProtocolComponentState, Chain},
-        storage::{SnapshotTotals, WriteTimestamp},
+        storage::WriteTimestamp,
         Bytes,
     };
 
@@ -142,10 +106,6 @@ mod test {
     };
 
     const EXTRACTOR: &str = "ex";
-
-    fn totals(accounts: u64, slots: u64, components: u64, attributes: u64) -> SnapshotTotals {
-        SnapshotTotals { accounts, slots, components, attributes }
-    }
 
     fn cursors() -> Vec<CursorSnapshot> {
         vec![CursorSnapshot {
@@ -201,13 +161,12 @@ mod test {
     #[test]
     fn from_snapshot_builds_entries_that_read_back() {
         let snapshot = StateSnapshot {
-            totals: totals(1, 1, 1, 1),
             accounts: vec![account_snapshot(5)],
             components: vec![component_snapshot(5)],
             cursors: cursors(),
         };
 
-        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]).unwrap();
+        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]);
 
         let state = cache.read();
         assert_eq!(
@@ -227,12 +186,11 @@ mod test {
     #[test]
     fn from_snapshot_stamps_entries_with_the_row_block() {
         let snapshot = StateSnapshot {
-            totals: totals(0, 0, 1, 1),
             accounts: vec![],
             components: vec![component_snapshot(5)],
             cursors: cursors(),
         };
-        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]).unwrap();
+        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]);
         let x = |cache: &EntityCache| {
             cache
                 .read()
@@ -250,24 +208,5 @@ mod test {
         same_second.block.ts = testing::block(5).ts;
         cache.fold(&same_second).unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
-    }
-
-    #[test]
-    fn from_snapshot_fails_when_the_totals_do_not_match_the_rows() {
-        let snapshot = StateSnapshot {
-            totals: totals(2, 1, 1, 1),
-            accounts: vec![account_snapshot(5)],
-            components: vec![component_snapshot(5)],
-            cursors: cursors(),
-        };
-
-        let err = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()])
-            .err()
-            .expect("the load must fail");
-
-        assert!(
-            matches!(err, LoadError::Mismatch { rows: "accounts", expected: 2, loaded: 1 }),
-            "{err}"
-        );
     }
 }
