@@ -12,7 +12,7 @@ use actix_web_opentelemetry::RequestTracing;
 use deltas_buffer::PendingDeltasBuffer;
 use futures03::future::try_join_all;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::info;
 use tycho_common::storage::Gateway;
 use tycho_ethereum::{
     rpc::EthereumRpcClient, services::entrypoint_tracer::tracer::EVMEntrypointService,
@@ -26,7 +26,11 @@ use crate::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
         middleware::{compression_middleware, rpc_metrics_middleware},
-        state::service::StateService,
+        state::{
+            cache::EntityCache,
+            service::StateService,
+            window::{DiscardSink, FoldSink},
+        },
     },
 };
 
@@ -62,6 +66,10 @@ pub struct ServicesBuilder<G> {
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
     entity_cache_mode: EntityCacheMode,
+    /// Built from the database before any extractor or the server starts (ENG-6292). `None`
+    /// until that load exists; the windows then fold into a `DiscardSink` and every request
+    /// reads the database.
+    entity_cache: Option<Arc<EntityCache>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -98,6 +106,7 @@ where
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
             entity_cache_mode: EntityCacheMode::default(),
+            entity_cache: None,
         }
     }
 
@@ -192,12 +201,16 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
+        let sink: Arc<dyn FoldSink> = match &self.entity_cache {
+            Some(cache) => cache.clone(),
+            None => Arc::new(DiscardSink),
+        };
         let pending_deltas = PendingDeltas::with_config(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
-            Arc::new(state::window::DiscardSink),
+            sink,
         );
         info!(
             depth = self.window_config.depth,
@@ -222,16 +235,9 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
-        // TODO(ENG-6305): in `shadow` and `serve` mode, build a `StateService` over
-        // `pending_deltas` and the `EntityCache` the startup load returns, and fold into that
-        // cache instead of `DiscardSink`.
-        let state_service: Option<Arc<StateService>> = match self.entity_cache_mode {
-            EntityCacheMode::Off => None,
-            mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
-                warn!(?mode, "Entity cache not built yet; serving state from the database");
-                None
-            }
-        };
+        let state_service = self.entity_cache.as_ref().map(|cache| {
+            Arc::new(StateService::new(pending_deltas.windows().clone(), cache.clone()))
+        });
 
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
         let (server_handle, server_task) = self.start_server(

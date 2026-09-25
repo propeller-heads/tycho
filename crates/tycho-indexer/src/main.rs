@@ -64,7 +64,7 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{PlansConfig, ServicesBuilder, WindowConfig},
+    services::{EntityCacheMode, PlansConfig, ServicesBuilder, WindowConfig},
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -494,6 +494,18 @@ async fn create_indexing_tasks(
         .enable_token_cache()
         .build()
         .await?;
+
+    // The entity cache must be complete before any extractor streams a block or the server
+    // answers a request, so it is loaded here, before either is built.
+    // TODO(ENG-6292): in `shadow` and `serve`, load it from one database snapshot and hand it to
+    // the `ServicesBuilder`.
+    if global_args.entity_cache_mode != EntityCacheMode::Off {
+        warn!(
+            mode = ?global_args.entity_cache_mode,
+            "Entity cache loading is not implemented; state requests read the database"
+        );
+    }
+
     let token_processor = EthereumTokenPreProcessor::new(
         &rpc_client,
         *chains
