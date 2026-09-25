@@ -38,8 +38,8 @@ All public DB operations go through one of two gateway structs:
 single-chain; it hard-fails otherwise.
 
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
-`chain`, `contract`, `protocol`, `entry_point`, and `extraction_state`—each adding methods to
-`PostgresGateway` via `impl` blocks in their own file.
+`chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
+methods to `PostgresGateway` via `impl` blocks in their own file.
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
 and utilities consumed by `contract` and `protocol`. Two paths: `apply_versioning()` for plain
