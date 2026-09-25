@@ -21,9 +21,43 @@ pub fn map_components(
     Ok(BlockTransactionProtocolComponents { tx_components })
 }
 
+/// Skip unrelated transactions before allocating or sorting their storage writes.
+fn discovery_writes<'a>(
+    tx: &'a eth::v2::TransactionTrace,
+    config: &DeploymentConfig,
+) -> Vec<&'a eth::v2::StorageChange> {
+    let writes = tx
+        .calls
+        .iter()
+        .filter(|call| !call.state_reverted)
+        .flat_map(|call| &call.storage_changes);
+    if !writes
+        .clone()
+        .any(|write| write.address == config.engine)
+    {
+        return vec![];
+    }
+    let base_slot = slot(config.pair_base_token_slot);
+    let quote_slot = slot(config.pair_quote_token_slot);
+    let mut relevant: Vec<_> = writes
+        .filter(|write| {
+            // Keep all Engine writes so the last registry value wins, including clears.
+            write.address == config.engine ||
+                ((write.key == IMPLEMENTATION_SLOT ||
+                    write.key == base_slot ||
+                    write.key == quote_slot) &&
+                    zero(&write.old_value) &&
+                    !zero(&write.new_value))
+        })
+        .collect();
+    // Nested call order is not storage-write order.
+    relevant.sort_by_key(|write| write.ordinal);
+    relevant
+}
+
 /// Only an initialized proxy registered by this Engine in the same committed tx is a Pair.
 fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<ProtocolComponent> {
-    let writes = committed_writes(tx);
+    let writes = discovery_writes(tx, config);
     let registry: HashMap<_, _> = writes
         .iter()
         .filter(|w| w.address == config.engine)
@@ -32,9 +66,14 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
     if registry.is_empty() {
         return vec![];
     }
+    let base_slot = slot(config.pair_base_token_slot);
+    let quote_slot = slot(config.pair_quote_token_slot);
     let mut candidates: BTreeMap<Vec<u8>, HashMap<Vec<u8>, Vec<u8>>> = BTreeMap::new();
     for w in writes {
-        if zero(&w.old_value) && !zero(&w.new_value) {
+        if (w.key == IMPLEMENTATION_SLOT || w.key == base_slot || w.key == quote_slot) &&
+            zero(&w.old_value) &&
+            !zero(&w.new_value)
+        {
             candidates
                 .entry(w.address.clone())
                 .or_default()
@@ -45,8 +84,8 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
         .into_iter()
         .filter_map(|(pair, slots)| {
             slots.get(IMPLEMENTATION_SLOT.as_slice())?;
-            let base = address(slots.get(&slot(config.pair_base_token_slot))?);
-            let quote = address(slots.get(&slot(config.pair_quote_token_slot))?);
+            let base = address(slots.get(&base_slot)?);
+            let quote = address(slots.get(&quote_slot)?);
             if zero(&base) || zero(&quote) || base == quote {
                 return None;
             }
@@ -136,5 +175,38 @@ mod tests {
     #[test]
     fn invalid_address_config_is_rejected() {
         assert!(DeploymentConfig::parse("tesseraswap=11").is_err());
+    }
+
+    #[test]
+    fn filters_unrelated_writes_and_transactions() {
+        let mut tx = transaction();
+        tx.calls[0]
+            .storage_changes
+            .extend((100..200).map(|key| eth::v2::StorageChange {
+                address: vec![9; 20],
+                key: slot(key),
+                old_value: vec![0; 32],
+                new_value: vec![1; 32],
+                ..Default::default()
+            }));
+        assert_eq!(discovery_writes(&tx, &config()).len(), 4);
+        assert_eq!(discover(&tx, &config()).len(), 1);
+        tx.calls[0].storage_changes.remove(3);
+        assert!(discovery_writes(&tx, &config()).is_empty());
+    }
+
+    #[test]
+    fn nested_registry_writes_use_last_ordinal_including_clear() {
+        let mut tx = transaction();
+        tx.calls[0].storage_changes[3].ordinal = 40;
+        let mut earlier = tx.calls[0].storage_changes[3].clone();
+        earlier.ordinal = 30;
+        earlier.new_value = vec![9; 20];
+        tx.calls
+            .push(eth::v2::Call { storage_changes: vec![earlier], ..Default::default() });
+        assert_eq!(discover(&tx, &config()).len(), 1);
+        tx.calls[0].storage_changes[3].old_value = vec![4; 20];
+        tx.calls[0].storage_changes[3].new_value = vec![0; 32];
+        assert!(discover(&tx, &config()).is_empty());
     }
 }

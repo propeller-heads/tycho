@@ -1,43 +1,6 @@
 use crate::{common::*, config::DeploymentConfig};
-use substreams::store::{
-    Appender, StoreAppend, StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetIfNotExists,
-    StoreSetIfNotExistsProto, StoreSetString,
-};
+use substreams::store::{StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetString};
 use substreams_ethereum::pb::eth;
-use tycho_substreams::prelude::*;
-#[substreams::handlers::store]
-pub fn store_components(
-    map: BlockTransactionProtocolComponents,
-    store: StoreSetIfNotExistsProto<ProtocolComponent>,
-) {
-    for tx in map.tx_components {
-        for c in tx.components {
-            store.set_if_not_exists(0, &c.id, &c);
-        }
-    }
-}
-#[substreams::handlers::store]
-pub fn store_pairs(map: BlockTransactionProtocolComponents, store: StoreAppend<String>) {
-    for tx in map.tx_components {
-        for c in tx.components {
-            store.append(0, "pairs", format!("{};", c.id));
-            for token in c.tokens {
-                store.append(0, format!("token:{}", id(&token)), format!("{};", c.id));
-            }
-        }
-    }
-}
-#[substreams::handlers::store]
-pub fn store_treasury(params: String, block: eth::v2::Block, store: StoreSetString) {
-    let config = DeploymentConfig::parse(&params).expect("invalid deployment config");
-    for tx in block.transactions() {
-        for w in committed_writes(tx) {
-            if w.address == config.tesseraswap && w.key == slot(config.treasury_slot) {
-                store.set(w.ordinal, "treasury", &hex::encode(address(&w.new_value)));
-            }
-        }
-    }
-}
 
 /// Persist fee-tag-0 and epoch signals even when the affected pair has no price update.
 #[substreams::handlers::store]
