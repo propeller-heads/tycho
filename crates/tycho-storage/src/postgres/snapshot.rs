@@ -3,10 +3,12 @@
 //! Every query filters live rows directly. On the partitioned tables a live row has
 //! `valid_to = MAX_TS`. On `contract_code` and `account_balance`, and for `deleted_at` on
 //! `account` and `protocol_component`, a live row is `NULL` as written or `MAX_TS` as reopened by
-//! `revert_state`, so both count. Versioned reads are not needed, because one live row per key is
-//! the versioning invariant, and they are much slower on tables this size. Rows are selected by a
-//! subquery, never by an id list: Postgres caps bind parameters at 65,535 and a chain can hold
-//! more components than that.
+//! `revert_state`, so both count. The write path closes only `NULL` rows, so a key written after
+//! a revert has two live rows on `contract_code` and `account_balance`; the newest one wins.
+//! Versioned reads are not needed, because otherwise one live row per key is the versioning
+//! invariant, and they are much slower on tables this size. Rows are selected by a subquery, never
+//! by an id list: Postgres caps bind parameters at 65,535 and a chain can hold more components
+//! than that.
 
 use std::collections::HashMap;
 
@@ -97,6 +99,12 @@ impl PostgresGateway {
                     .is_null()
                     .or(schema::contract_code::valid_to.eq(MAX_TS)),
             )
+            .distinct_on(schema::contract_code::account_id)
+            .order_by((
+                schema::contract_code::account_id,
+                schema::contract_code::valid_from.desc(),
+                schema::block::number.desc(),
+            ))
             .select((
                 schema::account::id,
                 schema::account::address,
@@ -123,6 +131,16 @@ impl PostgresGateway {
                         .is_null()
                         .or(schema::account_balance::valid_to.eq(MAX_TS)),
                 )
+                .distinct_on((
+                    schema::account_balance::account_id,
+                    schema::account_balance::token_id,
+                ))
+                .order_by((
+                    schema::account_balance::account_id,
+                    schema::account_balance::token_id,
+                    schema::account_balance::valid_from.desc(),
+                    schema::block::number.desc(),
+                ))
                 .select((
                     schema::account_balance::account_id,
                     schema::account_balance::token_id,
@@ -869,6 +887,52 @@ mod test_serial_db {
                 3,
                 "the committed slot is visible outside the snapshot"
             );
+        })
+        .await;
+    }
+
+    /// The write path closes only `NULL` rows, so a key written after a revert keeps its reopened
+    /// `MAX_TS` row next to the new `NULL` row. The newer row wins.
+    #[tokio::test]
+    async fn account_snapshots_take_the_newest_of_two_live_rows_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            let c1: i64 = schema::account::table
+                .filter(schema::account::title.eq("c1"))
+                .select(schema::account::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let stale_code =
+                db_fixtures::insert_contract_code(&mut conn, c1, f.txn[0], Bytes::from("0BAD"))
+                    .await;
+            diesel::update(
+                schema::contract_code::table.filter(schema::contract_code::id.eq(stale_code)),
+            )
+            .set(schema::contract_code::valid_to.eq(MAX_TS))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            diesel::update(
+                schema::account_balance::table
+                    .filter(schema::account_balance::account_id.eq(f.c0))
+                    .filter(schema::account_balance::token_id.eq(f.native_token))
+                    .filter(schema::account_balance::valid_to.is_not_null()),
+            )
+            .set(schema::account_balance::valid_to.eq(MAX_TS))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let accounts = by_address(
+                gw.account_snapshots(&Chain::Ethereum, &mut conn)
+                    .await
+                    .unwrap(),
+            );
+
+            assert_eq!(accounts, by_address(vec![expected_c0(), expected_c1()]));
         })
         .await;
     }
