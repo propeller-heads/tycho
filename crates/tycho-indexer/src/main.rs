@@ -530,7 +530,7 @@ async fn create_indexing_tasks(
         .port(global_args.server_port)
         .plans_config(plans_config)
         .dci_protocols(dci_protocols)
-        .protocol_systems(protocol_systems.clone())
+        .protocol_systems(protocol_systems)
         .register_extractors(extractor_handles.clone())
         .pending_deltas(pending_deltas_rxs)
         .window_config(WindowConfig {
@@ -546,7 +546,7 @@ async fn create_indexing_tasks(
             .first()
             .expect("No chain provided");
         info!(mode = ?global_args.entity_cache_mode, "Loading the entity cache");
-        let cache = EntityCache::load(&cached_gw, chain, &protocol_systems)
+        let cache = EntityCache::load(&cached_gw, chain)
             .await
             .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
         services = services.entity_cache(Arc::new(cache));

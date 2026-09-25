@@ -3,10 +3,10 @@
 use std::{collections::HashMap, time::Instant};
 
 use metrics::gauge;
-use tracing::{info, warn};
+use tracing::info;
 use tycho_common::{
     models::{Address, Chain, ComponentId, ProtocolSystem},
-    storage::{AccountSnapshot, ComponentSnapshot, CursorSnapshot, StateSnapshot, StorageError},
+    storage::{AccountSnapshot, ComponentSnapshot, StateSnapshot, StorageError},
 };
 use tycho_storage::postgres::cache::CachedGateway;
 
@@ -20,14 +20,10 @@ impl EntityCache {
     /// # Errors
     ///
     /// `StorageError` when the snapshot read fails. No cache exists after an error.
-    pub async fn load(
-        gateway: &CachedGateway,
-        chain: Chain,
-        extractors: &[String],
-    ) -> Result<Self, StorageError> {
+    pub async fn load(gateway: &CachedGateway, chain: Chain) -> Result<Self, StorageError> {
         let started = Instant::now();
         let snapshot = gateway.state_snapshot(chain).await?;
-        let cache = Self::from_snapshot(snapshot, extractors);
+        let cache = Self::from_snapshot(snapshot);
         let elapsed = started.elapsed();
         let (accounts, components) = cache.entry_counts();
         gauge!("entity_cache_load_seconds").set(elapsed.as_secs_f64());
@@ -38,9 +34,9 @@ impl EntityCache {
     }
 
     /// Builds the cache from one snapshot: every row becomes an entry stamped with the block that
-    /// wrote it. `extractors` names the configured extractors whose cursors are reported.
-    pub(crate) fn from_snapshot(snapshot: StateSnapshot, extractors: &[String]) -> Self {
-        let StateSnapshot { accounts, components, cursors } = snapshot;
+    /// wrote it.
+    pub(crate) fn from_snapshot(snapshot: StateSnapshot) -> Self {
+        let StateSnapshot { accounts, components } = snapshot;
         let mut account_entries: HashMap<Address, CachedAccount> =
             HashMap::with_capacity(accounts.len());
         for row in accounts {
@@ -56,24 +52,7 @@ impl EntityCache {
                 .or_default()
                 .insert(row.state.component_id.clone(), component_entry(row));
         }
-        report_cursors(extractors, &cursors);
         Self::from_entries(account_entries, component_entries)
-    }
-}
-
-/// Logs where each configured extractor's stream resumes. A configured extractor without a
-/// cursor row starts from its configured block; that is a first run, not an error.
-fn report_cursors(extractors: &[String], cursors: &[CursorSnapshot]) {
-    for extractor in extractors {
-        match cursors
-            .iter()
-            .find(|c| &c.extractor == extractor)
-        {
-            Some(c) => {
-                info!(extractor, block = c.block_number, hash = %c.block_hash, "Snapshot cursor")
-            }
-            None => warn!(extractor, "No saved cursor in the snapshot; the extractor starts fresh"),
-        }
     }
 }
 
@@ -106,15 +85,6 @@ mod test {
     };
 
     const EXTRACTOR: &str = "ex";
-
-    fn cursors() -> Vec<CursorSnapshot> {
-        vec![CursorSnapshot {
-            extractor: EXTRACTOR.to_string(),
-            cursor: b"c".to_vec(),
-            block_hash: Bytes::zero(32),
-            block_number: 5,
-        }]
-    }
 
     fn addr(n: u64) -> Bytes {
         Bytes::from(n).lpad(20, 0)
@@ -163,10 +133,9 @@ mod test {
         let snapshot = StateSnapshot {
             accounts: vec![account_snapshot(5)],
             components: vec![component_snapshot(5)],
-            cursors: cursors(),
         };
 
-        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]);
+        let cache = EntityCache::from_snapshot(snapshot);
 
         let state = cache.read();
         assert_eq!(
@@ -185,12 +154,8 @@ mod test {
 
     #[test]
     fn from_snapshot_stamps_entries_with_the_row_block() {
-        let snapshot = StateSnapshot {
-            accounts: vec![],
-            components: vec![component_snapshot(5)],
-            cursors: cursors(),
-        };
-        let cache = EntityCache::from_snapshot(snapshot, &[EXTRACTOR.to_string()]);
+        let snapshot = StateSnapshot { accounts: vec![], components: vec![component_snapshot(5)] };
+        let cache = EntityCache::from_snapshot(snapshot);
         let x = |cache: &EntityCache| {
             cache
                 .read()
