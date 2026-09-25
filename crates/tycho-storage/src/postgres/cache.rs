@@ -37,7 +37,7 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, SnapshotChunk,
+        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
         StorageError, Version, WithTotal,
     },
     Bytes,
@@ -731,16 +731,10 @@ impl CachedGateway {
         }
     }
 
-    /// Streams the live state of `chain` from one `REPEATABLE READ`, read-only transaction.
-    ///
-    /// The receiver yields `Totals`, then `Accounts` and `Components` chunks, then `Cursors`, all
-    /// from the same database snapshot. An error ends the stream after one `Err` item. Dropping the
-    /// receiver ends the read.
-    pub fn state_snapshot(
-        &self,
-        chain: Chain,
-    ) -> mpsc::Receiver<Result<SnapshotChunk, StorageError>> {
-        super::snapshot::spawn_state_snapshot(self.state_gateway.clone(), self.pool.clone(), chain)
+    /// All live state of `chain` from one `REPEATABLE READ`, read-only transaction, see
+    /// [`super::snapshot::read_state_snapshot`].
+    pub async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError> {
+        super::snapshot::read_state_snapshot(&self.state_gateway, &self.pool, chain).await
     }
 
     pub async fn get_delta(

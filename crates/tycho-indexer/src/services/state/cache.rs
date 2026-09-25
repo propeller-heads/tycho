@@ -470,9 +470,8 @@ impl EntityCache {
         }
     }
 
-    /// A cache holding the startup snapshot. Every entry already carries the timestamps of its
-    /// database rows; nothing is compared because nothing else exists yet.
-    pub(super) fn from_snapshot(
+    /// A cache holding the given entries. Nothing is compared because nothing else exists yet.
+    pub(super) fn from_entries(
         accounts: HashMap<Address, CachedAccount>,
         components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
     ) -> Self {
@@ -485,6 +484,17 @@ impl EntityCache {
         self.state
             .read()
             .expect("entity cache lock poisoned")
+    }
+
+    /// Number of cached accounts and of cached components across all systems.
+    pub(crate) fn entry_counts(&self) -> (usize, usize) {
+        let state = self.read();
+        let components = state
+            .components
+            .values()
+            .map(HashMap::len)
+            .sum();
+        (state.accounts.len(), components)
     }
 
     fn write_lock(&self) -> RwLockWriteGuard<'_, CacheState> {
@@ -1108,7 +1118,7 @@ mod test {
             )]),
         )]);
 
-        let cache = EntityCache::from_snapshot(accounts, components);
+        let cache = EntityCache::from_entries(accounts, components);
 
         assert_eq!(cached_account(&cache, &address), Some(loaded));
         assert_eq!(cached_component(&cache, "c1"), Some(state));
