@@ -798,8 +798,8 @@ pub trait Gateway:
 ///
 /// `block_ts` is the unit of the database's `valid_from`. `block_number` orders blocks that share
 /// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
-/// database. A folded block carries both from its header; a snapshot row carries both from the
-/// block of its `modify_tx`.
+/// database. A block header supplies both; a snapshot row takes both from the block of its
+/// `modify_tx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WriteTimestamp {
     block_ts: NaiveDateTime,
@@ -822,18 +822,44 @@ impl From<&Block> for WriteTimestamp {
     }
 }
 
-/// One account's live state with the write stamp of every value: the block of the row's
+/// Write timestamps of one account's values, one per database row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountWriteTimestamps {
+    pub slots: HashMap<StoreKey, WriteTimestamp>,
+    pub native_balance: WriteTimestamp,
+    pub code: WriteTimestamp,
+    pub token_balances: HashMap<Address, WriteTimestamp>,
+}
+
+impl AccountWriteTimestamps {
+    /// One timestamp for every value of `account`.
+    pub fn uniform(account: &Account, at: WriteTimestamp) -> Self {
+        Self {
+            slots: account
+                .slots
+                .keys()
+                .map(|key| (key.clone(), at))
+                .collect(),
+            native_balance: at,
+            code: at,
+            token_balances: account
+                .token_balances
+                .keys()
+                .map(|token| (token.clone(), at))
+                .collect(),
+        }
+    }
+}
+
+/// One account's live state and the write timestamp of every value: the block of the row's
 /// `modify_tx`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountSnapshot {
     pub account: Account,
-    pub slot_written_at: HashMap<StoreKey, WriteTimestamp>,
-    pub native_balance_written_at: WriteTimestamp,
-    pub code_written_at: WriteTimestamp,
-    pub token_balance_written_at: HashMap<Address, WriteTimestamp>,
+    pub written_at: AccountWriteTimestamps,
 }
 
-/// One component's live state, stamped with the newest write among its rows or, for a component
+/// One component's live state, timestamped with the newest write among its rows or, for a component
 /// without rows, the block of its `creation_tx`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentSnapshot {
@@ -842,17 +868,17 @@ pub struct ComponentSnapshot {
     pub updated_at: WriteTimestamp,
 }
 
-/// All live state of one chain, read from one database snapshot.
+/// All live contracts and components of one chain, read from one database snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
 }
 
-/// Reads all live state of a chain from one database snapshot.
+/// Reads all live contracts and components of a chain from one database snapshot.
 #[async_trait]
 pub trait StateSnapshotGateway {
-    /// All live accounts and components of `chain`, every value stamped with the block that
-    /// wrote its row, all from one consistent read.
+    /// All live accounts and components of `chain`, every value timestamped with the block
+    /// that wrote its row, all from one consistent read.
     async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError>;
 }

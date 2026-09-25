@@ -6,12 +6,10 @@ use metrics::gauge;
 use tracing::info;
 use tycho_common::{
     models::{Address, Chain, ComponentId, ProtocolSystem},
-    storage::{
-        AccountSnapshot, ComponentSnapshot, StateSnapshot, StateSnapshotGateway, StorageError,
-    },
+    storage::{ComponentSnapshot, StateSnapshot, StateSnapshotGateway, StorageError},
 };
 
-use super::cache::{AccountWriteTimestamps, CachedAccount, CachedComponentState, EntityCache};
+use super::cache::{CachedAccount, CachedComponentState, EntityCache};
 
 impl EntityCache {
     /// Builds the cache from the live state of `chain`: one database snapshot, read once through
@@ -44,7 +42,10 @@ impl EntityCache {
         let mut account_entries: HashMap<Address, CachedAccount> =
             HashMap::with_capacity(accounts.len());
         for row in accounts {
-            account_entries.insert(row.account.address.clone(), account_entry(row));
+            account_entries.insert(
+                row.account.address.clone(),
+                CachedAccount::from_snapshot(row.account, row.written_at),
+            );
         }
         let mut component_entries: HashMap<
             ProtocolSystem,
@@ -60,16 +61,6 @@ impl EntityCache {
     }
 }
 
-fn account_entry(row: AccountSnapshot) -> CachedAccount {
-    let timestamps = AccountWriteTimestamps {
-        slots: row.slot_written_at,
-        native_balance: row.native_balance_written_at,
-        code: row.code_written_at,
-        token_balances: row.token_balance_written_at,
-    };
-    CachedAccount::from_snapshot(row.account, timestamps)
-}
-
 fn component_entry(row: ComponentSnapshot) -> CachedComponentState {
     CachedComponentState::from_snapshot(row.state, row.updated_at)
 }
@@ -81,7 +72,7 @@ mod test {
     use async_trait::async_trait;
     use tycho_common::{
         models::{contract::Account, protocol::ProtocolComponentState, Chain},
-        storage::{StateSnapshotGateway, WriteTimestamp},
+        storage::{AccountSnapshot, AccountWriteTimestamps, StateSnapshotGateway, WriteTimestamp},
         Bytes,
     };
 
@@ -114,13 +105,8 @@ mod test {
             Bytes::from("0x02"),
             None,
         );
-        AccountSnapshot {
-            account,
-            slot_written_at: HashMap::from([(slot, at)]),
-            native_balance_written_at: at,
-            code_written_at: at,
-            token_balance_written_at: HashMap::new(),
-        }
+        let written_at = AccountWriteTimestamps::uniform(&account, at);
+        AccountSnapshot { account, written_at }
     }
 
     fn component_snapshot(block: u64) -> ComponentSnapshot {
