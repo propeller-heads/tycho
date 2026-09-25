@@ -1319,8 +1319,8 @@ impl Gateway for CachedGateway {}
 
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
-    /// One `REPEATABLE READ`, read-only transaction on a pooled connection, see
-    /// [`super::snapshot::read_state_snapshot`].
+    /// Reads the snapshot on one pooled connection in one `REPEATABLE READ`, read-only
+    /// transaction.
     async fn state_snapshot(&self, chain: Chain) -> Result<StateSnapshot, StorageError> {
         super::snapshot::read_state_snapshot(&self.state_gateway, &self.pool, chain).await
     }
