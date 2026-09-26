@@ -1,0 +1,108 @@
+use alloy_primitives::{keccak256, Address, B256, U256};
+use anyhow::Result;
+
+#[derive(serde::Deserialize)]
+pub struct Config {
+    pub entrypoint: Address,
+    pub curve_book: Address,
+    pub custodian: Address,
+    pub quote: Address,
+    pub start_block: u64,
+}
+
+impl Config {
+    pub fn parse(params: &str) -> Result<Self> {
+        Ok(serde_qs::from_str(params)?)
+    }
+
+    pub fn id(&self, base: Address) -> String {
+        format!("0x{:x}{:x}", self.entrypoint, base)
+    }
+
+    /// CurveBook v3's ERC-7201 layout and the custodian's claim reservation mapping.
+    /// The order is the simulator's word_0..word_31 wire format.
+    pub fn slots(&self, base: Address) -> Vec<(Address, B256)> {
+        let book = namespace("baibai.storage.CurveBook.v3");
+        let pair = mapping(U256::from_be_slice(base.as_slice()), book + U256::from(2));
+        let mut slots = vec![(self.curve_book, B256::from(book))];
+        for i in 0..5 {
+            slots.push((self.curve_book, B256::from(pair + U256::from(i))));
+        }
+        for side in [5, 6] {
+            for i in 0..12 {
+                slots.push((
+                    self.curve_book,
+                    B256::from(mapping(U256::from(i), pair + U256::from(side))),
+                ));
+            }
+        }
+        let claims = namespace("baibai.storage.Custodian") + U256::from(2);
+        for token in [base, self.quote] {
+            slots.push((
+                self.custodian,
+                B256::from(mapping(U256::from_be_slice(token.as_slice()), claims)),
+            ));
+        }
+        slots
+    }
+}
+
+pub(super) fn namespace(name: &str) -> U256 {
+    let hash = U256::from_be_bytes(keccak256(name).0) - U256::from(1);
+    U256::from_be_bytes(keccak256(hash.to_be_bytes::<32>()).0) & !U256::from(255)
+}
+
+pub(super) fn mapping(key: U256, slot: U256) -> U256 {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&key.to_be_bytes::<32>());
+    encoded[32..].copy_from_slice(&slot.to_be_bytes::<32>());
+    U256::from_be_bytes(keccak256(encoded).0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, b256};
+
+    pub fn config() -> Config {
+        Config {
+            entrypoint: address!("98c1d9e102eb2806d902b13186bdc7892ac4ffba"),
+            curve_book: address!("604d9b9eb1e1571c78661a6c1088427ec9c8c6e5"),
+            custodian: address!("aac48feb93c5c97e0fb3c7c57e1633922a4acda3"),
+            quote: address!("833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+            start_block: 50895895,
+        }
+    }
+
+    #[test]
+    fn storage_slots_match_fork_verified_layout() {
+        let config = config();
+        let base = address!("4200000000000000000000000000000000000006");
+        let slots = config.slots(base);
+        assert_eq!(slots.len(), 32);
+        assert_eq!(
+            slots[0],
+            (
+                config.curve_book,
+                b256!("e09504e49664366a3e335460a12239a33d2e4d6e11b3f715819aac7b9cbd4700")
+            )
+        );
+        assert_eq!(
+            slots[1].1,
+            b256!("bcb8bfe6ffbb71dd8cc906f7ff382624d78bf34f08d0db2fe70575e6e31e7ccf")
+        );
+        assert_eq!(
+            slots[6].1,
+            b256!("39d4cddf50b0121ac262edb797550f5bb3d7a094920cc5f379ea8501da1526b9")
+        );
+        assert_eq!(
+            slots[18].1,
+            b256!("b06093be85115d3933e65e4d612df056dffaeeabd757f4892813dbf7d291f548")
+        );
+        assert_eq!(slots[30].0, config.custodian);
+        assert_ne!(slots[30].1, slots[31].1);
+        // IDs must round-trip through Tycho's byte representation and the SDK's ':' keys.
+        let id = alloy_primitives::hex::decode(config.id(base)).unwrap();
+        assert_eq!(id, [config.entrypoint.as_slice(), base.as_slice()].concat());
+    }
+}
