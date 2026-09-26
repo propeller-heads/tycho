@@ -1,7 +1,7 @@
 use num_bigint::BigUint;
 
 use super::{
-    constants::{FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX},
+    constants::{FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX, TEMPEST_KEY},
     group_swaps::group_swaps,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
@@ -37,8 +37,17 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 ///
 /// This list is incomplete on its own: whole protocol families can qualify too. Use
 /// [`optimizable_transfer_in`] for the full classification.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
-    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
+    "erc4626",
+    "maverick_v2",
+    "uniswap_v2",
+    "sushiswap_v2",
+    "pancakeswap_v2",
+    "quickswap_v2",
+    // Tempest is the same push-payment `IPropAMM` shape the `pricelevelstream:` family uses, and
+    // is served by the same executor, but it is keyed by protocol name rather than that prefix.
+    TEMPEST_KEY,
+];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
@@ -365,6 +374,16 @@ mod tests {
         // input transfer                            0  ← push-payment, funds sent directly
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_single_tempest_pamm() {
+        // Tempest is push-payment like the `pricelevelstream:` venues but is keyed by name rather
+        // than that prefix, so it has to be listed explicitly. Same executor, same estimate.
+        let solution = make_solution(vec![make_swap("vm:tempest")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
         assert_eq!(gas, BigUint::from(200_000u64));
     }
 
