@@ -12,7 +12,10 @@ use tycho_substreams::{
 };
 
 use crate::{
-    common::{address_from_word, books_for_token, weth_event_delta},
+    common::{
+        address_from_word, books_for_token, previous_live_book_for_token, u64_from_word_padded,
+        weth_event_delta,
+    },
     config::DeploymentConfig,
 };
 
@@ -91,6 +94,9 @@ fn seed_new_books(
     for tx_components in &new_components.tx_components {
         let Some(tx) = &tx_components.tx else { continue };
         for component in &tx_components.components {
+            let new_asset_id = component
+                .get_attribute_value("asset_id")
+                .and_then(|b| u64_from_word_padded(&b));
             for token in &component.tokens {
                 if token.as_slice() == config.usdc.as_slice() {
                     continue;
@@ -105,6 +111,39 @@ fn seed_new_books(
                         token: token.clone(),
                         delta: balance.to_signed_bytes_be(),
                         component_id: comp_id.into_bytes(),
+                    });
+                }
+                // Re-listing: this token's live book (seeded with `balanceOf(maker)` above) has
+                // replaced an older book. Drain only the previous live book by the same amount so
+                // the maker's inventory is not double-counted across both books. USDC is excluded
+                // (it is shared across every book by design).
+                //
+                // Only the immediately preceding book is drained, never the whole superseded set:
+                // each older book was already drained to zero when its own replacement was created,
+                // so draining them again would push them negative.
+                //
+                // Invariant: the previous book's accumulated asset balance equals
+                // `balanceOf(maker)` at this block — it was the token's live book
+                // and tracked the maker's holdings until now, so
+                // `-balanceOf(maker)` nets it to zero. The balance store is additive
+                // and cannot be read back here (module graph cycle), so an exact drain isn't
+                // possible. The invariant only breaks if the maker's balance moves in this very
+                // block (its own Transfer is skipped via `seeded_tokens`) or the maker is rotated
+                // in the same block; both leave a small residual on the now-paused,
+                // unrouted book. Neither has occurred for this venue.
+                let Some(new_asset_id) = new_asset_id else { continue };
+                if let Some(old_id) =
+                    previous_live_book_for_token(token, new_asset_id, components_store)
+                {
+                    balance_deltas.push(BalanceDelta {
+                        ord: tx.index,
+                        tx: Some(tx.clone()),
+                        token: token.clone(),
+                        delta: balance
+                            .clone()
+                            .neg()
+                            .to_signed_bytes_be(),
+                        component_id: old_id.into_bytes(),
                     });
                 }
             }
