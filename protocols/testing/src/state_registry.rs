@@ -2,14 +2,23 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
-            ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
-            filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
-            lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
-            ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
-            rocketpool::state::RocketpoolState, sky::state::SkyState,
-            uniswap_v2::state::UniswapV2State, uniswap_v3::state::UniswapV3State,
-            uniswap_v4::state::UniswapV4State, vm::state::EVMPoolState,
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            ekubo::state::EkuboState,
+            ekubo_v3::state::EkuboV3State,
+            etherfi::state::EtherfiState,
+            filters::{camelot_v3_pool_filter, ekubo_v3_extension_filter},
+            fluid::FluidV1,
+            lido_v4::state::LidoV4State,
+            lunarbase::LunarBaseState,
+            pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State,
+            ring_swap_v2::state::RingSwapV2State,
+            rocketpool::state::RocketpoolState,
+            sky::state::SkyState,
+            uniswap_v2::state::UniswapV2State,
+            uniswap_v3::state::UniswapV3State,
+            uniswap_v4::state::UniswapV4State,
+            vm::state::EVMPoolState,
         },
         stream::ProtocolStreamBuilder,
     },
@@ -131,6 +140,14 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
+        // Pools with an active incentive call an unindexed virtual pool and cannot be simulated.
+        "vm:camelot_v3" => stream_builder
+            .exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
+                protocol_system,
+                tvl_filter,
+                Some(camelot_v3_pool_filter),
+                decoder_context,
+            ),
         // Default to EVMPoolState for all other protocols
         _ => stream_builder.exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
             protocol_system,

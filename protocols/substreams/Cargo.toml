@@ -37,6 +37,7 @@ members = [
     "ethereum-sky",
     "polygon-ramses-v3",
     "ethereum-etherfi",
+    "arbitrum-camelot-v3",
 ]
 resolver = "2"
 

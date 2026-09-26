@@ -1,0 +1,80 @@
+substreams_yaml_path: ./arbitrum-camelot-v3.yaml
+protocol_system: "vm:camelot_v3"
+adapter_contract: "CamelotV3SwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B"
+skip_balance_check: false
+initialized_accounts:
+  - "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B" # AlgebraFactory, created at block 101163738
+protocol_type_names:
+  - "camelot_v3_pool"
+tests:
+  # The first pool the factory ever created (WETH / USDC.e), including its first mint.
+  - name: test_first_pool_creation
+    start_block: 101213148
+    stop_block: 101213249
+    expected_components:
+      - id: "0x521aa84ab3fcc4c05cabac24dc3682339887b126"
+        tokens:
+          - "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" # WETH
+          - "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8" # USDC.e
+        static_attributes:
+          data_storage_operator: "0x6c70ec64217cfe81a7961168ce9909ebad7c2935"
+          manual_updates: "0x01"
+        creation_tx: "0x4fdf486f54e6f7e29cef24c5e75d79cafd8881d85947aa3d475aa4f35f1b4abd"
+        skip_simulation: false
+        # June 2023 predates Cancun support on Arbitrum One; TychoRouterV3 needs transient storage.
+        skip_execution: true
+
+  # A recent pool (SUSHI / PEPE) at a block where the router's opcodes are available.
+  - name: test_sushi_pepe_pool_creation
+    start_block: 280865282
+    stop_block: 280865383
+    expected_components:
+      - id: "0xbe4286ece220f999cfb5826e6fff98081506f682"
+        tokens:
+          - "0x1bc6059b12A452DD9Ec0140fDc79140Ebf4DBE12" # SUSHI
+          - "0x25d887Ce7a35172C62FeBFD67a1856F20FaEbB00" # PEPE
+        static_attributes:
+          data_storage_operator: "0x20769063ff40023995e81721cc6fa6788e539680"
+          manual_updates: "0x01"
+        creation_tx: "0xfd6566c8407d96c53d2239361a0636b508a66485925ca1ca30596e9cfd57e133"
+        skip_simulation: false
+        skip_execution: false
+
+  # A launch-era pool that traded from the start: 174 swaps in its first 20k blocks, the one at
+  # block 103441556 crossing an initialized tick, so the tick table words and tick slots the
+  # adapter's walk reads are exercised, and every swap forwards a 15% community fee to the vault.
+  - name: test_pnp_weth_pool_swaps_crossing_ticks
+    start_block: 103424089
+    stop_block: 103441600
+    expected_components:
+      - id: "0x13bc35d101b646cf1f566f95077e67a9f5b301a3"
+        tokens:
+          - "0x2Ac2B254Bc18cD4999f64773a966E4f4869c34Ee" # PNP
+          - "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" # WETH
+        static_attributes:
+          data_storage_operator: "0x25e57924327662af887cfc9d06007364171184f7"
+          manual_updates: "0x01"
+        creation_tx: "0xf5e7d2042c96dece6c7df2aeff9f01335727d287d035049111b7b352adb1b544"
+        skip_simulation: false
+        # July 2023 predates Cancun support on Arbitrum One; TychoRouterV3 needs transient storage.
+        skip_execution: true
+
+  # The SUSHI / PEPE pool's first swap, at block 280869342: the pool keeps the input minus the
+  # 15% community fee it forwards to the vault inside the swap, so the transfer-based balances
+  # are checked against the chain after a fee left the pool, and the swap executes.
+  - name: test_sushi_pepe_first_swap_pays_community_fee
+    start_block: 280865282
+    stop_block: 280869400
+    expected_components:
+      - id: "0xbe4286ece220f999cfb5826e6fff98081506f682"
+        tokens:
+          - "0x1bc6059b12A452DD9Ec0140fDc79140Ebf4DBE12" # SUSHI
+          - "0x25d887Ce7a35172C62FeBFD67a1856F20FaEbB00" # PEPE
+        static_attributes:
+          data_storage_operator: "0x20769063ff40023995e81721cc6fa6788e539680"
+          manual_updates: "0x01"
+        creation_tx: "0xfd6566c8407d96c53d2239361a0636b508a66485925ca1ca30596e9cfd57e133"
+        skip_simulation: false
+        skip_execution: false

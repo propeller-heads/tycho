@@ -38,6 +38,7 @@
   },
   "arbitrum": {
     "uniswap_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",
+    "vm:camelot_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",
     "rfq:native": "0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d"
   },
   "polygon": {
