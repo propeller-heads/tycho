@@ -33,6 +33,7 @@ WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 # Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
@@ -77,6 +78,7 @@ COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams 
 # Keep this in sync with CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
