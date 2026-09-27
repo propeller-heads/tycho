@@ -23,8 +23,8 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        self, chain_config::ChainConfigError, Address, Balance, Code, ComponentId, StoreKey,
-        StoreVal,
+        self, chain_config::ChainConfigError, token::TokenMetadataStatus, Address, Balance, Code,
+        ComponentId, StoreKey, StoreVal,
     },
     serde_primitives::{
         hex_bytes, hex_bytes_option, hex_hashmap_key, hex_hashmap_key_value, hex_hashmap_value,
@@ -1261,6 +1261,11 @@ impl TokensRequestResponse {
 #[serde(rename = "Token")]
 /// Token struct for the response from Tycho server for a tokens request.
 pub struct ResponseToken {
+    /// Pending tokens are unavailable regardless of their quality threshold.
+    // Referenced by its bare name so utoipa emits `#/components/schemas/TokenMetadataStatus`,
+    // matching the component registered in the indexer's OpenAPI document.
+    #[serde(default, skip_serializing_if = "TokenMetadataStatus::is_ready")]
+    pub metadata_status: TokenMetadataStatus,
     pub chain: Chain,
     /// The address of this token as hex encoded string
     #[schema(value_type=String, example="0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
@@ -1288,6 +1293,7 @@ pub struct ResponseToken {
 impl From<models::token::Token> for ResponseToken {
     fn from(value: models::token::Token) -> Self {
         Self {
+            metadata_status: value.metadata_status,
             chain: value.chain.into(),
             address: value.address,
             symbol: value.symbol,

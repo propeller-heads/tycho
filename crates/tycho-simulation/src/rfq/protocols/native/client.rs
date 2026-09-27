@@ -738,6 +738,7 @@ impl RFQClient for NativeClient {
                 current_components = new_components.clone();
 
                 let snapshot = Snapshot {
+                    tokens: Default::default(),
                     states: new_components,
                     vm_storage: HashMap::new(),
                 };

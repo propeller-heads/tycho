@@ -1048,20 +1048,7 @@ impl PostgresGateway {
         let tokens: Vec<Token> = results
             .into_iter()
             .map(|(orm_token, address_)| {
-                let gas_usage: Vec<_> = orm_token
-                    .gas
-                    .iter()
-                    .map(|u| u.map(|g| g as u64))
-                    .collect();
-                Token::new(
-                    &address_,
-                    orm_token.symbol.as_str(),
-                    orm_token.decimals as u32,
-                    orm_token.tax as u64,
-                    gas_usage.as_slice(),
-                    chain,
-                    orm_token.quality as u32,
-                )
+                super::token_cache::to_model_token(&orm_token, &address_, chain)
             })
             .collect();
 
@@ -1178,11 +1165,127 @@ impl PostgresGateway {
         Ok(())
     }
 
+    // The pending queries filter on the bare column rather than `= $1` so PostgreSQL can prove
+    // the `token_pending_metadata_idx` partial-index predicate under a generic plan.
+    pub(crate) async fn pending_token_metadata(
+        &self,
+        chain: Chain,
+        after_id: i64,
+        limit: i64,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<(i64, Token, NaiveDateTime)>, StorageError> {
+        let rows = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(self.get_chain_id(&chain)?))
+            .filter(schema::token::metadata_pending)
+            .filter(schema::token::id.gt(after_id))
+            .order(schema::token::id.asc())
+            .limit(limit)
+            .select((orm::Token::as_select(), schema::account::address))
+            .load::<(orm::Token, Address)>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|(row, address)| (row.id, Token::pending(&address, chain), row.inserted_ts))
+            .collect())
+    }
+
+    pub(crate) async fn pending_token_metadata_stats(
+        &self,
+        chain: Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(i64, Option<NaiveDateTime>), StorageError> {
+        schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(self.get_chain_id(&chain)?))
+            .filter(schema::token::metadata_pending)
+            .select((diesel::dsl::count_star(), diesel::dsl::min(schema::token::inserted_ts)))
+            .first(conn)
+            .await
+            .map_err(|error| PostgresError::from(error).into())
+    }
+
+    pub(crate) async fn ready_token_metadata(
+        &self,
+        chain: Chain,
+        addresses: &[Address],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<Token>, StorageError> {
+        let rows = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(self.get_chain_id(&chain)?))
+            .filter(schema::account::address.eq_any(addresses))
+            .filter(diesel::dsl::not(schema::token::metadata_pending))
+            .select((orm::Token::as_select(), schema::account::address))
+            .load::<(orm::Token, Address)>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|(row, address)| super::token_cache::to_model_token(&row, &address, chain))
+            .collect())
+    }
+
+    /// Completes only still-pending rows. Cache publication belongs to the caller after commit.
+    pub(crate) async fn complete_token_metadata(
+        &self,
+        tokens: &[Token],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<Token>, StorageError> {
+        let mut completed = Vec::new();
+        for token in tokens {
+            // Completing with a still-pending value would clear the flag while leaving the
+            // placeholder symbol and zero decimals in place: a fake-ready row that consumers
+            // would price with.
+            if !token.metadata_status.is_ready() {
+                return Err(StorageError::Unexpected(
+                    "Cannot complete pending token metadata".into(),
+                ));
+            }
+            let account_ids = schema::account::table
+                .filter(schema::account::chain_id.eq(self.get_chain_id(&token.chain)?))
+                .filter(schema::account::address.eq(&token.address))
+                .select(schema::account::id);
+            let gas: Vec<_> = token
+                .gas
+                .iter()
+                .map(|g| g.map(|g| g as i64))
+                .collect();
+            let count = diesel::update(schema::token::table)
+                .filter(schema::token::account_id.eq_any(account_ids))
+                .filter(schema::token::metadata_pending)
+                .set((
+                    schema::token::symbol.eq(truncate_to_byte_limit(&token.symbol, 255)),
+                    schema::token::decimals.eq(token.decimals as i32),
+                    schema::token::quality.eq(token.quality as i32),
+                    schema::token::gas.eq(gas),
+                    schema::token::tax.eq(token.tax as i64),
+                    schema::token::metadata_pending.eq(false),
+                ))
+                .execute(conn)
+                .await
+                .map_err(PostgresError::from)?;
+            if count != 0 {
+                completed.push(token.clone());
+            }
+        }
+        Ok(completed)
+    }
+
     pub async fn update_tokens(
         &self,
         tokens: &[Token],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
+        if tokens
+            .iter()
+            .any(|item| !item.metadata_status.is_ready())
+        {
+            return Err(StorageError::Unexpected(
+                "Pending metadata must be completed through recovery".into(),
+            ));
+        }
         trace!(addresses=?tokens.iter().map(|t| &t.address).collect::<Vec<_>>(), "Updating tokens");
         let address_to_db_id = {
             let token_addresses: HashSet<Address> = tokens
@@ -1204,7 +1307,8 @@ impl PostgresGateway {
             .collect::<HashMap<Bytes, i64>>()
         };
         use schema::token::dsl::*;
-        async {
+        let updated = async {
+            let mut updated = Vec::new();
             for t in tokens.iter() {
                 if let Some(db_id) = address_to_db_id.get(&t.address) {
                     let gas_val = t
@@ -1212,7 +1316,7 @@ impl PostgresGateway {
                         .iter()
                         .map(|v| v.map(|g| g as i64))
                         .collect::<Vec<_>>();
-                    diesel::update(schema::token::table)
+                    let count = diesel::update(schema::token::table)
                         .set((
                             symbol.eq(&t.symbol),
                             decimals.eq(t.decimals as i32),
@@ -1221,14 +1325,17 @@ impl PostgresGateway {
                             gas.eq(gas_val),
                         ))
                         .filter(id.eq(db_id))
+                        // Ordinary quality updates cannot complete unresolved metadata.
+                        .filter(metadata_pending.eq(false))
                         .execute(conn)
                         .await
                         .map_err(PostgresError::from)?;
+                    if count != 0 { updated.push(t.clone()); }
                 } else {
                     warn!(address=?&t.address, "Tried to update non existing token! Consider inserting it first!");
                 }
             }
-            Ok::<(), StorageError>(())
+            Ok::<_, StorageError>(updated)
         }
         .instrument(debug_span!("update_token_rows"))
         .await?;
@@ -1236,11 +1343,6 @@ impl PostgresGateway {
         if let Some(token_cache) = &self.token_cache {
             // Only tokens present in the DB were updated above; the cache mirrors the
             // DB, so restrict the write-through to those as well.
-            let updated: Vec<Token> = tokens
-                .iter()
-                .filter(|t| address_to_db_id.contains_key(&t.address))
-                .cloned()
-                .collect();
             token_cache.upsert_tokens(&updated);
         }
 

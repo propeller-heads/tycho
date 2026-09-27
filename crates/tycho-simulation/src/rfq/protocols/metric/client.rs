@@ -339,7 +339,7 @@ impl RFQClient for MetricClient {
 
                 yield Ok(("metric".to_string(), StateSyncMessage {
                     header: TimestampHeader { timestamp },
-                    snapshots: Snapshot { states: new_components, vm_storage: HashMap::new() },
+                    snapshots: Snapshot { states: new_components, vm_storage: HashMap::new(), tokens: HashMap::new() },
                     deltas: None,
                     removed_components,
                 }));

@@ -1383,6 +1383,7 @@ pub struct Token {
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
     pub quality: i32,
+    pub metadata_pending: bool,
 }
 
 #[derive(AsChangeset, Insertable, Debug)]
@@ -1395,6 +1396,7 @@ pub struct NewToken {
     pub tax: i64,
     pub gas: Vec<Option<i64>>,
     pub quality: i32,
+    pub metadata_pending: bool,
 }
 
 impl NewToken {
@@ -1402,13 +1404,14 @@ impl NewToken {
     /// IMPORTANT: Update this if you add/remove fields!
     /// Used to calculate MAX_BATCH_SIZE to avoid exceeding PostgreSQL's i16 parameter limit
     /// (32767).
-    pub const FIELD_COUNT: usize = 6;
+    pub const FIELD_COUNT: usize = 7;
     /// Maximum number of rows that can be inserted in a single batch.
     /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 
     pub fn from_token(account_id: i64, token: &models::token::Token) -> Self {
         Self {
+            metadata_pending: !token.metadata_status.is_ready(),
             account_id,
             symbol: token.symbol.clone(),
             decimals: token.decimals as i32,

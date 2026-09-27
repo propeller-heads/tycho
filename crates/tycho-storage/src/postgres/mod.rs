@@ -155,6 +155,8 @@ mod orm;
 mod protocol;
 mod schema;
 pub mod token_cache;
+#[cfg(test)]
+mod token_metadata_tests;
 mod versioning;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
