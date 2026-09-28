@@ -63,8 +63,7 @@ interface ITesseraPair {
     function poolState() external view returns (State memory);
 }
 
-/// Real venue execution supplies pricing and post-swap storage. No SDK math is
-/// embedded.
+/// Prices and post-swap storage come from executing TesseraSwap itself.
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
     ITesseraSwap public immutable tesseraSwap;
@@ -159,9 +158,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
         view
         returns (Fraction memory)
     {
-        // Choose the step through the venue, accounting for output token
-        // precision. A fixed one-micro-USDC step rounds to zero when buying
-        // cbBTC.
+        // The step must buy at least 1,000 raw output units, so low-decimal
+        // outputs such as cbBTC do not round to zero.
         uint256 target = 10 ** IERC20Metadata(buy).decimals() / 1e6;
         if (target < 1000) target = 1000;
         (uint256 step,) = _quoteInput(sell, buy, target);
@@ -258,9 +256,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
             ""
         );
         trade.gasUsed = gasBefore - gasleft();
-        // Report settlement, not the pre-fee view quote. In particular, a
-        // helper fee or a future implementation must not silently inflate
-        // exact-input simulation output.
+        // Report what the venue settled, not its view quote, so any gap
+        // between the two shows up in simulated output.
         uint256 received = IERC20(buy).balanceOf(msg.sender) - outputBefore;
         if (side == OrderSide.Buy && received < specified) {
             revert Unavailable("Exact output not settled");

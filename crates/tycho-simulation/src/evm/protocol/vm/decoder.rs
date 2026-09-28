@@ -50,8 +50,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
                 .attributes
                 .get(&address_key)
             {
-                // The wire value is UTF-8 address text. Invalid UTF-8 must terminate
-                // decoding; retrying the same index here would loop forever.
+                // The wire value is UTF-8 address text; anything else is rejected.
                 let decoded = String::from_utf8(encoded_address_bytes.to_vec()).map_err(|_| {
                     InvalidSnapshotError::ValueError(format!("{address_key} must be UTF-8"))
                 })?;

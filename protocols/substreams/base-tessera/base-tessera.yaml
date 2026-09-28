@@ -27,8 +27,7 @@ binaries:
 
 network: base
 
-# Deployment config (addresses + storage layout) is passed as params so the module can be
-# re-pointed at another Tessera deployment without code changes. Hex, no `0x` prefix.
+# Deployment addresses and storage-layout slots. Hex, no `0x` prefix.
 params:
   map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52"
   map_storage_changes: *config

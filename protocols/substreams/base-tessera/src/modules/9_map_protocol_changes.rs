@@ -177,9 +177,8 @@ fn record_pair_writes(
     let engine_slot = slot(0);
     let treasury_slot = slot(config.treasury_slot);
     // Array order is the consumer's stateless_contract_addr_<i> attribute index.
-    // Follow these pointers so the VM can load replacement bytecode instead of keeping
-    // an old implementation. An address change alone does not require a pause, provided
-    // the supported layout/ABI and external-state assumptions still hold.
+    // The VM reloads bytecode when one of these addresses changes; a change alone does
+    // not pause the pair.
     let dependency_slots = [
         IMPLEMENTATION_SLOT.to_vec(), // Pair EIP-1967 slot: implementation, attribute 0.
         slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
@@ -217,8 +216,7 @@ fn record_pair_writes(
                         attribute(builder, &pair, "engine", address(&w.new_value));
                     }
                     if w.key == treasury_slot {
-                        // Treasury rotation is supported: switch the balance owner here;
-                        // map_relative_balances supplies the corresponding balance bridge.
+                        // map_relative_balances emits the matching balance bridge.
                         attribute(builder, &pair, "balance_owner", address(&w.new_value));
                     }
                 } else if w.address != config.engine {
@@ -244,8 +242,6 @@ fn record_pair_writes(
 
 /// Emits a sticky pause signal for unsafe pairs in every emitted transaction.
 /// Safety is evaluated against closing-block stores; this module never emits an unpause.
-/// Consumers must enforce the signal before routing: emitting an attribute alone is not
-/// equivalent to removing a pool from the consumer's active set.
 fn enforce_pauses(
     config: &DeploymentConfig,
     storage: &BlockStorageChanges,
@@ -274,10 +270,9 @@ fn enforce_pauses(
                 .or_insert_with(|| TransactionChangesBuilder::new(tx));
         }
     }
-    // The indexer still follows config.engine and its registry layout. A replacement in
-    // TesseraSwap slot 0 would leave discovery and VM state tracking the old Engine, so
-    // signal a pause for every Pair until that deployment is explicitly supported.
-    // Ordinary storage updates inside the configured Engine do not trigger this check.
+    // Discovery and state indexing follow config.engine. If TesseraSwap slot 0 points at
+    // another Engine, every Pair is paused. Storage updates inside config.engine are not
+    // an Engine replacement.
     let epoch_changed = view
         .safety
         .engine
@@ -296,11 +291,9 @@ fn enforce_pauses(
                 .helpers
                 .get(pair)
                 .and_then(|helper| view.safety.fees.get(helper));
-            // Empty swapData selects helper fee A[0] (mapping base slot 1). We load the
-            // helper's bytecode but not its own storage, so the VM reads an absent fee as
-            // zero. A nonzero on-chain fee would make simulation disagree with execution:
-            // pause each Pair using that helper. A helper address change with zero fee is
-            // supported, as are pricing-library/implementation pointer changes above.
+            // Empty swapData selects helper fee A[0] (mapping base slot 1). The VM loads
+            // the helper's bytecode but not its storage, so it reads the fee as zero; a
+            // nonzero on-chain fee would make simulation over-quote execution.
             if epoch_changed || fee.is_some_and(|value| !zero(value)) {
                 builder.change_component_pause_state(pair, true);
             }

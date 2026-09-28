@@ -12,8 +12,8 @@ use crate::encoding::{
 
 /// Encodes a swap on Tessera on Base.
 ///
-/// The executor holds the settlement address as an immutable, so the protocol
-/// data is just the packed token pair; the traded book follows from it.
+/// The executor holds the TesseraSwap address as an immutable, so the protocol
+/// data is just the packed token pair; TesseraSwap routes it to the registered pair.
 #[derive(Clone)]
 pub struct TesseraSwapEncoder {
     executor_address: Bytes,
