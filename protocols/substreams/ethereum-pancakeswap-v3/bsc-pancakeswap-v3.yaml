@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "bsc_pancakeswap_v3"
-  version: v0.1.2
+  version: v0.1.3
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-pancakeswap-v3"
 
 protobuf:
