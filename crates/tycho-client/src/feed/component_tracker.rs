@@ -152,6 +152,8 @@ pub struct ComponentTracker<R: RPCClient> {
     pub contracts: HashSet<Address>,
     /// Client to retrieve necessary protocol components from the rpc.
     rpc_client: R,
+    /// Kept after removal so a TVL increase cannot reactivate a paused component.
+    pub(super) paused: HashSet<ComponentId>,
 }
 
 impl<R> ComponentTracker<R>
@@ -167,6 +169,7 @@ where
             contracts: Default::default(),
             rpc_client: rpc,
             entrypoints: Default::default(),
+            paused: Default::default(),
         }
     }
 
@@ -414,10 +417,10 @@ where
     /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
     /// the components that need to be added or removed.
     pub fn filter_updated_components(
-        &self,
+        &mut self,
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
-        match &self.filter.variant {
+        let (mut to_add, mut to_remove) = match &self.filter.variant {
             ComponentFilterVariant::Ids(_) => (Default::default(), Default::default()),
             ComponentFilterVariant::MinimumTVLRange { range: (remove_tvl, add_tvl), .. } => {
                 let (mut to_add, mut to_remove): (Vec<_>, Vec<_>) = deltas
@@ -439,7 +442,48 @@ where
 
                 (to_add, to_remove)
             }
+        };
+        for (id, delta) in &deltas.state_deltas {
+            let paused = if delta
+                .deleted_attributes
+                .contains("paused")
+            {
+                false
+            } else if let Some(value) = delta.updated_attributes.get("paused") {
+                value.iter().any(|byte| *byte != 0)
+            } else {
+                continue; // Missing from a sparse delta does not mean unpaused.
+            };
+            if paused {
+                self.paused.insert(id.clone());
+                to_remove.push(id.clone());
+            } else {
+                self.paused.remove(id);
+                to_add.push(id.clone());
+            }
         }
+        to_add.retain(|id| {
+            !self.paused.contains(id) && self.is_selected(id) && !to_remove.contains(id)
+        });
+        (to_add, to_remove)
+    }
+
+    pub(super) fn is_selected(&self, id: &str) -> bool {
+        match &self.filter.variant {
+            ComponentFilterVariant::Ids(ids) => ids.contains(&id.to_lowercase()),
+            ComponentFilterVariant::MinimumTVLRange { .. } => !self.filter.is_blocklisted(id),
+        }
+    }
+
+    /// Unpause may arrive without a TVL delta; use the freshly fetched snapshot for admission.
+    pub(super) fn can_admit(&self, id: &str, tvl: Option<f64>) -> bool {
+        self.is_selected(id) &&
+            match &self.filter.variant {
+                ComponentFilterVariant::Ids(_) => true,
+                ComponentFilterVariant::MinimumTVLRange { range: (_, add_tvl), .. } => {
+                    tvl.is_some_and(|tvl| tvl > *add_tvl)
+                }
+            }
     }
 }
 
@@ -632,5 +676,80 @@ mod test {
             "Non-blocklisted component should be in to_add"
         );
         assert!(to_remove.is_empty());
+    }
+    fn pause_delta(id: &str, value: Option<Bytes>) -> BlockAggregatedChanges {
+        use tycho_common::models::protocol::ProtocolComponentStateDelta;
+        let (updated_attributes, deleted_attributes) = match value {
+            Some(value) => (HashMap::from([("paused".into(), value)]), HashSet::new()),
+            None => (HashMap::new(), HashSet::from(["paused".into()])),
+        };
+        BlockAggregatedChanges {
+            state_deltas: HashMap::from([(
+                id.into(),
+                ProtocolComponentStateDelta {
+                    component_id: id.into(),
+                    updated_attributes,
+                    deleted_attributes,
+                    created_attributes: HashSet::new(),
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unpause_respects_id_selection_and_zero_value() {
+        let mut tracker = ComponentTracker::new(
+            Chain::Ethereum,
+            "test",
+            ComponentFilter::Ids(vec!["allowed".into()]),
+            MockRPCClient::new(),
+        );
+        assert!(tracker
+            .filter_updated_components(&pause_delta("other", None))
+            .0
+            .is_empty());
+        tracker.filter_updated_components(&pause_delta("allowed", Some(Bytes::from("0x01"))));
+        assert_eq!(
+            tracker
+                .filter_updated_components(&pause_delta("allowed", Some(Bytes::from("0x0000"))))
+                .0,
+            vec!["allowed"]
+        );
+    }
+
+    #[test]
+    fn pause_overrides_tvl_and_resume_requires_fresh_eligibility() {
+        let mut tracker = ComponentTracker::new(
+            Chain::Ethereum,
+            "test",
+            ComponentFilter::with_tvl_range(50.0, 100.0).blocklist(vec!["blocked".into()]),
+            MockRPCClient::new(),
+        );
+        let mut delta = pause_delta("pool", Some(Bytes::from("0x0001")));
+        delta
+            .component_tvl
+            .insert("pool".into(), 200.0);
+        let (add, remove) = tracker.filter_updated_components(&delta);
+        assert!(add.is_empty());
+        assert!(remove.contains(&"pool".to_owned()));
+        delta.state_deltas.clear();
+        assert!(tracker
+            .filter_updated_components(&delta)
+            .0
+            .is_empty());
+        assert_eq!(
+            tracker
+                .filter_updated_components(&pause_delta("pool", None))
+                .0,
+            vec!["pool"]
+        );
+        assert!(!tracker.can_admit("pool", None));
+        assert!(!tracker.can_admit("pool", Some(75.0)));
+        assert!(tracker.can_admit("pool", Some(101.0)));
+        assert!(tracker
+            .filter_updated_components(&pause_delta("blocked", None))
+            .0
+            .is_empty());
     }
 }

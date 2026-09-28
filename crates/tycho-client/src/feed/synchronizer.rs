@@ -502,10 +502,10 @@ where
             // up without tearing down the WS subscription and rebuilding state from scratch.
             const MAX_STALE_RETRIES: u32 = 5;
             let mut stale_retries: u32 = 0;
-            let (msg, header) = 'init: loop {
+            let (mut msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
-                let mut first_msg = loop {
+                let first_msg = loop {
                     let msg = select! {
                         deltas_result = timeout(Duration::from_secs(self.timeout), msg_rx.recv()) => {
                             deltas_result
@@ -578,8 +578,6 @@ where
                     break msg;
                 };
 
-                self.filter_deltas(&mut first_msg);
-
                 // initial snapshot
                 info!(height = first_msg.get_block().number, "First deltas received");
                 let header: BlockHeader = (&first_msg).into();
@@ -604,33 +602,30 @@ where
                     } else {
                         BlockHeader { revert: false, ..header.clone() }
                     };
-                    let component_ids =
-                        self.component_tracker.get_tracked_component_ids();
-                    let init_snapshot = if !self.include_snapshots ||
-                        component_ids.is_empty()
-                    {
+                    let mut components = self.component_tracker.components.clone();
+                    if self.include_snapshots && !self.component_tracker.paused.is_empty() {
+                        let ids = self.component_tracker.paused.iter()
+                            .filter(|id| self.component_tracker.is_selected(id)).cloned().collect::<Vec<_>>();
+                        if !ids.is_empty() {
+                            let params = crate::rpc::ProtocolComponentsPaginatedParams::new(
+                                self.extractor_id.chain, &self.extractor_id.name, RPC_CLIENT_CONCURRENCY,
+                            ).with_component_ids(ids);
+                            components.extend(self.rpc_client.get_protocol_components_paginated(params)
+                                .await?.into_iter().map(|c| (c.id.clone(), c)));
+                        }
+                    }
+                    let init_snapshot = if !self.include_snapshots || components.is_empty() {
                         Snapshot::default()
                     } else {
-                        // Fetch initial snapshots
-                        let components: HashMap<_, _> = self
-                            .component_tracker
-                            .components
-                            .iter()
-                            .filter(|(id, _)| component_ids.contains(id))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        let contract_ids: HashSet<Bytes> = self
-                            .component_tracker
-                            .get_contracts_by_component(&component_ids)
-                            .into_iter()
-                            .collect();
+                        let contract_ids = components.values()
+                            .flat_map(|c| c.contract_addresses.iter().cloned()).collect();
                         let fetch_params = FetchSnapshotParams {
                             chain: self.extractor_id.chain,
                             protocol_system: self.extractor_id.name.clone(),
                             block_number: snapshot_header.number,
                             uses_dci: self.uses_dci,
                             retrieve_balances: self.retrieve_balances,
-                            include_tvl: self.include_tvl,
+                            include_tvl: true,
                         };
                         match fetch_snapshot(
                             &self.rpc_client,
@@ -689,12 +684,13 @@ where
                 }
             };
 
+            self.filter_paused_components(&mut msg, true);
             block_tx.send(Ok(msg)).await?;
             self.last_synced_block = Some(header);
             loop {
                 select! {
                     deltas_opt = msg_rx.recv() => {
-                        if let Some(mut deltas) = deltas_opt {
+                        if let Some(deltas) = deltas_opt {
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
@@ -834,16 +830,15 @@ where
                             // Update entrypoints on the tracker (affects which contracts are tracked for DCI).
                             self.component_tracker.process_entrypoints(&deltas.dci_update);
 
-                            // Filter deltas by currently tracked components / contracts.
-                            self.filter_deltas(&mut deltas);
                             let n_changes = deltas.n_changes();
 
-                            let next = StateSyncMessage {
+                            let mut next = StateSyncMessage {
                                 header: header.clone(),
                                 snapshots,
                                 deltas: Some(deltas),
                                 removed_components,
                             };
+                            self.filter_paused_components(&mut next, false);
                             block_tx.send(Ok(next)).await?;
                             self.last_synced_block = Some(header.clone());
 
@@ -909,6 +904,11 @@ where
                     }
                 }
             }
+            for (id, tvl) in &delta.component_tvl {
+                if let Some(cws) = snapshot.states.get_mut(id) {
+                    cws.component_tvl = Some(*tvl);
+                }
+            }
             for (component_id, token_balances) in &delta.component_balances {
                 if let Some(cws) = snapshot.states.get_mut(component_id) {
                     for (token, bal) in token_balances {
@@ -966,7 +966,7 @@ where
             block_number: snapshot_block,
             uses_dci: self.uses_dci,
             retrieve_balances: self.retrieve_balances,
-            include_tvl: self.include_tvl,
+            include_tvl: true,
         };
         let ids = component_ids.clone();
         tokio::spawn(async move {
@@ -988,7 +988,7 @@ where
 
         for mut p in pending {
             match p.receiver.try_recv() {
-                Ok(Ok(fetch_result)) => {
+                Ok(Ok(mut fetch_result)) => {
                     debug!(
                         components = ?p.component_ids,
                         extractor = %self.extractor_id.name,
@@ -997,7 +997,23 @@ where
                     for id in &p.component_ids {
                         self.snapshot_queue.remove(id);
                     }
-                    let new_component_ids: Vec<String> = fetch_result
+                    let mut snapshot = fetch_result.snapshot;
+                    self.apply_deltas_to_snapshot(
+                        &mut snapshot,
+                        fetch_result.snapshot_block,
+                        &fetch_result.contract_ids,
+                    );
+                    // A canceled ID can still be returned by a shared batch. Never let its old
+                    // result overwrite a later request or bypass current admission criteria.
+                    snapshot.states.retain(|id, cws| {
+                        p.component_ids.contains(id) &&
+                            self.component_tracker
+                                .can_admit(id, cws.component_tvl)
+                    });
+                    fetch_result
+                        .components
+                        .retain(|id, _| snapshot.states.contains_key(id));
+                    let new_component_ids = fetch_result
                         .components
                         .keys()
                         .cloned()
@@ -1009,12 +1025,6 @@ where
                         .process_entrypoints(&fetch_result.dci_update);
                     self.component_tracker
                         .update_contracts(new_component_ids);
-                    let mut snapshot = fetch_result.snapshot;
-                    self.apply_deltas_to_snapshot(
-                        &mut snapshot,
-                        fetch_result.snapshot_block,
-                        &fetch_result.contract_ids,
-                    );
                     result.extend(snapshot);
                 }
                 Ok(Err(e)) => {
@@ -1060,6 +1070,93 @@ where
         }
 
         result
+    }
+
+    /// Keeps pause handling at the delivery boundary. Initial snapshots are authoritative;
+    /// background snapshots cannot clear a pause observed after their request was sent.
+    fn filter_paused_components(&mut self, msg: &mut StateSyncMessage<BlockHeader>, initial: bool) {
+        let tracker = &mut self.component_tracker;
+        for (id, cws) in &msg.snapshots.states {
+            let mut value = cws.state.attributes.get("paused");
+            if let Some(delta) = msg
+                .deltas
+                .as_ref()
+                .and_then(|d| d.state_deltas.get(id))
+            {
+                if delta
+                    .deleted_attributes
+                    .contains("paused")
+                {
+                    value = None;
+                } else if let Some(updated) = delta.updated_attributes.get("paused") {
+                    value = Some(updated);
+                }
+            }
+            if value.is_some_and(|v| v.iter().any(|b| *b != 0)) {
+                tracker.paused.insert(id.clone());
+            } else if initial {
+                tracker.paused.remove(id);
+            }
+        }
+        // The normal delta loop already processed these controls before scheduling snapshots.
+        // First-message controls must also be handled, including on a contiguous reconnect.
+        if initial {
+            if let Some(delta) = &msg.deltas {
+                let (add, remove) = tracker.filter_updated_components(delta);
+                msg.removed_components
+                    .extend(tracker.stop_tracking(&remove));
+                for id in add {
+                    if !tracker.components.contains_key(&id) {
+                        self.snapshot_queue
+                            .entry(id)
+                            .or_insert(SnapshotStatus::RetryNext);
+                    }
+                }
+            }
+        }
+        let removed: Vec<_> = tracker
+            .paused
+            .iter()
+            .filter(|id| tracker.components.contains_key(*id))
+            .cloned()
+            .collect();
+        if !removed.is_empty() {
+            msg.removed_components
+                .extend(tracker.stop_tracking(&removed));
+        }
+        // Drop only paused IDs from existing queues/batches; other requests keep their lifecycle.
+        self.snapshot_queue
+            .retain(|id, _| !tracker.paused.contains(id));
+        for task in &mut self.snapshot_tasks {
+            task.component_ids
+                .retain(|id| !tracker.paused.contains(id));
+        }
+        self.snapshot_tasks
+            .retain(|task| !task.component_ids.is_empty());
+        let mut added = Vec::new();
+        msg.snapshots.states.retain(|id, cws| {
+            let keep = !msg.removed_components.contains_key(id) &&
+                !tracker.paused.contains(id) &&
+                (tracker.components.contains_key(id) ||
+                    tracker.can_admit(id, cws.component_tvl));
+            if keep {
+                tracker
+                    .components
+                    .insert(id.clone(), cws.component.clone());
+                added.push(id.clone());
+            }
+            if !self.include_tvl {
+                cws.component_tvl = None;
+            }
+            keep
+        });
+        tracker.update_contracts(added);
+        msg.snapshots
+            .vm_storage
+            .retain(|address, _| tracker.contracts.contains(address));
+        if let Some(delta) = &mut msg.deltas {
+            self.filter_deltas(delta);
+        }
     }
 
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
@@ -4305,5 +4402,353 @@ mod test {
         assert_eq!(account.native_balance, Bytes::from("0x20"));
         // Code updated
         assert_eq!(account.code, Bytes::from("0x0c0d"));
+    }
+    fn pause_test_delta(block: u64, value: Option<Option<Bytes>>) -> BlockAggregatedChanges {
+        let mut delta = BlockAggregatedChanges {
+            block: Block {
+                number: block,
+                hash: Bytes::from(vec![block as u8]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if let Some(value) = value {
+            let (updated_attributes, deleted_attributes) = match value {
+                Some(value) => (HashMap::from([("paused".into(), value)]), HashSet::new()),
+                None => (HashMap::new(), HashSet::from(["paused".into()])),
+            };
+            delta.state_deltas.insert(
+                "pool".into(),
+                tycho_common::models::protocol::ProtocolComponentStateDelta {
+                    component_id: "pool".into(),
+                    updated_attributes,
+                    deleted_attributes,
+                    created_attributes: HashSet::new(),
+                },
+            );
+        }
+        delta
+    }
+
+    fn pause_test_snapshot(ids: &[&str], paused: bool) -> Snapshot {
+        Snapshot {
+            states: ids
+                .iter()
+                .map(|id| {
+                    let attributes = if paused {
+                        HashMap::from([("paused".into(), Bytes::from("0x01"))])
+                    } else {
+                        HashMap::new()
+                    };
+                    (
+                        id.to_string(),
+                        ComponentWithState {
+                            state: ProtocolComponentState::new(id, attributes, HashMap::new()),
+                            component: ProtocolComponent {
+                                id: id.to_string(),
+                                ..Default::default()
+                            },
+                            component_tvl: Some(100.0),
+                            entrypoints: vec![],
+                        },
+                    )
+                })
+                .collect(),
+            vm_storage: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_pause_survives_snapshot_rpc_failure_and_restores_on_unpause() {
+        let mut rpc = make_mock_client();
+        let mut calls = 0;
+        rpc.expect_get_snapshots()
+            .times(4)
+            .returning(move |_, _, _| {
+                calls += 1;
+                match calls {
+                    1 | 4 => Ok(pause_test_snapshot(&["pool"], false)),
+                    2 => Err(RPCError::ServerUnreachable("temporary failure".into())),
+                    3 => Ok(pause_test_snapshot(&["pool"], true)),
+                    _ => unreachable!("only four snapshot calls expected"),
+                }
+            });
+        rpc.expect_get_protocol_components()
+            .times(1)
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "pool".into(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let channels: Vec<_> = (0..4).map(|_| channel(2)).collect();
+        let (senders, receivers): (Vec<_>, std::collections::VecDeque<_>) =
+            channels.into_iter().unzip();
+        let mut receivers = receivers;
+        let mut deltas = MockDeltasClient::new();
+        deltas
+            .expect_subscribe()
+            .times(4)
+            .returning(move |_, _| Ok((Uuid::default(), receivers.pop_front().unwrap())));
+        deltas
+            .expect_unsubscribe()
+            .times(4)
+            .returning(|_| Ok(()));
+        let mut sync = with_mocked_clients(true, false, Some(rpc), Some(deltas));
+        sync.component_tracker
+            .components
+            .insert("pool".into(), ProtocolComponent { id: "pool".into(), ..Default::default() });
+        for (round, input) in senders.iter().enumerate() {
+            input
+                .send(pause_test_delta(10 * (round as u64 + 1), None))
+                .await
+                .unwrap();
+            let (mut out_tx, mut out_rx) = channel(2);
+            let (close_tx, close_rx) = oneshot::channel();
+            if round == 1 {
+                assert!(sync
+                    .state_sync(&mut out_tx, close_rx)
+                    .await
+                    .is_err());
+                assert!(sync
+                    .component_tracker
+                    .components
+                    .contains_key("pool"));
+                drop(close_tx);
+                continue;
+            }
+            let receive = async {
+                let msg = out_rx.recv().await.unwrap().unwrap();
+                close_tx.send(()).unwrap();
+                msg
+            };
+            let (exit, msg) = tokio::join!(sync.state_sync(&mut out_tx, close_rx), receive);
+            assert!(exit.is_ok());
+            if round == 2 {
+                assert!(msg.snapshots.states.is_empty());
+                assert!(msg
+                    .removed_components
+                    .contains_key("pool"));
+            } else {
+                assert!(msg
+                    .snapshots
+                    .states
+                    .contains_key("pool"));
+                assert!(!msg
+                    .removed_components
+                    .contains_key("pool"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_pools_leave_live_feed_and_resume_only_with_a_fresh_snapshot() {
+        for (initially_paused, resumed_tvl) in [(false, 100.0), (true, 100.0), (false, 25.0)] {
+            let ready = Arc::new(tokio::sync::Notify::new());
+            let snapshot_ready = ready.clone();
+            let mut rpc = MockRPCClient::new();
+            let mut calls = 0;
+            rpc.expect_get_snapshots()
+                .times(2)
+                .returning(move |_, _, _| {
+                    calls += 1;
+                    let mut snapshot =
+                        pause_test_snapshot(&["pool"], calls == 1 && initially_paused);
+                    if calls == 2 {
+                        snapshot
+                            .states
+                            .get_mut("pool")
+                            .unwrap()
+                            .component_tvl = Some(resumed_tvl);
+                        snapshot
+                            .states
+                            .get_mut("pool")
+                            .unwrap()
+                            .state
+                            .attributes
+                            .insert("fresh_state".into(), Bytes::from("0x42"));
+                        snapshot_ready.notify_one();
+                    }
+                    Ok(snapshot)
+                });
+            rpc.expect_get_protocol_components()
+                .times(1)
+                .returning(|_| {
+                    Ok(Page::new(
+                        vec![ProtocolComponent { id: "pool".into(), ..Default::default() }],
+                        1,
+                        0,
+                        100,
+                    ))
+                });
+            let (input, incoming) = channel(2);
+            let mut deltas = MockDeltasClient::new();
+            deltas
+                .expect_subscribe()
+                .return_once(move |_, _| Ok((Uuid::default(), incoming)));
+            deltas
+                .expect_unsubscribe()
+                .return_once(|_| Ok(()));
+            let mut sync = with_mocked_clients(true, false, Some(rpc), Some(deltas));
+            sync.component_tracker
+                .components
+                .insert(
+                    "pool".into(),
+                    ProtocolComponent { id: "pool".into(), ..Default::default() },
+                );
+            let (mut output, mut messages) =
+                channel::<SyncResult<StateSyncMessage<BlockHeader>>>(2);
+            let (close, close_rx) = oneshot::channel();
+            let consumer = async {
+                input
+                    .send(pause_test_delta(1, None))
+                    .await
+                    .unwrap();
+                let initial = messages.recv().await.unwrap().unwrap();
+                assert_eq!(
+                    initial
+                        .snapshots
+                        .states
+                        .contains_key("pool"),
+                    !initially_paused
+                );
+
+                let mut pause = pause_test_delta(2, Some(Some(Bytes::from("0x01"))));
+                pause
+                    .component_tvl
+                    .insert("pool".into(), 1000.0);
+                input.send(pause).await.unwrap();
+                let paused = messages.recv().await.unwrap().unwrap();
+                assert_eq!(
+                    paused
+                        .removed_components
+                        .contains_key("pool"),
+                    !initially_paused
+                );
+                assert!(paused.snapshots.states.is_empty());
+                assert!(paused
+                    .deltas
+                    .unwrap()
+                    .state_deltas
+                    .is_empty());
+
+                let mut tvl = pause_test_delta(3, None);
+                tvl.component_tvl
+                    .insert("pool".into(), 2000.0);
+                input.send(tvl).await.unwrap();
+                assert!(messages
+                    .recv()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .snapshots
+                    .states
+                    .is_empty());
+
+                input
+                    .send(pause_test_delta(4, Some(None)))
+                    .await
+                    .unwrap();
+                assert!(messages
+                    .recv()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .snapshots
+                    .states
+                    .is_empty());
+                ready.notified().await;
+                input
+                    .send(pause_test_delta(5, None))
+                    .await
+                    .unwrap();
+                let resumed = messages.recv().await.unwrap().unwrap();
+                if resumed_tvl > 50.0 {
+                    assert_eq!(
+                        resumed.snapshots.states["pool"]
+                            .state
+                            .attributes["fresh_state"],
+                        Bytes::from("0x42")
+                    );
+                } else {
+                    // The unpause delta had no TVL. Admission must use the freshly queried TVL,
+                    // not the high value observed before resumption was requested.
+                    assert!(resumed.snapshots.states.is_empty());
+                }
+                assert!(resumed.removed_components.is_empty());
+                close.send(()).unwrap();
+            };
+            let (exit, ()) = tokio::join!(sync.state_sync(&mut output, close_rx), consumer);
+            assert!(exit.is_ok());
+        }
+    }
+
+    #[test]
+    fn paused_batch_cannot_revive_a_pool_or_overwrite_its_new_request() {
+        let mut sync = with_mocked_clients(true, true, None, None);
+        let (tx, receiver) = oneshot::channel();
+        sync.snapshot_tasks.push(SnapshotTask {
+            component_ids: vec!["pool".into(), "other".into()],
+            snapshot_block: 1,
+            receiver,
+        });
+        sync.snapshot_queue
+            .insert("pool".into(), SnapshotStatus::InFlight);
+        let mut msg = StateSyncMessage {
+            snapshots: pause_test_snapshot(&["pool"], false),
+            deltas: Some(pause_test_delta(2, Some(Some(Bytes::from("0x01"))))),
+            ..Default::default()
+        };
+        sync.filter_paused_components(&mut msg, true);
+        assert!(msg.snapshots.states.is_empty());
+        assert!(!sync.snapshot_queue.contains_key("pool"));
+        // Resumption starts another request while the old shared batch finishes.
+        sync.component_tracker
+            .filter_updated_components(&pause_test_delta(3, Some(None)));
+        sync.snapshot_queue
+            .insert("pool".into(), SnapshotStatus::InFlight);
+        let snapshot = pause_test_snapshot(&["pool", "other"], false);
+        assert!(tx
+            .send(Ok(SnapshotFetchResult {
+                components: snapshot
+                    .states
+                    .iter()
+                    .map(|(id, c)| (id.clone(), c.component.clone()))
+                    .collect(),
+                snapshot,
+                snapshot_block: 1,
+                contract_ids: HashSet::new(),
+                dci_update: DCIUpdate::default(),
+            }))
+            .is_ok());
+        let snapshot = sync.drain_completed_snapshots();
+        assert!(!snapshot.states.contains_key("pool"));
+        assert!(snapshot.states.contains_key("other"));
+        assert_eq!(sync.snapshot_queue.get("pool"), Some(&SnapshotStatus::InFlight));
+    }
+
+    #[test]
+    fn removal_wins_over_a_snapshot_in_the_same_message() {
+        let mut sync = with_mocked_clients(true, true, None, None);
+        let snapshot = pause_test_snapshot(&["pool"], false);
+        let component = snapshot.states["pool"]
+            .component
+            .clone();
+        let mut msg = StateSyncMessage {
+            snapshots: snapshot,
+            removed_components: HashMap::from([("pool".into(), component)]),
+            ..Default::default()
+        };
+        sync.filter_paused_components(&mut msg, false);
+        assert!(msg.snapshots.states.is_empty());
+        assert!(sync
+            .component_tracker
+            .components
+            .is_empty());
+        assert!(msg
+            .removed_components
+            .contains_key("pool"));
     }
 }
