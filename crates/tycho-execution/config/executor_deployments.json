@@ -83,6 +83,7 @@
       "args": ["0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"]
     },
     "pricelevelstream": { "contract": "PropAMMExecutor", "args": [] },
+    "vm:tempest": { "contract": "PropAMMExecutor", "args": [] },
     "fallback": {
       "contract": "FallbackExecutor",
       "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]

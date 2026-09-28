@@ -227,6 +227,28 @@ contract TokenProxyTest is Test {
         assertEq(proxy.allowance(user1, user2), 50 ether);
     }
 
+    /// Mirrors what `TokenProxyOverwriteFactory::set_has_custom_approval` does from Rust: flag the
+    /// holder without writing any approval amount. With the approval system off, `transferFrom`
+    /// ignores allowances entirely, so `allowance` must not report zero -- a protocol that reads it
+    /// as a precondition (a pAMM checking its vault's standing approval before quoting) would
+    /// refuse to price state that is in fact spendable.
+    function testAllowanceUnlimitedWhenFlaggedWithoutExplicitApproval() public {
+        // keccak256("HAS_CUSTOM_APPROVAL_MAPPING")
+        bytes32 hasCustomApprovalPosition = 0x9f0c1bc0e9c3078f9ad5fc59c8606416b3fabcbd4c8353fed22937c66c866ce3;
+        vm.store(address(proxy), keccak256(abi.encode(user1, hasCustomApprovalPosition)), bytes32(uint256(1)));
+
+        assertEq(proxy.allowance(user1, user2), type(uint256).max);
+    }
+
+    /// With the approval system enabled the stored amount is authoritative again, including zero.
+    function testAllowanceRespectsApprovalSystemWhenEnabled() public {
+        bytes32 hasCustomApprovalPosition = 0x9f0c1bc0e9c3078f9ad5fc59c8606416b3fabcbd4c8353fed22937c66c866ce3;
+        vm.store(address(proxy), keccak256(abi.encode(user1, hasCustomApprovalPosition)), bytes32(uint256(1)));
+        proxy.setUseApprovalSystem(true);
+
+        assertEq(proxy.allowance(user1, user2), 0);
+    }
+
     function testTransferFrom() public {
         vm.skip(true); // transferFrom balance accounting is broken; needs team fix
         // Set initial balances

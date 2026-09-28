@@ -112,6 +112,8 @@ const FERMISWAP_PROTOCOL_SYSTEM: &str = "vm:fermiswap";
 const KIPSELI_PROTOCOL_SYSTEM: &str = "vm:kipseli";
 /// bopAMM protocol system identifier as indexed by Tycho.
 const BOPAMM_PROTOCOL_SYSTEM: &str = "vm:bopamm";
+/// Tempest (Flowdesk) protocol system identifier as indexed by Tycho.
+const TEMPEST_PROTOCOL_SYSTEM: &str = "vm:tempest";
 
 /// FermiSwap venue aliases on Titan's quote stream: the FermiSwap oracle and the FermiSwapper
 /// router. Both keys carry the same registry diffs; either serves the protocol.
@@ -124,6 +126,11 @@ const KIPSELI_VENUES: &[&str] =
 /// bopAMM (Bebop) venue on Titan's quote stream: a self-storage pAMM whose frames write the
 /// maker's signed quote into the venue's own storage.
 const BOPAMM_VENUES: &[&str] = &["0x160141a205f5ddcf096ba3f48b7ed21eb52c62ea"];
+/// Tempest venue on Titan's quote stream: the `TempestEth` router, which is also the `target` the
+/// maker writes its lanes against in the shared `PrioUpdateRegistry`. Confirmed against live
+/// frames — the venue keys the stream publishes carry a `stateDiff` on the registry for this
+/// address, which is what the override snapshot consumes.
+const TEMPEST_VENUES: &[&str] = &["0x00000003f1ec2379e79f58e12ec6c4f51ee92149"];
 
 /// Longest gap between Titan messages tolerated before the socket is treated as dead and
 /// re-established. Titan pushes several updates per second, so a multi-second silence means a
@@ -159,7 +166,12 @@ const MAX_LANE_TIMESTAMP_LEAD_SECS: u64 = 2 * SECONDS_PER_SLOT;
 
 /// Returns the pAMM `protocol_system`s this provider knows how to serve.
 fn known_pamm_protocols() -> &'static [&'static str] {
-    &[FERMISWAP_PROTOCOL_SYSTEM, KIPSELI_PROTOCOL_SYSTEM, BOPAMM_PROTOCOL_SYSTEM]
+    &[
+        FERMISWAP_PROTOCOL_SYSTEM,
+        KIPSELI_PROTOCOL_SYSTEM,
+        BOPAMM_PROTOCOL_SYSTEM,
+        TEMPEST_PROTOCOL_SYSTEM,
+    ]
 }
 
 /// Default override providers contributed by Titan, keyed by `protocol_system`.
@@ -375,6 +387,7 @@ impl TitanProvider {
             FERMISWAP_PROTOCOL_SYSTEM => FERMISWAP_VENUES,
             KIPSELI_PROTOCOL_SYSTEM => KIPSELI_VENUES,
             BOPAMM_PROTOCOL_SYSTEM => BOPAMM_VENUES,
+            TEMPEST_PROTOCOL_SYSTEM => TEMPEST_VENUES,
             _ => return None,
         };
         let venues = raw
@@ -571,6 +584,7 @@ mod tests {
             (FERMISWAP_PROTOCOL_SYSTEM, FERMISWAP_VENUES),
             (KIPSELI_PROTOCOL_SYSTEM, KIPSELI_VENUES),
             (BOPAMM_PROTOCOL_SYSTEM, BOPAMM_VENUES),
+            (TEMPEST_PROTOCOL_SYSTEM, TEMPEST_VENUES),
         ];
         for (protocol, expected) in cases {
             let venues = TitanProvider::venues_for_protocol(protocol).expect("venues must resolve");
