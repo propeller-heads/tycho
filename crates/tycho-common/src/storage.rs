@@ -879,6 +879,10 @@ pub struct StateSnapshot {
 #[async_trait]
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block
-    /// that wrote its row, all from one consistent read.
+    /// that wrote its row.
+    ///
+    /// Implementations must read everything from one database snapshot: a row committed after
+    /// the read starts is invisible to every part of the result. In SQL terms, a read-only
+    /// `REPEATABLE READ` transaction or stricter.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError>;
 }
