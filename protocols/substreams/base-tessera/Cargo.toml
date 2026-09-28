@@ -8,6 +8,7 @@ name = "base_tessera"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+prost = "0.11"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
 hex = { version = "0.4.3", features = ["serde"] }

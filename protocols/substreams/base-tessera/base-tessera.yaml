@@ -9,8 +9,16 @@ protobuf:
     - tycho/evm/v1/vm.proto
     - tycho/evm/v1/common.proto
     - tycho/evm/v1/utils.proto
+    - tessera.proto
   importPaths:
+    - ./proto/v1
     - ../../../proto
+  excludePaths:
+    - google
+    - tycho
+    - sf/ethereum
+    - sf/substreams
+    - sf/firehose
 
 binaries:
   default:
@@ -23,6 +31,7 @@ network: base
 # re-pointed at another Tessera deployment without code changes. Hex, no `0x` prefix.
 params:
   map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52"
+  map_storage_changes: *config
   store_treasury: *config
   store_safety: *config
   map_relative_balances: *config
@@ -54,6 +63,16 @@ modules:
     inputs:
       - map: map_components
 
+  - name: map_storage_changes
+    kind: map
+    initialBlock: 37518600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pairs
+    output:
+      type: proto:tessera.v1.BlockStorageChanges
+
   - name: store_treasury
     kind: store
     initialBlock: 37518600
@@ -61,7 +80,7 @@ modules:
     valueType: string
     inputs:
       - params: string
-      - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
 
   - name: store_safety
     kind: store
@@ -70,7 +89,7 @@ modules:
     valueType: string
     inputs:
       - params: string
-      - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
       - store: store_pairs
 
   - name: map_relative_balances
@@ -79,6 +98,7 @@ modules:
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
       - map: map_components
       - store: store_components
       - store: store_pairs
@@ -100,6 +120,7 @@ modules:
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
       - map: map_components
       - map: map_relative_balances
       - store: store_pairs

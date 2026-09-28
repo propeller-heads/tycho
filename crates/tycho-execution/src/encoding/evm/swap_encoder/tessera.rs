@@ -66,7 +66,7 @@ mod tests {
 
     fn weth_usdc_component() -> ProtocolComponent {
         ProtocolComponent {
-            id: String::from("0xdb13ad0fcd134e9c48f2fdaea8f6751a0f5349ca000000000000000000000000"),
+            id: String::from("0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"),
             protocol_system: String::from("vm:tessera"),
             ..Default::default()
         }

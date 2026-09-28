@@ -63,13 +63,13 @@ contract LunarBaseExecutor is IExecutor {
         ILunarBasePool(pool)
             .swapExactIn(
                 ILunarBasePool.ExactInputParams({
-                    tokenIn: _toLunarBaseToken(tokenIn),
-                    tokenOut: _toLunarBaseToken(tokenOut),
-                    recipient: receiver,
-                    amountIn: amountIn,
-                    amountOutMinimum: 0,
-                    deadline: block.timestamp
-                })
+                tokenIn: _toLunarBaseToken(tokenIn),
+                tokenOut: _toLunarBaseToken(tokenOut),
+                recipient: receiver,
+                amountIn: amountIn,
+                amountOutMinimum: 0,
+                deadline: block.timestamp
+            })
             );
     }
 

@@ -1,4 +1,4 @@
-use crate::{common::*, config::DeploymentConfig};
+use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageChanges};
 use anyhow::{anyhow, Result};
 use std::collections::{BTreeSet, HashSet};
 use substreams::{
@@ -10,6 +10,8 @@ use tycho_substreams::{
     abi::{erc20, weth},
     prelude::*,
 };
+
+const BASE_WETH: [u8; 20] = substreams::hex!("4200000000000000000000000000000000000006");
 
 fn balance(token: &[u8], owner: &[u8]) -> Result<BigInt> {
     if zero(owner) {
@@ -31,7 +33,7 @@ fn event_delta(log: &eth::v2::Log, owner: &[u8]) -> Option<BigInt> {
         };
     }
     // Only Base's canonical WETH emits wrap/unwrap events in this accounting model.
-    if log.address != substreams::hex!("4200000000000000000000000000000000000006") {
+    if log.address != BASE_WETH {
         return None;
     }
     if let Some(weth::events::Deposit { dst, wad }) = weth::events::Deposit::match_and_decode(log) {
@@ -84,19 +86,23 @@ impl BalanceSources for StoreSources<'_> {
 pub fn map_relative_balances(
     params: String,
     block: eth::v2::Block,
+    storage: BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     components: StoreGetProto<ProtocolComponent>,
     pair_store: StoreGetString,
     treasury_store: StoreGetString,
 ) -> Result<BlockBalanceDeltas> {
     let config = DeploymentConfig::parse(&params)?;
+    // Balance RPCs read the closing block state, so seeds must use its closing custodian.
+    // Rotation accounting below recovers the opening custodian from the first slot write.
     let owner = treasury_store
         .get_last("treasury")
         .map(hex::decode)
         .transpose()?
         .unwrap_or(config.treasury.clone());
     let sources = StoreSources { components: &components, pair_store: &pair_store };
-    let balance_deltas = balance_deltas(&config, &block, new_components, &owner, &sources)?;
+    let balance_deltas =
+        balance_deltas_from_storage(&config, &block, &storage, new_components, &owner, &sources)?;
     Ok(BlockBalanceDeltas { balance_deltas })
 }
 
@@ -107,27 +113,24 @@ pub fn map_relative_balances(
 /// Transfer and WETH events are matched against the custodian that opened the block. A treasury
 /// rotation then adds, per token, the new custodian's closing balance minus the old one's.
 /// Deltas are ordered by ordinal.
-fn balance_deltas(
+fn balance_deltas_from_storage(
     config: &DeploymentConfig,
     block: &eth::v2::Block,
+    storage: &BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     owner: &[u8],
     sources: &impl BalanceSources,
 ) -> Result<Vec<BalanceDelta>> {
-    let mut rotations: Vec<_> = block
-        .transactions()
-        .flat_map(|tx| {
-            tx.calls
-                .iter()
-                .filter(|c| !c.state_reverted)
-                .flat_map(move |c| {
-                    c.storage_changes
-                        .iter()
-                        .map(move |w| (tx, w))
-                })
-        })
-        .filter(|(_, w)| w.address == config.tesseraswap && w.key == slot(config.treasury_slot))
-        .collect();
+    let treasury_slot = slot(config.treasury_slot);
+    let mut rotations = vec![];
+    for group in &storage.transactions {
+        let tx = storage_transaction(group)?;
+        for w in &group.writes {
+            if w.address == config.tesseraswap && w.key == treasury_slot {
+                rotations.push((tx, w));
+            }
+        }
+    }
     rotations.sort_by_key(|(_, w)| w.ordinal);
     // Account the entire block against its opening custodian, then bridge end-of-block balances.
     let old_owner = rotations
@@ -168,6 +171,9 @@ fn balance_deltas(
             }
         }
     }
+    // Multiple rotations collapse to one opening-to-closing bridge. Intermediate owners
+    // must not contribute extra bridges: both balance RPCs already include the whole block.
+    // Attach the adjustment to the final rotation transaction and skip end-block seeds.
     if let Some((tx, write)) = rotations.last() {
         for token in sources.pair_tokens() {
             let adjustment =
@@ -178,7 +184,7 @@ fn balance_deltas(
                 }
                 deltas.push(BalanceDelta {
                     ord: write.ordinal,
-                    tx: Some((*tx).into()),
+                    tx: Some((*tx).clone()),
                     token: token.clone(),
                     component_id: pair.into_bytes(),
                     delta: adjustment.to_signed_bytes_be(),
@@ -188,6 +194,19 @@ fn balance_deltas(
     }
     deltas.sort_by_key(|d| d.ord);
     Ok(deltas)
+}
+
+#[cfg(test)]
+fn balance_deltas(
+    config: &DeploymentConfig,
+    block: &eth::v2::Block,
+    new_components: BlockTransactionProtocolComponents,
+    owner: &[u8],
+    sources: &impl BalanceSources,
+) -> Result<Vec<BalanceDelta>> {
+    let storage =
+        crate::modules::map_storage_changes::filter_storage_changes(config, block, &HashSet::new());
+    balance_deltas_from_storage(config, block, &storage, new_components, owner, sources)
 }
 
 #[cfg(test)]
@@ -202,7 +221,6 @@ mod tests {
     const USDC: [u8; 20] = [0x0c; 20];
     const BASE_TOKEN: [u8; 20] = [0x0b; 20];
     const UNHELD: [u8; 20] = [0x0e; 20];
-    const WETH: [u8; 20] = substreams::hex!("4200000000000000000000000000000000000006");
 
     struct FakeSources {
         holders: HashMap<Vec<u8>, Vec<String>>,
@@ -406,17 +424,50 @@ mod tests {
     }
 
     #[test]
+    fn treasury_slot_writes_outside_tesseraswap_are_not_rotations() {
+        let sources = FakeSources {
+            holders: HashMap::from([(USDC.to_vec(), vec!["pair".to_string()])]),
+            balances: HashMap::from([
+                ((USDC.to_vec(), TREASURY.to_vec()), 80),
+                ((USDC.to_vec(), NEW_TREASURY.to_vec()), 300),
+            ]),
+        };
+        // The Engine's writes reach this module, and its slot 1 is not the treasury.
+        let engine_write = eth::v2::StorageChange {
+            address: config().engine,
+            key: slot(1),
+            old_value: word(&TREASURY),
+            new_value: word(&NEW_TREASURY),
+            ordinal: 20,
+        };
+        let block = block(vec![
+            tx(0, vec![transfer(&USDC, &TREASURY, &OUTSIDER, 20, 5)], vec![]),
+            tx(1, vec![], vec![engine_write]),
+        ]);
+        let deltas = balance_deltas(
+            &config(),
+            &block,
+            BlockTransactionProtocolComponents::default(),
+            &TREASURY,
+            &sources,
+        )
+        .unwrap();
+
+        assert_eq!(deltas_of(&deltas, "pair", &USDC), vec![BigInt::from(-20)]);
+    }
+
+    #[test]
     fn weth_deposits_count_only_on_canonical_weth() {
         let sources = FakeSources {
             holders: HashMap::from([
-                (WETH.to_vec(), vec!["pair".to_string()]),
+                (BASE_WETH.to_vec(), vec!["pair".to_string()]),
                 (OUTSIDER.to_vec(), vec!["pair".to_string()]),
             ]),
             balances: HashMap::new(),
         };
         let block = block(vec![tx(
             0,
-            vec![deposit(&WETH, &TREASURY, 40, 1), deposit(&OUTSIDER, &TREASURY, 40, 2)],
+            vec![deposit(&BASE_WETH, &TREASURY, 40, 1), deposit(&OUTSIDER, &TREASURY, 40, 2)],
             vec![],
         )]);
         let deltas = balance_deltas(
@@ -428,7 +479,74 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(deltas_of(&deltas, "pair", &WETH), vec![BigInt::from(40)]);
+        assert_eq!(deltas_of(&deltas, "pair", &BASE_WETH), vec![BigInt::from(40)]);
         assert!(deltas_of(&deltas, "pair", &OUTSIDER).is_empty());
+    }
+
+    #[test]
+    fn missing_storage_transaction_returns_an_error() {
+        let storage = BlockStorageChanges {
+            transactions: vec![crate::pb::tessera::v1::TransactionStorageChanges {
+                tx: None,
+                writes: vec![crate::pb::tessera::v1::StorageChange {
+                    address: config().tesseraswap,
+                    key: slot(1),
+                    old_value: word(&TREASURY),
+                    new_value: word(&NEW_TREASURY),
+                    ordinal: 20,
+                }],
+            }],
+        };
+        let sources = FakeSources { holders: HashMap::new(), balances: HashMap::new() };
+        let error = balance_deltas_from_storage(
+            &config(),
+            &block(vec![]),
+            &storage,
+            BlockTransactionProtocolComponents::default(),
+            &NEW_TREASURY,
+            &sources,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("writes without a transaction"));
+    }
+
+    #[test]
+    fn multiple_rotations_bridge_once_to_closing_owner_and_skip_new_pair_seed() {
+        let sources = FakeSources {
+            holders: HashMap::from([(USDC.to_vec(), vec!["existing".into(), "new".into()])]),
+            balances: HashMap::from([
+                ((USDC.to_vec(), TREASURY.to_vec()), 80),
+                ((USDC.to_vec(), NEW_TREASURY.to_vec()), 300),
+                // An intermediate custodian must not affect the final bridge.
+                ((USDC.to_vec(), OUTSIDER.to_vec()), 999),
+            ]),
+        };
+        let rotation = |old: &[u8], new: &[u8], ordinal| eth::v2::StorageChange {
+            address: config().tesseraswap,
+            key: slot(1),
+            old_value: word(old),
+            new_value: word(new),
+            ordinal,
+        };
+        let block = block(vec![
+            tx(0, vec![transfer(&USDC, &TREASURY, &OUTSIDER, 20, 5)], vec![]),
+            tx(1, vec![], vec![rotation(&TREASURY, &OUTSIDER, 20)]),
+            tx(2, vec![], vec![rotation(&OUTSIDER, &NEW_TREASURY, 30)]),
+        ]);
+        let deltas =
+            balance_deltas(&config(), &block, created("new", &[&USDC], 1), &NEW_TREASURY, &sources)
+                .unwrap();
+        assert_eq!(
+            deltas_of(&deltas, "existing", &USDC),
+            vec![BigInt::from(-20), BigInt::from(220)]
+        );
+        assert_eq!(deltas_of(&deltas, "new", &USDC), vec![BigInt::from(300)]);
+        let bridge = deltas
+            .iter()
+            .find(|d| d.ord == 30)
+            .unwrap();
+        assert_eq!(bridge.tx.as_ref().unwrap().index, 2);
     }
 }

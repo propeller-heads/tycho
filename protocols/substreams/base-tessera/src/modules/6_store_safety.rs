@@ -1,13 +1,14 @@
-use crate::{common::*, config::DeploymentConfig};
+use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageChanges};
 use std::collections::HashSet;
 use substreams::store::{StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetString};
+#[cfg(test)]
 use substreams_ethereum::pb::eth;
 
 /// Persist fee-tag-0 and epoch signals even when the affected pair has no price update.
 #[substreams::handlers::store]
 pub fn store_safety(
     params: String,
-    block: eth::v2::Block,
+    changes: BlockStorageChanges,
     pairs: StoreGetString,
     store: StoreSetString,
 ) {
@@ -15,7 +16,7 @@ pub fn store_safety(
     let known: HashSet<_> = crate::common::pairs(&pairs, "pairs")
         .into_iter()
         .collect();
-    for (ordinal, key, value) in safety_writes(&config, &block, &known) {
+    for (ordinal, key, value) in safety_writes(&config, &changes, &known) {
         store.set(ordinal, key, &value);
     }
 }
@@ -24,17 +25,23 @@ pub fn store_safety(
 ///
 /// Produces each known pair's write-helper address under `helper:0x<pair>`, the tag-0 fee word
 /// of every address writing that mapping slot under `fee:0x<address>`, and the Engine held in
-/// TesseraSwap slot 0 under `engine`. Values are hex without `0x`. Reverted writes are skipped.
+/// TesseraSwap slot 0 under `engine`. Values are hex without `0x`.
 fn safety_writes(
     config: &DeploymentConfig,
-    block: &eth::v2::Block,
+    changes: &BlockStorageChanges,
     known: &HashSet<String>,
 ) -> Vec<(u64, String, String)> {
+    // Helper-owned A[0], not a Pair slot: keccak256(uint256(0) ++ uint256(1)).
     let fee_key = fee_tag_zero_slot();
+    // Pair slot 52 links a Pair to the helper whose fee must be checked.
+    let helper_slot = slot(config.pair_write_helper_slot);
+    // TesseraSwap slot 0 links all Pairs to the Engine; replacement crosses our
+    // configured discovery/state-indexing boundary and is evaluated by enforce_pauses.
+    let engine_slot = slot(0);
     let mut writes = vec![];
-    for tx in block.transactions() {
-        for w in committed_writes(tx) {
-            if known.contains(&id(&w.address)) && w.key == slot(config.pair_write_helper_slot) {
+    for tx in &changes.transactions {
+        for w in &tx.writes {
+            if w.key == helper_slot && known.contains(&id(&w.address)) {
                 writes.push((
                     w.ordinal,
                     format!("helper:{}", id(&w.address)),
@@ -51,7 +58,7 @@ fn safety_writes(
                     hex::encode(&w.new_value),
                 ));
             }
-            if w.address == config.tesseraswap && w.key == slot(0) {
+            if w.address == config.tesseraswap && w.key == engine_slot {
                 writes.push((w.ordinal, "engine".to_string(), hex::encode(address(&w.new_value))));
             }
         }
@@ -100,8 +107,8 @@ mod tests {
         w
     }
 
-    fn block(writes: Vec<eth::v2::StorageChange>, reverted: bool) -> eth::v2::Block {
-        eth::v2::Block {
+    fn block(writes: Vec<eth::v2::StorageChange>, reverted: bool) -> BlockStorageChanges {
+        let block = eth::v2::Block {
             transaction_traces: vec![eth::v2::TransactionTrace {
                 status: 1,
                 calls: vec![eth::v2::Call {
@@ -112,7 +119,12 @@ mod tests {
                 ..Default::default()
             }],
             ..Default::default()
-        }
+        };
+        crate::modules::map_storage_changes::filter_storage_changes(
+            &config(),
+            &block,
+            &HashSet::from([PAIR.to_vec()]),
+        )
     }
 
     fn known() -> HashSet<String> {
@@ -126,7 +138,8 @@ mod tests {
             &block(
                 vec![
                     write(&PAIR, slot(52), word(&HELPER), 1),
-                    write(&STRANGER, slot(52), word(&HELPER), 2),
+                    // Retained upstream as an Engine write, but the Engine is not a pair.
+                    write(&config().engine, slot(52), word(&HELPER), 2),
                 ],
                 false,
             ),
@@ -154,7 +167,8 @@ mod tests {
             &block(
                 vec![
                     write(&config().tesseraswap, slot(0), word(&engine), 4),
-                    write(&STRANGER, slot(0), word(&engine), 5),
+                    write(&config().engine, slot(0), word(&engine), 5),
+                    write(&PAIR, slot(0), word(&engine), 6),
                 ],
                 false,
             ),

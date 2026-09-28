@@ -21,6 +21,37 @@ contract LimitedTesseraQuotes {
     }
 }
 
+// Synthetic venue: the view quote is pre-fee, but settlement deducts 10%.
+// This isolates the adapter's accounting from the real venue's currently zero
+// tag-0 fee.
+contract DiscountedTesseraSettlement {
+    function tesseraSwapViewAmounts(address, address, int256 amount)
+        external
+        pure
+        returns (uint256, uint256)
+    {
+        uint256 input =
+            amount < 0 ? (uint256(-amount) + 1) / 2 : uint256(amount);
+        return (input, amount < 0 ? uint256(-amount) : input * 2);
+    }
+
+    function tesseraSwapWithAllowances(
+        address sell,
+        address buy,
+        int256 amount,
+        uint256,
+        address recipient,
+        bytes calldata data
+    ) external {
+        require(data.length == 0, "expected tag zero");
+        uint256 input =
+            amount < 0 ? (uint256(-amount) + 1) / 2 : uint256(amount);
+        uint256 output = amount < 0 ? uint256(-amount) : input * 2;
+        require(IERC20(sell).transferFrom(msg.sender, address(this), input));
+        require(IERC20(buy).transfer(recipient, output * 9 / 10));
+    }
+}
+
 contract TesseraSwapAdapterTest is Test {
     address constant VENUE = 0x55555522005BcAE1c2424D474BfD5ed477749E3e;
     address constant PAIR = 0xf524C1Bc1C64A2C99bc7eccf19EDe9a1d89d5a7C;
@@ -136,5 +167,35 @@ contract TesseraSwapAdapterTest is Test {
     function testRejectsWrongTokens() public {
         vm.expectRevert();
         adapter.getLimits(poolId, WETH, address(1));
+    }
+
+    function testSellReportsSettledOutputInsteadOfViewQuote() public {
+        DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
+        TesseraSwapAdapter localAdapter = new TesseraSwapAdapter(address(venue));
+        deal(WETH, address(this), 100);
+        deal(USDC, address(venue), 200);
+        IERC20(WETH).approve(address(localAdapter), 100);
+        uint256 beforeOut = IERC20(USDC).balanceOf(address(this));
+        ISwapAdapterTypes.Trade memory trade = localAdapter.swap(
+            poolId, WETH, USDC, ISwapAdapterTypes.OrderSide.Sell, 100
+        );
+        assertEq(IERC20(USDC).balanceOf(address(this)) - beforeOut, 180);
+        assertEq(trade.calculatedAmount, 180);
+    }
+
+    function testBuyRejectsUnderfilledExactOutput() public {
+        DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
+        TesseraSwapAdapter localAdapter = new TesseraSwapAdapter(address(venue));
+        deal(WETH, address(this), 100);
+        deal(USDC, address(venue), 200);
+        IERC20(WETH).approve(address(localAdapter), 100);
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "Unavailable(string)", "Exact output not settled"
+            )
+        );
+        localAdapter.swap(
+            poolId, WETH, USDC, ISwapAdapterTypes.OrderSide.Buy, 200
+        );
     }
 }

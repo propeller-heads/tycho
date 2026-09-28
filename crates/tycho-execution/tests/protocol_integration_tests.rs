@@ -4025,14 +4025,41 @@ fn test_sequential_encoding_strategy_sky() {
 
 #[test]
 fn test_single_encoding_strategy_tessera_weth_usdc() {
-    // WETH ──(Tessera)──> USDC
+    encode_tessera_router_fixture(false);
+}
+
+#[test]
+fn test_single_encoding_strategy_tessera_usdc_weth() {
+    encode_tessera_router_fixture(true);
+}
+
+fn encode_tessera_router_fixture(reverse: bool) {
     let tessera_pair = ProtocolComponent {
         id: String::from("0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"),
         protocol_system: String::from("vm:tessera"),
         ..Default::default()
     };
-    let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
-    let token_out = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let (token_in, token_out, amount, expected, minimum, fixture) = if reverse {
+        (
+            usdc,
+            weth,
+            "100000000",
+            "30000000000000000",
+            "20000000000000000",
+            "test_single_encoding_strategy_tessera_usdc_weth",
+        )
+    } else {
+        (
+            weth,
+            usdc,
+            "10000000000000000",
+            "24000000",
+            "23520000",
+            "test_single_encoding_strategy_tessera_weth_usdc",
+        )
+    };
     let swap = Swap::new(
         tessera_pair,
         default_token(token_in.clone()),
@@ -4047,9 +4074,9 @@ fn test_single_encoding_strategy_tessera_weth_usdc() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         token_in,
         token_out,
-        BigUint::from_str("10000000000000000").unwrap(),
-        BigUint::from_str("24000000").unwrap(),
-        BigUint::from_str("23520000").unwrap(),
+        BigUint::from_str(amount).unwrap(),
+        BigUint::from_str(expected).unwrap(),
+        BigUint::from_str(minimum).unwrap(),
         vec![swap],
     );
 
@@ -4059,10 +4086,10 @@ fn test_single_encoding_strategy_tessera_weth_usdc() {
         .clone();
 
     let calldata = encode_tycho_router_call(
-        eth_chain().id(),
+        Chain::Base.id(),
         encoded_solution,
         &solution,
-        &eth(),
+        &Bytes::zero(20),
         None,
         0,
         Bytes::zero(20),
@@ -4071,8 +4098,5 @@ fn test_single_encoding_strategy_tessera_weth_usdc() {
     .unwrap()
     .data;
     let hex_calldata = encode(&calldata);
-    write_calldata_to_file(
-        "test_single_encoding_strategy_tessera_weth_usdc",
-        hex_calldata.as_str(),
-    );
+    write_calldata_to_file(fixture, hex_calldata.as_str());
 }

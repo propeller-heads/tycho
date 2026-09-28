@@ -245,6 +245,7 @@ contract TesseraSwapAdapter is ISwapAdapter {
         }
         IERC20(sell).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(sell).forceApprove(address(tesseraSwap), amountIn);
+        uint256 outputBefore = IERC20(buy).balanceOf(msg.sender);
         uint256 gasBefore = gasleft();
         // Empty data selects integrator tag 0: view and settlement agree while
         // A[0] == 0.
@@ -257,7 +258,14 @@ contract TesseraSwapAdapter is ISwapAdapter {
             ""
         );
         trade.gasUsed = gasBefore - gasleft();
-        trade.calculatedAmount = side == OrderSide.Sell ? amountOut : amountIn;
+        // Report settlement, not the pre-fee view quote. In particular, a
+        // helper fee or a future implementation must not silently inflate
+        // exact-input simulation output.
+        uint256 received = IERC20(buy).balanceOf(msg.sender) - outputBefore;
+        if (side == OrderSide.Buy && received < specified) {
+            revert Unavailable("Exact output not settled");
+        }
+        trade.calculatedAmount = side == OrderSide.Sell ? received : amountIn;
         trade.price = _price(sell, buy, 0);
     }
 }

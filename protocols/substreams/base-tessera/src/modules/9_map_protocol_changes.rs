@@ -1,4 +1,4 @@
-use crate::{common::*, config::DeploymentConfig};
+use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageChanges};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use substreams::{
@@ -46,6 +46,7 @@ fn attribute(builder: &mut TransactionChangesBuilder, component: &str, name: &st
 pub fn map_protocol_changes(
     params: String,
     block: eth::v2::Block,
+    storage: BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
     pair_store: StoreGetString,
@@ -64,10 +65,17 @@ pub fn map_protocol_changes(
         .unwrap_or(config.treasury.clone());
     let safety = read_safety(&safety_store, &known);
     let view = PairView { known, owner, safety };
-    protocol_changes(&config, &block, ModuleInputs { new_components, deltas, balance_store }, &view)
+    protocol_changes_from_storage(
+        &config,
+        &block,
+        &storage,
+        ModuleInputs { new_components, deltas, balance_store },
+        &view,
+    )
 }
 
-/// The engine, helper assignments and tag-0 fees recorded for `known` pairs.
+/// Closing-block engine, helper assignments and tag-0 fees for `known` pairs.
+/// These get_last reads are not an ordinal-by-ordinal reconstruction of safety state.
 fn read_safety(store: &StoreGetString, known: &HashSet<String>) -> Safety {
     let mut helpers = HashMap::new();
     let mut fees = HashMap::new();
@@ -95,9 +103,10 @@ fn read_safety(store: &StoreGetString, known: &HashSet<String>) -> Safety {
 /// by a transaction ordered before its creation. Every emitted transaction pauses a pair whose
 /// helper charges a nonzero tag-0 fee, and pauses every pair once the recorded Engine differs from
 /// the configured one.
-fn protocol_changes(
+fn protocol_changes_from_storage(
     config: &DeploymentConfig,
     block: &eth::v2::Block,
+    storage: &BlockStorageChanges,
     inputs: ModuleInputs,
     view: &PairView,
 ) -> Result<BlockChanges> {
@@ -142,8 +151,8 @@ fn protocol_changes(
         |addr| addr == config.tesseraswap || addr == config.engine || known.contains(&id(addr)),
         &mut changes,
     );
-    record_pair_writes(config, block, known, &created, &mut changes);
-    enforce_pauses(config, block, view, &created, &mut changes);
+    record_pair_writes(config, storage, known, &created, &mut changes)?;
+    enforce_pauses(config, storage, view, &created, &mut changes)?;
     let mut changes: Vec<_> = changes.into_iter().collect();
     changes.sort_by_key(|(index, _)| *index);
     Ok(BlockChanges {
@@ -159,14 +168,30 @@ fn protocol_changes(
 /// Marks the pairs each committed write touches and publishes the attributes it sets.
 fn record_pair_writes(
     config: &DeploymentConfig,
-    block: &eth::v2::Block,
+    storage: &BlockStorageChanges,
     known: &HashSet<String>,
     created: &HashMap<String, u64>,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
-) {
-    for tx in block.transactions() {
-        for w in committed_writes(tx) {
+) -> Result<()> {
+    // These slots belong to TesseraSwap, not the Pair: Engine at 0, Treasury at 1.
+    let engine_slot = slot(0);
+    let treasury_slot = slot(config.treasury_slot);
+    // Array order is the consumer's stateless_contract_addr_<i> attribute index.
+    // Follow these pointers so the VM can load replacement bytecode instead of keeping
+    // an old implementation. An address change alone does not require a pause, provided
+    // the supported layout/ABI and external-state assumptions still hold.
+    let dependency_slots = [
+        IMPLEMENTATION_SLOT.to_vec(), // Pair EIP-1967 slot: implementation, attribute 0.
+        slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
+        slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
+    ];
+    for group in &storage.transactions {
+        let transaction = storage_transaction(group)?;
+        for w in &group.writes {
             let pair_id = id(&w.address);
+            // Swap/Engine state is shared: conservatively refresh every existing Pair.
+            // Pair-owned writes affect only that Pair, including ordinary quote/inventory
+            // writes that do not change any of the dependency addresses below.
             let targets: Vec<_> = if w.address == config.engine || w.address == config.tesseraswap {
                 known.iter().cloned().collect()
             } else if known.contains(&pair_id) {
@@ -174,11 +199,12 @@ fn record_pair_writes(
             } else {
                 continue;
             };
-            let transaction: Transaction = tx.into();
             let builder = changes
                 .entry(transaction.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&transaction));
+                .or_insert_with(|| TransactionChangesBuilder::new(transaction));
             for pair in targets {
+                // known includes end-block discoveries; never attach changes to a Pair
+                // in a transaction earlier than the one that created it.
                 if created
                     .get(&pair)
                     .is_some_and(|index| *index > transaction.index)
@@ -187,14 +213,19 @@ fn record_pair_writes(
                 }
                 builder.mark_component_as_updated(&pair);
                 if w.address == config.tesseraswap {
-                    if w.key == slot(0) {
+                    if w.key == engine_slot {
                         attribute(builder, &pair, "engine", address(&w.new_value));
                     }
-                    if w.key == slot(config.treasury_slot) {
+                    if w.key == treasury_slot {
+                        // Treasury rotation is supported: switch the balance owner here;
+                        // map_relative_balances supplies the corresponding balance bridge.
                         attribute(builder, &pair, "balance_owner", address(&w.new_value));
                     }
                 } else if w.address != config.engine {
-                    if let Some(i) = dependency_index(config, &w.key) {
+                    if let Some(i) = dependency_slots
+                        .iter()
+                        .position(|key| *key == w.key)
+                    {
                         if !zero(&w.new_value) {
                             attribute(
                                 builder,
@@ -208,16 +239,20 @@ fn record_pair_writes(
             }
         }
     }
+    Ok(())
 }
 
-/// Pauses unsafe pairs in every emitted transaction.
+/// Emits a sticky pause signal for unsafe pairs in every emitted transaction.
+/// Safety is evaluated against closing-block stores; this module never emits an unpause.
+/// Consumers must enforce the signal before routing: emitting an attribute alone is not
+/// equivalent to removing a pool from the consumer's active set.
 fn enforce_pauses(
     config: &DeploymentConfig,
-    block: &eth::v2::Block,
+    storage: &BlockStorageChanges,
     view: &PairView,
     created: &HashMap<String, u64>,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
-) {
+) -> Result<()> {
     // Always enforce persisted signals on emitted component updates. Fee-table writes can
     // occur without a Pair write, so include their transaction explicitly as a trigger.
     let fee_key = fee_tag_zero_slot();
@@ -227,22 +262,22 @@ fn enforce_pauses(
         .values()
         .map(String::as_str)
         .collect();
-    for tx in block.transactions() {
-        if tx
-            .calls
+    for group in &storage.transactions {
+        if group
+            .writes
             .iter()
-            .filter(|c| !c.state_reverted)
-            .flat_map(|c| &c.storage_changes)
-            .any(|w| {
-                w.key == fee_key.as_slice() && helpers.contains(hex::encode(&w.address).as_str())
-            })
+            .any(|w| w.key == fee_key && helpers.contains(hex::encode(&w.address).as_str()))
         {
-            let tx: Transaction = tx.into();
+            let tx = storage_transaction(group)?;
             changes
                 .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+                .or_insert_with(|| TransactionChangesBuilder::new(tx));
         }
     }
+    // The indexer still follows config.engine and its registry layout. A replacement in
+    // TesseraSwap slot 0 would leave discovery and VM state tracking the old Engine, so
+    // signal a pause for every Pair until that deployment is explicitly supported.
+    // Ordinary storage updates inside the configured Engine do not trigger this check.
     let epoch_changed = view
         .safety
         .engine
@@ -261,24 +296,35 @@ fn enforce_pauses(
                 .helpers
                 .get(pair)
                 .and_then(|helper| view.safety.fees.get(helper));
+            // Empty swapData selects helper fee A[0] (mapping base slot 1). We load the
+            // helper's bytecode but not its own storage, so the VM reads an absent fee as
+            // zero. A nonzero on-chain fee would make simulation disagree with execution:
+            // pause each Pair using that helper. A helper address change with zero fee is
+            // supported, as are pricing-library/implementation pointer changes above.
             if epoch_changed || fee.is_some_and(|value| !zero(value)) {
                 builder.change_component_pause_state(pair, true);
             }
         }
     }
+    Ok(())
 }
 
-/// The `stateless_contract_addr_<i>` index of a pair slot holding a dependency address.
-fn dependency_index(config: &DeploymentConfig, key: &[u8]) -> Option<usize> {
-    if key == IMPLEMENTATION_SLOT {
-        Some(0)
-    } else if key == slot(config.pair_lib_slot) {
-        Some(1)
-    } else if key == slot(config.pair_write_helper_slot) {
-        Some(2)
-    } else {
-        None
-    }
+/// Runs the block through `filter_storage_changes` first, as the manifest does.
+#[cfg(test)]
+fn protocol_changes(
+    config: &DeploymentConfig,
+    block: &eth::v2::Block,
+    inputs: ModuleInputs,
+    view: &PairView,
+) -> Result<BlockChanges> {
+    let known = view
+        .known
+        .iter()
+        .map(|pair| hex::decode(pair.trim_start_matches("0x")).unwrap())
+        .collect();
+    let storage =
+        crate::modules::map_storage_changes::filter_storage_changes(config, block, &known);
+    protocol_changes_from_storage(config, block, &storage, inputs, view)
 }
 
 #[cfg(test)]
@@ -408,6 +454,17 @@ mod tests {
     }
 
     #[test]
+    fn pair_writes_touch_only_their_own_pair() {
+        let block = block(vec![tx(0, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let out =
+            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safe()))
+                .unwrap();
+
+        assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"], id(&HELPER).into_bytes());
+        assert!(attrs_in(&out, 0, &OTHER_PAIR).is_empty());
+    }
+
+    #[test]
     fn tesseraswap_writes_reach_every_pair() {
         let (engine, treasury) = ([0x23; 20], [0x34; 20]);
         let tesseraswap = config().tesseraswap;
@@ -505,6 +562,22 @@ mod tests {
     }
 
     #[test]
+    fn fee_write_outside_assigned_helpers_emits_nothing() {
+        let safety = Safety {
+            engine: None,
+            helpers: HashMap::from([(id(&PAIR), hex::encode(HELPER))]),
+            fees: HashMap::from([(hex::encode(HELPER), slot(10_000))]),
+        };
+        let stranger = [0x0f; 20];
+        let block =
+            block(vec![tx(3, vec![write(&stranger, fee_tag_zero_slot(), vec![0; 32], slot(1))])]);
+        let out =
+            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
+
+        assert!(out.changes.is_empty());
+    }
+
+    #[test]
     fn writes_before_pair_creation_are_ignored() {
         let inputs = ModuleInputs {
             new_components: BlockTransactionProtocolComponents {
@@ -523,5 +596,32 @@ mod tests {
 
         assert!(attrs_in(&out, 2, &PAIR).is_empty(), "tx 2 precedes the pair");
         assert_eq!(attrs_in(&out, 5, &PAIR)["balance_owner"], TREASURY.to_vec());
+    }
+
+    #[test]
+    fn missing_storage_transaction_returns_an_error() {
+        let storage = BlockStorageChanges {
+            transactions: vec![crate::pb::tessera::v1::TransactionStorageChanges {
+                tx: None,
+                writes: vec![crate::pb::tessera::v1::StorageChange {
+                    address: PAIR.to_vec(),
+                    key: IMPLEMENTATION_SLOT.to_vec(),
+                    old_value: vec![],
+                    new_value: word(&HELPER),
+                    ordinal: 20,
+                }],
+            }],
+        };
+        let error = protocol_changes_from_storage(
+            &config(),
+            &block(vec![]),
+            &storage,
+            no_inputs(),
+            &view(&[&PAIR], safe()),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("writes without a transaction"));
     }
 }

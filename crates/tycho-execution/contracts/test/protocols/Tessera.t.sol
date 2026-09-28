@@ -171,25 +171,59 @@ contract TesseraRouterTest is TychoRouterTestSetup {
     }
 
     function testSingleSwapIntegration() public {
-        uint256 amountIn = 0.01 ether;
-        vm.prank(tychoRouterAddr);
-        (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
-            .tesseraSwapViewAmounts(BASE_WETH, BASE_USDC, int256(amountIn));
-        deal(BASE_WETH, ALICE, amountIn);
-        uint256 usdcBefore = IERC20(BASE_USDC).balanceOf(ALICE);
-
-        vm.startPrank(ALICE);
-        IERC20(BASE_WETH).approve(tychoRouterAddr, type(uint256).max);
-        bytes memory callData = loadCallDataFromFile(
+        _checkEncodedRouterSwap(
+            BASE_WETH,
+            BASE_USDC,
+            0.01 ether,
             "test_single_encoding_strategy_tessera_weth_usdc"
         );
+    }
+
+    function testSingleSwapIntegrationUsdcToWeth() public {
+        _checkEncodedRouterSwap(
+            BASE_USDC,
+            BASE_WETH,
+            100e6,
+            "test_single_encoding_strategy_tessera_usdc_weth"
+        );
+    }
+
+    function _checkEncodedRouterSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        string memory fixture
+    ) internal {
+        vm.prank(tychoRouterAddr);
+        (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
+            .tesseraSwapViewAmounts(tokenIn, tokenOut, int256(amountIn));
+        assertGt(quote, 0);
+        // Exercise the encoder-produced router call, including the executor's fee-tag choice.
+        vm.expectCall(
+            TESSERA_SWAP,
+            abi.encodeWithSignature(
+                "tesseraSwapWithAllowances(address,address,int256,uint256,address,bytes)",
+                tokenIn,
+                tokenOut,
+                int256(amountIn),
+                uint256(0),
+                ALICE,
+                bytes("")
+            )
+        );
+        deal(tokenIn, ALICE, amountIn);
+        uint256 outputBefore = IERC20(tokenOut).balanceOf(ALICE);
+
+        vm.startPrank(ALICE);
+        IERC20(tokenIn).approve(tychoRouterAddr, type(uint256).max);
+        bytes memory callData = loadCallDataFromFile(fixture);
         (bool success,) = tychoRouterAddr.call(callData);
         vm.stopPrank();
 
         assertTrue(success, "Call Failed");
-        assertEq(IERC20(BASE_USDC).balanceOf(ALICE) - usdcBefore, quote);
-        assertEq(IERC20(BASE_WETH).balanceOf(ALICE), 0);
-        assertEq(IERC20(BASE_WETH).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(tokenOut).balanceOf(ALICE) - outputBefore, quote);
+        assertEq(IERC20(tokenIn).balanceOf(ALICE), 0);
+        assertEq(IERC20(tokenIn).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(tokenOut).balanceOf(tychoRouterAddr), 0);
     }
 }
