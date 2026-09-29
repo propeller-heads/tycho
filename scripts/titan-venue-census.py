@@ -17,9 +17,12 @@ import asyncio
 import hashlib
 import itertools
 import json
+import os
 from collections import Counter, defaultdict
 
-DEFAULT_URL = "wss://eu.rpc.titanbuilder.xyz/ws/pamm_quote_stream"
+DEFAULT_URL = os.environ.get(
+    "TITAN_PAMM_STREAM_URL", "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream"
+)
 META_KEYS = {"slot", "blockNumber", "timestamp"}
 
 
@@ -93,7 +96,7 @@ async def census(url: str, seconds: float) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seconds", type=float, default=60, help="capture duration (default 60)")
-    parser.add_argument("--url", default=DEFAULT_URL, help=f"stream endpoint (default {DEFAULT_URL})")
+    parser.add_argument("--url", default=DEFAULT_URL, help=f"stream endpoint (default $TITAN_PAMM_STREAM_URL or {DEFAULT_URL})")
     args = parser.parse_args()
     asyncio.run(census(args.url, args.seconds))
 

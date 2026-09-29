@@ -154,6 +154,7 @@ mod extraction_state;
 mod orm;
 mod protocol;
 mod schema;
+mod snapshot;
 pub mod token_cache;
 mod versioning;
 

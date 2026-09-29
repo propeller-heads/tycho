@@ -552,8 +552,14 @@ mod tests {
             );
         };
 
-        let bid_price = bid_ask.bid_price().unwrap();
-        let ask_price = bid_ask.ask_price().unwrap();
+        let bid_price = bid_ask
+            .bid_price()
+            .unwrap()
+            .expect("the selected pool quotes a bid");
+        let ask_price = bid_ask
+            .ask_price()
+            .unwrap()
+            .expect("the selected pool quotes an ask");
         assert!(bid_price.is_finite() && bid_price > 0.0);
         assert!(ask_price.is_finite() && ask_price >= bid_price);
         assert!(bid_ask.total_token0_available().is_ok());

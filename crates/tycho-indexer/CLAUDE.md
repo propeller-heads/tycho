@@ -46,7 +46,7 @@ services/
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
-    cache.rs                EntityCache — long-lived timestamped entity store the windows fold into (not wired yet, ENG-6305)
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup, wired into the services by ENG-6293
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -168,6 +168,12 @@ Committed blocks are therefore retained and served, so window contents and DB ro
 to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
+
+With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
+snapshot after the extractors are built and before the server starts (`EntityCache::load` in
+`services/state/cache.rs`), then drops it: handing it to the services as the window sink and the
+read source is ENG-6293. The windows fold into `DiscardSink`. `off` (the default) skips the load.
+A failed load is a setup error and ends the process.
 
 ## Connections
 
