@@ -14,6 +14,7 @@ pub struct MetricClientBuilder {
     api_key: Option<String>,
     poll_time: Duration,
     quote_timeout: Duration,
+    via_fallback_router: bool,
 }
 
 impl MetricClientBuilder {
@@ -27,6 +28,7 @@ impl MetricClientBuilder {
             api_key: config.api_key,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
+            via_fallback_router: false,
         }
     }
 
@@ -64,8 +66,17 @@ impl MetricClientBuilder {
         self
     }
 
+    /// Labels the emitted components `MetricClient::FALLBACK_PROTOCOL_SYSTEM`, so Tycho executes
+    /// their swaps through `MetricFallbackRouter`. The solver must then name a fallback pool in
+    /// each swap's `user_data`. Off by default: the direct `MetricClient::PROTOCOL_SYSTEM`
+    /// path.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<MetricClient, RFQError> {
-        MetricClient::new(
+        let client = MetricClient::new(
             self.chain,
             self.tokens,
             self.tvl,
@@ -73,6 +84,7 @@ impl MetricClientBuilder {
             self.api_key,
             self.poll_time,
             self.quote_timeout,
-        )
+        )?;
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }
