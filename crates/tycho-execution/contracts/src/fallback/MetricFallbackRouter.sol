@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IMetricPool} from "@interfaces/IMetricPool.sol";
+import {IMetricPool} from "../executors/MetricExecutor.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {
     TychoFallbackRouter,

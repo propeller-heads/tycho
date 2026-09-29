@@ -8,7 +8,6 @@ import {
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
-import {BebopCalldata} from "../../lib/BebopCalldata.sol";
 import {TychoFallbackRouter} from "./TychoFallbackRouter.sol";
 
 error BebopFallbackRouter__AddressZero();
@@ -33,6 +32,13 @@ contract BebopFallbackRouter is TychoFallbackRouter {
 
     /// @notice `[partialFillOffset: 1][originalFilledTakerAmount: 32]`, then the calldata.
     uint256 private constant _CALLDATA_START = 33;
+
+    /// @notice BebopSettlement.swapSingle
+    bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
+    /// @notice BebopSettlement.swapAggregate
+    bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
+    /// @notice BebopRouter.swap
+    bytes4 private constant _ROUTER_SWAP_SELECTOR = 0x9586d0e8;
 
     /// @notice The Bebop settlement contract.
     address public immutable bebopSettlement;
@@ -75,16 +81,9 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         if (bebopData.length < _CALLDATA_START + 4) {
             revert BebopFallbackRouter__InvalidDataLength(bebopData.length);
         }
-        bytes4 selector = bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + 4]);
-        BebopCalldata.CallCheck check = BebopCalldata.checkCall(
-            target, selector, bebopSettlement, bebopRouter
+        _validateCall(
+            target, bytes4(bebopData[_CALLDATA_START:_CALLDATA_START + 4])
         );
-        if (check == BebopCalldata.CallCheck.InvalidTarget) {
-            revert BebopFallbackRouter__InvalidTarget(target);
-        }
-        if (check == BebopCalldata.CallCheck.InvalidSelector) {
-            revert BebopFallbackRouter__InvalidSelector(selector);
-        }
         _swap(swap_, target, bebopData, fallbackSwap);
     }
 
@@ -105,13 +104,12 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         address target,
         bytes calldata bebopData
     ) internal override {
-        bytes memory bebopCalldata =
-            BebopCalldata.capFilledTakerAmount(
-                bebopData[_CALLDATA_START:],
-                swap_.amountIn,
-                _originalFilledTakerAmount(bebopData),
-                uint8(bebopData[0])
-            );
+        bytes memory bebopCalldata = _capFilledTakerAmount(
+            bebopData[_CALLDATA_START:],
+            swap_.amountIn,
+            _originalFilledTakerAmount(bebopData),
+            uint8(bebopData[0])
+        );
         IERC20 tokenIn = IERC20(swap_.tokenIn);
         IERC20 tokenOut = IERC20(swap_.tokenOut);
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
@@ -124,6 +122,47 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         tokenOut.safeTransfer(
             swap_.receiver, tokenOut.balanceOf(address(this)) - balanceBefore
         );
+    }
+
+    /// @dev Reverts unless `target` is the settlement or router and `selector` is one of its swap
+    /// selectors.
+    function _validateCall(address target, bytes4 selector) internal view {
+        if (target == bebopSettlement) {
+            if (
+                selector != _SWAP_SINGLE_SELECTOR
+                    && selector != _SWAP_AGGREGATE_SELECTOR
+            ) {
+                revert BebopFallbackRouter__InvalidSelector(selector);
+            }
+        } else if (target == bebopRouter) {
+            if (selector != _ROUTER_SWAP_SELECTOR) {
+                revert BebopFallbackRouter__InvalidSelector(selector);
+            }
+        } else {
+            revert BebopFallbackRouter__InvalidTarget(target);
+        }
+    }
+
+    /// @dev Caps the calldata's `filledTakerAmount` at `amountIn`, in place. The Bebop API's
+    /// `partialFillOffset` is its position in 32-byte words after the selector.
+    function _capFilledTakerAmount(
+        bytes memory bebopCalldata,
+        uint256 amountIn,
+        uint256 originalFilledTakerAmount,
+        uint8 partialFillOffset
+    ) internal pure returns (bytes memory) {
+        if (amountIn >= originalFilledTakerAmount) {
+            return bebopCalldata;
+        }
+        uint256 filledTakerAmountPos = 4 + uint256(partialFillOffset) * 32;
+        // slither-disable-next-line assembly
+        assembly {
+            mstore(
+                add(add(bebopCalldata, 0x20), filledTakerAmountPos),
+                amountIn
+            )
+        }
+        return bebopCalldata;
     }
 
     function _originalFilledTakerAmount(bytes calldata bebopData)

@@ -3,8 +3,23 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
-import {IMetricPool} from "@interfaces/IMetricPool.sol";
 import {TransferManager} from "../TransferManager.sol";
+
+// MetricOmmPool swap interface; see
+// https://docs.metric.xyz/RSm94m71kqtGICv4iKRj
+// -> Developers -> Smart Contracts Reference -> Swapping directly via pool.
+// The returned deltas are intentionally ignored: the Dispatcher verifies output
+// via balance-diff.
+interface IMetricPool {
+    function swap(
+        address recipient,
+        bool zeroForOne,
+        int128 amountSpecified,
+        uint128 priceLimitX64,
+        bytes calldata callbackData,
+        bytes calldata extensionData
+    ) external returns (int128 amount0Delta, int128 amount1Delta);
+}
 
 error MetricExecutor__InvalidDataLength();
 error MetricExecutor__AmountInTooLarge();

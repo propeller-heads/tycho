@@ -188,8 +188,7 @@ every leg pays for one simulated Metric swap.
 `swap` checks the target and selector against the immutable `bebopSettlement` and `bebopRouter` before anything runs.
 The router approves the target for `amountIn`, calls it, revokes the approval, and forwards the output to the
 receiver. An `amountIn` above `originalFilledTakerAmount` quotes 0, so the fallback swaps the whole leg instead of
-leaving the remainder in the router. `lib/BebopCalldata.sol` holds the target/selector check and the
-`filledTakerAmount` rewrite that `BebopExecutor` also uses.
+leaving the remainder in the router.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
