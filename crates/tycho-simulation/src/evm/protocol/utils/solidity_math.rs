@@ -1,12 +1,10 @@
 use alloy::primitives::{U256, U512};
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::protocol::safe_math::{div_mod_u512, safe_div_u512, safe_mul_u512};
+use crate::evm::protocol::safe_math::{div_mod_u512, safe_div_u512};
 
 pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
-    let a_big = U512::from(a);
-    let b_big = U512::from(b);
-    let product = safe_mul_u512(a_big, b_big)?;
+    let product: U512 = a.widening_mul(b);
     let (mut result, rest) = div_mod_u512(product, U512::from(denom))?;
     if !rest.is_zero() {
         result = result
@@ -17,9 +15,7 @@ pub(crate) fn mul_div_rounding_up(a: U256, b: U256, denom: U256) -> Result<U256,
 }
 
 pub(crate) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
-    let a_big = U512::from(a);
-    let b_big = U512::from(b);
-    let product = safe_mul_u512(a_big, b_big)?;
+    let product: U512 = a.widening_mul(b);
     let result = safe_div_u512(product, U512::from(denom))?;
     truncate_to_u256(result)
 }
