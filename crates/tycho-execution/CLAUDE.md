@@ -150,7 +150,7 @@ PropAMM (a single generic executor shared by all pAMMs implementing the standard
 address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback").
 
-### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/PropAMMFallbackRouter.sol`, `executors/FallbackExecutor.sol`, `executors/PropAMMFallbackExecutor.sol`)
+### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
 `swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
@@ -168,8 +168,18 @@ TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> pAMM     (rever
 runs the quote-then-fallback sequence below. A concrete router names the primary venue: it implements
 `_quotePrimary` (zero means the primary cannot fill) and `_swapPrimary` (pays the primary and delivers to the
 receiver), and exposes an external `swap` that calls `_swap(swap_, primary, primaryData, fallbackSwap)`.
-`PropAMMFallbackRouter` is the only concrete router today: its primary is a pAMM, and `primaryData` is empty.
-The sections below describe it; "pAMM" is the primary there.
+Each concrete router has its own executor, and each executor holds one router address:
+
+| Router | Executor | Primary quote | Executor swap data |
+|---|---|---|---|
+| `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
+| `MetricFallbackRouter` | `MetricFallbackExecutor` | `simulateMetric` runs the swap and reverts with the output | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+
+`MetricFallbackRouter` pays the pool's `metricOmmSwapCallback` through the catch-all `fallback`, which sends the full
+`amountIn` to the pool the swap called, as the Dispatcher does for `MetricExecutor`. Metric has no quote function, so
+every leg pays for one simulated Metric swap.
+
+The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
 fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
