@@ -2,7 +2,7 @@ require('dotenv').config();
 const hre = require("hardhat");
 const {deployCreate2} = require("./utils");
 
-// TychoFallbackRouter takes three per-chain singletons: Uniswap V4's PoolManager,
+// PropAMMFallbackRouter takes three per-chain singletons: Uniswap V4's PoolManager,
 // Fluid's liquidity layer and the Uniswap V3 static quoter. The first two come
 // from the chain's executor deployments, the quoter from STATIC_QUOTERS below.
 // A missing one is deployed as address(0): the protocol reverts
@@ -39,7 +39,7 @@ async function main() {
     const fluidLiquidity = deployments.fluid_v1?.args?.[0] ?? ZERO_ADDRESS;
     const staticQuoter = STATIC_QUOTERS[base] ?? ZERO_ADDRESS;
 
-    console.log(`Deploying TychoFallbackRouter to ${network} with:`);
+    console.log(`Deploying PropAMMFallbackRouter to ${network} with:`);
     console.log(
         `- poolManager: ${describe(poolManager, "Uniswap V4 disabled")}`
     );
@@ -54,8 +54,9 @@ async function main() {
     );
 
     await deployCreate2({
-        contractName: "TychoFallbackRouter",
-        contractFqn: "src/fallback/TychoFallbackRouter.sol:TychoFallbackRouter",
+        contractName: "PropAMMFallbackRouter",
+        contractFqn:
+            "src/fallback/PropAMMFallbackRouter.sol:PropAMMFallbackRouter",
         args: [poolManager, fluidLiquidity, staticQuoter],
         network,
     });

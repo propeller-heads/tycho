@@ -45,7 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes more; a pAMM that wins the quote but fails still falls through. See "Protocol fallback" below. |
+| `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
@@ -150,7 +150,7 @@ PropAMM (a single generic executor shared by all pAMMs implementing the standard
 address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback").
 
-### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
+### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/PropAMMFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
 `swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
@@ -164,11 +164,18 @@ TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> pAMM     (rever
                                                              --> fallback (fills, pays receiver)
 ```
 
+`TychoFallbackRouter` is abstract. It holds the fallback protocols, their callbacks and the internal `_swap`, which
+runs the quote-then-fallback sequence below. A concrete router names the primary venue: it implements
+`_quotePrimary` (zero means the primary cannot fill) and `_swapPrimary` (pays the primary and delivers to the
+receiver), and exposes an external `swap` that calls `_swap(swap_, primary, primaryData, fallbackSwap)`.
+`PropAMMFallbackRouter` is the only concrete router today: its primary is a pAMM, and `primaryData` is empty.
+The sections below describe it; "pAMM" is the primary there.
+
 `FallbackExecutor` declares `TransferType.Transfer` with the fallback router as receiver and `outputToRouter = false`,
-then calls `TychoFallbackRouter.swap()`.
+then calls `PropAMMFallbackRouter.swap()`.
 
 **One pAMM and one caller-chosen fallback.** `swap` quotes both first and runs the fallback directly when it quotes
-more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePropAMM`, an external self-call wrapped in
+more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePrimary`, an external self-call wrapped in
 try/catch, so its transfer reverts with it and the fallback starts from the same balance. The fallback then runs in
 the outer frame: it gets no try/catch, so its revert is the swap's revert and there is no third attempt. The contract
 never picks a protocol itself -- the encoder decides which fallback to use and supplies its pool address.
@@ -188,9 +195,9 @@ fallback quote costs gas on every other leg, including the ones the pAMM fills: 
 simulation, about 44k for Fluid, about 39k for Curve, about 31k for Uniswap V3, about 11k for Uniswap V2 (router
 call, cold state, mainnet fork).
 
-`FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
+`FallbackSwap(primary, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
-`PropAMMFailed` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
+`PrimaryFailed` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
 served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's revert reason is
 not carried: reading caller-controlled returndata of any size costs gas.
 
@@ -251,7 +258,7 @@ Constraints:
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
-- `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory, reading `poolManager` and
+- `scripts/deploy-fallback-router.js` deploys `PropAMMFallbackRouter` through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
   static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
   missing. The `FallbackExecutor` then goes through `deploy-executors.js` like any executor: add a

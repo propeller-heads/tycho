@@ -21,7 +21,6 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
-import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {
     ICurveCryptoPool,
@@ -48,10 +47,12 @@ error TychoFallbackRouter__SimulatedAmountOut(uint256 amountOut);
 error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 
 /// @title TychoFallbackRouter
-/// @notice Quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes
-/// more `tokenOut`. A pAMM that wins the quote but fails still falls through to the fallback.
+/// @notice Quotes a primary venue against the caller's chosen fallback protocol and runs whichever
+/// quotes more `tokenOut`. A primary that wins the quote but fails still falls through to the
+/// fallback. A concrete router names the primary venue: it implements `_quotePrimary` and
+/// `_swapPrimary`, and exposes an external entry point that calls `_swap`.
 /// @dev Exists because an executor cannot fall back: the Dispatcher transfers a swap's input before
-/// it delegatecalls `swap()`, so a reverting pAMM has already been paid and a Uniswap V3 retry,
+/// it delegatecalls `swap()`, so a reverting primary has already been paid and a Uniswap V3 retry,
 /// which pays in a callback, cannot be funded. Here the tokens stay in this contract.
 ///
 /// One build serves every chain. The PoolManager, Fluid liquidity layer and Uniswap V3 static
@@ -62,7 +63,7 @@ error TychoFallbackRouter__UnknownProtocol(uint8 protocol);
 /// mistaken transfer) is claimable by anyone through `swap` and is considered lost, which is also
 /// why a Curve approval is left in place rather than revoked. Native ETH, fee-on-transfer and
 /// rebasing tokens are unsupported.
-contract TychoFallbackRouter is ReentrancyGuardTransient {
+abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     /// @notice The protocols a fallback may use.
@@ -75,13 +76,13 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         AerodromeV1
     }
 
-    /// @notice Why the fallback ran instead of the pAMM.
+    /// @notice Why the fallback ran instead of the primary.
     enum FallbackReason {
-        // The fallback quoted more `tokenOut` than the pAMM, or the pAMM could not quote at all
-        // and its swap was never attempted.
+        // The fallback quoted more `tokenOut` than the primary, or the primary could not quote at
+        // all and its swap was never attempted.
         FallbackQuotedHigher,
-        // The pAMM quoted at least as much as the fallback, then reverted or delivered nothing.
-        PropAMMFailed
+        // The primary quoted at least as much as the fallback, then reverted or delivered nothing.
+        PrimaryFailed
     }
 
     /// @notice One swap: what goes in, what comes out, and who receives it.
@@ -119,12 +120,12 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// without one, where a Uniswap V3 fallback is quoted by simulation.
     IUniswapV3StaticQuoter public immutable uniswapV3StaticQuoter;
 
-    /// @notice `protocol` filled instead of the pAMM, for `reason`. Absence of this event on a
-    /// filled swap means the pAMM served it, which is the pAMM fill rate.
-    /// @dev The pAMM's revert reason is deliberately not carried: reading it would copy
+    /// @notice `protocol` filled instead of the `primary` venue, for `reason`. Absence of this
+    /// event on a filled swap means the primary served it, which is the primary fill rate.
+    /// @dev The primary's revert reason is deliberately not carried: reading it would copy
     /// caller-controlled returndata of any size into this frame.
     event FallbackSwap(
-        address indexed pamm,
+        address indexed primary,
         address indexed tokenIn,
         address indexed tokenOut,
         uint256 amountIn,
@@ -148,39 +149,25 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         uniswapV3StaticQuoter = uniswapV3StaticQuoter_;
     }
 
-    /// @notice Quotes `pamm` and `fallbackSwap`, then runs the fallback if it quotes more
-    /// `tokenOut`, otherwise `pamm` and, only if that fails, `fallbackSwap`. A failing fallback
-    /// reverts the swap; there is no third attempt.
-    /// @dev Permissionless: the caller names every parameter, so a balance sitting in this
-    /// contract can be taken by anyone and is considered lost. Push-payment: the caller MUST
-    /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH, fee-on-transfer and
-    /// rebasing tokens are not supported.
-    /// `fallbackSwap` names one of Uniswap V2, V3 or V4, Curve, Fluid V1 or Aerodrome V1.
-    /// A fallback quote that reverts counts as zero, so equal quotes keep the pAMM. A pAMM that
-    /// cannot quote skips both the fallback quote and its own swap.
-    /// No output is returned: the caller measures its own `swap_.tokenOut` balance diff at
-    /// `swap_.receiver`, which is how the Dispatcher verifies every swap.
-    function swap(
+    /// @notice Quotes the primary and `fallbackSwap`, then runs the fallback if it quotes more
+    /// `tokenOut`, otherwise the primary and, only if that fails, `fallbackSwap`. A failing
+    /// fallback reverts the swap; there is no third attempt.
+    /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
+    /// A fallback quote that reverts counts as zero, so equal quotes keep the primary. A primary
+    /// that quotes zero skips both the fallback quote and its own swap.
+    function _swap(
         Swap calldata swap_,
-        address pamm,
+        address primary,
+        bytes calldata primaryData,
         bytes calldata fallbackSwap
-    ) external nonReentrant {
-        // Low-level so a `pamm` without code, or one returning nothing decodable, quotes zero
-        // instead of reverting `swap`. That covers `pamm == address(0)`, so no zero check.
-        // slither-disable-next-line low-level-calls,missing-zero-check
-        (bool quoted, bytes memory quote) = pamm.call(
-            abi.encodeCall(
-                IPropAMM.quote, (swap_.tokenIn, swap_.tokenOut, swap_.amountIn)
-            )
-        );
-        uint256 pammAmountOut =
-            quoted && quote.length >= 32 ? abi.decode(quote, (uint256)) : 0;
+    ) internal nonReentrant {
+        uint256 primaryAmountOut = _quotePrimary(swap_, primary, primaryData);
 
         FallbackReason reason = FallbackReason.FallbackQuotedHigher;
-        // A pAMM that cannot quote does not get its swap attempted, so there is nothing for the
-        // fallback quote to decide and it is skipped. That saves the whole quote, which for
+        // A primary that cannot quote does not get its swap attempted, so there is nothing for
+        // the fallback quote to decide and it is skipped. That saves the whole quote, which for
         // Uniswap V4 is a simulated swap.
-        if (pammAmountOut > 0) {
+        if (primaryAmountOut > 0) {
             uint256 fallbackAmountOut = 0;
             try this.quoteFallback(swap_, fallbackSwap) returns (
                 uint256 amountOut
@@ -188,19 +175,19 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
                 fallbackAmountOut = amountOut;
             } catch {}
 
-            if (fallbackAmountOut <= pammAmountOut) {
-                try this.executePropAMM(swap_, pamm) {
+            if (fallbackAmountOut <= primaryAmountOut) {
+                try this.executePrimary(swap_, primary, primaryData) {
                     return;
                 } catch {}
-                reason = FallbackReason.PropAMMFailed;
+                reason = FallbackReason.PrimaryFailed;
             }
         }
 
         FallbackProtocol protocol = _executeFallback(swap_, fallbackSwap);
-        // Reentrancy cannot happen: `swap` is nonReentrant.
+        // Reentrancy cannot happen: `_swap` is nonReentrant.
         // slither-disable-next-line reentrancy-events
         emit FallbackSwap(
-            pamm,
+            primary,
             swap_.tokenIn,
             swap_.tokenOut,
             swap_.amountIn,
@@ -209,31 +196,41 @@ contract TychoFallbackRouter is ReentrancyGuardTransient {
         );
     }
 
-    /// @notice Runs the pAMM. External only so `swap` can try/catch it.
-    function executePropAMM(Swap calldata swap_, address pamm) external {
+    /// @notice The `tokenOut` the primary would deliver for `swap_`, or zero when it cannot
+    /// fill. Must not revert: a primary that cannot quote returns zero.
+    function _quotePrimary(
+        Swap calldata swap_,
+        address primary,
+        bytes calldata primaryData
+    ) internal virtual returns (uint256 amountOut);
+
+    /// @notice Pays the primary out of this contract's `swap_.tokenIn` and swaps, delivering
+    /// `swap_.tokenOut` to `swap_.receiver`.
+    function _swapPrimary(
+        Swap calldata swap_,
+        address primary,
+        bytes calldata primaryData
+    ) internal virtual;
+
+    /// @notice Runs the primary. External only so `_swap` can try/catch it.
+    function executePrimary(
+        Swap calldata swap_,
+        address primary,
+        bytes calldata primaryData
+    ) external {
         _requireSelf();
         uint256 balanceBefore = IERC20(swap_.tokenOut).balanceOf(swap_.receiver);
 
-        IERC20(swap_.tokenIn).safeTransfer(pamm, swap_.amountIn);
-        // slither-disable-next-line unused-return
-        IPropAMM(pamm)
-            .swap(
-                swap_.tokenIn,
-                swap_.tokenOut,
-                swap_.amountIn,
-                0,
-                swap_.receiver,
-                block.timestamp
-            );
+        _swapPrimary(swap_, primary, primaryData);
 
-        // Reverts on zero delivered, so a pAMM that fills with nothing still falls through
+        // Reverts on zero delivered, so a primary that fills with nothing still falls through
         // to the fallback.
         if (IERC20(swap_.tokenOut).balanceOf(swap_.receiver) <= balanceBefore) {
             revert TychoFallbackRouter__NoOutput();
         }
     }
 
-    /// @notice Quotes the fallback protocol. External only so `swap` can try/catch it: it
+    /// @notice Quotes the fallback protocol. External only so `_swap` can try/catch it: it
     /// reverts with the protocol's own error, or the decoder's, when it cannot quote.
     function quoteFallback(Swap calldata swap_, bytes calldata fallbackSwap)
         external

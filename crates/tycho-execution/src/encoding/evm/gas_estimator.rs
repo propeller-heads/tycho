@@ -73,7 +73,7 @@ pub fn needs_approval(protocol_system: &str) -> bool {
     PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system)
 }
 
-/// Extra gas the `TychoFallbackRouter` adds around a pAMM fill: the `executePropAMM` try/catch
+/// Extra gas the `TychoFallbackRouter` adds around a pAMM fill: the `executePrimary` try/catch
 /// self-call, the router->pAMM transfer, the `nonReentrant` guard and the no-output balance
 /// check. The router is push-funded, so the input transfer is charged separately and this sits on
 /// top of it.

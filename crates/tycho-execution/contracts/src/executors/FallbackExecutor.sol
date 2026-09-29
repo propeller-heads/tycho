@@ -3,13 +3,14 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TychoFallbackRouter} from "../fallback/TychoFallbackRouter.sol";
+import {PropAMMFallbackRouter} from "../fallback/PropAMMFallbackRouter.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 error FallbackExecutor__AddressZero();
 error FallbackExecutor__InvalidDataLength(uint256 length);
 
 /// @title FallbackExecutor
-/// @notice Runs one swap through `TychoFallbackRouter`.
+/// @notice Runs one swap through `PropAMMFallbackRouter`.
 /// @dev `TransferType.Transfer` sends `amountIn` to the fallback router, which then owns the
 /// tokens and pays each protocol itself. The router address is immutable, so the executor only
 /// ever calls this one contract. Every address inside the swap data is called by the router, not
@@ -19,13 +20,13 @@ error FallbackExecutor__InvalidDataLength(uint256 length);
 /// fallback exists to rescue. The TychoRouter's route-level `minAmountOut` must clear the price
 /// the fallback fills at.
 contract FallbackExecutor is IExecutor {
-    TychoFallbackRouter public immutable fallbackRouter;
+    PropAMMFallbackRouter public immutable fallbackRouter;
 
     constructor(address fallbackRouter_) {
         if (fallbackRouter_ == address(0)) {
             revert FallbackExecutor__AddressZero();
         }
-        fallbackRouter = TychoFallbackRouter(fallbackRouter_);
+        fallbackRouter = PropAMMFallbackRouter(fallbackRouter_);
     }
 
     function fundsExpectedAddress(
