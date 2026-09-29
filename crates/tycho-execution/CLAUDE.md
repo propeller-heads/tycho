@@ -280,7 +280,8 @@ Constraints:
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
-- `scripts/deploy-fallback-router.js` deploys `PropAMMFallbackRouter` through the CREATE2 factory, reading `poolManager` and
+- `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`
+  or `bebop`; Bebop adds the `rfq:bebop` settlement and router) through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
   static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
   missing. The `PropAMMFallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
