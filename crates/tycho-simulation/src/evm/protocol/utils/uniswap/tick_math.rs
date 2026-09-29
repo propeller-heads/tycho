@@ -1,6 +1,4 @@
-use std::ops::BitOr;
-
-use alloy::primitives::{Sign, I256, U256};
+use alloy::primitives::{I256, U256};
 use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::protocol::safe_math::safe_div_u256;
@@ -157,6 +155,14 @@ pub(crate) fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError>
     Ok((ratio >> 32) + if rest.is_zero() { U256::ZERO } else { U256::from(1u64) })
 }
 
+/// `x * x` as its high and low 128 bits.
+fn square_u128(x: u128) -> (u128, u128) {
+    let (high_half, low_half) = (x >> 64, x & u128::from(u64::MAX));
+    let cross = high_half * low_half;
+    let (low, carry) = (low_half * low_half).overflowing_add(cross << 65);
+    (high_half * high_half + (cross >> 63) + u128::from(carry), low)
+}
+
 fn most_significant_bit(x: U256) -> Result<usize, SimulationError> {
     if x == U256::ZERO {
         return Err(SimulationError::FatalError(
@@ -175,26 +181,20 @@ pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, Simulation
     }
     let ratio_x128 = sqrt_price << 32;
     let msb = most_significant_bit(ratio_x128)?;
-    let msb_diff = (msb as i32) - 128;
-    // Convert msb_diff to I256
-    let mut log_2: I256 = if msb_diff >= 0 {
-        I256::from_raw(U256::from(msb_diff as u64)) << 64
-    } else {
-        -I256::from_raw(U256::from((-msb_diff) as u64)) << 64
-    };
 
-    let mut r = if msb >= 128 { ratio_x128 >> (msb - 127) } else { ratio_x128 << (127 - msb) };
-
+    // Normalised to [2^127, 2^128): the mantissa whose repeated squaring yields the fraction bits.
+    let mut r: u128 =
+        if msb >= 128 { ratio_x128 >> (msb - 127) } else { ratio_x128 << (127 - msb) }.to();
+    let mut fraction = 0u64;
     for i in 0..14 {
-        r = r.wrapping_mul(r) >> 127;
-        let f = r >> 128;
-        let shift_value = I256::checked_from_sign_and_abs(Sign::Positive, f << (63 - i))
-            .ok_or_else(|| {
-                SimulationError::FatalError("Failed to convert shifted value to I256".to_string())
-            })?;
-        log_2 = log_2.bitor(shift_value);
-        r >>= f;
+        let (high, low) = square_u128(r);
+        let f = high >> 127;
+        fraction |= (f as u64) << (63 - i);
+        r = if f == 1 { high } else { (high << 1) | (low >> 127) };
     }
+    // The integer part occupies bits 64 and up, the fraction bits 50..=63, so they never overlap.
+    let log_2 = I256::try_from(((msb as i128 - 128) << 64) | fraction as i128)
+        .expect("an i128 always fits in an I256");
 
     let log_sqrt10001 =
         log_2 * I256::from_raw(U256::from_limbs([11745905768312294533u64, 13863u64, 0, 0]));
@@ -223,9 +223,88 @@ pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, Simulation
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{ops::BitOr, str::FromStr};
+
+    use alloy::primitives::Sign;
 
     use super::*;
+
+    /// The 256-bit log2 loop the native one must match bit for bit.
+    fn tick_at_sqrt_ratio_reference(sqrt_price: U256) -> i32 {
+        let ratio_x128 = sqrt_price << 32;
+        let msb = most_significant_bit(ratio_x128).unwrap();
+        let msb_diff = (msb as i32) - 128;
+        let mut log_2: I256 = if msb_diff >= 0 {
+            I256::from_raw(U256::from(msb_diff as u64)) << 64
+        } else {
+            -I256::from_raw(U256::from((-msb_diff) as u64)) << 64
+        };
+        let mut r = if msb >= 128 { ratio_x128 >> (msb - 127) } else { ratio_x128 << (127 - msb) };
+        for i in 0..14 {
+            r = r.wrapping_mul(r) >> 127;
+            let f = r >> 128;
+            log_2 = log_2
+                .bitor(I256::checked_from_sign_and_abs(Sign::Positive, f << (63 - i)).unwrap());
+            r >>= f;
+        }
+        let log_sqrt10001 =
+            log_2 * I256::from_raw(U256::from_limbs([11745905768312294533u64, 13863u64, 0, 0]));
+        let tick_low = (log_sqrt10001 -
+            I256::from_raw(U256::from_limbs([
+                6552757943157144234u64,
+                184476617836266586u64,
+                0,
+                0,
+            ])))
+        .asr(128);
+        let tick_high = (log_sqrt10001 +
+            I256::from_raw(U256::from_limbs([
+                4998474450511881007u64,
+                15793544031827761793u64,
+                0,
+                0,
+            ])))
+        .asr(128);
+        if tick_low == tick_high {
+            tick_low.as_i32()
+        } else if get_sqrt_ratio_at_tick(tick_high.as_i32()).unwrap() <= sqrt_price {
+            tick_high.as_i32()
+        } else {
+            tick_low.as_i32()
+        }
+    }
+
+    #[test]
+    fn test_get_tick_at_sqrt_ratio_matches_reference() {
+        let mut prices = Vec::new();
+        let dense = (MIN_TICK..MIN_TICK + 2048)
+            .chain(-2048..2048)
+            .chain(MAX_TICK - 2048..=MAX_TICK);
+        for tick in dense.chain((MIN_TICK..=MAX_TICK).step_by(101)) {
+            let boundary = get_sqrt_ratio_at_tick(tick).unwrap();
+            prices.extend([boundary - U256::from(1u64), boundary, boundary + U256::from(1u64)]);
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let span = MAX_SQRT_RATIO - MIN_SQRT_RATIO;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let bits = 32 + (state % 128) as usize;
+            let raw = U256::from_limbs([state, state.rotate_left(17), state.rotate_left(41), 0]);
+            prices.push(MIN_SQRT_RATIO + (raw >> (192 - bits)) % span);
+        }
+        for price in prices {
+            if price < MIN_SQRT_RATIO || price >= MAX_SQRT_RATIO {
+                continue;
+            }
+            assert_eq!(
+                get_tick_at_sqrt_ratio(price).unwrap(),
+                tick_at_sqrt_ratio_reference(price),
+                "{price}"
+            );
+        }
+    }
 
     struct TestCase {
         tick: i32,
