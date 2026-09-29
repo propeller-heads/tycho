@@ -33,8 +33,7 @@ interface IMetricOmmSwapCallback {
     ) external;
 }
 
-/// @notice A MetricOmm pool with a settable output. It pulls `amountIn` through the callback
-/// and reverts unless the callback paid exactly that.
+/// @notice Reverts unless the callback paid exactly `amountIn`.
 contract MockMetricOmmPool {
     IERC20 public immutable tokenIn;
     IERC20 public immutable tokenOut;
@@ -73,8 +72,6 @@ contract MockMetricOmmPool {
     }
 }
 
-/// @notice `MetricFallbackRouter` against a mock Metric pool, with a real Uniswap V3 pool as the
-/// fallback.
 contract MetricFallbackRouterTest is Constants {
     uint256 constant FORK_BLOCK = 22_689_128;
     uint256 constant USDC_IN = 10_000e6;
@@ -266,8 +263,6 @@ contract MetricFallbackRouterTest is Constants {
     }
 }
 
-/// @notice `MetricFallbackRouter` against the real WETH/USDC MetricOmm pool on Base, with the
-/// Uniswap V3 WETH/USDC 0.05% pool as the fallback.
 contract MetricFallbackRouterBaseTest is Constants {
     /// The block `TychoRouterForMetricTest` forks at, where the pool's oracle is fresh.
     uint256 constant FORK_BLOCK = 48_957_697;
@@ -295,7 +290,6 @@ contract MetricFallbackRouterBaseTest is Constants {
         deal(BASE_WETH, address(router), WETH_IN);
     }
 
-    /// Both venues quote for real, and the leg pays whichever quoted more.
     function testPaysTheHigherQuote() public {
         TychoFallbackRouter.Swap memory swap_ = _swapStruct();
         bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
@@ -314,7 +308,6 @@ contract MetricFallbackRouterBaseTest is Constants {
         assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
     }
 
-    /// A fallback that cannot quote leaves Metric to fill, through its real callback.
     function testMetricFillsThroughCallback() public {
         uint256 poolWethBefore =
             IERC20(BASE_WETH).balanceOf(METRIC_WETH_USDC_POOL);
@@ -334,7 +327,7 @@ contract MetricFallbackRouterBaseTest is Constants {
         assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
     }
 
-    /// A day later the pool's oracle is stale, so Metric cannot quote and the fallback fills.
+    /// A day later the pool's oracle is stale.
     function testStaleMetricFallsBack() public {
         vm.warp(block.timestamp + 1 days);
 

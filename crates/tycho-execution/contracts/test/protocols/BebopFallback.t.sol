@@ -23,11 +23,7 @@ import {
     BebopFallbackRouter__InvalidTarget
 } from "../../src/fallback/BebopFallbackRouter.sol";
 
-/// @notice `BebopFallbackRouter` against a real signed Bebop order, with the Uniswap V2 WBTC/WETH
-/// pair as the fallback.
-/// @dev The order is `BebopExecutorTest.testSingleOrder`'s: 1 WETH for 3 617 660 WBTC units, with
-/// `TAKER` as taker and receiver. `TAKER` is the test contract's first deployment address, so
-/// the router deploys there first and the order accepts it.
+/// @dev Uses `BebopExecutorTest.testSingleOrder`'s signed order, whose taker is `TAKER`.
 contract BebopFallbackRouterTest is Constants {
     uint256 constant FORK_BLOCK = 23_124_275;
     address constant TAKER = 0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f;
@@ -98,8 +94,7 @@ contract BebopFallbackRouterTest is Constants {
         );
     }
 
-    /// The order cannot take more than it signed, so the whole leg goes to the fallback and the
-    /// order is not attempted.
+    /// The whole leg goes to the fallback and the order is not attempted.
     function testInputAboveSignedAmountFallsBack() public {
         uint256 amountIn = SIGNED_WETH_IN + 1;
         deal(WETH_ADDR, address(router), amountIn);

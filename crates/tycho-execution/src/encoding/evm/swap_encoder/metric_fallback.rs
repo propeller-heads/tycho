@@ -9,16 +9,7 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Encodes a Metric swap for `MetricFallbackRouter`, which quotes the Metric pool against the
-/// fallback protocol named in the swap's `user_data` and runs whichever quotes more.
-///
-/// The swap data is the `rfq:metric` swap data followed by the fallback:
-/// `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]`.
-///
-/// # Fields
-/// * `executor_address` - The `MetricFallbackExecutor` that performs the swap.
-/// * `chain` - The chain whose router runs the swap. Fallback protocols it does not run are
-///   rejected.
+/// Encodes a Metric swap for `MetricFallbackRouter`.
 #[derive(Clone)]
 pub struct MetricFallbackSwapEncoder {
     executor_address: Bytes,

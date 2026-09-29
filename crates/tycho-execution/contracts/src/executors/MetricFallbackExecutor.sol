@@ -10,7 +10,6 @@ import {MetricFallbackRouter} from "../fallback/MetricFallbackRouter.sol";
 
 /// @title MetricFallbackExecutor
 /// @notice Runs one swap through `MetricFallbackRouter`.
-/// @dev Swap data is `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]`.
 contract MetricFallbackExecutor is FallbackExecutor {
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 

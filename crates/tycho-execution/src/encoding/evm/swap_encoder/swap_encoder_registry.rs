@@ -229,8 +229,7 @@ impl SwapEncoderRegistry {
             "lido_v4" => {
                 Ok(Box::new(LidoV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            // RFQ venues behind their own fallback router. Matched before the `fallback:` family,
-            // which every other `fallback:{pamm}` resolves to.
+            // Matched before the `fallback:` family.
             METRIC_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(MetricFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -307,8 +306,7 @@ mod tests {
             .is_none());
     }
 
-    /// A fallback router for an RFQ venue has its own exact entry, which wins over the
-    /// `fallback` family entry every pAMM resolves to.
+    /// An exact entry wins over the `fallback` family entry.
     #[test]
     fn test_rfq_fallback_routers_resolve_before_the_family() {
         let family = "0x1111111111111111111111111111111111111111";
@@ -330,7 +328,6 @@ mod tests {
         assert_eq!(resolved.executor_address(), &Bytes::from_str(family).unwrap());
     }
 
-    /// The Bebop fallback encoder needs the chain's router address to request the quote for.
     #[test]
     fn test_bebop_fallback_requires_router_config() {
         let executors =

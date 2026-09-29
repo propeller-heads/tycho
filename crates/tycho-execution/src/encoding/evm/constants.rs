@@ -159,12 +159,10 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const FALLBACK_KEY: &str = "fallback";
 
-/// Protocol system of Metric components executed through `MetricFallbackRouter`. It sits in the
-/// `fallback:` family, but has its own executor-config entry.
+/// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 
-/// Protocol system of Bebop components executed through `BebopFallbackRouter`. It sits in the
-/// `fallback:` family, but has its own executor-config entry.
+/// Bebop components executed through `BebopFallbackRouter`.
 pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
 
 #[cfg(test)]

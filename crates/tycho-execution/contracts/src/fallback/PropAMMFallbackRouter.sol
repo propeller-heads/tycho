@@ -11,8 +11,7 @@ import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {TychoFallbackRouter} from "./TychoFallbackRouter.sol";
 
 /// @title PropAMMFallbackRouter
-/// @notice A `TychoFallbackRouter` whose primary venue is a pAMM, quoted through
-/// `IPropAMM.quote` and filled through `IPropAMM.swap`.
+/// @notice A `TychoFallbackRouter` whose primary is an `IPropAMM`.
 contract PropAMMFallbackRouter is TychoFallbackRouter {
     using SafeERC20 for IERC20;
 
@@ -47,8 +46,6 @@ contract PropAMMFallbackRouter is TychoFallbackRouter {
         _swap(swap_, pamm, fallbackSwap[0:0], fallbackSwap);
     }
 
-    /// @dev Low-level so a `pamm` without code, or one returning nothing decodable, quotes zero
-    /// instead of reverting `swap`. That covers `pamm == address(0)`, so no zero check.
     function _quotePrimary(
         Swap calldata swap_,
         address pamm,
@@ -58,6 +55,8 @@ contract PropAMMFallbackRouter is TychoFallbackRouter {
         override
         returns (uint256 amountOut)
     {
+        // Low-level so a `pamm` without code, or one returning nothing decodable, quotes zero
+        // instead of reverting `swap`. That covers `pamm == address(0)`, so no zero check.
         // slither-disable-next-line low-level-calls,missing-zero-check
         (bool quoted, bytes memory quote) = pamm.call(
             abi.encodeCall(

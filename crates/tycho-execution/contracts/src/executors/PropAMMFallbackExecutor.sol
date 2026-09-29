@@ -10,7 +10,6 @@ import {PropAMMFallbackRouter} from "../fallback/PropAMMFallbackRouter.sol";
 
 /// @title PropAMMFallbackExecutor
 /// @notice Runs one swap through `PropAMMFallbackRouter`.
-/// @dev Swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`.
 contract PropAMMFallbackExecutor is FallbackExecutor {
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 

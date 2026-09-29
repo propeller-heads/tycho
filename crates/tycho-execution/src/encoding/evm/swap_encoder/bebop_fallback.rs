@@ -9,25 +9,13 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Protocol-specific config key holding the chain's `BebopFallbackRouter` address.
+/// Protocol config key of the chain's `BebopFallbackRouter` address.
 const FALLBACK_ROUTER_CONFIG_KEY: &str = "fallback_router";
 
-/// `[tokenIn: 20][tokenOut: 20][target: 20]`, the head of the `rfq:bebop` swap data.
 const BEBOP_HEAD_LENGTH: usize = 60;
 
-/// Encodes a Bebop swap for `BebopFallbackRouter`, which runs the signed Bebop order and falls
-/// back to the protocol named in the swap's `user_data` when the order fails.
-///
-/// The signed order must name the `BebopFallbackRouter` as taker and receiver, so the quote is
-/// requested for that address instead of the TychoRouter. The swap data is
-/// `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]`, where
-/// `bebopData` is the rest of the `rfq:bebop` swap data.
-///
-/// # Fields
-/// * `executor_address` - The `BebopFallbackExecutor` that performs the swap.
-/// * `chain` - The chain whose router runs the swap. Fallback protocols it does not run are
-///   rejected.
-/// * `fallback_router` - The chain's `BebopFallbackRouter`, from the `fallback_router` config.
+/// Encodes a Bebop swap for `BebopFallbackRouter`. The quote is requested with that router as
+/// taker.
 #[derive(Clone)]
 pub struct BebopFallbackSwapEncoder {
     executor_address: Bytes,
@@ -37,7 +25,6 @@ pub struct BebopFallbackSwapEncoder {
 }
 
 impl BebopFallbackSwapEncoder {
-    /// The encoding context the Bebop quote is requested with: the fallback router is the taker.
     fn quote_context(&self, encoding_context: &EncodingContext) -> EncodingContext {
         EncodingContext {
             router_address: Some(self.fallback_router.clone()),

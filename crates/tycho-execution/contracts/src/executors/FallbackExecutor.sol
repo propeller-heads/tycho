@@ -8,8 +8,7 @@ error FallbackExecutor__AddressZero();
 error FallbackExecutor__InvalidDataLength(uint256 length);
 
 /// @title FallbackExecutor
-/// @notice Runs one swap through a `TychoFallbackRouter`. A concrete executor decodes its
-/// router's swap data and implements `swap`.
+/// @notice Runs one swap through a `TychoFallbackRouter`.
 /// @dev `TransferType.Transfer` sends `amountIn` to the fallback router, which then owns the
 /// tokens and pays each protocol itself. The router address is immutable, so the executor only
 /// ever calls this one contract. Every address inside the swap data is called by the router, not
@@ -18,8 +17,6 @@ error FallbackExecutor__InvalidDataLength(uint256 length);
 /// Every protocol gets `minAmountOut = 0`, since a binding value would revert the trades the
 /// fallback exists to rescue. The TychoRouter's route-level `minAmountOut` must clear the price
 /// the fallback fills at.
-///
-/// Swap data always starts with `[tokenIn: 20][tokenOut: 20]`.
 abstract contract FallbackExecutor is IExecutor {
     address public immutable fallbackRouter;
 
@@ -59,7 +56,6 @@ abstract contract FallbackExecutor is IExecutor {
         outputToRouter = false;
     }
 
-    /// @notice Reverts `FallbackExecutor__InvalidDataLength` for swap data this executor cannot
-    /// decode.
+    /// @notice Reverts `FallbackExecutor__InvalidDataLength` on data it cannot decode.
     function _validateDataLength(bytes calldata data) internal pure virtual;
 }

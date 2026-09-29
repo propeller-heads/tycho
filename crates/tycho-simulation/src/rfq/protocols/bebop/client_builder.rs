@@ -111,9 +111,7 @@ impl BebopClientBuilder {
         self
     }
 
-    /// Labels the emitted components `BebopClient::FALLBACK_PROTOCOL_SYSTEM`, so Tycho executes
-    /// their swaps through `BebopFallbackRouter`. The solver must then name a fallback pool in each
-    /// swap's `user_data`. Off by default: the direct `BebopClient::PROTOCOL_SYSTEM` path.
+    /// Executes the swaps through Tycho's `BebopFallbackRouter`. Off by default.
     pub fn with_fallback_router(mut self) -> Self {
         self.via_fallback_router = true;
         self

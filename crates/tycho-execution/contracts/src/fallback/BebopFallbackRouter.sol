@@ -16,33 +16,21 @@ error BebopFallbackRouter__InvalidSelector(bytes4 selector);
 error BebopFallbackRouter__InvalidTarget(address target);
 
 /// @title BebopFallbackRouter
-/// @notice A `TychoFallbackRouter` whose primary venue is a signed Bebop PMM order, run through
-/// the Bebop settlement or router contract.
-/// @dev The order's price is signed off-chain, so there is nothing to compare on-chain: the order
-/// runs first, and the fallback runs only when the order reverts, delivers nothing, or cannot take
-/// the whole `amountIn`. The order MUST name this contract as taker and receiver.
-///
-/// The settlement pulls `tokenIn` with `transferFrom`, so this contract approves the target for
-/// `amountIn` and revokes the approval after the call. The target and selector are checked
-/// against the immutable settlement and router, since this contract is permissionless and holds
-/// the leg's tokens. Bebop pays this contract, which forwards the output to the receiver.
+/// @notice A `TychoFallbackRouter` whose primary is a signed Bebop order. The order MUST name
+/// this contract as taker and receiver.
+/// @dev The price is signed off-chain, so the order runs first and the fallback runs only when it
+/// fails.
 contract BebopFallbackRouter is TychoFallbackRouter {
     using SafeERC20 for IERC20;
     using Address for address;
 
-    /// @notice `[partialFillOffset: 1][originalFilledTakerAmount: 32]`, then the calldata.
     uint256 private constant _CALLDATA_START = 33;
 
-    /// @notice BebopSettlement.swapSingle
     bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
-    /// @notice BebopSettlement.swapAggregate
     bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
-    /// @notice BebopRouter.swap
     bytes4 private constant _ROUTER_SWAP_SELECTOR = 0x9586d0e8;
 
-    /// @notice The Bebop settlement contract.
     address public immutable bebopSettlement;
-    /// @notice The Bebop router contract.
     address public immutable bebopRouter;
 
     constructor(
@@ -63,15 +51,8 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         bebopRouter = bebopRouter_;
     }
 
-    /// @notice Runs the Bebop order and, only if that fails, `fallbackSwap`. A failing fallback
-    /// reverts the swap; there is no third attempt.
-    /// @dev Permissionless: the caller names every parameter, so a balance sitting in this
-    /// contract can be taken by anyone and is considered lost. Push-payment: the caller MUST
-    /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH, fee-on-transfer and
-    /// rebasing tokens are not supported.
-    /// @param target The Bebop settlement or router contract.
-    /// @param bebopData `[partialFillOffset: 1][originalFilledTakerAmount: 32][calldata]`, where
-    /// `calldata` is the Bebop API's transaction data for `target`.
+    /// @notice Runs the Bebop order and, only if that fails, `fallbackSwap`.
+    /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     function swap(
         Swap calldata swap_,
         address target,
@@ -87,8 +68,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         _swap(swap_, target, bebopData, fallbackSwap);
     }
 
-    /// @dev The order fills at most `originalFilledTakerAmount`, so a larger `amountIn` goes to
-    /// the fallback whole instead of leaving the remainder here.
+    /// @dev An `amountIn` above the signed amount goes to the fallback whole.
     function _quotePrimary(
         Swap calldata swap_,
         address, /* target */
@@ -124,8 +104,6 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         );
     }
 
-    /// @dev Reverts unless `target` is the settlement or router and `selector` is one of its swap
-    /// selectors.
     function _validateCall(address target, bytes4 selector) internal view {
         if (target == bebopSettlement) {
             if (
@@ -143,8 +121,7 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         }
     }
 
-    /// @dev Caps the calldata's `filledTakerAmount` at `amountIn`, in place. The Bebop API's
-    /// `partialFillOffset` is its position in 32-byte words after the selector.
+    /// @dev Caps the calldata's `filledTakerAmount` at `amountIn`.
     function _capFilledTakerAmount(
         bytes memory bebopCalldata,
         uint256 amountIn,

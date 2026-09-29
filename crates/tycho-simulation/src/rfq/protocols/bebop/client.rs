@@ -87,11 +87,9 @@ fn default_protocol_system() -> String {
 
 impl BebopClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:bebop";
-    /// The protocol system of components executed through Tycho's `BebopFallbackRouter`, which
-    /// falls back to the pool the solver names when the Bebop swap fails.
+    /// Components executed through Tycho's `BebopFallbackRouter`.
     pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:bebop";
 
-    /// Labels emitted components `FALLBACK_PROTOCOL_SYSTEM` instead of `PROTOCOL_SYSTEM`.
     pub(super) fn via_fallback_router(mut self) -> Self {
         self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
         self

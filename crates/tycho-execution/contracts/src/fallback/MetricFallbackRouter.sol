@@ -14,14 +14,8 @@ error MetricFallbackRouter__AmountInTooLarge(uint256 amountIn);
 error MetricFallbackRouter__InvalidDataLength(uint256 length);
 
 /// @title MetricFallbackRouter
-/// @notice A `TychoFallbackRouter` whose primary venue is a MetricOmm pool.
-/// @dev Metric has no quote function, so the quote runs the real swap in `simulateMetric` and
-/// reads the output off its revert, as a Uniswap V4 fallback quote does. The quote costs a full
-/// Metric swap on every leg.
-///
-/// The pool pulls its input through `metricOmmSwapCallback`, which the catch-all `fallback`
-/// answers: it pays the full `amountIn` to the pool the swap called, as the Dispatcher does for
-/// `MetricExecutor`.
+/// @notice A `TychoFallbackRouter` whose primary is a MetricOmm pool.
+/// @dev Metric has no quote function, so every quote runs a full Metric swap and rolls it back.
 contract MetricFallbackRouter is TychoFallbackRouter {
     uint256 private constant _INT128_MAX = uint256(uint128(type(int128).max));
 
@@ -35,14 +29,8 @@ contract MetricFallbackRouter is TychoFallbackRouter {
         )
     {}
 
-    /// @notice Quotes `pool` and `fallbackSwap`, then runs the fallback if it quotes more
-    /// `tokenOut`, otherwise `pool` and, only if that fails, `fallbackSwap`. A failing fallback
-    /// reverts the swap; there is no third attempt.
-    /// @dev Permissionless: the caller names every parameter, so a balance sitting in this
-    /// contract can be taken by anyone and is considered lost. Push-payment: the caller MUST
-    /// transfer `swap_.amountIn` of `swap_.tokenIn` here first. Native ETH, fee-on-transfer and
-    /// rebasing tokens are not supported.
-    /// @param metricData `[zeroForOne: 1]`, in the pool's own token order.
+    /// @notice Quotes `pool` and `fallbackSwap` and runs whichever quotes more.
+    /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     function swap(
         Swap calldata swap_,
         address pool,
@@ -55,9 +43,8 @@ contract MetricFallbackRouter is TychoFallbackRouter {
         _swap(swap_, pool, metricData, fallbackSwap);
     }
 
-    /// @notice Runs the Metric swap, then reverts `TychoFallbackRouter__SimulatedAmountOut` with
-    /// the amount it delivered so the swap rolls back. External only so `_quotePrimary` can
-    /// try/catch it.
+    /// @notice Runs the Metric swap and reverts with its output. External only so
+    /// `_quotePrimary` can try/catch it.
     function simulateMetric(
         Swap calldata swap_,
         address pool,

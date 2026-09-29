@@ -10,9 +10,6 @@ import {BebopFallbackRouter} from "../fallback/BebopFallbackRouter.sol";
 
 /// @title BebopFallbackExecutor
 /// @notice Runs one swap through `BebopFallbackRouter`.
-/// @dev Swap data is
-/// `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]`. Both
-/// `bebopData` and the fallback are variable-length, so `bebopData` carries a length prefix.
 contract BebopFallbackExecutor is FallbackExecutor {
     uint256 private constant _BEBOP_DATA_START = 64;
 
@@ -43,8 +40,7 @@ contract BebopFallbackExecutor is FallbackExecutor {
         _validateAndFindFallback(data);
     }
 
-    /// @dev Reverts unless the data holds the length prefix, the whole `bebopData` and a
-    /// non-empty fallback.
+    /// @dev Reverts unless a fallback follows `bebopData`.
     function _validateAndFindFallback(bytes calldata data)
         internal
         pure

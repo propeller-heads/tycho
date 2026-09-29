@@ -63,11 +63,9 @@ fn default_protocol_system() -> String {
 
 impl MetricClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:metric";
-    /// The protocol system of components executed through Tycho's `MetricFallbackRouter`, which
-    /// falls back to the pool the solver names when the Metric swap fails.
+    /// Components executed through Tycho's `MetricFallbackRouter`.
     pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:metric";
 
-    /// Labels emitted components `FALLBACK_PROTOCOL_SYSTEM` instead of `PROTOCOL_SYSTEM`.
     pub(super) fn via_fallback_router(mut self) -> Self {
         self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
         self
