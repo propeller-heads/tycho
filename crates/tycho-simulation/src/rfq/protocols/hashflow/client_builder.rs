@@ -55,7 +55,7 @@ impl HashflowClientBuilder {
             quote_tokens: None,
             poll_time: Duration::from_secs(5), // Default 5 second polling
             quote_timeout: Duration::from_secs(5), // Default 5 second timeout
-            quote_rule: QuoteRule::OncePerMaker,
+            quote_rule: HashflowClient::DEFAULT_QUOTE_RULE,
         }
     }
 

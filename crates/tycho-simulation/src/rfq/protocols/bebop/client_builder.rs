@@ -4,9 +4,7 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::BebopClient;
-use crate::rfq::{
-    errors::RFQError, models::QuoteRule, protocols::utils::default_quote_tokens_for_chain,
-};
+use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
 
 /// `BebopClientBuilder` is a builder pattern implementation for creating instances of
 /// `BebopClient`.
@@ -49,7 +47,6 @@ pub struct BebopClientBuilder {
     origin_address: Option<Bytes>,
     origin_target: Option<Bytes>,
     origin_source: Option<String>,
-    quote_rule: QuoteRule,
 }
 
 impl BebopClientBuilder {
@@ -64,15 +61,7 @@ impl BebopClientBuilder {
             origin_address: None,
             origin_target: None,
             origin_source: None,
-            quote_rule: QuoteRule::OncePerVenue,
         }
-    }
-
-    /// How often one route may take quotes from Bebop. Once, by default. Bebop names no market
-    /// maker, so [`QuoteRule::OncePerMaker`] is refused at build.
-    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
-        self.quote_rule = quote_rule;
-        self
     }
 
     /// Set the tokens for which to monitor prices
@@ -121,11 +110,6 @@ impl BebopClientBuilder {
     }
 
     pub fn build(self) -> Result<BebopClient, RFQError> {
-        if self.quote_rule == QuoteRule::OncePerMaker {
-            return Err(RFQError::InvalidInput(
-                "Bebop names no market maker; use QuoteRule::OncePerVenue or None".into(),
-            ));
-        }
         let quote_tokens;
         if let Some(tokens) = self.quote_tokens {
             quote_tokens = tokens;
@@ -143,7 +127,6 @@ impl BebopClientBuilder {
             self.origin_address,
             self.origin_target,
             self.origin_source,
-            self.quote_rule,
         )
     }
 }

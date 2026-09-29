@@ -7,7 +7,10 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::errors::RFQError;
+use crate::rfq::{
+    errors::RFQError,
+    models::{fill_levels, PriceLevel},
+};
 
 /// The error Hashflow reports on a rejected request, sent as an object alongside HTTP 200.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,51 +35,7 @@ pub struct HashflowPriceLevelsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashflowMarketMakerLevels {
     pub pair: HashflowPair,
-    pub levels: Vec<HashflowPriceLevel>,
-}
-
-/// One market maker's levels on one directed pair, as the venue state and its component
-/// attribute carry them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HashflowMakerLevels {
-    #[serde(rename = "mm")]
-    pub market_maker: String,
-    pub pair: HashflowPair,
-    pub levels: Vec<HashflowPriceLevel>,
-}
-
-impl HashflowMakerLevels {
-    /// Total quote token the levels hold, in whole units.
-    pub fn calculate_tvl(&self) -> f64 {
-        self.levels
-            .iter()
-            .map(|level| level.quantity * level.price)
-            .sum()
-    }
-
-    /// Quote token amount for `amount_in` base tokens, and the base tokens the levels could not
-    /// fill.
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        get_amount_out_from_levels(&self.levels, amount_in)
-    }
-}
-
-/// Consumes the levels in order until `amount_in` is filled or the levels run out. Returns
-/// (amount_out, remaining_amount_in).
-fn get_amount_out_from_levels(levels: &[HashflowPriceLevel], amount_in: f64) -> (f64, f64) {
-    let mut remaining_amount_in = amount_in;
-    let mut total_amount_out = 0.0;
-
-    for level in levels {
-        if remaining_amount_in <= 0.0 {
-            break;
-        };
-        let amount_to_fill = remaining_amount_in.min(level.quantity);
-        total_amount_out += amount_to_fill * level.price;
-        remaining_amount_in -= amount_to_fill;
-    }
-
-    (total_amount_out, remaining_amount_in)
+    pub levels: Vec<PriceLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,40 +55,6 @@ where
     let checksum = address.to_checksum(None);
     let checksum_bytes = Bytes::from_str(&checksum).map_err(serde::de::Error::custom)?;
     Ok(checksum_bytes)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HashflowPriceLevel {
-    #[serde(
-        rename = "q",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    /// Quantity of tokens that can be traded at this level
-    pub quantity: f64,
-    #[serde(
-        rename = "p",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    /// Price per token at this level
-    pub price: f64,
-}
-
-fn deserialize_string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    s.parse()
-        .map_err(serde::de::Error::custom)
-}
-
-fn serialize_f64_to_string<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
 }
 
 impl HashflowMarketMakerLevels {
@@ -166,20 +91,10 @@ impl HashflowMarketMakerLevels {
         Some(total_quote_token / (base_token_amount - remaining_base_token))
     }
 
-    /// Calculates the total token output for a given token input using available price levels.
-    ///
-    /// Iterates over the price levels, consuming as much liquidity as available at each
-    /// price level until the input amount is fully consumed or liquidity runs out.
-    ///
-    /// # Parameters
-    /// - `amount_in`: The amount of base tokens to trade.
-    ///
-    /// # Returns
-    /// A tuple of (amount_out, remaining_amount_in) where:
-    /// - `amount_out`: The total quote tokens that can be obtained
-    /// - `remaining_amount_in`: Any remaining base tokens that couldn't be filled
+    /// The quote token amount for `amount_in` base tokens, and the base tokens the levels could
+    /// not fill.
     pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        get_amount_out_from_levels(&self.levels, amount_in)
+        fill_levels(&self.levels, amount_in)
     }
 }
 
@@ -236,9 +151,11 @@ pub struct HashflowRFQ {
     pub options: Option<HashflowRFQOptions>,
 }
 
+/// Options of one quote request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowRFQOptions {
-    /// Without this Hashflow answers a declined request with a quote from another maker.
+    /// When true, a request the named makers decline fails instead of being answered by another
+    /// maker.
     #[serde(rename = "doNotRetryWithOtherMakers")]
     pub do_not_retry_with_other_makers: bool,
 }
@@ -344,8 +261,8 @@ mod tests {
                 quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
             },
             levels: vec![
-                HashflowPriceLevel { quantity: 1.0, price: 3000.0 },
-                HashflowPriceLevel { quantity: 2.0, price: 2999.0 },
+                PriceLevel { quantity: 1.0, price: 3000.0 },
+                PriceLevel { quantity: 2.0, price: 2999.0 },
             ],
         }
     }

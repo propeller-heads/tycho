@@ -1,10 +1,9 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
-    time::SystemTime,
 };
 
-use alloy::primitives::{utils::keccak256, Address, U256};
+use alloy::primitives::{Address, U256};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use num_bigint::BigUint;
@@ -24,14 +23,18 @@ use crate::{
         client::RFQClient,
         errors::RFQError,
         models::{QuoteRule, TimestampHeader},
-        protocols::hashflow::models::{
-            HashflowChain, HashflowMakerLevels, HashflowMarketMakerLevels,
-            HashflowMarketMakersResponse, HashflowPriceLevelsResponse, HashflowQuoteRequest,
-            HashflowQuoteResponse, HashflowRFQ, HashflowRFQOptions,
+        protocols::{
+            component,
+            hashflow::models::{
+                HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
+                HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse,
+                HashflowRFQ, HashflowRFQOptions,
+            },
+            maker_books::MakerBook,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
+    tycho_common::models::protocol::ProtocolComponent,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,12 +56,12 @@ pub struct HashflowClient {
     poll_time: Duration,
     quote_timeout: Duration,
     /// How often one route may take quotes from Hashflow.
-    #[serde(default)]
     quote_rule: QuoteRule,
 }
 
 impl HashflowClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:hashflow";
+    pub const DEFAULT_QUOTE_RULE: QuoteRule = QuoteRule::OncePerMaker;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -86,6 +89,16 @@ impl HashflowClient {
             quote_timeout,
             quote_rule,
         })
+    }
+
+    pub fn quote_rule(&self) -> QuoteRule {
+        self.quote_rule
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_quote_endpoint(mut self, quote_endpoint: String) -> Self {
+        self.quote_endpoint = quote_endpoint;
+        self
     }
 
     /// Normalize TVL to a common quote token for comparison
@@ -122,24 +135,18 @@ impl HashflowClient {
         Ok(0.0)
     }
 
-    /// The id of this chain's venue component. One per chain, for the venue's life.
     pub fn component_id(&self) -> String {
-        format!("{}", keccak256(format!("hashflow_{}", self.chain.id()).as_bytes()))
+        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
     }
 
     /// The venue component for one poll: every market maker's levels on every pair whose tokens
-    /// are indexed and whose TVL clears the threshold. `None` when no book clears it.
-    ///
-    /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
-    /// attribute lists the directed pairs that have a book, 40 bytes each (base then quote), so
-    /// a consumer can connect those pairs and not every pair of its tokens. Its `quote_rule`
-    /// static attribute is the reuse rule. Its `books` state attribute is the books as JSON,
-    /// sorted by maker, base and quote.
+    /// the client requested and whose TVL clears the threshold. `None` when no book clears it.
     fn venue_component(
         &self,
         levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
     ) -> Result<Option<ComponentWithState>, RFQError> {
         let mut books = Vec::new();
+        let mut swap_directions = BTreeSet::new();
         let mut tvl = 0.0;
         for (mm_name, mm_levels) in levels_by_mm {
             for mm_level in mm_levels {
@@ -161,9 +168,11 @@ impl HashflowClient {
                     continue;
                 }
                 tvl += normalized_tvl;
-                books.push(HashflowMakerLevels {
+                swap_directions.insert((base_token.clone(), quote_token.clone()));
+                books.push(MakerBook {
                     market_maker: mm_name.clone(),
-                    pair: mm_level.pair.clone(),
+                    base_token: base_token.clone(),
+                    quote_token: quote_token.clone(),
                     levels: mm_level.levels.clone(),
                 });
             }
@@ -172,66 +181,37 @@ impl HashflowClient {
             return Ok(None);
         }
         books.sort_by(|a, b| {
-            (&a.market_maker, &a.pair.base_token, &a.pair.quote_token).cmp(&(
+            (&a.base_token, &a.quote_token, &a.market_maker).cmp(&(
+                &b.base_token,
+                &b.quote_token,
                 &b.market_maker,
-                &b.pair.base_token,
-                &b.pair.quote_token,
             ))
         });
-
-        let mut tokens = BTreeSet::new();
-        let mut pairs = BTreeSet::new();
-        for book in &books {
-            tokens.insert(book.pair.base_token.clone());
-            tokens.insert(book.pair.quote_token.clone());
-            pairs.insert((book.pair.base_token.clone(), book.pair.quote_token.clone()));
-        }
-        let mut pairs_attribute = Vec::with_capacity(pairs.len() * 40);
-        for (base_token, quote_token) in &pairs {
-            pairs_attribute.extend_from_slice(base_token);
-            pairs_attribute.extend_from_slice(quote_token);
-        }
-
-        let component_id = self.component_id();
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "hashflow_pool".to_string(),
-            chain: self.chain,
-            tokens: tokens.into_iter().collect(),
-            contract_addresses: vec![], // empty for RFQ
-            static_attributes: HashMap::from([
-                ("pairs".to_string(), pairs_attribute.into()),
-                (
-                    QuoteRule::ATTRIBUTE.to_string(),
-                    self.quote_rule
-                        .as_str()
-                        .as_bytes()
-                        .to_vec()
-                        .into(),
-                ),
-            ]),
-            ..Default::default()
-        };
-
-        let books_json = serde_json::to_vec(&books).map_err(|e| {
-            RFQError::ParsingError(format!("Failed to serialize Hashflow books: {e}"))
-        })?;
-        let attributes = HashMap::from([("books".to_string(), books_json.into())]);
-
-        Ok(Some(ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }))
+        let component = component::venue_component(
+            Self::PROTOCOL_SYSTEM,
+            "hashflow_pool",
+            self.chain,
+            &swap_directions,
+            &books,
+            tvl,
+            self.quote_rule,
+        )?;
+        Ok(Some(component))
     }
 
-    /// Requests a firm quote, from `market_maker` alone when one is named.
-    ///
-    /// A named maker is asked with `doNotRetryWithOtherMakers`, so a declined request is an
-    /// error and not a quote from a maker the caller did not choose.
-    pub async fn request_binding_quote_from(
+    /// Requests a firm quote from `market_maker` alone. Hashflow is asked with
+    /// `doNotRetryWithOtherMakers`, so a declined request is an error and not a quote from a
+    /// maker the caller did not choose.
+    pub(crate) async fn request_binding_quote_from_maker(
+        &self,
+        params: &GetAmountOutParams,
+        market_maker: &str,
+    ) -> Result<SignedQuote, RFQError> {
+        self.request_quote(params, Some(market_maker))
+            .await
+    }
+
+    async fn request_quote(
         &self,
         params: &GetAmountOutParams,
         market_maker: Option<&str>,
@@ -359,94 +339,7 @@ impl HashflowClient {
             .levels
             .ok_or_else(|| RFQError::ParsingError("API response missing levels".to_string()))
     }
-}
 
-#[async_trait]
-impl RFQClient for HashflowClient {
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let mut client = self.clone();
-
-        Box::pin(async_stream::stream! {
-            let mut current_component: Option<ProtocolComponent> = None;
-            let mut ticker = interval(client.poll_time);
-
-            info!("Starting Hashflow price levels polling every {} seconds", client.poll_time.as_secs());
-            info!("TVL threshold: {:.2}", client.tvl);
-
-            loop {
-                ticker.tick().await;
-
-                let market_makers;
-                match client.fetch_market_makers().await {
-                    Ok(mms) => {
-                        market_makers = mms;
-                        info!("Successfully fetched market makers");
-                    }
-                    Err(e) => {
-                        info!("Failed to fetch market makers: {}", e);
-                        continue;
-                    }
-                }
-
-                match client.fetch_price_levels(&market_makers).await {
-                    Ok(levels_by_mm) => {
-                        info!("Fetched price levels from {} market makers", levels_by_mm.len());
-                        let mut states = HashMap::new();
-                        let mut removed_components = HashMap::new();
-                        match client.venue_component(&levels_by_mm)? {
-                            Some(component_with_state) => {
-                                current_component = Some(component_with_state.component.clone());
-                                states.insert(component_with_state.component.id.clone(), component_with_state);
-                            }
-                            // The venue lost its last book, so the component leaves the market.
-                            None => {
-                                if let Some(component) = current_component.take() {
-                                    removed_components.insert(component.id.clone(), component);
-                                }
-                            }
-                        }
-
-                        let snapshot = Snapshot {
-                            states,
-                            vm_storage: HashMap::new(),
-                        };
-
-                        let timestamp = SystemTime::now().duration_since(
-                            SystemTime::UNIX_EPOCH
-                        ).map_err(
-                            |_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into())
-                        )?.as_secs();
-
-                        let msg = StateSyncMessage::<TimestampHeader> {
-                            header: TimestampHeader { timestamp },
-                            snapshots: snapshot,
-                            deltas: None,
-                            removed_components,
-                        };
-
-                        yield Ok(("hashflow".to_string(), msg));
-                    },
-                    Err(e) => {
-                        error!("Failed to fetch price levels from Hashflow API: {}", e);
-                        continue;
-                    }
-                }
-            }
-        })
-    }
-
-    async fn request_binding_quote(
-        &self,
-        params: &GetAmountOutParams,
-    ) -> Result<SignedQuote, RFQError> {
-        self.request_binding_quote_from(params, None)
-            .await
-    }
-}
-
-impl HashflowClient {
     async fn send_quote_request(
         &self,
         params: &GetAmountOutParams,
@@ -704,8 +597,65 @@ impl HashflowClient {
     }
 }
 
+#[async_trait]
+impl RFQClient for HashflowClient {
+    fn stream(
+        &self,
+    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
+        let mut client = self.clone();
+
+        Box::pin(async_stream::stream! {
+            let mut current_component: Option<ProtocolComponent> = None;
+            let mut ticker = interval(client.poll_time);
+
+            info!("Starting Hashflow price levels polling every {} seconds", client.poll_time.as_secs());
+            info!("TVL threshold: {:.2}", client.tvl);
+
+            loop {
+                ticker.tick().await;
+
+                let market_makers;
+                match client.fetch_market_makers().await {
+                    Ok(mms) => {
+                        market_makers = mms;
+                        info!("Successfully fetched market makers");
+                    }
+                    Err(e) => {
+                        info!("Failed to fetch market makers: {}", e);
+                        continue;
+                    }
+                }
+
+                let levels_by_mm = match client.fetch_price_levels(&market_makers).await {
+                    Ok(levels_by_mm) => levels_by_mm,
+                    Err(e) => {
+                        error!("Failed to fetch price levels from Hashflow API: {}", e);
+                        continue;
+                    }
+                };
+                info!("Fetched price levels from {} market makers", levels_by_mm.len());
+                let component = match client.venue_component(&levels_by_mm) {
+                    Ok(component) => component,
+                    Err(e) => {
+                        error!("Failed to build the Hashflow component: {}", e);
+                        continue;
+                    }
+                };
+                yield Ok(("hashflow".to_string(), component::venue_message(&mut current_component, component)));
+            }
+        })
+    }
+
+    async fn request_binding_quote(
+        &self,
+        params: &GetAmountOutParams,
+    ) -> Result<SignedQuote, RFQError> {
+        self.request_quote(params, None).await
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{env, str::FromStr, time::Duration};
 
     use dotenv::dotenv;
@@ -715,7 +665,12 @@ mod tests {
     use super::*;
     use crate::rfq::{
         constants::get_hashflow_auth,
-        protocols::hashflow::models::{HashflowPair, HashflowPriceLevel},
+        models::PriceLevel,
+        protocols::{
+            component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
+            hashflow::models::HashflowPair,
+            test_utils::{effective_trader_of, mock_quote_server, read_request_body},
+        },
     };
 
     #[test]
@@ -743,9 +698,7 @@ mod tests {
         // Create mock levels for ETH/USDC pair for normalization
         let eth_usdc_level = HashflowMarketMakerLevels {
             pair: HashflowPair { base_token: weth.clone(), quote_token: usdc },
-            levels: vec![
-                HashflowPriceLevel { quantity: 1.0, price: 3000.0 }, /* 1 ETH = 3000 USDC */
-            ],
+            levels: vec![PriceLevel { quantity: 1.0, price: 3000.0 } /* 1 ETH = 3000 USDC */],
         };
 
         levels.insert("test_mm".to_string(), vec![eth_usdc_level]);
@@ -844,13 +797,13 @@ mod tests {
                         assert!(snapshot.states.len() <= 1, "one venue component per chain");
                         for (id, component_with_state) in &snapshot.states {
                             assert_eq!(id, &client.component_id());
-                            let books: Vec<HashflowMakerLevels> = serde_json::from_slice(
-                                &component_with_state.state.attributes["books"],
+                            let books: Vec<MakerBook> = serde_json::from_slice(
+                                &component_with_state.state.attributes[BOOKS_ATTRIBUTE],
                             )
                             .unwrap();
                             assert!(!books.is_empty());
-                            let pairs = &component_with_state.component.static_attributes["pairs"];
-                            assert_eq!(pairs.len() % 40, 0);
+                            let directions = &component_with_state.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE];
+                            assert_eq!(directions.len() % 40, 0);
                             if let Some(tvl) = component_with_state.component_tvl {
                                 assert!(tvl >= 1.0);
                                 println!("Component {id} TVL: ${tvl:.2}");
@@ -958,93 +911,9 @@ mod tests {
 
     /// Response template; the mock server replaces `{{EFFECTIVE_TRADER}}` with the address the
     /// request carried, echoing it like the real API.
-    const QUOTE_RESPONSE: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"{{EFFECTIVE_TRADER}}","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+    pub(crate) const QUOTE_RESPONSE: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"{{EFFECTIVE_TRADER}}","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
 
     const QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
-
-    /// Reads one HTTP request off the stream and returns its body.
-    async fn read_request_body(stream: &mut tokio::net::TcpStream) -> String {
-        use tokio::io::AsyncReadExt;
-
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.unwrap();
-            raw.extend_from_slice(&buf[..n]);
-            let text = String::from_utf8_lossy(&raw);
-            if let Some(header_end) = text.find("\r\n\r\n") {
-                let content_length: usize = text
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|v| v.trim().parse().unwrap())
-                    })
-                    .unwrap_or(0);
-                if raw.len() >= header_end + 4 + content_length {
-                    return text[header_end + 4..].to_string();
-                }
-            }
-            if n == 0 {
-                return String::new();
-            }
-        }
-    }
-
-    /// Extracts the effectiveTrader value from a request body.
-    fn effective_trader_of(request_body: &str) -> String {
-        let start = request_body
-            .find("\"effectiveTrader\":\"")
-            .expect("request carries no effectiveTrader") +
-            "\"effectiveTrader\":\"".len();
-        request_body[start..start + request_body[start..].find('"').unwrap()].to_string()
-    }
-
-    /// Creates a mock server that answers with `json_response` after a delay, substituting the
-    /// request's effectiveTrader for `{{EFFECTIVE_TRADER}}`. Returns the address and a log of
-    /// the received request bodies.
-    async fn create_delayed_response_server(
-        delay_ms: u64,
-        json_response: &'static str,
-    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        use std::sync::{Arc, Mutex};
-
-        use tokio::{io::AsyncWriteExt, net::TcpListener};
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        let request_log: Arc<Mutex<Vec<String>>> = Arc::default();
-        let request_log_server = request_log.clone();
-
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let json_response_clone = json_response.to_owned();
-                let request_log = request_log_server.clone();
-                tokio::spawn(async move {
-                    let body = read_request_body(&mut stream).await;
-                    let json_response_clone = json_response_clone
-                        .replace("{{EFFECTIVE_TRADER}}", &effective_trader_of(&body));
-                    request_log.lock().unwrap().push(body);
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json_response_clone.len(),
-                        json_response_clone
-                    );
-                    let _ = stream
-                        .write_all(response.as_bytes())
-                        .await;
-                    let _ = stream.flush().await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        (addr, request_log)
-    }
 
     fn create_test_hashflow_client(
         quote_endpoint: String,
@@ -1070,7 +939,7 @@ mod tests {
     }
 
     /// Helper function to create test quote params
-    fn create_test_quote_params() -> GetAmountOutParams {
+    pub(crate) fn create_test_quote_params() -> GetAmountOutParams {
         let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
         let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
@@ -1088,8 +957,7 @@ mod tests {
     async fn test_request_binding_quote_without_effective_trader() {
         // A response that drops the requested effectiveTrader would leave the quote in the
         // trader's shared nonce scope, so the client rejects it.
-        let (addr, _) =
-            create_delayed_response_server(0, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
+        let (addr, _) = mock_quote_server(0, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
         let client = create_test_hashflow_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
             Duration::from_secs(1),
@@ -1108,7 +976,7 @@ mod tests {
     async fn test_request_binding_quote_field_mapping() {
         // The wire request carries the receiver as Hashflow's trader and a fresh random
         // address as the effectiveTrader — a new one per quote request.
-        let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
+        let (addr, request_log) = mock_quote_server(0, QUOTE_RESPONSE).await;
         let client = create_test_hashflow_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
             Duration::from_secs(1),
@@ -1149,28 +1017,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_binding_quote_names_the_maker() {
-        let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
+    async fn test_request_binding_quote_from_maker() {
+        let (addr, request_log) = mock_quote_server(0, QUOTE_RESPONSE).await;
         let client = create_test_hashflow_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
             Duration::from_secs(1),
         );
-        let params = create_test_quote_params();
 
         client
-            .request_binding_quote_from(&params, Some("mm1"))
-            .await
-            .unwrap();
-        client
-            .request_binding_quote(&params)
+            .request_binding_quote_from_maker(&create_test_quote_params(), "mm1")
             .await
             .unwrap();
 
-        let requests = request_log.lock().unwrap();
-        assert!(requests[0].contains("\"marketMakers\":[\"mm1\"]"), "{}", requests[0]);
-        assert!(requests[0].contains("\"doNotRetryWithOtherMakers\":true"), "{}", requests[0]);
-        assert!(!requests[1].contains("marketMakers"), "{}", requests[1]);
-        assert!(!requests[1].contains("options"), "{}", requests[1]);
+        let request = &request_log.lock().unwrap()[0];
+        assert!(request.contains("\"marketMakers\":[\"mm1\"]"), "{request}");
+        assert!(request.contains("\"doNotRetryWithOtherMakers\":true"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn test_request_binding_quote_names_no_maker() {
+        let (addr, request_log) = mock_quote_server(0, QUOTE_RESPONSE).await;
+        let client = create_test_hashflow_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+
+        client
+            .request_binding_quote(&create_test_quote_params())
+            .await
+            .unwrap();
+
+        let request = &request_log.lock().unwrap()[0];
+        assert!(!request.contains("marketMakers"), "{request}");
+        assert!(!request.contains("options"), "{request}");
     }
 
     fn levels(pair: (&Bytes, &Bytes), levels: &[(f64, f64)]) -> HashflowMarketMakerLevels {
@@ -1178,7 +1057,7 @@ mod tests {
             pair: HashflowPair { base_token: pair.0.clone(), quote_token: pair.1.clone() },
             levels: levels
                 .iter()
-                .map(|&(quantity, price)| HashflowPriceLevel { quantity, price })
+                .map(|&(quantity, price)| PriceLevel { quantity, price })
                 .collect(),
         }
     }
@@ -1220,21 +1099,24 @@ mod tests {
         let mut expected_tokens = vec![weth.clone(), usdc.clone()];
         expected_tokens.sort();
         assert_eq!(component.component.tokens, expected_tokens);
-        let mut expected_pairs = weth.to_vec();
-        expected_pairs.extend_from_slice(&usdc);
-        assert_eq!(component.component.static_attributes["pairs"].to_vec(), expected_pairs);
+        let mut expected_directions = weth.to_vec();
+        expected_directions.extend_from_slice(&usdc);
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].to_vec(),
+            expected_directions
+        );
         assert_eq!(
             component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
             b"once_per_maker"
         );
 
-        let books: Vec<HashflowMakerLevels> =
-            serde_json::from_slice(&component.state.attributes["books"]).unwrap();
+        let books: Vec<MakerBook> =
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
         assert_eq!(books.len(), 2);
         assert_eq!(books[0].market_maker, "mm_a", "books are sorted by maker");
         assert_eq!(books[0].levels[0].quantity, 2.0);
         assert_eq!(books[1].market_maker, "mm_b");
-        assert_eq!(books[1].pair.base_token, weth);
+        assert_eq!(books[1].base_token, weth);
     }
 
     #[test]
@@ -1250,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hashflow_quote_timeout() {
-        let (addr, _) = create_delayed_response_server(500, QUOTE_RESPONSE).await;
+        let (addr, _) = mock_quote_server(500, QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
         let client_short_timeout = create_test_hashflow_client(
@@ -1432,7 +1314,8 @@ mod tests {
             "auth_user": "provided_user",
             "quote_tokens": [],
             "poll_time": {"secs": 10, "nanos": 0},
-            "quote_timeout": {"secs": 30, "nanos": 0}
+            "quote_timeout": {"secs": 30, "nanos": 0},
+            "quote_rule": "once_per_maker"
         }"#;
 
         let client: HashflowClient = serde_json::from_str(json).unwrap();

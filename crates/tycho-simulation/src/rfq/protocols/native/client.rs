@@ -26,14 +26,15 @@ use crate::{
         errors::RFQError,
         models::{QuoteRule, TimestampHeader},
         protocols::{
+            component,
             native::models::{
                 FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeSupportedChain,
             },
             utils::bytes_to_address,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
+    tycho_common::models::protocol::ProtocolComponent,
 };
 
 static NATIVE_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
@@ -84,13 +85,6 @@ pub struct NativeClient {
     quote_tokens: HashSet<Bytes>,
     poll_time: Duration,
     quote_timeout: Duration,
-    /// How often one route may take quotes from Native.
-    #[serde(default = "once_per_venue")]
-    quote_rule: QuoteRule,
-}
-
-fn once_per_venue() -> QuoteRule {
-    QuoteRule::OncePerVenue
 }
 
 impl NativeClient {
@@ -138,7 +132,6 @@ impl NativeClient {
         quote_tokens: HashSet<Bytes>,
         poll_time: Duration,
         quote_timeout: Duration,
-        quote_rule: QuoteRule,
     ) -> Result<Self, RFQError> {
         NativeSupportedChain::try_from(chain).map_err(RFQError::InvalidInput)?;
         if poll_time.is_zero() {
@@ -155,7 +148,6 @@ impl NativeClient {
             quote_tokens,
             poll_time,
             quote_timeout,
-            quote_rule,
         })
     }
 
@@ -193,19 +185,13 @@ impl NativeClient {
             .map(|(candidate, _)| candidate)
     }
 
-    /// The id of this chain's venue component. One per chain, for the venue's life.
     pub fn component_id(&self) -> String {
-        format!("{}", keccak256(format!("native_{}", self.chain.id()).as_bytes()))
+        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
     }
 
-    /// The venue component for one poll: every grouped book whose tokens are indexed and whose
-    /// TVL clears the threshold. `None` when no book clears it.
-    ///
-    /// The component's `tokens` are every token a book names, sorted. Its `pairs` static
-    /// attribute lists the directed pairs that have levels, 40 bytes each (token in, then token
-    /// out): a book's bids serve its base token in, its asks its quote token in. Its
-    /// `quote_rule` static attribute is the reuse rule. Its `books` state attribute is the books
-    /// as JSON, sorted by base and quote.
+    /// The venue component for one poll: every grouped book whose tokens the client requested
+    /// and whose TVL clears the threshold. `None` when no book clears it. A book's bids serve its
+    /// base token in, its asks its quote token in.
     fn venue_component(
         &self,
         grouped_books: &HashMap<String, NativePriceData>,
@@ -218,6 +204,9 @@ impl NativeClient {
                     .tokens
                     .contains(&book.quote_address)
             {
+                continue;
+            }
+            if book.bids.is_empty() && book.asks.is_empty() {
                 continue;
             }
             let quote_price_data = if self
@@ -256,57 +245,25 @@ impl NativeClient {
             (&a.base_address, &a.quote_address).cmp(&(&b.base_address, &b.quote_address))
         });
 
-        let mut tokens = BTreeSet::new();
-        let mut pairs = BTreeSet::new();
+        let mut swap_directions = BTreeSet::new();
         for book in &books {
-            tokens.insert(book.base_address.clone());
-            tokens.insert(book.quote_address.clone());
             if !book.bids.is_empty() {
-                pairs.insert((book.base_address.clone(), book.quote_address.clone()));
+                swap_directions.insert((book.base_address.clone(), book.quote_address.clone()));
             }
             if !book.asks.is_empty() {
-                pairs.insert((book.quote_address.clone(), book.base_address.clone()));
+                swap_directions.insert((book.quote_address.clone(), book.base_address.clone()));
             }
         }
-        let mut pairs_attribute = Vec::with_capacity(pairs.len() * 40);
-        for (token_in, token_out) in &pairs {
-            pairs_attribute.extend_from_slice(token_in);
-            pairs_attribute.extend_from_slice(token_out);
-        }
-
-        let component_id = self.component_id();
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "native_relay_pool".to_string(),
-            chain: self.chain,
-            tokens: tokens.into_iter().collect(),
-            contract_addresses: vec![],
-            static_attributes: HashMap::from([
-                ("pairs".to_string(), pairs_attribute.into()),
-                (
-                    QuoteRule::ATTRIBUTE.to_string(),
-                    self.quote_rule
-                        .as_str()
-                        .as_bytes()
-                        .to_vec()
-                        .into(),
-                ),
-            ]),
-            ..Default::default()
-        };
-
-        let books_json = serde_json::to_vec(&books).map_err(|e| {
-            RFQError::ParsingError(format!("Failed to serialize Native books: {e}"))
-        })?;
-        let attributes = HashMap::from([("books".to_string(), books_json.into())]);
-
-        Ok(Some(ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }))
+        let component = component::venue_component(
+            Self::PROTOCOL_SYSTEM,
+            "native_relay_pool",
+            self.chain,
+            &swap_directions,
+            &books,
+            tvl,
+            QuoteRule::OncePerVenue,
+        )?;
+        Ok(Some(component))
     }
 
     async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, RFQError> {
@@ -774,42 +731,14 @@ impl RFQClient for NativeClient {
                     }
                 };
 
-                let mut states = HashMap::new();
-                let mut removed_components = HashMap::new();
-                match client.venue_component(&books) {
-                    Ok(Some(component_with_state)) => {
-                        current_component = Some(component_with_state.component.clone());
-                        states.insert(component_with_state.component.id.clone(), component_with_state);
-                    }
-                    // The venue lost its last book, so the component leaves the market.
-                    Ok(None) => {
-                        if let Some(component) = current_component.take() {
-                            removed_components.insert(component.id.clone(), component);
-                        }
-                    }
+                let component = match client.venue_component(&books) {
+                    Ok(component) => component,
                     Err(e) => {
                         error!("Failed to build the Native Relay component: {}", e);
                         continue;
                     }
-                }
-
-                let snapshot = Snapshot {
-                    states,
-                    vm_storage: HashMap::new(),
                 };
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let msg = StateSyncMessage::<TimestampHeader> {
-                    header: TimestampHeader { timestamp },
-                    snapshots: snapshot,
-                    deltas: None,
-                    removed_components,
-                };
-
-                yield Ok(("native".to_string(), msg));
+                yield Ok(("native".to_string(), component::venue_message(&mut current_component, component)));
             }
         })
     }
@@ -900,7 +829,10 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::native::client_builder::NativeClientBuilder;
+    use crate::rfq::protocols::{
+        component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
+        native::client_builder::NativeClientBuilder,
+    };
 
     fn successful_quote_json(amount_in: &str) -> serde_json::Value {
         let calldata = format!("0x7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
@@ -992,7 +924,6 @@ mod tests {
             HashSet::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1021,7 +952,6 @@ mod tests {
             HashSet::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         );
 
         assert!(client.is_ok());
@@ -1043,7 +973,6 @@ mod tests {
             HashSet::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         );
 
         assert!(matches!(result, Err(RFQError::InvalidInput(_))));
@@ -1083,7 +1012,6 @@ mod tests {
             HashSet::from([usdc.clone(), usdt.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
         let books = HashMap::from([
@@ -1113,7 +1041,6 @@ mod tests {
             HashSet::from([lower_quote.clone(), higher_quote.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
         let books = HashMap::from([
@@ -1140,7 +1067,6 @@ mod tests {
             HashSet::from([usdt.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1187,13 +1113,17 @@ mod tests {
         expected_tokens.sort();
         assert_eq!(component.component.tokens, expected_tokens);
         assert_eq!(component.state.component_id, client.component_id());
-        assert_eq!(component.component.static_attributes["pairs"].len(), 80, "bids and asks");
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].len(),
+            80,
+            "bids and asks"
+        );
         assert_eq!(
             component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
             b"once_per_venue"
         );
         let decoded_books: Vec<NativePriceData> =
-            serde_json::from_slice(&component.state.attributes["books"]).unwrap();
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
         assert_eq!(decoded_books.len(), 1);
         assert_eq!(decoded_books[0].bids.len(), 1);
         assert_eq!(decoded_books[0].asks.len(), 1);
@@ -1213,7 +1143,6 @@ mod tests {
             HashSet::from([usdc.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
         let entries = vec![
@@ -1332,7 +1261,6 @@ mod tests {
             HashSet::from([usdc.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1391,7 +1319,6 @@ mod tests {
             quote_tokens,
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1701,7 +1628,6 @@ mod tests {
             HashSet::from([usdc.clone()]),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
 
@@ -1728,7 +1654,6 @@ mod tests {
             HashSet::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
-            QuoteRule::OncePerVenue,
         )
         .unwrap();
         client.endpoint = endpoint;

@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -17,25 +17,21 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
-    models::QuoteRule,
     protocols::bebop::{client::BebopClient, models::BebopPriceData},
 };
 
 /// Bebop's liquidity on one chain: one book per pair, bids and asks in one entry.
 ///
-/// Bebop names no market maker and picks the makers behind a firm quote itself, so the state
-/// tracks the venue as a whole: under [`QuoteRule::OncePerVenue`] a swap marks the state used
-/// and a later swap on that state finds no liquidity.
+/// Bebop names no market maker and picks the makers behind a firm quote itself, so a swap marks
+/// the whole venue used and a later swap on that state finds no liquidity.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BebopState {
-    /// One entry per pair. Bids sell the pair's base token, asks buy it.
-    pub books: Vec<BebopPriceData>,
-    /// Every token a book names, by address.
-    pub tokens: HashMap<Bytes, Token>,
-    pub quote_rule: QuoteRule,
+    /// One entry per pair. A bid takes the pair's base token in; an ask takes its quote token in.
+    pub books: Arc<Vec<BebopPriceData>>,
+    pub tokens: Arc<HashMap<Bytes, Token>>,
     /// Whether a swap on this state already took Bebop's quote.
     pub used: bool,
-    pub client: BebopClient,
+    pub client: Arc<BebopClient>,
 }
 
 impl fmt::Debug for BebopState {
@@ -43,40 +39,54 @@ impl fmt::Debug for BebopState {
         f.debug_struct("BebopState")
             .field("books", &self.books.len())
             .field("tokens", &self.tokens.len())
-            .field("quote_rule", &self.quote_rule)
             .field("used", &self.used)
             .finish_non_exhaustive()
     }
 }
 
 impl BebopState {
+    /// Fails when a book names a token `tokens` does not carry.
     pub fn new(
         books: Vec<BebopPriceData>,
         tokens: HashMap<Bytes, Token>,
-        quote_rule: QuoteRule,
         client: BebopClient,
-    ) -> Self {
-        BebopState { books, tokens, quote_rule, used: false, client }
-    }
-
-    /// Whether this state may still quote under its reuse rule.
-    fn available(&self) -> bool {
-        !(self.used && self.quote_rule == QuoteRule::OncePerVenue)
+    ) -> Result<Self, SimulationError> {
+        for book in &books {
+            for address in [&book.base, &book.quote] {
+                if !tokens.contains_key(&Bytes::from(address.clone())) {
+                    return Err(SimulationError::FatalError(format!(
+                        "Bebop book names token 0x{}, which the state does not carry",
+                        hex::encode(address)
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            books: Arc::new(books),
+            tokens: Arc::new(tokens),
+            used: false,
+            client: Arc::new(client),
+        })
     }
 
     /// The book that trades `token_in` for `token_out`, and whether that sells its base token.
+    /// A book quoting the pair as given beats one quoting it the other way round.
     fn book(
         &self,
         token_in: &Bytes,
         token_out: &Bytes,
     ) -> Result<(&BebopPriceData, bool), SimulationError> {
-        for book in &self.books {
-            if book.base == token_in.as_ref() && book.quote == token_out.as_ref() {
-                return Ok((book, true));
-            }
-            if book.base == token_out.as_ref() && book.quote == token_in.as_ref() {
-                return Ok((book, false));
-            }
+        let sells_base = |book: &&BebopPriceData| {
+            book.base == token_in.as_ref() && book.quote == token_out.as_ref()
+        };
+        let sells_quote = |book: &&BebopPriceData| {
+            book.base == token_out.as_ref() && book.quote == token_in.as_ref()
+        };
+        if let Some(book) = self.books.iter().find(sells_base) {
+            return Ok((book, true));
+        }
+        if let Some(book) = self.books.iter().find(sells_quote) {
+            return Ok((book, false));
         }
         Err(SimulationError::RecoverableError(format!(
             "Invalid token addresses: {token_in}, {token_out}"
@@ -88,6 +98,15 @@ impl BebopState {
             SimulationError::RecoverableError(format!("Bebop does not quote token {address}"))
         })
     }
+
+    fn used_state(&self) -> Self {
+        Self {
+            books: self.books.clone(),
+            tokens: self.tokens.clone(),
+            used: true,
+            client: self.client.clone(),
+        }
+    }
 }
 
 #[typetag::serde]
@@ -97,7 +116,7 @@ impl ProtocolSim for BebopState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        if !self.available() {
+        if self.used {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
         let (book, sell_base) = self.book(&base.address, &quote.address)?;
@@ -136,7 +155,7 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        if !self.available() {
+        if self.used {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
         let (book, sell_base) = self.book(&token_in.address, &token_out.address)?;
@@ -163,15 +182,13 @@ impl ProtocolSim for BebopState {
         let (amount_out, remaining_amount_in) =
             book.get_amount_out_from_levels(amount_in, price_levels);
 
-        let mut new_state = self.clone();
-        new_state.used = true;
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
                 .ok_or_else(|| {
                     SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
                 })?,
             gas: BigUint::from(70_000u64), // Rough gas estimation
-            new_state: Box::new(new_state),
+            new_state: Box::new(self.used_state()),
         };
 
         if remaining_amount_in > 0.0 {
@@ -189,15 +206,16 @@ impl ProtocolSim for BebopState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let (book, sell_base) = self.book(&sell_token, &buy_token)?;
+        if self.used {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
         let sell_decimals = self.token(&sell_token)?.decimals;
         let buy_decimals = self.token(&buy_token)?.decimals;
 
         // If selling BASE for QUOTE, we need to look at [BASE/QUOTE].bids
         // If buying BASE with QUOTE, we need to look at [BASE/QUOTE].asks
         let price_levels = if sell_base { book.get_bids() } else { book.get_asks() };
-
-        // A used venue and an empty book alike hold nothing to sell.
-        if price_levels.is_empty() || !self.available() {
+        if price_levels.is_empty() {
             return Ok((BigUint::from(0u64), BigUint::from(0u64)));
         }
 
@@ -281,46 +299,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-
-    fn wbtc() -> Token {
-        Token::new(
-            &hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599")
-                .unwrap()
-                .into(),
-            "WBTC",
-            8,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn usdc() -> Token {
-        Token::new(
-            &hex::decode("a0b86991c6218a76c1d19d4a2e9eb0ce3606eb48")
-                .unwrap()
-                .into(),
-            "USDC",
-            6,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn weth() -> Token {
-        Token::new(
-            &Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap(),
-            "WETH",
-            18,
-            0,
-            &[],
-            Default::default(),
-            100,
-        )
-    }
+    use crate::rfq::protocols::test_utils::{usdc, wbtc, weth};
 
     fn empty_bebop_client() -> BebopClient {
         BebopClient::new(
@@ -333,7 +312,6 @@ mod tests {
             None,
             None,
             None,
-            QuoteRule::OncePerVenue,
         )
         .unwrap()
     }
@@ -348,26 +326,46 @@ mod tests {
         }
     }
 
-    /// WBTC/USDC and WETH/USDC books, quoted once per route.
-    fn create_test_bebop_state() -> BebopState {
+    fn state(books: Vec<BebopPriceData>) -> BebopState {
         BebopState::new(
-            vec![
-                book(
-                    &wbtc(),
-                    &usdc(),
-                    &[65000.0, 1.5, 64950.0, 2.0, 64900.0, 0.5],
-                    &[65100.0, 1.0, 65150.0, 2.5, 65200.0, 1.5],
-                ),
-                book(&weth(), &usdc(), &[3000.0, 2.0, 2900.0, 2.5], &[3100.0, 1.5, 3000.0, 3.0]),
-            ],
+            books,
             HashMap::from([
                 (wbtc().address, wbtc()),
                 (usdc().address, usdc()),
                 (weth().address, weth()),
             ]),
-            QuoteRule::OncePerVenue,
             empty_bebop_client(),
         )
+        .unwrap()
+    }
+
+    /// WBTC/USDC and WETH/USDC books.
+    fn create_test_bebop_state() -> BebopState {
+        state(vec![
+            book(
+                &wbtc(),
+                &usdc(),
+                &[65000.0, 1.5, 64950.0, 2.0, 64900.0, 0.5],
+                &[65100.0, 1.0, 65150.0, 2.5, 65200.0, 1.5],
+            ),
+            book(&weth(), &usdc(), &[3000.0, 2.0, 2900.0, 2.5], &[3100.0, 1.5, 3000.0, 3.0]),
+        ])
+    }
+
+    fn edit_book(state: &mut BebopState, edit: impl FnOnce(&mut BebopPriceData)) {
+        edit(&mut Arc::make_mut(&mut state.books)[0]);
+    }
+
+    #[test]
+    fn test_new_rejects_book_naming_unknown_token() {
+        let result = BebopState::new(
+            vec![book(&weth(), &usdc(), &[3000.0, 2.0], &[])],
+            HashMap::from([(weth().address, weth())]),
+            empty_bebop_client(),
+        );
+        assert!(
+            matches!(result, Err(SimulationError::FatalError(msg)) if msg.contains("does not carry"))
+        );
     }
 
     #[test]
@@ -396,7 +394,7 @@ mod tests {
     #[test]
     fn test_spot_price_empty_asks() {
         let mut state = create_test_bebop_state();
-        state.books[0].asks = vec![];
+        edit_book(&mut state, |book| book.asks = vec![]);
 
         // Test WBTC/USDC with no asks - should use only best bid
         let price = state
@@ -408,7 +406,7 @@ mod tests {
     #[test]
     fn test_spot_price_empty_bids() {
         let mut state = create_test_bebop_state();
-        state.books[0].bids = vec![];
+        edit_book(&mut state, |book| book.bids = vec![]);
 
         // Test WBTC/USDC with no bids - should use only best ask
         let price = state
@@ -420,8 +418,10 @@ mod tests {
     #[test]
     fn test_spot_price_no_liquidity() {
         let mut state = create_test_bebop_state();
-        state.books[0].bids = vec![];
-        state.books[0].asks = vec![];
+        edit_book(&mut state, |book| {
+            book.bids = vec![];
+            book.asks = vec![];
+        });
         assert!(state
             .spot_price(&wbtc(), &usdc())
             .is_err());
@@ -436,6 +436,20 @@ mod tests {
                 .unwrap(),
             3050.0
         );
+    }
+
+    #[test]
+    fn test_book_quoting_the_direction_beats_the_inverted_one() {
+        // The USDC/WETH book pays 1/2048 WETH per USDC; the WETH/USDC book's asks sell 1 WETH for
+        // 3100 USDC.
+        let state = state(vec![
+            book(&weth(), &usdc(), &[3000.0, 2.0], &[3100.0, 1.5]),
+            book(&usdc(), &weth(), &[0.00048828125, 2000.0], &[]),
+        ]);
+        let result = state
+            .get_amount_out(BigUint::from(2_000_000_000u64), &usdc(), &weth())
+            .unwrap();
+        assert_eq!(result.amount, BigUint::from_str("0_976562500000000000").unwrap());
     }
 
     #[test]
@@ -463,7 +477,7 @@ mod tests {
     #[test]
     fn test_get_limits_no_bids() {
         let mut state = create_test_bebop_state();
-        state.books[0].bids = vec![];
+        edit_book(&mut state, |book| book.bids = vec![]);
         let (token_limit, quote_limit) = state
             .get_limits(wbtc().address, usdc().address)
             .unwrap();
@@ -473,13 +487,11 @@ mod tests {
 
     #[test]
     fn test_get_limits_used_venue() {
-        let mut state = create_test_bebop_state();
-        state.used = true;
-        let (token_limit, quote_limit) = state
-            .get_limits(wbtc().address, usdc().address)
-            .unwrap();
-        assert_eq!(token_limit, BigUint::from(0u64));
-        assert_eq!(quote_limit, BigUint::from(0u64));
+        let state = create_test_bebop_state().used_state();
+        let result = state.get_limits(wbtc().address, usdc().address);
+        assert!(
+            matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+        );
     }
 
     #[test]
@@ -525,31 +537,16 @@ mod tests {
         assert!(
             matches!(second, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
         );
-        assert!(after_first
-            .spot_price(&wbtc(), &usdc())
-            .is_err());
-    }
-
-    #[test]
-    fn test_get_amount_out_without_rule() {
-        let mut state = create_test_bebop_state();
-        state.quote_rule = QuoteRule::None;
-        let first = state
-            .get_amount_out(BigUint::from_str("1_000000000000000000").unwrap(), &weth(), &usdc())
-            .unwrap();
-        let second = first
-            .new_state
-            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
-            .unwrap();
-        assert_eq!(second.amount, BigUint::from(65_000_000_000u64));
+        let spot_price = after_first.spot_price(&wbtc(), &usdc());
+        assert!(
+            matches!(spot_price, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+        );
     }
 
     #[test]
     fn test_eq_reads_used() {
         let state = create_test_bebop_state();
-        let mut used = state.clone();
-        used.used = true;
         assert!(state.eq(&state.clone()));
-        assert!(!state.eq(&used));
+        assert!(!state.eq(&state.used_state()));
     }
 }

@@ -33,7 +33,7 @@ impl LiquoriceClientBuilder {
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
             quote_expiry_secs: 300,
-            quote_rule: QuoteRule::OncePerMaker,
+            quote_rule: LiquoriceClient::DEFAULT_QUOTE_RULE,
         }
     }
 
