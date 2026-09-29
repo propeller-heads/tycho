@@ -174,10 +174,22 @@ Each concrete router has its own executor, and each executor holds one router ad
 |---|---|---|---|
 | `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
 | `MetricFallbackRouter` | `MetricFallbackExecutor` | `simulateMetric` runs the swap and reverts with the output | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+| `BebopFallbackRouter` | `BebopFallbackExecutor` | `PRIMARY_FIRST`, or 0 when `amountIn` exceeds the signed amount | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
+
+A primary that quotes `PRIMARY_FIRST` (`type(uint256).max`) has its price fixed off-chain: it runs first and the
+fallback quote is skipped, so the fallback runs only when the primary fails.
 
 `MetricFallbackRouter` pays the pool's `metricOmmSwapCallback` through the catch-all `fallback`, which sends the full
 `amountIn` to the pool the swap called, as the Dispatcher does for `MetricExecutor`. Metric has no quote function, so
 every leg pays for one simulated Metric swap.
+
+`BebopFallbackRouter` runs a signed Bebop order. `bebopData` is `[partialFillOffset: 1][originalFilledTakerAmount: 32]
+[calldata]`, the same fields `BebopExecutor` takes. The order MUST name the fallback router as taker and receiver.
+`swap` checks the target and selector against the immutable `bebopSettlement` and `bebopRouter` before anything runs.
+The router approves the target for `amountIn`, calls it, revokes the approval, and forwards the output to the
+receiver. An `amountIn` above `originalFilledTakerAmount` quotes 0, so the fallback swaps the whole leg instead of
+leaving the remainder in the router. `lib/BebopCalldata.sol` holds the target/selector check and the
+`filledTakerAmount` rewrite that `BebopExecutor` also uses.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 

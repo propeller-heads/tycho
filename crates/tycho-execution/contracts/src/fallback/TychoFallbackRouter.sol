@@ -102,6 +102,10 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         bytes hookData;
     }
 
+    /// @notice The `_quotePrimary` result for a primary whose price is fixed off-chain, such as a
+    /// signed RFQ order: there is no on-chain price to compare, so the primary runs first.
+    uint256 internal constant PRIMARY_FIRST = type(uint256).max;
+
     // keccak256("TychoFallbackRouter#CALLBACK_SOURCE")
     bytes32 private constant _CALLBACK_SOURCE_SLOT =
         0xf69ae8e0008b818aeb91c2b052698e485056e760fad9d0aa28144b842debe4f7;
@@ -154,7 +158,8 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
     /// fallback reverts the swap; there is no third attempt.
     /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     /// A fallback quote that reverts counts as zero, so equal quotes keep the primary. A primary
-    /// that quotes zero skips both the fallback quote and its own swap.
+    /// that quotes zero skips both the fallback quote and its own swap. A primary that quotes
+    /// `PRIMARY_FIRST` is tried first and also skips the fallback quote.
     function _swap(
         Swap calldata swap_,
         address primary,
@@ -169,11 +174,13 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         // Uniswap V4 is a simulated swap.
         if (primaryAmountOut > 0) {
             uint256 fallbackAmountOut = 0;
-            try this.quoteFallback(swap_, fallbackSwap) returns (
-                uint256 amountOut
-            ) {
-                fallbackAmountOut = amountOut;
-            } catch {}
+            if (primaryAmountOut != PRIMARY_FIRST) {
+                try this.quoteFallback(swap_, fallbackSwap) returns (
+                    uint256 amountOut
+                ) {
+                    fallbackAmountOut = amountOut;
+                } catch {}
+            }
 
             if (fallbackAmountOut <= primaryAmountOut) {
                 try this.executePrimary(swap_, primary, primaryData) {
@@ -197,7 +204,8 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
     }
 
     /// @notice The `tokenOut` the primary would deliver for `swap_`, or zero when it cannot
-    /// fill. Must not revert: a primary that cannot quote returns zero.
+    /// fill. Must not revert: a primary that cannot quote returns zero. A primary whose price is
+    /// fixed off-chain returns `PRIMARY_FIRST`.
     function _quotePrimary(
         Swap calldata swap_,
         address primary,

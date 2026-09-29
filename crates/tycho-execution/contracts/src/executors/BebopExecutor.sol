@@ -3,12 +3,12 @@ pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {TransferManager} from "../TransferManager.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {
     IERC20,
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {BebopCalldata} from "../../lib/BebopCalldata.sol";
 
 /// @title BebopExecutor
 /// @notice Executor for Bebop PMM RFQ (Request for Quote) swaps
@@ -16,7 +16,6 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 ///      settlement contract or the Bebop router contract, selected per-quote
 /// @dev Only supports single token in to single token out swaps
 contract BebopExecutor is IExecutor {
-    using Math for uint256;
     using SafeERC20 for IERC20;
     using Address for address;
 
@@ -25,13 +24,6 @@ contract BebopExecutor is IExecutor {
     error BebopExecutor__ZeroAddress();
     error BebopExecutor__InvalidTarget();
     error BebopExecutor__InvalidSelector();
-
-    /// @notice BebopSettlement.swapSingle
-    bytes4 private constant _SWAP_SINGLE_SELECTOR = 0x4dcebcba;
-    /// @notice BebopSettlement.swapAggregate
-    bytes4 private constant _SWAP_AGGREGATE_SELECTOR = 0xa2f74893;
-    /// @notice BebopRouter.swap
-    bytes4 private constant _ROUTER_SWAP_SELECTOR = 0x9586d0e8;
 
     /// @notice The Bebop settlement contract address
     address public immutable bebopSettlement;
@@ -78,7 +70,7 @@ contract BebopExecutor is IExecutor {
 
         // Modify the filledTakerAmount in the calldata
         // If the filledTakerAmount is the same as the original, the original calldata is returned
-        bytes memory finalCalldata = _modifyFilledTakerAmount(
+        bytes memory finalCalldata = BebopCalldata.capFilledTakerAmount(
             bebopCalldata,
             amountIn,
             originalFilledTakerAmount,
@@ -94,19 +86,14 @@ contract BebopExecutor is IExecutor {
     /// @dev Reverts unless target is an allowed contract and the selector is
     ///      one that target exposes for swaps.
     function _validateCall(address target, bytes4 selector) internal view {
-        if (target == bebopSettlement) {
-            if (
-                selector != _SWAP_SINGLE_SELECTOR
-                    && selector != _SWAP_AGGREGATE_SELECTOR
-            ) {
-                revert BebopExecutor__InvalidSelector();
-            }
-        } else if (target == bebopRouter) {
-            if (selector != _ROUTER_SWAP_SELECTOR) {
-                revert BebopExecutor__InvalidSelector();
-            }
-        } else {
+        BebopCalldata.CallCheck check = BebopCalldata.checkCall(
+            target, selector, bebopSettlement, bebopRouter
+        );
+        if (check == BebopCalldata.CallCheck.InvalidTarget) {
             revert BebopExecutor__InvalidTarget();
+        }
+        if (check == BebopCalldata.CallCheck.InvalidSelector) {
+            revert BebopExecutor__InvalidSelector();
         }
     }
 
@@ -130,46 +117,6 @@ contract BebopExecutor is IExecutor {
         partialFillOffset = uint8(data[60]);
         originalFilledTakerAmount = uint256(bytes32(data[61:93]));
         bebopCalldata = data[93:];
-    }
-
-    /// @dev Modifies the filledTakerAmount in the bebop calldata to handle slippage
-    /// @param bebopCalldata The original calldata for the bebop settlement
-    /// @param amountIn The actual amount available from the router
-    /// @param originalFilledTakerAmount The original amount expected when the quote was generated
-    /// @param partialFillOffset The offset from Bebop API indicating where filledTakerAmount is located
-    /// @return The modified calldata with updated filledTakerAmount
-    function _modifyFilledTakerAmount(
-        bytes memory bebopCalldata,
-        uint256 amountIn,
-        uint256 originalFilledTakerAmount,
-        uint8 partialFillOffset
-    ) internal pure returns (bytes memory) {
-        // Use the offset from Bebop API to locate filledTakerAmount
-        // Position = 4 bytes (selector) + offset * 32 bytes
-        uint256 filledTakerAmountPos = 4 + uint256(partialFillOffset) * 32;
-
-        // Cap the fill amount at what we actually have available
-        uint256 newFilledTakerAmount = originalFilledTakerAmount > amountIn
-            ? amountIn
-            : originalFilledTakerAmount;
-
-        // If the new filledTakerAmount is the same as the original, return the original calldata
-        if (newFilledTakerAmount == originalFilledTakerAmount) {
-            return bebopCalldata;
-        }
-
-        // Use assembly to modify the filledTakerAmount at the correct position
-        // slither-disable-next-line assembly
-        assembly {
-            // Get pointer to the data portion of the bytes array
-            let dataPtr := add(bebopCalldata, 0x20)
-
-            // Calculate the actual position and store the new value
-            let actualPos := add(dataPtr, filledTakerAmountPos)
-            mstore(actualPos, newFilledTakerAmount)
-        }
-
-        return bebopCalldata;
     }
 
     /**
