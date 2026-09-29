@@ -120,13 +120,13 @@ impl FallbackProtocol {
 
 /// The fallback protocol and its pool, from the swap's `user_data` JSON, e.g.
 /// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`.
-struct FallbackSwap {
-    protocol: FallbackProtocol,
+pub(super) struct FallbackSwap {
+    pub(super) protocol: FallbackProtocol,
     data: FallbackSwapData,
 }
 
 impl FallbackSwap {
-    fn from_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
+    pub(super) fn from_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
         let Some(bytes) = user_data
             .as_ref()
             .filter(|bytes| !bytes.is_empty())
@@ -165,7 +165,7 @@ impl FallbackSwap {
     }
 
     /// The protocol byte followed by the protocol data.
-    fn encode(&self) -> Result<Vec<u8>, EncodingError> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, EncodingError> {
         let mut encoded = vec![self.protocol.protocol_byte()];
         encoded.extend(self.data.encode()?);
         Ok(encoded)

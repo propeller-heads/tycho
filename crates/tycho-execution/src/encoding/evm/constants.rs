@@ -159,6 +159,14 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const FALLBACK_KEY: &str = "fallback";
 
+/// Protocol system of Metric components executed through `MetricFallbackRouter`. It sits in the
+/// `fallback:` family, but has its own executor-config entry.
+pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
+
+/// Protocol system of Bebop components executed through `BebopFallbackRouter`. It sits in the
+/// `fallback:` family, but has its own executor-config entry.
+pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +177,8 @@ mod tests {
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
+        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

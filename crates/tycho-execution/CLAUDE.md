@@ -430,6 +430,21 @@ parameters the contract decodes: a solver builds the variant for the pool it pic
 defined once. The encoder rejects a protocol the chain's router does not run with an
 `InvalidInput` error instead of letting it revert on chain.
 
+`fallback:rfq:metric` and `fallback:rfq:bebop` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
+`BEBOP_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
+exact executor-config entry, which `get_encoder` matches before the `fallback` family. They read the
+same `FallbackSwapData` `user_data`:
+
+- `MetricFallbackSwapEncoder` appends the fallback to the `rfq:metric` swap data.
+- `BebopFallbackSwapEncoder` requests the signed quote with the chain's `BebopFallbackRouter` as
+  taker and receiver. It reads that address from `fallback_router` under `fallback:rfq:bebop` in
+  `protocol_specific_addresses.json` and fails to build without it. It then inserts the
+  `bebopDataLength` prefix and appends the fallback.
+
+Neither router is deployed, so no chain lists these entries yet. The gas estimator charges a
+Metric leg its pool gas twice (the quote runs the swap), and a Bebop leg the router's approval and
+output forward.
+
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
