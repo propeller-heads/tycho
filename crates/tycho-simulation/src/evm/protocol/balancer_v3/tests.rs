@@ -16,6 +16,7 @@ use balancer_maths_rust::{
         maths::mul_down_fixed,
         types::{BasePoolState, PoolState},
     },
+    hooks::stable_surge::StableSurgeHookState,
     pools::{
         quantamm::quantamm_data::{QuantAmmImmutable, QuantAmmMutable, QuantAmmState},
         reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
@@ -214,6 +215,7 @@ fn build_state(entry: &Value, timestamp: u64) -> BalancerV3State {
         min_token_balances,
         timestamp,
         state,
+        None,
     )
 }
 
@@ -502,7 +504,10 @@ fn stable_limit_sits_at_the_imbalance_boundary() {
 
 /// Builds a synthetic 3-token stable pool, standing in for one whose third token has drained to
 /// zero balance without the pool itself being re-seeded.
-fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
+fn stable_pool_with_balances(
+    balances: Vec<U256>,
+    stable_surge: Option<StableSurgeHookState>,
+) -> BalancerV3State {
     let num_tokens = balances.len();
     let tokens: Vec<String> = (0..num_tokens)
         .map(|i| format!("0x{:040x}", i + 0xa))
@@ -530,9 +535,49 @@ fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
         0,
         PoolState::Stable(StableState {
             base,
-            mutable: StableMutable { amp: U256::from(100_000u32) },
+            mutable: StableMutable { amp: U256::from(STABLE_TEST_AMP) },
         }),
+        stable_surge,
     )
+}
+
+const STABLE_TEST_AMP: u32 = 100_000;
+
+/// The surge hook leaves swaps that keep the pool within its threshold at the static fee, and
+/// charges more on one that pushes the pool past it.
+#[test]
+fn stable_surge_raises_the_fee_only_past_the_threshold() {
+    let balances = vec![uint_wad() * U256::from(1_000u32); 2];
+    let surge = StableSurgeHookState {
+        amp: U256::from(STABLE_TEST_AMP),
+        // 10% imbalance threshold, 5% maximum fee.
+        surge_threshold_percentage: uint_wad() / U256::from(10u8),
+        max_surge_fee_percentage: uint_wad() / U256::from(20u8),
+        ..Default::default()
+    };
+    let plain = stable_pool_with_balances(balances.clone(), None);
+    let surging = stable_pool_with_balances(balances, Some(surge));
+    let (token0, token1) = (token_at(&plain, 0), token_at(&plain, 1));
+    let quote = |pool: &BalancerV3State, amount: u32| {
+        pool.get_amount_out(BigUint::from(amount) * BigUint::from(10u64).pow(18), &token0, &token1)
+            .expect("quote")
+            .amount
+    };
+
+    assert_eq!(quote(&surging, 1), quote(&plain, 1), "a small swap stays below the threshold");
+    assert!(quote(&surging, 300) < quote(&plain, 300), "a large swap pays the surge fee");
+}
+
+/// States serialized before StableSurge support carry no `stable_surge` and must still load.
+#[test]
+fn state_without_stable_surge_deserializes() {
+    let pool = stable_pool_with_balances(vec![uint_wad(); 2], None);
+    let mut json = serde_json::to_value(&pool).expect("serialize");
+    json.as_object_mut()
+        .expect("object")
+        .remove("stable_surge");
+
+    assert!(serde_json::from_value::<BalancerV3State>(json).is_ok());
 }
 
 /// A stable pool's third token draining to zero balance must not crash a swap between the other
@@ -542,7 +587,7 @@ fn stable_pool_with_balances(balances: Vec<U256>) -> BalancerV3State {
 fn stable_pool_zero_balance_on_untouched_token_does_not_divide_by_zero() {
     let balances =
         vec![uint_wad() * U256::from(1_000u32), uint_wad() * U256::from(1_000u32), U256::ZERO];
-    let pool = stable_pool_with_balances(balances);
+    let pool = stable_pool_with_balances(balances, None);
     let token0 = token_at(&pool, 0);
     let token1 = token_at(&pool, 1);
 
@@ -592,6 +637,7 @@ fn weighted_pool_with_min_balances(
         min_token_balances,
         0,
         PoolState::Weighted(WeightedState::new(base, weights)),
+        None,
     )
 }
 
@@ -761,6 +807,7 @@ fn protocol_fee_leaves_the_pool_in_the_balances_own_units() {
         Vec::new(),
         0,
         PoolState::Weighted(WeightedState::new(base, weights)),
+        None,
     );
 
     let amount_in_raw = U256::from(100_000_000u64); // 100 whole units of the 6-decimal token
@@ -870,6 +917,7 @@ fn reclamm_pool_with_a_zero_invariant_is_reported_not_panicked() {
                 price_ratio_update_end_time: U256::ZERO,
             },
         }),
+        None,
     );
 
     let error = pool
@@ -958,4 +1006,137 @@ fn pool_id(entry: &Value) -> &str {
 
 fn token_at(pool: &BalancerV3State, index: usize) -> Token {
     Token::new(&pool.token_addresses()[index], "TKN", 18, 0, &[Some(0)], Chain::Ethereum, 100)
+}
+
+/// Live parity on Monad: each pool is read through the VM from chain storage at a random recent
+/// block — what the indexer's storage would hold — and quoted natively, then compared to the wei
+/// with `BatchRouter.querySwapExactIn` `eth_call`ed at that same block.
+mod live {
+    use std::collections::HashMap;
+
+    use alloy::{
+        primitives::{address, Address},
+        sol,
+        sol_types::SolCall,
+    };
+
+    use super::*;
+    use crate::evm::protocol::test_utils::parity::LiveChain;
+
+    sol! {
+        struct SwapPathStep { address pool; address tokenOut; bool isBuffer; }
+        struct SwapPathExactAmountIn {
+            address tokenIn;
+            SwapPathStep[] steps;
+            uint256 exactAmountIn;
+            uint256 minAmountOut;
+        }
+        function querySwapExactIn(SwapPathExactAmountIn[] paths, address sender, bytes userData)
+            external returns (uint256[] pathAmountsOut, address[] tokensOut, uint256[] amountsOut);
+        struct TokenInfo { uint8 tokenType; address rateProvider; bool paysYieldFees; }
+        function getPoolTokenInfo(address pool) external view returns (
+            address[] tokens,
+            TokenInfo[] tokenInfo,
+            uint256[] balancesRaw,
+            uint256[] lastBalancesLiveScaled18
+        );
+    }
+
+    const VAULT: Address = address!("bA1333333333a1BA1108E8412f11850A5C319bA9");
+    const BATCH_ROUTER: Address = address!("85a80afee867adf27b50bdb7b76da70f1e853062");
+    const BLOCKS: usize = 5;
+    const SWAPS_PER_BLOCK: usize = 4;
+    const LOOKBACK: u64 = 200_000;
+
+    fn assert_matches_chain(pool: Address, pool_type: BalancerPoolType) {
+        let mut chain = LiveChain::connect();
+        let attributes = HashMap::new();
+        for block in chain.random_recent_blocks(BLOCKS, LOOKBACK) {
+            let info = getPoolTokenInfoCall::abi_decode_returns(
+                &chain
+                    .eth_call(VAULT, getPoolTokenInfoCall { pool }.abi_encode(), block.number)
+                    .expect("getPoolTokenInfo"),
+            )
+            .expect("decode getPoolTokenInfo");
+            let tokens: Vec<Bytes> = info
+                .tokens
+                .iter()
+                .map(|t| Bytes::from(t.to_vec()))
+                .collect();
+            let engine = chain.engine_at(&block);
+            let state = BalancerV3State::from_vm(
+                &engine,
+                Bytes::from(pool.to_vec()),
+                pool_type,
+                tokens.clone(),
+                &attributes,
+                block.timestamp,
+            )
+            .unwrap_or_else(|e| panic!("{pool} @ {}: read failed: {e}", block.number));
+
+            for _ in 0..SWAPS_PER_BLOCK {
+                let Some((i, j, amount_in)) = chain.random_swap(&info.balancesRaw) else {
+                    continue;
+                };
+                let path = SwapPathExactAmountIn {
+                    tokenIn: info.tokens[i],
+                    steps: vec![SwapPathStep { pool, tokenOut: info.tokens[j], isBuffer: false }],
+                    exactAmountIn: amount_in,
+                    minAmountOut: U256::ZERO,
+                };
+                let onchain = chain
+                    .eth_call(
+                        BATCH_ROUTER,
+                        querySwapExactInCall {
+                            paths: vec![path],
+                            sender: Address::ZERO,
+                            userData: Default::default(),
+                        }
+                        .abi_encode(),
+                        block.number,
+                    )
+                    .map(|raw| {
+                        querySwapExactInCall::abi_decode_returns(&raw)
+                            .expect("decode querySwapExactIn")
+                            .amountsOut[0]
+                    });
+                let ours = state
+                    .get_amount_out(
+                        u256_to_biguint(amount_in),
+                        &token(&tokens[i].to_string()),
+                        &token(&tokens[j].to_string()),
+                    )
+                    .map(|res| res.amount);
+                match (onchain, ours) {
+                    (Some(expected), Ok(ours)) => assert_eq!(
+                        ours,
+                        u256_to_biguint(expected),
+                        "{pool} @ {}: {amount_in} of token {i} -> {j}",
+                        block.number
+                    ),
+                    // Both sides refusing the swap is agreement too.
+                    (None, Err(_)) => {}
+                    (onchain, ours) => panic!(
+                        "{pool} @ {}: {amount_in} of token {i} -> {j}: chain {onchain:?}, ours {:?}",
+                        block.number,
+                        ours.map(|o| o.to_string())
+                    ),
+                }
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::stable_surge_usdt_ausd_usdc(address!("2daa146dfb7eaef0038f9f15b2ec1e4de003f72b"), BalancerPoolType::StableSurge)]
+    #[case::stable_surge_syzusd_ausd(address!("c71c30914bc7790218b1adee782ba307b7867b08"), BalancerPoolType::StableSurge)]
+    #[case::stable_surge_gmon_wmon(address!("c0abfaa62331db4bee1d3904b86310c5d120e045"), BalancerPoolType::StableSurge)]
+    #[case::stable_ausd_usdc(address!("47a4aaf5bbe897c4558c5780b150535eee6aa58b"), BalancerPoolType::Stable)]
+    #[case::stable_usdt_ausd_usdc(address!("daae80492fda633b5d0375b22eedc5c7b422fb4c"), BalancerPoolType::Stable)]
+    #[case::reclamm_weth_wmon(address!("067abd928147282fb06475a09f6be22cee933ea3"), BalancerPoolType::Reclamm)]
+    #[case::reclamm_wbtc_wmon(address!("ad4779c425fefdf8c0fddf72ec53be34bae0809d"), BalancerPoolType::Reclamm)]
+    #[case::reclamm_wmon_usdc(address!("696e219bc37954154291ebcd66b40ba0b1a26148"), BalancerPoolType::Reclamm)]
+    #[ignore = "Requires RPC_URL to be set in environment variables or .env file (Monad)"]
+    fn monad_pool_matches_query_swap(#[case] pool: Address, #[case] pool_type: BalancerPoolType) {
+        assert_matches_chain(pool, pool_type);
+    }
 }

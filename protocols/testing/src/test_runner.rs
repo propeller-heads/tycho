@@ -82,6 +82,11 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
         ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
         ("robinhood-up-v3", "base-aerodrome-slipstreams"),
+        ("monad-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("monad-pancakeswap-v3", "ethereum-pancakeswap-v3"),
+        ("monad-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
+        ("monad-balancer-v3", "ethereum-balancer-v3"),
+        ("monad-curve", "ethereum-curve"),
     ])
 });
 
@@ -1658,37 +1663,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn arc_uniswap_packages_use_shared_packages_and_arc_manifests() {
+    /// Every clone package resolves to its shared package, its own integration test file and its
+    /// own manifest.
+    fn assert_clone_packages(chain: Chain, cases: &[(&str, &str, &str, &str)]) {
         let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("protocols/testing must live below protocols")
             .to_path_buf();
 
-        for (protocol, base_protocol, config_file_name, manifest_path) in [
-            (
-                "arc-uniswap-v2",
-                "ethereum-uniswap-v2",
-                "integration_test_arc_uniswap_v2.tycho.yaml",
-                "./arc-uniswap-v2.yaml",
-            ),
-            (
-                "arc-uniswap-v3",
-                "ethereum-uniswap-v3-logs-only",
-                "integration_test_arc_uniswap_v3.tycho.yaml",
-                "./arc-uniswap-v3.yaml",
-            ),
-            (
-                "arc-uniswap-v4-no-hooks",
-                "ethereum-uniswap-v4/no-hooks",
-                "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
-                "./arc-uniswap-v4-no-hooks.yaml",
-            ),
-        ] {
+        for &(protocol, base_protocol, config_file_name, manifest_path) in cases {
             let runner = TestRunner::new(RunnerConfig {
                 test_type: TestType::Range(TestTypeRange { match_test: None }),
                 root_path: root_path.clone(),
-                chain: Chain::Arc,
+                chain,
                 protocol: protocol.to_string(),
                 db_url: String::new(),
                 rpc_url: "http://localhost:8545".to_string(),
@@ -1697,7 +1684,7 @@ mod tests {
                 reuse_last_sync: false,
                 prebuilt_wasm: false,
             })
-            .expect("Arc package resolution must produce a runner");
+            .expect("package resolution must produce a runner");
 
             assert!(
                 runner
@@ -1713,7 +1700,7 @@ mod tests {
             );
 
             let config = TestRunner::parse_config(&runner.config_file_path)
-                .expect("Arc integration test configuration must parse");
+                .expect("integration test configuration must parse");
             assert_eq!(
                 config.substreams_yaml_path, manifest_path,
                 "unexpected manifest for {protocol}",
@@ -1726,6 +1713,72 @@ mod tests {
                 "manifest must exist for {protocol}",
             );
         }
+    }
+
+    #[test]
+    fn arc_uniswap_packages_use_shared_packages_and_arc_manifests() {
+        assert_clone_packages(
+            Chain::Arc,
+            &[
+                (
+                    "arc-uniswap-v2",
+                    "ethereum-uniswap-v2",
+                    "integration_test_arc_uniswap_v2.tycho.yaml",
+                    "./arc-uniswap-v2.yaml",
+                ),
+                (
+                    "arc-uniswap-v3",
+                    "ethereum-uniswap-v3-logs-only",
+                    "integration_test_arc_uniswap_v3.tycho.yaml",
+                    "./arc-uniswap-v3.yaml",
+                ),
+                (
+                    "arc-uniswap-v4-no-hooks",
+                    "ethereum-uniswap-v4/no-hooks",
+                    "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
+                    "./arc-uniswap-v4-no-hooks.yaml",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn monad_packages_use_shared_packages_and_monad_manifests() {
+        assert_clone_packages(
+            Chain::Monad,
+            &[
+                (
+                    "monad-uniswap-v3",
+                    "ethereum-uniswap-v3-logs-only",
+                    "integration_test_monad_uniswap_v3.tycho.yaml",
+                    "./monad-uniswap-v3.yaml",
+                ),
+                (
+                    "monad-pancakeswap-v3",
+                    "ethereum-pancakeswap-v3",
+                    "integration_test_monad_pancakeswap_v3.tycho.yaml",
+                    "./monad-pancakeswap-v3.yaml",
+                ),
+                (
+                    "monad-uniswap-v4-no-hooks",
+                    "ethereum-uniswap-v4/no-hooks",
+                    "integration_test_monad_uniswap_v4_no_hooks.tycho.yaml",
+                    "./monad-uniswap-v4-no-hooks.yaml",
+                ),
+                (
+                    "monad-balancer-v3",
+                    "ethereum-balancer-v3",
+                    "integration_test_monad_balancer_v3.tycho.yaml",
+                    "./monad-balancer-v3.yaml",
+                ),
+                (
+                    "monad-curve",
+                    "ethereum-curve",
+                    "integration_test_monad_curve.tycho.yaml",
+                    "./monad-curve.yaml",
+                ),
+            ],
+        );
     }
 
     fn get_mocked_runner() -> TestRunner {

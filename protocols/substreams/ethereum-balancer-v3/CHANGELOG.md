@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.6.0
+
+- Add StableSurge pool support via the `StableSurgePoolFactory` (optional
+  `stable_surge_factory` and `stable_surge_hook` deployment parameters, set
+  together). The hook is added to each such pool's contracts and its storage is
+  tracked, since it holds the per-pool surge threshold and maximum fee.
+- `weighted_factory`, `stable_factory` and `stable_surge_factory` accept a
+  comma-separated list, so several generations of a family (same `create`
+  signature) are indexed by one manifest. Single addresses parse as before.
+- Add the Monad manifest (`monad-balancer-v3.yaml`, Vault
+  `0xbA1333333333a1BA1108E8412f11850A5C319bA9`, `initialBlock` 22091249 at the
+  Vault's deployment; first `PoolRegistered` at 48702459). Weighted v1+v2, Stable
+  v2+v3, StableSurge v2+v3 and reCLAMM v3 factories. Rate-provider pools are
+  indexed: Monad RPC nodes support `debug_traceCall`.
+
 ## v0.5.0
 
 - Add reCLAMM pool support via the `ReClammPoolFactory` (new `reclamm_factory`

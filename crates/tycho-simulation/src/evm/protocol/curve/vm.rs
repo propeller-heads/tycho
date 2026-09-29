@@ -530,13 +530,7 @@ mod test {
     use tycho_client::feed::BlockHeader;
 
     use super::*;
-    use crate::evm::{
-        engine_db::{
-            simulation_db::SimulationDB,
-            utils::{get_client, get_runtime},
-        },
-        simulation::SimulationEngine,
-    };
+    use crate::evm::protocol::test_utils::parity::LiveChain;
 
     sol! {
         function get_dy_stable(int128 i, int128 j, uint256 dx) external view returns (uint256);
@@ -587,9 +581,7 @@ mod test {
         let (i, j, dx) = swap;
         let (block_number, timestamp) = block;
         let header = BlockHeader { number: block_number, timestamp, ..Default::default() };
-        let mut db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
-        db.set_block(Some(header));
-        let engine = SimulationEngine::new(db, false);
+        let engine = LiveChain::connect().engine_at(&header);
         let pool = AlloyAddress::from_str(pool).unwrap();
         let decimals = read_decimals(&engine, &pool, n_coins);
 
@@ -813,5 +805,92 @@ mod test {
             (0, 1, U256::from(1_000_000_000_000_000_000u128)),
             (21_500_000, 1_736_000_000),
         );
+    }
+
+    /// Live parity on Monad: each `core_stableswap_factory` pool is resolved and read through the
+    /// VM from chain storage at a random recent block, as the decoder does from indexed storage,
+    /// and quoted natively; the quote must equal the pool's own `get_dy` `eth_call`ed at that
+    /// block.
+    mod live {
+        use std::collections::HashMap;
+
+        use alloy::primitives::address;
+
+        use super::*;
+        use crate::evm::protocol::curve::variant;
+
+        sol! {
+            function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
+            function get_dy(uint256 i, uint256 j, uint256 dx) external view returns (uint256);
+        }
+
+        /// Curve factories on Monad, as the manifest configures them.
+        const CORE_STABLESWAP_FACTORY: &str = "0x8271e06e5887fe5ba05234f5315c19f3ec90e8ad";
+        const STABLESWAP_NG_FACTORY: &str = "0x6fd134881c6842600962b778ce56e2e3c4698295";
+        const TWOCRYPTO_FACTORY: &str = "0xe7fbd704b938cb8fe26313c3464d4b7b7348c88c";
+        const BLOCKS: usize = 5;
+        const SWAPS_PER_BLOCK: usize = 4;
+        const LOOKBACK: u64 = 200_000;
+
+        fn assert_matches_chain(pool: AlloyAddress, n_coins: usize, factory: &str) {
+            let mut chain = LiveChain::connect();
+            let attributes =
+                HashMap::from([("factory".to_string(), Bytes::from(factory.as_bytes().to_vec()))]);
+            for block in chain.random_recent_blocks(BLOCKS, LOOKBACK) {
+                let engine = chain.engine_at(&block);
+                let decimals = read_decimals(&engine, &pool, n_coins);
+                let resolved = variant::resolve_variant(&attributes, &pool, n_coins, &engine)
+                    .expect("variant");
+                let raw = read_raw_pool_state(
+                    &engine,
+                    &pool,
+                    resolved,
+                    &decimals,
+                    &PendingOverrides::default(),
+                )
+                .unwrap_or_else(|e| panic!("{pool} @ {}: read failed: {e}", block.number));
+                let decoded = build_pool(&raw).expect("build_pool");
+                for _ in 0..SWAPS_PER_BLOCK {
+                    let Some((i, j, dx)) = chain.random_swap(&raw.balances) else {
+                        continue;
+                    };
+                    let calldata = if resolved.is_crypto() {
+                        get_dy_1Call { i: U256::from(i), j: U256::from(j), dx }.abi_encode()
+                    } else {
+                        get_dy_0Call { i: i as i128, j: j as i128, dx }.abi_encode()
+                    };
+                    let onchain = chain
+                        .eth_call(pool, calldata, block.number)
+                        .map(|out| U256::from_be_slice(&out[..32]));
+                    assert_eq!(
+                        decoded.get_amount_out(i, j, dx),
+                        onchain,
+                        "{pool} ({resolved:?}) @ {}: {dx} of coin {i} -> {j}",
+                        block.number
+                    );
+                }
+            }
+        }
+
+        #[rstest::rstest]
+        #[case::three_pool(address!("942644106b073e30d72c2c5d7529d5c296ea91ab"), 3, CORE_STABLESWAP_FACTORY)]
+        #[case::cbbtc_wbtc_lbtc(address!("d2634e05ebed90bd0a6c0e93d48d7bd8036653b1"), 3, CORE_STABLESWAP_FACTORY)]
+        #[case::mon_lsts(address!("74d80ee400d3026fdd2520265cc98300710b25d4"), 4, CORE_STABLESWAP_FACTORY)]
+        #[case::usdat_usdc(address!("fd945d71d4e9609a1fab0ae9c30da8088e7aee1e"), 2, CORE_STABLESWAP_FACTORY)]
+        #[case::bitcoin_converter(address!("5d37f9b272ca7cda2a05245b9a503746eefac88f"), 3, CORE_STABLESWAP_FACTORY)]
+        #[case::spectra_pt_ibt(
+            address!("5d31ef52e2571294c91f01a3d12bf664d2951666"),
+            2,
+            STABLESWAP_NG_FACTORY
+        )]
+        #[case::twocrypto_usdc_wmon(address!("78051fbf40581619ffaadb6cd7e5856d4a327a6d"), 2, TWOCRYPTO_FACTORY)]
+        #[ignore = "Requires RPC_URL to be set in environment variables or .env file (Monad)"]
+        fn monad_pool_matches_get_dy(
+            #[case] pool: AlloyAddress,
+            #[case] n_coins: usize,
+            #[case] factory: &str,
+        ) {
+            assert_matches_chain(pool, n_coins, factory);
+        }
     }
 }

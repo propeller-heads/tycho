@@ -22,9 +22,11 @@ Contract addresses are configured per manifest via query-string params on map/st
 - `vault_extension` — Vault extension contract
 - `batch_router` — Batch router for swaps
 - `permit2` — Permit2 authorization contract
-- `weighted_factory` — Weighted pool factory
-- `stable_factory` — Stable pool factory
+- `weighted_factory` — Weighted pool factory; a comma-separated list indexes several generations
+- `stable_factory` — Stable pool factory; a comma-separated list indexes several generations
 - `reclamm_factory` — ReClamm pool factory
+- `stable_surge_factory`, `stable_surge_hook` — StableSurge pool factories (comma-separated) and
+  the hook they attach to their pools (optional, set together)
 - `skip_rate_provider_pools` — When `true`, pools whose factory `Create` call includes any
   `WITH_RATE` token are not emitted as protocol components (optional, default `false`). Set to
   `true` on L2 deployments where RPC nodes lack DCI/tracing support; yield-bearing pools with rate
@@ -35,6 +37,7 @@ See `substreams.yaml` (Ethereum mainnet) and the network-specific manifests:
 - `base-balancer-v3.yaml`
 - `arbitrum-balancer-v3.yaml`
 - `gnosis-balancer-v3.yaml`
+- `monad-balancer-v3.yaml`
 
 Addresses are sourced from the [Balancer deployments repo](https://github.com/balancer/balancer-deployments).
 

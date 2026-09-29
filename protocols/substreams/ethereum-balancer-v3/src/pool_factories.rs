@@ -6,6 +6,9 @@ use abi::{
     stable_pool_factory_contract::{
         events::PoolCreated as StablePoolCreated, functions::Create as StablePoolCreate,
     },
+    stable_surge_pool_factory_contract::{
+        events::PoolCreated as StableSurgePoolCreated, functions::Create as StableSurgePoolCreate,
+    },
     weighted_pool_factory_contract::{
         events::PoolCreated as WeightedPoolCreated, functions::Create as WeightedPoolCreate,
     },
@@ -41,7 +44,11 @@ pub fn address_map(
     call: &Call,
     config: &DeploymentConfig,
 ) -> Option<ProtocolComponent> {
-    if pool_factory_address == config.weighted_factory.as_slice() {
+    if config
+        .weighted_factory
+        .iter()
+        .any(|f| f == pool_factory_address)
+    {
         let WeightedPoolCreate {
             tokens: token_config,
             normalized_weights,
@@ -80,38 +87,43 @@ pub fn address_map(
         return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
     }
 
-    if pool_factory_address == config.stable_factory.as_slice() {
-        let StablePoolCreate { tokens: token_config, swap_fee_percentage, .. } =
+    if config
+        .stable_factory
+        .iter()
+        .any(|f| f == pool_factory_address)
+    {
+        let StablePoolCreate { tokens, swap_fee_percentage, .. } =
             StablePoolCreate::match_and_decode(call)?;
         let StablePoolCreated { pool } = StablePoolCreated::match_and_decode(log)?;
-        let rate_providers = collect_rate_providers(&token_config);
-        if should_skip_rate_provider_pool(config, &rate_providers) {
-            return None;
-        }
+        return stable_pool_component(
+            &pool,
+            tokens,
+            &swap_fee_percentage,
+            "StablePoolFactory",
+            config,
+        );
+    }
 
-        // TODO: to add "buffers" support for boosted pools, we need to add the unwrapped
-        // version of all ERC4626 tokens to the pool tokens list. Skipped for now - we need
-        // to test that the adapter supports it correctly and ERC4626 overwrites are handled
-        // correctly in simulation.
-        let tokens = token_config
-            .into_iter()
-            .map(|t| t.0)
-            .collect::<Vec<_>>();
-
-        let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
-        let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
-
-        let mut attributes = vec![
-            ("pool_type", "StablePoolFactory".as_bytes()),
-            ("bpt", &pool),
-            ("fee", &fee_bytes),
-        ];
-
-        if !rate_providers.is_empty() {
-            attributes.push(("rate_providers", &rate_providers_bytes));
-        }
-
-        return Some(create_pool_component(&pool, tokens.as_slice(), &attributes, config));
+    if config
+        .stable_surge_factory
+        .iter()
+        .any(|f| f == pool_factory_address)
+    {
+        let StableSurgePoolCreate { tokens, swap_fee_percentage, .. } =
+            StableSurgePoolCreate::match_and_decode(call)?;
+        let StableSurgePoolCreated { pool } = StableSurgePoolCreated::match_and_decode(log)?;
+        let mut component = stable_pool_component(
+            &pool,
+            tokens,
+            &swap_fee_percentage,
+            "StableSurgePoolFactory",
+            config,
+        )?;
+        // The hook keeps each pool's surge threshold and maximum fee in its own storage.
+        component
+            .contracts
+            .push(config.stable_surge_hook.clone());
+        return Some(component);
     }
 
     if pool_factory_address == config.reclamm_factory.as_slice() {
@@ -164,6 +176,42 @@ pub fn address_map(
     }
 
     None
+}
+
+/// The component for a pool of the stable family, whose factories differ only in their `create`
+/// signature and the `pool_type` marker.
+fn stable_pool_component(
+    pool: &[u8],
+    token_config: TokenConfig,
+    swap_fee_percentage: &BigInt,
+    pool_type: &str,
+    config: &DeploymentConfig,
+) -> Option<ProtocolComponent> {
+    let rate_providers = collect_rate_providers(&token_config);
+    if should_skip_rate_provider_pool(config, &rate_providers) {
+        return None;
+    }
+
+    // TODO: to add "buffers" support for boosted pools, we need to add the unwrapped
+    // version of all ERC4626 tokens to the pool tokens list. Skipped for now - we need
+    // to test that the adapter supports it correctly and ERC4626 overwrites are handled
+    // correctly in simulation.
+    let tokens = token_config
+        .into_iter()
+        .map(|t| t.0)
+        .collect::<Vec<_>>();
+
+    let fee_bytes = swap_fee_percentage.to_signed_bytes_be();
+    let rate_providers_bytes = json_serialize_address_list(rate_providers.as_slice());
+
+    let mut attributes =
+        vec![("pool_type", pool_type.as_bytes()), ("bpt", pool), ("fee", &fee_bytes)];
+
+    if !rate_providers.is_empty() {
+        attributes.push(("rate_providers", &rate_providers_bytes));
+    }
+
+    Some(create_pool_component(pool, tokens.as_slice(), &attributes, config))
 }
 
 fn create_pool_component(

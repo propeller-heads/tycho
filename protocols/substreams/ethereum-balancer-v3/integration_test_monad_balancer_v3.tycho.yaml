@@ -1,0 +1,53 @@
+substreams_yaml_path: ./monad-balancer-v3.yaml
+protocol_system: "vm:balancer_v3"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "balancer_v3_pool"
+adapter_contract: "BalancerV3SwapAdapter"
+adapter_build_signature: "constructor(address,address,address,address)"
+adapter_build_args: "0xbA1333333333a1BA1108E8412f11850A5C319bA9,0x85a80afee867aDf27B50BdB7b76DA70f1E853062,0x000000000022D473030F116dDEE9F6B43aC78BA3,0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"
+skip_balance_check: true # Skipped because this Balancer V3 uses a Vault, the current version of the testing module doesn't support this.
+
+initialized_accounts:
+  - "0xbA1333333333a1BA1108E8412f11850A5C319bA9"
+
+tests:
+  # wnAUSD/wnUSDC/wnUSDT stable surge pool; every token carries a rate provider.
+  - name: test_monad_stable_surge_pool_creation
+    start_block: 55818937
+    stop_block: 55818940
+    expected_components:
+      - id: "0x2daa146dfb7eaef0038f9f15b2ec1e4de003f72b"
+        tokens:
+          - "0x4e8aaecCE10ad9394e96fE5f2bd4e587A7B04298"
+          - "0x82c370ba90E38ef6Acd8b1b078d34fD86FC6bAC9"
+          - "0x8d5c2Df3Eef09088Fcccf3376D8EcD0Dd505f642"
+        static_attributes:
+          pool_type: "0x537461626c655375726765506f6f6c466163746f7279"
+          bpt: "0x2daa146dfb7eaef0038f9f15b2ec1e4de003f72b"
+          fee: "0x1b48eb57e000"
+          rate_providers: "0x5b22307831646638663763313761373632663663373833346531386435613739373163663834633032626130222c22307837643464613335613265303439333561376166313837333462613165376635373139366638353535222c22307864343736366338333633353966356363353838353434613536336666363733613031313336616130225d"
+        skip_simulation: true # This test only covers component creation and static attributes.
+        creation_tx: "0x418ad36bbcff0d94c1a99794e2b9887e7157a6f6e5e2f4f21e70b037814d4e04"
+
+  # WMON/USDC reCLAMM ("AutoRange") pool.
+  - name: test_monad_reclamm_pool_creation
+    start_block: 78475955
+    stop_block: 78475958
+    expected_components:
+      - id: "0x696e219bc37954154291ebcd66b40ba0b1a26148"
+        tokens:
+          - "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" # WMON
+          - "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" # USDC
+        static_attributes:
+          pool_type: "0x5265436c616d6d506f6f6c466163746f7279"
+          fee: "0x0aa87bee538000"
+          initial_min_price: "0x3a14541452d800"
+          initial_max_price: "0x742890e02ec800"
+          initial_target_price: "0x5222407f249682"
+          daily_price_shift_exponent: "0x2386f26fc10000"
+          centeredness_margin: "0x0214e8348c4f0000"
+          token_a_price_includes_rate: "0x00"
+          token_b_price_includes_rate: "0x00"
+        skip_simulation: true
+        creation_tx: "0x173a22ede9cf040db1aee2a50fa115db8d2b913636682926fe2890fd83b91fe9"

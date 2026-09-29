@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.10
+
+- Add the Monad manifest (`monad-curve.yaml`, `monad-params.json`): core StableSwap
+  factory `0x8271e06e5887fe5ba05234f5315c19f3ec90e8ad`, StableSwap-NG factory
+  `0x6fd134881c6842600962b778ce56e2e3c4698295` and TwoCrypto factory
+  `0xe7fbd704b938cb8fe26313c3464d4b7b7348c88c`. Monad has no address provider or
+  MetaRegistry, so `meta_registry` is empty. `initialBlock` 35641454 is the core
+  factory's deployment (first `PlainPoolDeployed` at block 36882311).
+
 ## v0.3.9
 
 - Update `tycho-substreams` from `0.8.0` to `0.8.1`. Contract changes carrying only

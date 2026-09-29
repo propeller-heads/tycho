@@ -16,6 +16,7 @@ use alloy::{
 };
 use balancer_maths_rust::{
     common::types::{BasePoolState, PoolState},
+    hooks::stable_surge::StableSurgeHookState,
     pools::{
         quantamm::quantamm_data::{QuantAmmImmutable, QuantAmmMutable, QuantAmmState},
         reclammv2::reclammv2_data::{ReClammV2Immutable, ReClammV2Mutable, ReClammV2State},
@@ -165,6 +166,12 @@ sol! {
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
         function getPoolPausedState(address pool) external view returns (bool, uint32, uint32, address);
     }
+
+    #[allow(missing_docs)]
+    interface IStableSurgeHook {
+        function getSurgeThresholdPercentage(address pool) external view returns (uint256);
+        function getMaxSurgeFeePercentage(address pool) external view returns (uint256);
+    }
 }
 
 impl HooksConfig {
@@ -178,6 +185,15 @@ impl HooksConfig {
             self.shouldCallComputeDynamicSwapFee ||
             self.shouldCallBeforeSwap ||
             self.shouldCallAfterSwap
+    }
+
+    /// Whether this is the hook profile of a `StableSurgeHook`: a dynamic swap fee and nothing
+    /// else that touches a swap.
+    fn is_stable_surge(&self) -> bool {
+        self.shouldCallComputeDynamicSwapFee &&
+            !self.enableHookAdjustedAmounts &&
+            !self.shouldCallBeforeSwap &&
+            !self.shouldCallAfterSwap
     }
 }
 
@@ -208,11 +224,15 @@ pub enum BalancerPoolType {
     Reclamm,
     /// Weighted pools whose weights are interpolated by an off-chain rule engine.
     QuantAmm,
+    /// Stable pools from `StableSurgePoolFactory`, whose `StableSurgeHook` raises the swap fee
+    /// for swaps that push the pool past its imbalance threshold.
+    StableSurge,
 }
 
 impl BalancerPoolType {
     /// Kept next to [`Self::factory_marker`] so adding a variant means touching both.
-    const ALL: [Self; 4] = [Self::Weighted, Self::Stable, Self::Reclamm, Self::QuantAmm];
+    const ALL: [Self; 5] =
+        [Self::Weighted, Self::Stable, Self::Reclamm, Self::QuantAmm, Self::StableSurge];
 
     fn from_factory_marker(marker: &str) -> Option<Self> {
         Self::ALL
@@ -227,6 +247,7 @@ impl BalancerPoolType {
             Self::Stable => "StablePoolFactory",
             Self::Reclamm => "ReClammPoolFactory",
             Self::QuantAmm => "QuantAMMWeightedPoolFactory",
+            Self::StableSurge => "StableSurgePoolFactory",
         }
     }
 
@@ -238,7 +259,7 @@ impl BalancerPoolType {
     fn maths_marker(self) -> &'static str {
         match self {
             Self::Weighted => "WEIGHTED",
-            Self::Stable => "STABLE",
+            Self::Stable | Self::StableSurge => "STABLE",
             Self::Reclamm => "RECLAMM_V2",
             Self::QuantAmm => "QUANT_AMM_WEIGHTED",
         }
@@ -306,7 +327,11 @@ where
     // a dynamic-fee hook, and quoting it as hookless yields amounts the Vault rejects.
     let hooks: HooksConfig =
         call(engine, &VAULT, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
-    if hooks.affects_swaps() {
+    // `StableSurgePoolFactory` always registers its own `StableSurgeHook`, so the factory the
+    // indexer attributed the pool to identifies the hook; the flag check guards against a profile
+    // that hook does not have.
+    let hook_is_modelled = pool_type == BalancerPoolType::StableSurge && hooks.is_stable_surge();
+    if hooks.affects_swaps() && !hook_is_modelled {
         return Err(SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} uses swap hook {:?}, which the native maths does not model",
             hooks.hooksContract
@@ -343,7 +368,7 @@ where
             );
             Ok(PoolState::Weighted(WeightedState::new(base, weights)))
         }
-        BalancerPoolType::Stable => {
+        BalancerPoolType::Stable | BalancerPoolType::StableSurge => {
             let dynamic: StablePoolDynamicData =
                 call(engine, pool, IBalancerV3Pool::getStablePoolDynamicDataCall {})?;
             let base = base_state(
@@ -415,6 +440,39 @@ where
             }))
         }
     }
+}
+
+/// Reads the surge parameters a `StableSurgeHook` keeps for `pool`, paired with the pool's current
+/// amplification `amp` as the hook's fee computation expects.
+///
+/// Both parameters can be changed by the pool's swap-fee manager, so they are re-read on every
+/// update alongside the pool state.
+pub(super) fn read_stable_surge_hook<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    pool: &AlloyAddress,
+    amp: U256,
+) -> Result<StableSurgeHookState, SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let hooks: HooksConfig =
+        call(engine, &VAULT, IBalancerV3Vault::getHooksConfigCall { pool: *pool })?;
+    let hook = hooks.hooksContract;
+    Ok(StableSurgeHookState {
+        amp,
+        surge_threshold_percentage: call(
+            engine,
+            &hook,
+            IStableSurgeHook::getSurgeThresholdPercentageCall { pool: *pool },
+        )?,
+        max_surge_fee_percentage: call(
+            engine,
+            &hook,
+            IStableSurgeHook::getMaxSurgeFeePercentageCall { pool: *pool },
+        )?,
+        ..Default::default()
+    })
 }
 
 /// Reads the pool's packed config and rejects the states in which it cannot be quoted.
@@ -845,10 +903,12 @@ mod tests {
         assert_eq!(BalancerPoolType::Stable.factory_marker(), "StablePoolFactory");
         assert_eq!(BalancerPoolType::Reclamm.factory_marker(), "ReClammPoolFactory");
         assert_eq!(BalancerPoolType::QuantAmm.factory_marker(), "QuantAMMWeightedPoolFactory");
+        assert_eq!(BalancerPoolType::StableSurge.factory_marker(), "StableSurgePoolFactory");
         assert_eq!(BalancerPoolType::Weighted.maths_marker(), "WEIGHTED");
         assert_eq!(BalancerPoolType::Stable.maths_marker(), "STABLE");
         assert_eq!(BalancerPoolType::Reclamm.maths_marker(), "RECLAMM_V2");
         assert_eq!(BalancerPoolType::QuantAmm.maths_marker(), "QUANT_AMM_WEIGHTED");
+        assert_eq!(BalancerPoolType::StableSurge.maths_marker(), "STABLE");
     }
 
     #[test]

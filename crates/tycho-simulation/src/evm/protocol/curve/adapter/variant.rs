@@ -60,6 +60,19 @@ impl CurveVariant {
             Self::TriCryptoNG => "TriCryptoNG",
         }
     }
+
+    /// Whether the pool is a CryptoSwap pool, which indexes coins as `uint256` rather than the
+    /// StableSwap pools' `int128`.
+    pub fn is_crypto(&self) -> bool {
+        matches!(
+            self,
+            Self::TwoCryptoV1 |
+                Self::TwoCryptoNG |
+                Self::TwoCryptoStable |
+                Self::TriCryptoV1 |
+                Self::TriCryptoNG
+        )
+    }
 }
 
 impl std::fmt::Display for CurveVariant {

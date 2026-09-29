@@ -3,19 +3,22 @@
 //! Mirrors the Curve hybrid decoder: the VM engine is used to resolve the pool family and read
 //! state through the pool's own getters, after which quoting is pure Rust. Pool families the maths
 //! library cannot price are rejected here so they never reach the router with wrong numbers.
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt::Debug, str::FromStr};
 
 use alloy::primitives::Address as AlloyAddress;
+use balancer_maths_rust::common::types::PoolState;
+use revm::DatabaseRef;
 use tycho_client::feed::synchronizer::ComponentWithState;
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::{models::token::Token, simulation::errors::SimulationError, Bytes};
 
 use crate::{
     evm::{
-        engine_db::{create_engine, SHARED_TYCHO_DB},
+        engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface, SHARED_TYCHO_DB},
         protocol::{
             balancer_v3::{state::BalancerV3State, vm},
             vm::utils::load_stateless_contracts,
         },
+        simulation::SimulationEngine,
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -63,25 +66,71 @@ impl TryFromWithBlock<ComponentWithState, tycho_client::feed::BlockHeader> for B
 
         // The component's token list is the pool's registration order, which its balances, rates
         // and weights are all indexed by.
-        let tokens = value.component.tokens.clone();
-        let state = vm::read_pool_state(
+        BalancerV3State::from_vm(
             &engine,
-            &pool,
+            pool_address,
             pool_type,
-            &tokens,
+            value.component.tokens.clone(),
             &value.component.static_attributes,
             block.timestamp,
         )
-        .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))?;
+        .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
+    }
+}
+
+impl BalancerV3State {
+    /// Reads a pool of family `pool_type` through `engine`'s view of the indexed storage.
+    pub(super) fn from_vm<D: EngineDatabaseInterface + Clone + Debug>(
+        engine: &SimulationEngine<D>,
+        pool_address: Bytes,
+        pool_type: vm::BalancerPoolType,
+        tokens: Vec<Bytes>,
+        static_attributes: &HashMap<String, Bytes>,
+        block_timestamp: u64,
+    ) -> Result<Self, SimulationError>
+    where
+        <D as DatabaseRef>::Error: Debug,
+        <D as EngineDatabaseInterface>::Error: Debug,
+    {
+        let pool = AlloyAddress::from_slice(pool_address.as_ref());
+        let state = vm::read_pool_state(
+            engine,
+            &pool,
+            pool_type,
+            &tokens,
+            static_attributes,
+            block_timestamp,
+        )?;
         // Only the weighted family registers per-token minimum balances. QuantAMM shares
         // `WeightedMath`'s curve but not that check — it bounds swaps by its own trade-size ratio.
         let min_token_balances = match pool_type {
-            vm::BalancerPoolType::Weighted => vm::read_weighted_min_token_balances(&engine, &pool),
+            vm::BalancerPoolType::Weighted => vm::read_weighted_min_token_balances(engine, &pool),
             vm::BalancerPoolType::Stable |
+            vm::BalancerPoolType::StableSurge |
             vm::BalancerPoolType::Reclamm |
             vm::BalancerPoolType::QuantAmm => Vec::new(),
         };
-
-        Ok(BalancerV3State::new(pool_address, tokens, min_token_balances, block.timestamp, state))
+        let stable_surge = match pool_type {
+            vm::BalancerPoolType::StableSurge => {
+                let PoolState::Stable(stable) = &state else {
+                    return Err(SimulationError::FatalError(format!(
+                        "balancer_v3 pool {pool} was read as a non-stable state"
+                    )));
+                };
+                Some(vm::read_stable_surge_hook(engine, &pool, stable.mutable.amp)?)
+            }
+            vm::BalancerPoolType::Weighted |
+            vm::BalancerPoolType::Stable |
+            vm::BalancerPoolType::Reclamm |
+            vm::BalancerPoolType::QuantAmm => None,
+        };
+        Ok(Self::new(
+            pool_address,
+            tokens,
+            min_token_balances,
+            block_timestamp,
+            state,
+            stable_surge,
+        ))
     }
 }

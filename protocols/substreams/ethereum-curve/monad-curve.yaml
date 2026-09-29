@@ -1,0 +1,91 @@
+specVersion: v0.1.0
+package:
+  name: "monad_curve"
+  version: v0.3.10
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-curve"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+    - ./proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_curve.wasm
+
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 35641454 # Creation of the core StableSwap factory 0x8271e06e5887fe5ba05234f5315c19f3ec90e8ad
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_component_tokens
+    kind: store
+    initialBlock: 35641454
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_components
+
+  - name: store_non_component_accounts
+    kind: store
+    initialBlock: 35641454
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_components
+
+  - name: store_set_oracle_components
+    kind: store
+    initialBlock: 35641454
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_components
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 35641454
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_component_tokens
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 35641454
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 35641454
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - map: map_relative_balances
+      - store: store_component_tokens
+      - store: store_non_component_accounts
+      - store: store_set_oracle_components
+      - store: store_balances
+        mode: deltas # This is the key property that simplifies `BalanceChange` handling
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_components: protocol_params[meta_registry]=&protocol_params[crypto_pool_factory]=&protocol_params[meta_pool_factory]=&protocol_params[crypto_swap_ng_factory]=6fd134881c6842600962b778ce56e2e3c4698295&protocol_params[tricrypto_factory]=&protocol_params[twocrypto_factory]=e7fbd704b938cb8fe26313c3464d4b7b7348c88c&protocol_params[stableswap_factory]=&protocol_params[core_stableswap_factory]=8271e06e5887fe5ba05234f5315c19f3ec90e8ad&protocol_params[weth]=3bd359c1119da7da1d913d1c4d2b7c461115433a&protocol_params[steth]=&protocol_params[rusdy]=&protocol_params[rusdy_blocklist]=&protocol_params[old_susd]=&protocol_params[new_susd]=&protocol_params[tricrypto_2_lp]=&protocol_params[tricrypto_2_math]=&protocol_params[twocrypto_custom_view]=&protocol_params[twocrypto_custom_math]=
+  map_relative_balances: protocol_params[meta_registry]=&protocol_params[crypto_pool_factory]=&protocol_params[meta_pool_factory]=&protocol_params[crypto_swap_ng_factory]=6fd134881c6842600962b778ce56e2e3c4698295&protocol_params[tricrypto_factory]=&protocol_params[twocrypto_factory]=e7fbd704b938cb8fe26313c3464d4b7b7348c88c&protocol_params[stableswap_factory]=&protocol_params[core_stableswap_factory]=8271e06e5887fe5ba05234f5315c19f3ec90e8ad&protocol_params[weth]=3bd359c1119da7da1d913d1c4d2b7c461115433a&protocol_params[steth]=&protocol_params[rusdy]=&protocol_params[rusdy_blocklist]=&protocol_params[old_susd]=&protocol_params[new_susd]=&protocol_params[tricrypto_2_lp]=&protocol_params[tricrypto_2_math]=&protocol_params[twocrypto_custom_view]=&protocol_params[twocrypto_custom_math]=
+  map_protocol_changes: protocol_params[meta_registry]=&protocol_params[crypto_pool_factory]=&protocol_params[meta_pool_factory]=&protocol_params[crypto_swap_ng_factory]=6fd134881c6842600962b778ce56e2e3c4698295&protocol_params[tricrypto_factory]=&protocol_params[twocrypto_factory]=e7fbd704b938cb8fe26313c3464d4b7b7348c88c&protocol_params[stableswap_factory]=&protocol_params[core_stableswap_factory]=8271e06e5887fe5ba05234f5315c19f3ec90e8ad&protocol_params[weth]=3bd359c1119da7da1d913d1c4d2b7c461115433a&protocol_params[steth]=&protocol_params[rusdy]=&protocol_params[rusdy_blocklist]=&protocol_params[old_susd]=&protocol_params[new_susd]=&protocol_params[tricrypto_2_lp]=&protocol_params[tricrypto_2_math]=&protocol_params[twocrypto_custom_view]=&protocol_params[twocrypto_custom_math]=

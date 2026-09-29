@@ -255,7 +255,9 @@ pub fn map_protocol_changes(
             components_store
                 .get_last(pool_store_key(addr))
                 .is_some() ||
-                addr.eq(vault_address)
+                addr.eq(vault_address) ||
+                (!config.stable_surge_hook.is_empty() &&
+                    addr.eq(config.stable_surge_hook.as_slice()))
         },
         &mut transaction_changes,
     );

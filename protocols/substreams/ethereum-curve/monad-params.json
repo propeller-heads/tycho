@@ -1,0 +1,24 @@
+{
+  "protocol_params": {
+    "meta_registry": "",
+    "crypto_pool_factory": "",
+    "meta_pool_factory": "",
+    "crypto_swap_ng_factory": "6fd134881c6842600962b778ce56e2e3c4698295",
+    "tricrypto_factory": "",
+    "twocrypto_factory": "e7fbd704b938cb8fe26313c3464d4b7b7348c88c",
+    "stableswap_factory": "",
+    "core_stableswap_factory": "8271e06e5887fe5ba05234f5315c19f3ec90e8ad",
+    "weth": "3bd359c1119da7da1d913d1c4d2b7c461115433a",
+    "steth": "",
+    "rusdy": "",
+    "rusdy_blocklist": "",
+    "old_susd": "",
+    "new_susd": "",
+    "tricrypto_2_lp": "",
+    "tricrypto_2_math": "",
+    "twocrypto_custom_view": "",
+    "twocrypto_custom_math": "",
+    "twocrypto_custom_implementation_ids": []
+  },
+  "pools": []
+}

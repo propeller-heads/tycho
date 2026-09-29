@@ -14,6 +14,7 @@ use balancer_maths_rust::{
         },
         WAD as ONE_WAD_SCALED_18,
     },
+    hooks::stable_surge::{StableSurgeHook, StableSurgeHookState},
     pools::{
         quantamm::QuantAmmPool,
         reclammv2::{compute_current_virtual_balances, compute_in_given_out, ReClammV2Pool},
@@ -21,7 +22,7 @@ use balancer_maths_rust::{
         weighted::{WeightedPool, MAX_IN_RATIO},
     },
     vault::swap::{swap as vault_swap, MINIMUM_TRADE_AMOUNT},
-    DefaultHook, PoolError,
+    DefaultHook, HookBase, HookState, PoolError,
 };
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,9 @@ pub struct BalancerV3State {
     block_timestamp: u64,
     /// Pool state in the form the maths library consumes.
     state: PoolState,
+    /// Surge parameters of a `StableSurgePoolFactory` pool's hook; `None` for hookless pools.
+    #[serde(default)]
+    stable_surge: Option<StableSurgeHookState>,
 }
 
 impl BalancerV3State {
@@ -97,8 +101,32 @@ impl BalancerV3State {
         min_token_balances: Vec<U256>,
         block_timestamp: u64,
         state: PoolState,
+        stable_surge: Option<StableSurgeHookState>,
     ) -> Self {
-        Self { pool_address, tokens, min_token_balances, block_timestamp, state }
+        Self { pool_address, tokens, min_token_balances, block_timestamp, state, stable_surge }
+    }
+
+    /// The fee percentage the Vault charges on a swap described by `params`: the static fee, or
+    /// what the pool's `StableSurgeHook` raises it to. Fails where the hook fails, as the Vault
+    /// then reverts with `DynamicSwapFeeHookFailed`.
+    fn swap_fee_percentage(&self, params: &SwapParams) -> Result<U256, SimulationError> {
+        let static_fee = self.state.base().swap_fee;
+        let Some(surge) = &self.stable_surge else {
+            return Ok(static_fee);
+        };
+        let result = StableSurgeHook::new().on_compute_dynamic_swap_fee(
+            params,
+            &static_fee,
+            &HookState::StableSurge(surge.clone()),
+        );
+        if result.success {
+            Ok(result.dynamic_swap_fee)
+        } else {
+            Err(SimulationError::RecoverableError(format!(
+                "balancer_v3 pool {} surge fee computation failed",
+                self.pool_address
+            )))
+        }
     }
 
     /// Token addresses in pool registration order.
@@ -174,9 +202,19 @@ impl BalancerV3State {
         };
         // `Vault::swap` takes the state by `Box<PoolState>`, cloning it on every call — which the
         // limit searches make hundreds of. Supplying the pool implementation and hook directly is
-        // all its body does before delegating here, and lets the state be borrowed. The no-op hook
-        // is faithful because the decoder rejects pools carrying a swap hook.
-        vault_swap(&input, &self.state, self.pool_impl()?.as_ref(), &DefaultHook::new(), None)
+        // all its body does before delegating here, and lets the state be borrowed. The decoder
+        // rejects every swap hook but the surge hook, so the no-op hook is faithful for the rest.
+        let pool = self.pool_impl()?;
+        match &self.stable_surge {
+            Some(surge) => vault_swap(
+                &input,
+                &self.state,
+                pool.as_ref(),
+                &StableSurgeHook::new(),
+                Some(&HookState::StableSurge(surge.clone())),
+            ),
+            None => vault_swap(&input, &self.state, pool.as_ref(), &DefaultHook::new(), None),
+        }
     }
 
     /// Largest input the Vault accepts for a swap from `index_in` to `index_out`, in the input
@@ -527,8 +565,15 @@ impl BalancerV3State {
             &base.token_rates[index_out],
         )
         .map_err(maths_error)?;
+        let fee_percentage = self.swap_fee_percentage(&SwapParams {
+            swap_kind: SwapKind::GivenIn,
+            token_in_index: index_in,
+            token_out_index: index_out,
+            amount_scaled_18: amount_in_scaled,
+            balances_live_scaled_18: base.balances_live_scaled_18.clone(),
+        })?;
         let total_fee_scaled =
-            mul_up_fixed(&amount_in_scaled, &base.swap_fee).map_err(maths_error)?;
+            mul_up_fixed(&amount_in_scaled, &fee_percentage).map_err(maths_error)?;
         // This returns the fee in the input token's raw units, truncated to whole ones, so it has
         // to be scaled back up before meeting balances held at 18 decimals. Skipping that leaves
         // the deduction short by the token's scaling factor — 10^12 for something like USDC.
@@ -591,17 +636,19 @@ impl ProtocolSim for BalancerV3State {
                 self.pool_address
             ))
         };
+        let probe_params = SwapParams {
+            swap_kind: SwapKind::GivenIn,
+            token_in_index: index_in,
+            token_out_index: index_out,
+            amount_scaled_18: probe,
+            balances_live_scaled_18: balances.clone(),
+        };
         let out = self
             .pool_impl()
             .map_err(probe_failed)?
-            .on_swap(&SwapParams {
-                swap_kind: SwapKind::GivenIn,
-                token_in_index: index_in,
-                token_out_index: index_out,
-                amount_scaled_18: probe,
-                balances_live_scaled_18: balances.clone(),
-            })
+            .on_swap(&probe_params)
             .map_err(probe_failed)?;
+        let fee = u256_to_f64(self.swap_fee_percentage(&probe_params)?)? / WAD;
 
         // Live balances are already normalized to 18 decimals, so the decimal correction cancels;
         // what remains is undoing the token rates that scaled them into underlying-value terms.
@@ -614,7 +661,7 @@ impl ProtocolSim for BalancerV3State {
                 self.pool_address, quote.address
             )));
         }
-        Ok(add_fee_markup(ratio * rate_in / rate_out, self.fee()))
+        Ok(add_fee_markup(ratio * rate_in / rate_out, fee))
     }
 
     fn get_amount_out(
@@ -699,6 +746,12 @@ impl ProtocolSim for BalancerV3State {
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
         self.state = vm::refresh_pool_state(&engine, &pool, &self.state, self.block_timestamp)
             .map_err(TransitionError::SimulationError)?;
+        if let (Some(_), PoolState::Stable(stable)) = (&self.stable_surge, &self.state) {
+            self.stable_surge = Some(
+                vm::read_stable_surge_hook(&engine, &pool, stable.mutable.amp)
+                    .map_err(TransitionError::SimulationError)?,
+            );
+        }
         Ok(())
     }
 

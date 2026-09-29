@@ -83,19 +83,8 @@ impl CurveState {
             })
     }
 
-    fn is_crypto(&self) -> bool {
-        matches!(
-            self.variant,
-            CurveVariant::TwoCryptoV1 |
-                CurveVariant::TwoCryptoNG |
-                CurveVariant::TwoCryptoStable |
-                CurveVariant::TriCryptoV1 |
-                CurveVariant::TriCryptoNG
-        )
-    }
-
     fn gas_estimate(&self) -> u64 {
-        if self.is_crypto() {
+        if self.variant.is_crypto() {
             CRYPTOSWAP_GAS
         } else {
             STABLESWAP_GAS
