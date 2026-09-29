@@ -43,7 +43,7 @@ use super::{
     cache::{CachedAccount, EntityCache},
     window::{DeltaWindow, WindowResolution},
 };
-use crate::services::rpc::RpcError;
+use crate::services::{deltas_buffer::PendingDeltasError, rpc::RpcError};
 
 /// Which path answers state requests, holding what the cache modes need: the loaded
 /// [`EntityCache`] when building the services, the [`StateService`] once built.
@@ -121,6 +121,8 @@ impl StateService {
     ///   cached nor changed by a delta in the window.
     /// - `RpcError::Parse` (400) when the version is malformed, or `protocol_system` is empty or
     ///   has no window. Today this silently reads the database.
+    /// - `RpcError::DeltasError` (500) when the window cannot be read or a change cannot be merged,
+    ///   as on the database path.
     /// - `RpcError::Storage(StorageError::NotFound("Block", ..))` when the version is a block
     ///   number above the tip. tycho-client retries a body that contains `"Could not find Block"`
     ///   and may blacklist a component on any other text, so the entity name must be `Block`.
@@ -286,7 +288,7 @@ impl StateService {
                 || ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
                 ProtocolComponentState::from,
             );
-            let merge_error = |err: MergeError| RpcError::Unknown(err.to_string());
+            let merge_error = |err: MergeError| RpcError::from(PendingDeltasError::from(err));
             for change in window_changes
                 .get(*id)
                 .into_iter()
@@ -332,9 +334,12 @@ impl StateService {
                 RpcError::Parse(format!("Unknown protocol system `{protocol_system}`"))
             })?;
         let version = BlockOrTimestamp::try_from(version).map_err(RpcError::from)?;
-        let window = window
-            .lock()
-            .map_err(|err| RpcError::Unknown(format!("Delta window lock poisoned: {err}")))?;
+        let window = window.lock().map_err(|err| {
+            RpcError::from(PendingDeltasError::LockError(
+                protocol_system.to_string(),
+                err.to_string(),
+            ))
+        })?;
         let block = match window.resolve(&version) {
             WindowResolution::InWindow(block) => block,
             WindowResolution::BelowFloor => return Err(StateServiceError::VersionTooOld),
@@ -346,7 +351,8 @@ impl StateService {
                 .into())
             }
         };
-        let value = read(&window, block.number).map_err(RpcError::from)?;
+        let value = read(&window, block.number)
+            .map_err(|err| RpcError::from(PendingDeltasError::from(err)))?;
         Ok((WriteTimestamp::from(&block), value))
     }
 }
