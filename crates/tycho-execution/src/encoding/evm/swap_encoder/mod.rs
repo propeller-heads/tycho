@@ -12,6 +12,7 @@ mod etherfi;
 mod fallback;
 pub use fallback::{FallbackProtocol, FallbackSwapData};
 mod fermiswap;
+mod flamm;
 mod fluid_v1;
 mod hashflow;
 mod lido_v4;

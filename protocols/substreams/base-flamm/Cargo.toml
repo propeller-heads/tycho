@@ -1,0 +1,27 @@
+[package]
+name = "base-flamm"
+version = "0.1.0"
+edition = "2021"
+description = "Everlong FLAMM native indexing on Base: pool, hook, router, financing account, price feed, Morpho Blue, IRM and Chainlink state as component attributes"
+
+[lib]
+name = "base_flamm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+hex = "0.4.3"
+keccak-hash = "0.11.0"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.1"
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[dev-dependencies]
+# the end-to-end fixtures are gzipped (real Base blocks and the stream they fold into)
+flate2 = "1"
+prost-types = "0.11"
+serde_json = "1.0.138"

@@ -43,6 +43,7 @@ pub enum Executor {
     AerodromeV1,
     LiquidityParty,
     LunarBase,
+    FLAMM,
     PropAMM,
 }
 
@@ -64,7 +65,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 12] = [
+    pub const VARIANTS: [Executor; 13] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -76,6 +77,7 @@ impl Executor {
         Executor::AerodromeV1,
         Executor::LiquidityParty,
         Executor::LunarBase,
+        Executor::FLAMM,
         Executor::PropAMM,
     ];
 
@@ -337,6 +339,28 @@ impl Executor {
                     output_to_router: false,
                 })
             }
+            // https://github.com/propeller-heads/tycho/blob/9323e6dfc975d5cd593061ff95e4f6094fceb44f/crates/tycho-execution/contracts/src/executors/FLAMMExecutor.sol
+            // Both venues (the trailing venue byte, data[60:61]) debit the pool named in the data
+            // the same way, so the byte is not requested here.
+            Self::FLAMM => Ok(TransferData {
+                transfer_type: TransferType::ProtocolWillDebit,
+                receiver: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
@@ -645,6 +669,31 @@ impl Executor {
                 // the actual swap logic doesn't matter
                 Ok(())
             }
+            // https://github.com/propeller-heads/tycho/blob/9323e6dfc975d5cd593061ff95e4f6094fceb44f/crates/tycho-execution/contracts/src/executors/FLAMMExecutor.sol
+            // The executor accepts only pools the FLAMM factory created, but creation is
+            // permissionless and the creator chooses the hooks the pool calls into, so the pool is
+            // caller-controlled code as far as the router is concerned. The executor never moves
+            // tokens itself: the pool pulls the input the Dispatcher approved and pays the
+            // receiver. The executor's own revert unless the pool consumed exactly
+            // `amountIn` is satisfied trivially by a sender-controlled pool.
+            Self::FLAMM => {
+                let pool = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if pool.is_sender_controlled() {
+                    // if the sender controls the pool,
+                    // the actual swap logic doesn't matter
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "flamm pool not sender controlled. not low hanging fruit. would require simulating real pool".into(),
+                    })
+                }
+            }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => {
                 let pamm = params.request(
@@ -699,6 +748,7 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
             Self::LunarBase => unimplemented!(),
+            Self::FLAMM => unimplemented!(),
             Self::PropAMM => unimplemented!(),
         }
     }
@@ -727,6 +777,7 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
+            Self::FLAMM => unimplemented!("FLAMM doesn't use callbacks"),
             Self::PropAMM => {
                 unimplemented!("PropAMM doesn't use callbacks")
             }
@@ -790,6 +841,8 @@ impl Executor {
             )?,
             // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L37
             Self::LunarBase => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/9323e6dfc975d5cd593061ff95e4f6094fceb44f/crates/tycho-execution/contracts/src/executors/FLAMMExecutor.sol
+            Self::FLAMM => Address::Router,
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },

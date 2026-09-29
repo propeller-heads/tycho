@@ -90,6 +90,7 @@ EXECUTOR_FIXTURES=(
     "MaverickV2|ethereum|vm:maverick_v2"
     "EkuboV3|ethereum|ekubo_v3"
     "EkuboV3Robinhood|robinhood|ekubo_v3"
+    "FLAMM|base|flamm"
     "FluidV1|ethereum|fluid_v1"
     "LiquidityParty|ethereum|vm:liquidityparty"
     "LunarBase|base|lunarbase"
