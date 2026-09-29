@@ -1,0 +1,25 @@
+[package]
+name = "monad-kuru"
+version = "0.1.1"
+edition = "2021"
+
+[lib]
+name = "monad_kuru"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+prost = "0.11"
+anyhow = "1.0.75"
+hex = "0.4.3"
+ethabi = "18.0.0"
+tycho-substreams = { path = "../crates/tycho-substreams" }
+kuru-book = { path = "../../../crates/kuru-book" }
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[build-dependencies]
+anyhow = "1.0.75"
+substreams-ethereum = "0.9.9"

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.5
+
+- Add the Monad Uniswap V3 manifest (factory `0x204FAca1764B154221e35c0d20aBb3c525710498`, first `PoolCreated` at block 32036467).
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding

@@ -1,0 +1,10 @@
+[package]
+name = "kuru-book"
+description = "Kuru (Monad CLOB) market events -> price levels, shared by tycho-simulation and the monad-kuru substreams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

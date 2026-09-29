@@ -1,0 +1,69 @@
+[
+ {
+  "type": "event",
+  "name": "MarketRegistered",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "baseAsset",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "quoteAsset",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "market",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "vaultAddress",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "pricePrecision",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "sizePrecision",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "tickSize",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "minSize",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "maxSize",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "takerFeeBps",
+    "type": "uint256",
+    "indexed": false
+   },
+   {
+    "name": "makerFeeBps",
+    "type": "uint256",
+    "indexed": false
+   },
+   {
+    "name": "kuruAmmSpread",
+    "type": "uint96",
+    "indexed": false
+   }
+  ]
+ }
+]

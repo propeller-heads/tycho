@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package kuru.v1;
+
+import "tycho/evm/v1/common.proto";
+
+// One market event (`kuru_book::Event`), in log order.
+message Event {
+  string market = 1;          // 0x-hex market address (= component id)
+  uint64 ordinal = 2;
+  tycho.evm.v1.Transaction tx = 3;
+  uint32 kind = 4;            // 0 created, 1 canceled, 2 flip update, 3 trade
+  uint64 order_id = 5;
+  uint32 price = 6;
+  string size = 7;            // created/canceled/flip-update size; trade updated size
+  bool is_buy = 8;            // side of the order; trade: taker side
+  string price_1e18 = 9;      // trade only
+  string filled = 10;         // trade only
+}
+
+message Events {
+  repeated Event events = 1;
+}
+
+// Level change: `market:side:price` += delta (sizePrecision units).
+message LevelDelta {
+  string market = 1;
+  uint64 ordinal = 2;
+  tycho.evm.v1.Transaction tx = 3;
+  bool is_buy = 4;
+  uint32 price = 5;
+  string delta = 6;
+}
+
+message LevelDeltas {
+  repeated LevelDelta deltas = 1;
+}

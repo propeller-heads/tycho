@@ -84,6 +84,7 @@ jobs:
       BSC_RPC_URL: ${{ secrets.BSC_RPC_URL_ARCHIVE }}
       POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL_ARCHIVE }}
       ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL_ARCHIVE }}
+      MONAD_RPC_URL: ${{ secrets.MONAD_RPC_URL_ARCHIVE }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -105,10 +106,15 @@ jobs:
         run: forge fmt --check
 
       - name: Run tests
-        run: forge test -vvv
+        run: forge test -vvv --no-match-path 'test/protocols/Kuru.t.sol'
+
+      # Foundry runs chain 143 forks only under its Monad network.
+      - name: Run Monad tests
+        run: forge test -vvv --network monad --match-path 'test/protocols/Kuru.t.sol'
+        if: matrix.project.path == 'crates/tycho-execution/contracts'
 
       - name: Gas snapshot
-        run: NO_COLOR=1 forge snapshot >> "$GITHUB_STEP_SUMMARY"
+        run: NO_COLOR=1 forge snapshot --no-match-path 'test/protocols/Kuru.t.sol' >> "$GITHUB_STEP_SUMMARY"
         if: matrix.project.path == 'crates/tycho-execution/contracts'
 
   # One skip job per matrix entry so each check name matches exactly what branch

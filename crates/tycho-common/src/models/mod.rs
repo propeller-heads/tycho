@@ -96,6 +96,7 @@ pub enum Chain {
     Plasma,
     Robinhood,
     Arc,
+    Monad,
     /// User-defined chain resolved via the [`chain_config`] registry; see the enum docs.
     Custom(CustomChainId),
 }
@@ -164,6 +165,7 @@ impl Chain {
             "plasma" => Some(Chain::Plasma),
             "robinhood" => Some(Chain::Robinhood),
             "arc" => Some(Chain::Arc),
+            "monad" => Some(Chain::Monad),
             _ => None,
         }
     }
@@ -204,6 +206,7 @@ impl Display for Chain {
             Chain::Plasma => f.write_str("plasma"),
             Chain::Robinhood => f.write_str("robinhood"),
             Chain::Arc => f.write_str("arc"),
+            Chain::Monad => f.write_str("monad"),
             Chain::Custom(name) => f.write_str(name.as_str()),
         }
     }
@@ -223,6 +226,7 @@ impl From<dto::Chain> for Chain {
             dto::Chain::Plasma => Chain::Plasma,
             dto::Chain::Robinhood => Chain::Robinhood,
             dto::Chain::Arc => Chain::Arc,
+            dto::Chain::Monad => Chain::Monad,
             dto::Chain::Custom(name) => Chain::custom(name.as_str()).unwrap_or_else(|e| {
                 panic!(
                     "received custom chain '{name}' with no registered config: {e}; install it via \
@@ -297,6 +301,18 @@ fn native_xpl(chain: Chain) -> Token {
     )
 }
 
+fn native_mon(chain: Chain) -> Token {
+    Token::new(
+        &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+        "MON",
+        18,
+        0,
+        &[Some(2300)],
+        chain,
+        100,
+    )
+}
+
 fn native_arc_usdc(chain: Chain) -> Token {
     Token::new(&Bytes::from([0u8; 20]), "USDC", 18, 0, &[Some(2300)], chain, 100)
 }
@@ -347,6 +363,10 @@ fn wrapped_native_pol(chain: Chain, address: &str) -> Token {
 
 fn wrapped_native_xpl(chain: Chain, address: &str) -> Token {
     Token::new(&Bytes::from_str(address).unwrap(), "WXPL", 18, 0, &[Some(2300)], chain, 100)
+}
+
+fn wrapped_native_mon(chain: Chain, address: &str) -> Token {
+    Token::new(&Bytes::from_str(address).unwrap(), "WMON", 18, 0, &[Some(2300)], chain, 100)
 }
 
 fn routable_arc_usdc(chain: Chain) -> Token {
@@ -402,6 +422,7 @@ impl Chain {
             Chain::Plasma => 9745,
             Chain::Robinhood => 4663,
             Chain::Arc => 5042,
+            Chain::Monad => 143,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.chain_id,
         })
     }
@@ -409,7 +430,7 @@ impl Chain {
     /// Returns a default TVL threshold in native token units for the given tier.
     ///
     /// Values are approximate and target a USD-equivalent range, not a precise conversion.
-    /// Native token prices used: ETH ~$2,000, POL ~$0.10, BNB ~$630.
+    /// Native token prices used: ETH ~$2,000, POL ~$0.10, BNB ~$630, MON ~$0.03.
     /// These prices are volatile, and used as a reference. They should not be updated often,
     /// unless big price movements occour, making an update necessary.
     ///
@@ -465,6 +486,10 @@ impl Chain {
             (Chain::Arc, TvlThresholdTier::Low) => 20_000.0,
             (Chain::Arc, TvlThresholdTier::Medium) => 200_000.0,
 
+            // Monad (MON ≈ $0.03): 700_000 MON ≈ $20K, 7_000_000 MON ≈ $200K
+            (Chain::Monad, TvlThresholdTier::Low) => 700_000.0,
+            (Chain::Monad, TvlThresholdTier::Medium) => 7_000_000.0,
+
             (Chain::Custom(id), TvlThresholdTier::Low) => {
                 try_resolve_custom(id, chain_registry())?
                     .default_tvl_thresholds
@@ -501,6 +526,7 @@ impl Chain {
             Chain::Plasma => native_xpl(Chain::Plasma),
             Chain::Robinhood => native_eth(Chain::Robinhood),
             Chain::Arc => native_arc_usdc(Chain::Arc),
+            Chain::Monad => native_mon(Chain::Monad),
             Chain::Custom(id) => native_custom(*self, try_resolve_custom(id, chain_registry())?),
         })
     }
@@ -604,6 +630,13 @@ impl Chain {
                 native: native_arc_usdc(Chain::Arc),
                 routable: routable_arc_usdc(Chain::Arc),
             },
+            Chain::Monad => NativeAsset::Wrapper {
+                native: native_mon(Chain::Monad),
+                wrapper: wrapped_native_mon(
+                    Chain::Monad,
+                    "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+                ),
+            },
             Chain::Custom(id) => {
                 let config = try_resolve_custom(id, chain_registry())?;
                 let native = native_custom(*self, config);
@@ -639,6 +672,8 @@ impl Chain {
             Chain::Robinhood => 1,
             // Arc produces sub-second blocks; integer-second APIs use the one-second ceiling.
             Chain::Arc => 1,
+            // Monad produces ~0.4 s blocks; integer-second APIs use the one-second ceiling.
+            Chain::Monad => 1,
             Chain::Custom(id) => try_resolve_custom(id, chain_registry())?.block_time_secs,
         })
     }
@@ -1033,6 +1068,26 @@ mod tests {
     #[test]
     fn test_robinhood_block_time_secs() {
         assert_eq!(Chain::Robinhood.block_time_secs(), 1);
+    }
+
+    #[test]
+    fn test_monad_chain() {
+        assert_eq!(Chain::Monad.id(), 143);
+        assert_eq!(Chain::Monad.to_string(), "monad");
+        assert_eq!("monad".parse::<Chain>().unwrap(), Chain::Monad);
+        assert_eq!(serde_json::to_string(&Chain::Monad).unwrap(), r#""monad""#);
+        assert_eq!(Chain::Monad.native_token().symbol, "MON");
+        let wmon = Chain::Monad
+            .wrapped_native_token()
+            .expect("Monad should have a wrapper");
+        assert_eq!(wmon.symbol, "WMON");
+        assert_eq!(
+            wmon.address,
+            Bytes::from_str("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A").unwrap()
+        );
+        assert_eq!(Chain::Monad.default_tvl_threshold(TvlThresholdTier::Low), 700_000.0);
+        assert_eq!(Chain::Monad.block_time_secs(), 1);
+        assert_eq!(Chain::from(dto::Chain::from(Chain::Monad)), Chain::Monad);
     }
 
     #[test]

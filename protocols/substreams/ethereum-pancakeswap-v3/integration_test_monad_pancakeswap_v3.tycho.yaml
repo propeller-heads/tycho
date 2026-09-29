@@ -1,0 +1,24 @@
+substreams_yaml_path: ./monad-pancakeswap-v3.yaml
+protocol_system: "pancakeswap_v3"
+protocol_type_names:
+  - "pancakeswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The first Monad PancakeSwap V3 pool (fee 2500, tick spacing 50) is created in block 25819360
+  # and first swapped in 25823756.
+  - name: test_first_pool
+    start_block: 25819360
+    stop_block: 25823756
+    expected_components:
+      - id: "0x95e9e619dd5e86ec453841ba7e2e58279cffbc42"
+        tokens:
+          - "0xcf05fc31a6b693dd0beb76e958ae4bcd490dc985"
+          - "0xf05266b1b1759d3a2746cd3b031b802c2496b278"
+        static_attributes:
+          fee: "0x09c4"
+          tick_spacing: "0x32"
+        creation_tx: "0x4099e19bdb214aee24af2964c0bd9497306c4e0ecf8d87db5436960f36183b2c"
+        skip_simulation: false
+        skip_execution: true

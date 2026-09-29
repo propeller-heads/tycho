@@ -26,6 +26,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>velodrome_slipstreams</code></td><td><p>Native</p><p>(<code>VelodromeSlipstreamsState</code>)</p></td><td>-</td><td>Unichain</td><td></td></tr>
 <tr><td><code>up_v3</code></td><td>Native (<code>AerodromeSlipstreamsState</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>lunarbase</code></td><td>Native (<code>LunarBaseState</code>)</td><td>7 μs (0.007 ms)</td><td>Base</td><td></td></tr>
+<tr><td><code>kuru</code></td><td>Native (<code>KuruState</code>)</td><td>-</td><td>Monad</td><td>Order book plus AMM vault. Swaps run as fill-or-kill market orders; the market takes whole size units, so input below one unit of the market's precision stays with the router.</td></tr>
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
 <tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
 <tr><td><code>erc4626</code></td><td>Native (<code>ERC4626State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>A few vaults are unsupported. Use <code>erc4626_filter</code></td></tr>
@@ -112,6 +113,10 @@ fn register_exchanges(
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
+        }
+        Chain::Monad => {
+            builder = builder
+                .exchange::<KuruState>("kuru", tvl_filter.clone(), None)
         }
         _ => {}
     }

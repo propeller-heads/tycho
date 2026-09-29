@@ -30,7 +30,7 @@ impl SwapEncoder for LunarBaseSwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let pool = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid LunarBase component id".to_owned()))?;
+            .map_err(|_| EncodingError::FatalError("Invalid component id".to_owned()))?;
         let token_in = convert_to_router_token(bytes_to_address(&swap.token_in().address)?);
         let token_out = convert_to_router_token(bytes_to_address(&swap.token_out().address)?);
 

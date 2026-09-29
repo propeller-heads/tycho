@@ -1,0 +1,26 @@
+substreams_yaml_path: ./monad-kuru.yaml
+protocol_system: "kuru"
+protocol_type_names:
+  - "kuru_market"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The first Kuru market (MON/USDC) is registered by the Router in block 33615323; its first
+  # trade is in 37070983, so the test checks the component only.
+  - name: test_first_market
+    start_block: 33615323
+    stop_block: 33615324
+    expected_components:
+      - id: "0x122c0d8683cab344163fb73e28e741754257e3fa"
+        tokens:
+          - "0x0000000000000000000000000000000000000000" # MON
+          - "0x754704bc059f8c67012fed69bc8a327a5aafb603" # USDC
+        static_attributes:
+          base: "0x0000000000000000000000000000000000000000"
+          quote: "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+          price_precision: "0x989680"
+          size_precision: "0x174876e800"
+        creation_tx: "0x9284be16e3e3bd6f169594cc35e0e880cc8c71b201e2cf6f14ce8624e86b36d7"
+        skip_simulation: true
+        skip_execution: true

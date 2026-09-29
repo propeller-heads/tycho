@@ -1,0 +1,214 @@
+[
+ {
+  "type": "event",
+  "name": "OrderCreated",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "size",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "price",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false
+   }
+  ]
+ },
+ {
+  "type": "event",
+  "name": "FlipOrderCreated",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "flippedId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "size",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "price",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "flippedPrice",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false
+   }
+  ]
+ },
+ {
+  "type": "event",
+  "name": "FlippedOrderCreated",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "flippedId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "size",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "price",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "flippedPrice",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false
+   }
+  ]
+ },
+ {
+  "type": "event",
+  "name": "FlipOrderUpdated",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "size",
+    "type": "uint96",
+    "indexed": false
+   }
+  ]
+ },
+ {
+  "type": "event",
+  "name": "OrderCanceled",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "owner",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "price",
+    "type": "uint32",
+    "indexed": false
+   },
+   {
+    "name": "size",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false
+   }
+  ]
+ },
+ {
+  "type": "event",
+  "name": "Trade",
+  "anonymous": false,
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint40",
+    "indexed": false
+   },
+   {
+    "name": "makerAddress",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false
+   },
+   {
+    "name": "price",
+    "type": "uint256",
+    "indexed": false
+   },
+   {
+    "name": "updatedSize",
+    "type": "uint96",
+    "indexed": false
+   },
+   {
+    "name": "takerAddress",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "txOrigin",
+    "type": "address",
+    "indexed": false
+   },
+   {
+    "name": "filledSize",
+    "type": "uint96",
+    "indexed": false
+   }
+  ]
+ }
+]

@@ -77,6 +77,7 @@ revm = { version = "29.0.1", features = [
 ], optional = true }
 revm-inspectors = { version = "0.30.0", features = ["serde"], optional = true }
 ruint = { workspace = true }
+kuru-book = { workspace = true }
 
 # Ekubo
 ekubo_sdk = { version = "3", features = ["evm", "serde"] }
@@ -115,6 +116,7 @@ crossterm = { version = "0.28.1", features = ["event-stream"] }
 unicode-width = "0.1.13"
 tracing-appender = { workspace = true }
 dialoguer = "0.10.4"
+alloy = { workspace = true, features = ["providers", "rpc-client", "rpc-types", "reqwest-default-tls"] }
 criterion = "0.8.2"
 
 [features]

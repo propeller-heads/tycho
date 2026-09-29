@@ -89,10 +89,15 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Wave 1: foundation crate
+      # Wave 1: foundation crates
       - name: Publish tycho-common
         run: >
           cargo publish -p tycho-common --locked
+          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+
+      - name: Publish kuru-book
+        run: >
+          cargo publish -p kuru-book --locked
           --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index wave 1

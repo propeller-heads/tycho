@@ -207,7 +207,8 @@ impl SwapEncoderRegistry {
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "lunarbase" => {
+            // Kuru's executor takes the same packed (market, tokenIn, tokenOut) data.
+            "lunarbase" | "kuru" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {
@@ -320,6 +321,21 @@ mod tests {
                 "chain {chain} is missing the uniswap_v3 encoder"
             );
         }
+    }
+
+    /// Kuru markets on Monad resolve to the executor configured under `kuru`.
+    #[test]
+    fn test_kuru_resolves_on_monad() {
+        let executor_address =
+            Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let registry = SwapEncoderRegistry::new(Chain::Monad)
+            .add_default_encoders(Some(format!(r#"{{"monad":{{"kuru":"{executor_address}"}}}}"#)))
+            .unwrap();
+
+        let encoder = registry
+            .get_encoder("kuru")
+            .expect("no encoder resolved for kuru");
+        assert_eq!(encoder.executor_address(), &executor_address);
     }
 
     #[test]

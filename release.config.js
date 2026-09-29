@@ -51,6 +51,7 @@ const config = {
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-integration-test.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-execution.version ${nextRelease.version}" +
                     " && toml set --toml-path Cargo.toml workspace.dependencies.tycho-protobuf.version ${nextRelease.version}" +
+                    " && toml set --toml-path Cargo.toml workspace.dependencies.kuru-book.version ${nextRelease.version}" +
                     " && cargo check --workspace",
             },
         ],

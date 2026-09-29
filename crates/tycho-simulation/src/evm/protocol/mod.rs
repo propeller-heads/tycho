@@ -11,6 +11,7 @@ pub mod erc4626;
 pub mod etherfi;
 pub mod filters;
 pub mod fluid;
+pub mod kuru;
 pub mod lido_v4;
 pub mod lunarbase;
 pub mod native_wrapper;

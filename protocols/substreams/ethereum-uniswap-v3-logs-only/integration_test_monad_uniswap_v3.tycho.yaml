@@ -1,0 +1,24 @@
+substreams_yaml_path: ./monad-uniswap-v3.yaml
+protocol_system: "uniswap_v3"
+protocol_type_names:
+  - "uniswap_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The first Monad Uniswap V3 pool (WMON/USDC 0.3%) is created in block 32036467; it is not
+  # swapped until 34105730, so the test checks the component only.
+  - name: test_first_pool
+    start_block: 32036467
+    stop_block: 32036468
+    expected_components:
+      - id: "0x659bd0bc4167ba25c62e05656f78043e7ed4a9da"
+        tokens:
+          - "0x3bd359c1119da7da1d913d1c4d2b7c461115433a" # WMON
+          - "0x754704bc059f8c67012fed69bc8a327a5aafb603" # USDC
+        static_attributes:
+          fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0xebadef985bc972ccacfb58bbbd5f623dd8f301ca93fd2ee4153dc8add55ab577"
+        skip_simulation: true
+        skip_execution: true

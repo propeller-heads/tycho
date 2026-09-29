@@ -57,6 +57,7 @@ values or callback arguments to determine transfer amounts.**
 - All tests inherit from `TychoRouterTestSetup.sol`
 - Test naming: `test<Description>` in Solidity
 - Fork tests require `RPC_URL` (Ethereum mainnet) and `BASE_RPC_URL` env vars
+- Monad fork tests (`test/protocols/Kuru.t.sol`) require `MONAD_RPC_URL` and `--network monad`
 
 ### Cross-language integration tests
 

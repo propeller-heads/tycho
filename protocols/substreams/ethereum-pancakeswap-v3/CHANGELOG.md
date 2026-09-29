@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.4
+
+- Add the Monad PancakeSwap V3 manifest (factory `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865`, first `PoolCreated` at block 25819360).
+
 ## v0.1.3
 
 - `map_pools_created` takes a query-string parameter:

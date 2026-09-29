@@ -100,6 +100,9 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
     ],
+    "monad": [
+        "kuru",
+    ],
 };
 
 async function main() {

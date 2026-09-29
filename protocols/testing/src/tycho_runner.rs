@@ -335,6 +335,8 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Polygon => Some("https://polygon.streamingfast.io:443".to_string()),
         Chain::Robinhood => Some("https://mainnet.robinhood.streamingfast.io:443".to_string()),
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
+        // Extended blocks (storage changes), which the storage-reading packages need.
+        Chain::Monad => Some("https://mainnet.monad.streamingfast.io:443".to_string()),
         _ => None,
     }
 }

@@ -9,6 +9,7 @@ members = [
     "crates/tycho-indexer",
     "crates/tycho-protobuf",
     "crates/tycho-simulation",
+    "crates/kuru-book",
     "crates/tycho-test",
     "crates/tycho-integration-test",
     "crates/tycho-execution",
@@ -38,6 +39,7 @@ tycho-client           = { path = "crates/tycho-client",           version = "0.
 tycho-protobuf         = { path = "crates/tycho-protobuf",         version = "0.430.0" }
 tycho-storage          = { path = "crates/tycho-storage",          version = "0.430.0" }
 tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.430.0" }
+kuru-book              = { path = "crates/kuru-book",              version = "0.430.0" }
 tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.430.0" }
 tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.430.0" }
 tycho-test             = { path = "crates/tycho-test",             version = "0.430.0" }

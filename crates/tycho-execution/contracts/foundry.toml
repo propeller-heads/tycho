@@ -28,6 +28,7 @@ robinhood = "${ROBINHOOD_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"
 polygon = "${POLYGON_RPC_URL}"
 bsc = "${BSC_RPC_URL}"
+monad = "${MONAD_RPC_URL}"
 
 [fmt]
 line_length = 80

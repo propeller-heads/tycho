@@ -1,0 +1,26 @@
+substreams_yaml_path: ./monad-uniswap-v4-no-hooks.yaml
+# Uniswap V4 balances are held by the pool manager rather than individual pool IDs.
+skip_balance_check: true
+protocol_type_names:
+  - "uniswap_v4_pool"
+protocol_system: "uniswap_v4"
+module_name: "map_protocol_changes"
+initialized_accounts:
+  - "0x188d586ddcf52439676ca21a244753fa19f9ea8e" # pool manager
+tests:
+  # MON/USDC 0.05% initializes in block 37700697 and first swaps in 37700708.
+  - name: test_mon_usdc_pool
+    start_block: 37700697
+    stop_block: 37700708
+    expected_components:
+      - id: "0x18a9fc874581f3ba12b7898f80a683c66fd5877fd74b26a85ba9a3a79c549954"
+        tokens:
+          - "0x0000000000000000000000000000000000000000" # MON
+          - "0x754704bc059f8c67012fed69bc8a327a5aafb603" # USDC
+        static_attributes:
+          tick_spacing: "0x0a"
+          hooks: "0x0000000000000000000000000000000000000000"
+          key_lp_fee: "0x01f4"
+        creation_tx: "0x0f76afa03b4e3f445722349db0ce2775818223371aebe88a2fe7d94566a8d075"
+        skip_simulation: false
+        skip_execution: true

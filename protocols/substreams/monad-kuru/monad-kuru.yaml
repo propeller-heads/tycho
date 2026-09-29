@@ -1,0 +1,143 @@
+specVersion: v0.1.0
+package:
+  name: "monad_kuru"
+  version: v0.1.1
+
+imports:
+  ethereum_common: https://spkg.io/streamingfast/ethereum-common-v0.3.3.spkg
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - kuru.proto
+  importPaths:
+    - ./proto
+    - ../../../proto/
+  excludePaths:
+    - sf/ethereum
+    - google
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/monad_kuru.wasm
+
+# 33615323: first Kuru Router MarketRegistered on Monad.
+modules:
+  - name: map_markets
+    kind: map
+    initialBlock: 33615323
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        # MarketRegistered topic0; map_markets also checks the emitter is the router.
+        string: evt_sig:0x8fd547930d9019b964dccbf749798118018ee4fe341a4b2f970bf28797842eab
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_markets
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_markets
+
+  - name: map_events
+    kind: map
+    initialBlock: 33615323
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        # topic0 of OrderCreated, FlipOrderCreated, FlippedOrderCreated, FlipOrderUpdated,
+        # OrderCanceled, Trade. The order stores and level/balance maps skip with it.
+        # map_protocol_changes stays unfiltered: it reads market storage writes, which
+        # can land without a market log (fee setters, vault updates, pause).
+        string: >-
+          evt_sig:0xb81bbaf150467ef3096ed6220cb963abc169bffd2eb88f26c47359ef344cf94c ||
+          evt_sig:0xf81d3fdea8a7ee9c5c09179882e1bce1c513a741146e453167d9e8912c8eb3aa ||
+          evt_sig:0x49496a41b922bdba3ff7f57bb0992ab1a1a3ee95b5ae5bd7271c67861f018352 ||
+          evt_sig:0xb74e966bc873b8c144fab39c9981210f50130885e89caf4556c0840cec741dcd ||
+          evt_sig:0xd9c089818ef223629c2af53488dc47cf2867f157caca778ce77aaa742b8c1079 ||
+          evt_sig:0xf16924fba1c18c108912fcacaac7450c98eb3f2d8c0a3cdf3df7066c08f21581
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_markets
+    output:
+      type: proto:kuru.v1.Events
+
+  - name: store_order_sizes
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - map: map_events
+
+  - name: store_order_meta
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_events
+
+  - name: map_level_deltas
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - map: map_events
+      - store: store_order_sizes
+        mode: deltas
+      - store: store_order_meta
+      - store: store_markets
+    output:
+      type: proto:kuru.v1.LevelDeltas
+
+  - name: store_levels
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_level_deltas
+
+  - name: map_balance_deltas
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - map: map_level_deltas
+      - store: store_markets
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_markets
+      - store: store_markets
+      - map: map_level_deltas
+      - store: store_levels
+        mode: deltas
+      - map: map_balance_deltas
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_markets: "d651346d7c789536ebf06dc72aE3C8502cd695CC"
