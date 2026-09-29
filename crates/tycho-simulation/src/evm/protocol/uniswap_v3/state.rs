@@ -130,13 +130,13 @@ impl UniswapV3State {
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized) = match self
+            let (mut next_tick, next_tick_info) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_tick_info_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => {
+                Ok((tick, info)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
-                    (tick, init)
+                    (tick, info)
                 }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
@@ -158,9 +158,15 @@ impl UniswapV3State {
             };
 
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
+            let initialized = next_tick_info.is_some();
 
             let sqrt_price_start = state.sqrt_price;
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            // An initialized tick stores its sqrt price, computed from the same index when the
+            // tick was created; only a word boundary needs the conversion.
+            let sqrt_price_next = match next_tick_info {
+                Some(info) if info.index == next_tick => info.sqrt_price,
+                _ => get_sqrt_ratio_at_tick(next_tick)?,
+            };
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
@@ -200,12 +206,8 @@ impl UniswapV3State {
                 .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
-                if step.initialized {
-                    let liquidity_raw = self
-                        .ticks
-                        .get_tick(step.tick_next)
-                        .unwrap()
-                        .net_liquidity;
+                if let Some(info) = next_tick_info {
+                    let liquidity_raw = info.net_liquidity;
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;

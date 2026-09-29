@@ -229,6 +229,17 @@ impl TickList {
         tick: i32,
         lte: bool,
     ) -> Result<(i32, bool), TickListError> {
+        let (next_tick, info) = self.next_tick_info_within_one_word(tick, lte)?;
+        Ok((next_tick, info.is_some()))
+    }
+
+    /// [`Self::next_initialized_tick_within_one_word`], with the next tick's stored info when that
+    /// tick is initialized.
+    pub(crate) fn next_tick_info_within_one_word(
+        &self,
+        tick: i32,
+        lte: bool,
+    ) -> Result<(i32, Option<&TickInfo>), TickListError> {
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -242,14 +253,12 @@ impl TickList {
 
             if self.is_below_smallest(tick) {
                 let minimum = cmp::max(self.ticks[0].index - spacing, min_in_word);
-                return Ok((minimum, false));
+                return Ok((minimum, None));
             }
 
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::max(idx, min_in_word);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let info = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::max(info.index, min_in_word);
+            Ok((next_tick_idx, (next_tick_idx == info.index).then_some(info)))
         } else {
             let word_pos = (compressed + 1) >> 8;
             let max_in_word = (((word_pos + 1) << 8) - 1) * spacing;
@@ -261,13 +270,11 @@ impl TickList {
             if self.is_at_or_above_largest(tick) {
                 let maximum =
                     cmp::min(self.ticks[self.ticks.len() - 1].index + spacing, max_in_word);
-                return Ok((maximum, false));
+                return Ok((maximum, None));
             }
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::min(max_in_word, idx);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let info = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::min(max_in_word, info.index);
+            Ok((next_tick_idx, (next_tick_idx == info.index).then_some(info)))
         }
     }
 }
