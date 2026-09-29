@@ -124,9 +124,9 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
     }
     let numerator1 = U256::from(liquidity) << RESOLUTION;
 
+    // `amount != 0`, so `checked_mul` fails exactly when the Solidity divide-back check does.
     if add {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
-        if product / amount == sqrt_price {
+        if let Some(product) = amount.checked_mul(sqrt_price) {
             // No overflow case: liquidity * sqrtPX96 / (liquidity +- amount * sqrtPX96)
             let denominator = safe_add_u256(numerator1, product)?;
             if denominator >= numerator1 {
@@ -136,12 +136,14 @@ fn get_next_sqrt_price_from_amount0_rounding_up(
         // Overflow: liquidity / (liquidity / sqrtPX96 +- amount)
         div_rounding_up(numerator1, safe_add_u256(safe_div_u256(numerator1, sqrt_price)?, amount)?)
     } else {
-        let (product, _) = amount.overflowing_mul(sqrt_price);
-        if safe_div_u256(product, amount)? != sqrt_price || numerator1 <= product {
+        let Some(product) = amount
+            .checked_mul(sqrt_price)
+            .filter(|product| numerator1 > *product)
+        else {
             return Err(SimulationError::FatalError(
                 "sqrt_price_math: overflow in get_next_sqrt_price_from_amount0".to_string(),
             ));
-        }
+        };
         let denominator = safe_sub_u256(numerator1, product)?;
         // No overflow case: liquidity * sqrtPX96 / (liquidity +- amount * sqrtPX96)
         mul_div_rounding_up(numerator1, sqrt_price, denominator)
