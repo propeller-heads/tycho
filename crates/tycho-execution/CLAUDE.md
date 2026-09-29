@@ -150,7 +150,7 @@ PropAMM (a single generic executor shared by all pAMMs implementing the standard
 address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback").
 
-### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/PropAMMFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
+### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/PropAMMFallbackRouter.sol`, `executors/FallbackExecutor.sol`, `executors/PropAMMFallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
 `swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
@@ -171,8 +171,9 @@ receiver), and exposes an external `swap` that calls `_swap(swap_, primary, prim
 `PropAMMFallbackRouter` is the only concrete router today: its primary is a pAMM, and `primaryData` is empty.
 The sections below describe it; "pAMM" is the primary there.
 
-`FallbackExecutor` declares `TransferType.Transfer` with the fallback router as receiver and `outputToRouter = false`,
-then calls `PropAMMFallbackRouter.swap()`.
+`FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
+fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
+calls `PropAMMFallbackRouter.swap()`.
 
 **One pAMM and one caller-chosen fallback.** `swap` quotes both first and runs the fallback directly when it quotes
 more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePrimary`, an external self-call wrapped in
@@ -208,7 +209,7 @@ single source of truth there, and a fallback that pays nothing fails the route-l
 **The fallback can never be a pAMM.** A pAMM is the thing the pAMM slot exists to retry, so retrying it with another
 one defeats the purpose. This needs no runtime check: pAMM is not one of the enumerated fallback protocols.
 
-Swap encoding -- `FallbackExecutor` swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`. The pAMM is a
+Swap encoding -- `PropAMMFallbackExecutor` swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`. The pAMM is a
 bare address, so no length prefix is needed to find where the fallback starts. The fallback is
 `[protocol: uint8][protocol data]`:
 
@@ -261,7 +262,7 @@ Constraints:
 - `scripts/deploy-fallback-router.js` deploys `PropAMMFallbackRouter` through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
   static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
-  missing. The `FallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
+  missing. The `PropAMMFallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
   `fallback` entry with the printed router address to `executor_deployments.json` and list `fallback` under the
   chain. Deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`, executor
   `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router `0xd38142E88f3d1011D8258737f257c709Dd0e2204`,
@@ -394,7 +395,7 @@ resolve generically: a single `pricelevelstream` config entry serves the whole f
 
 `fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
 fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It
-resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
+resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `PropAMMFallbackExecutor`). The fallback protocol —
 one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
 swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
 static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackProtocol`) is the

@@ -16,7 +16,9 @@ import {
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
 import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {FallbackExecutor} from "../src/executors/FallbackExecutor.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../src/executors/PropAMMFallbackExecutor.sol";
 import {PropAMMFallbackRouter} from "../src/fallback/PropAMMFallbackRouter.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
@@ -141,7 +143,7 @@ contract TychoRouterTestSetup is
     PropAMMExecutor public propAMMExecutor;
     SkyExecutor public skyExecutor;
     PropAMMFallbackRouter public fallbackRouter;
-    FallbackExecutor public fallbackExecutor;
+    PropAMMFallbackExecutor public fallbackExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -297,7 +299,7 @@ contract TychoRouterTestSetup is
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
-        fallbackExecutor = new FallbackExecutor(address(fallbackRouter));
+        fallbackExecutor = new PropAMMFallbackExecutor(address(fallbackRouter));
         // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
         // Native always deploy, so appending it shifts no address before it.
         lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);

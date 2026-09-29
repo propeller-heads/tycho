@@ -8,10 +8,12 @@ import {AerodromeV1TestBase} from "./AerodromeV1.t.sol";
 import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
-    FallbackExecutor,
     FallbackExecutor__AddressZero,
     FallbackExecutor__InvalidDataLength
 } from "../../src/executors/FallbackExecutor.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../../src/executors/PropAMMFallbackExecutor.sol";
 import {
     TychoFallbackRouter,
     TychoFallbackRouter__CallbackTokenMismatch,
@@ -1423,7 +1425,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
     function testConstructorRejectsZeroAddress() public {
         vm.expectRevert(FallbackExecutor__AddressZero.selector);
-        new FallbackExecutor(address(0));
+        new PropAMMFallbackExecutor(address(0));
     }
 
     /// The whole swap: a dead pAMM still settles, at the Uniswap V3 price.

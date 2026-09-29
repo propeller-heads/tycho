@@ -10,7 +10,7 @@ const {deployCreate2} = require("./utils");
 // `SUPPORTED_PROTOCOLS` in the Rust encoder must agree with what this deploys;
 // its tests check that against executor_deployments.json.
 //
-// Then deploy the FallbackExecutor with deploy-executors.js: add a `fallback`
+// Then deploy the PropAMMFallbackExecutor with deploy-executors.js: add a `fallback`
 // entry with the printed address to executor_deployments.json.
 const executorDeployments = require("../../config/executor_deployments.json");
 

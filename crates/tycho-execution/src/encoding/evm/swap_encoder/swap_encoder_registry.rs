@@ -271,7 +271,7 @@ mod tests {
 
     /// The TychoFallbackRouter family resolves like the price-level-stream family: the single
     /// `fallback` config entry serves the bare key and every `fallback:{protocol}` protocol,
-    /// against the `FallbackExecutor` address.
+    /// against the `PropAMMFallbackExecutor` address.
     #[test]
     fn test_fallback_protocol_resolution() {
         let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
