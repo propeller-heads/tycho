@@ -13,6 +13,7 @@ const {deployCreate2} = require("./utils");
 // `SUPPORTED_PROTOCOLS` in the Rust encoder must agree with what this deploys;
 // its tests check that against executor_deployments.json.
 //
+// MetricFallbackRouter also takes Metric's swap quoter, from METRIC_SWAP_QUOTERS.
 // BebopFallbackRouter also takes the Bebop settlement and router, from the chain's
 // `rfq:bebop` entry.
 //
@@ -25,6 +26,13 @@ const {deployCreate2} = require("./utils");
 const executorDeployments = require("../../config/executor_deployments.json");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// Metric's MetricOmmSwapQuoter, per chain. It must belong to the factory that
+// created the pools the Metric API serves: on Base that is factory
+// 0x622911384e7973439b8be305f5e3Fc3c5736EDe4.
+const METRIC_SWAP_QUOTERS = {
+    base: "0xaB6C48D981B943F62A23bb4EB2db125182E6753c",
+};
 
 const ROUTERS = {
     propamm: "PropAMMFallbackRouter",
@@ -64,6 +72,16 @@ async function main() {
         );
     }
     const args = [poolManager, fluidLiquidity, staticQuoter];
+    if (kind === "metric") {
+        const metricQuoter = METRIC_SWAP_QUOTERS[base];
+        if (!metricQuoter) {
+            throw new Error(
+                `No Metric swap quoter for network '${base}': add it to ` +
+                "METRIC_SWAP_QUOTERS"
+            );
+        }
+        args.push(metricQuoter);
+    }
     if (kind === "bebop") {
         const bebopArgs = deployments["rfq:bebop"]?.args;
         if (!bebopArgs) {
@@ -89,6 +107,9 @@ async function main() {
         )}`
     );
 
+    if (kind === "metric") {
+        console.log(`- metricQuoter: ${args[3]}`);
+    }
     if (kind === "bebop") {
         console.log(`- bebopSettlement: ${args[3]}`);
         console.log(`- bebopRouter: ${args[4]}`);

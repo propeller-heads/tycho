@@ -173,15 +173,17 @@ Each concrete router has its own executor, and each executor holds one router ad
 | Router | Executor | Primary quote | Executor swap data |
 |---|---|---|---|
 | `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
-| `MetricFallbackRouter` | `MetricFallbackExecutor` | `simulateMetric` runs the swap and reverts with the output | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+| `MetricFallbackRouter` | `MetricFallbackExecutor` | Metric's `MetricOmmSwapQuoter.quoteLiveExactInSingle` (`metricQuoter` immutable) | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
 | `BebopFallbackRouter` | `BebopFallbackExecutor` | `PRIMARY_FIRST`, or 0 when `amountIn` exceeds the signed amount | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
 
 A primary that quotes `PRIMARY_FIRST` (`type(uint256).max`) has its price fixed off-chain: it runs first and the
 fallback quote is skipped, so the fallback runs only when the primary fails.
 
-`MetricFallbackRouter` pays the pool's `metricOmmSwapCallback` through the catch-all `fallback`, which sends the full
-`amountIn` to the pool the swap called, as the Dispatcher does for `MetricExecutor`. Metric has no quote function, so
-every leg pays for one simulated Metric swap.
+`MetricFallbackRouter` quotes through Metric's `MetricOmmSwapQuoter`, a lens that runs the pool's swap up to its
+callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. The quoter must belong to the
+factory that created the pools the router serves. The router pays the pool's `metricOmmSwapCallback` through the
+catch-all `fallback`, which sends the full `amountIn` to the pool the swap called, as the Dispatcher does for
+`MetricExecutor`.
 
 `BebopFallbackRouter` runs a signed Bebop order. `bebopData` is `[partialFillOffset: 1][originalFilledTakerAmount: 32]
 [calldata]`, the same fields `BebopExecutor` takes. The order MUST name the fallback router as taker and receiver.
@@ -443,7 +445,7 @@ same `FallbackSwapData` `user_data`:
   `bebopDataLength` prefix and appends the fallback.
 
 Neither router is deployed, so no chain lists these entries yet. The gas estimator charges a
-Metric leg its pool gas twice (the quote runs the swap), and a Bebop leg the router's approval and
+Metric leg its pool gas twice (the quoter runs the pool's swap), and a Bebop leg the router's approval and
 output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`

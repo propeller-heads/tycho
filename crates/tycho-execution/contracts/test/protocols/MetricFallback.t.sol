@@ -15,13 +15,11 @@ import {
 import {
     MetricFallbackExecutor
 } from "../../src/executors/MetricFallbackExecutor.sol";
+import {TychoFallbackRouter} from "../../src/fallback/TychoFallbackRouter.sol";
 import {
-    TychoFallbackRouter,
-    TychoFallbackRouter__NotSelf,
-    TychoFallbackRouter__SimulatedAmountOut
-} from "../../src/fallback/TychoFallbackRouter.sol";
-import {
+    IMetricOmmSwapQuoter,
     MetricFallbackRouter,
+    MetricFallbackRouter__AddressZero,
     MetricFallbackRouter__InvalidDataLength
 } from "../../src/fallback/MetricFallbackRouter.sol";
 
@@ -33,11 +31,13 @@ interface IMetricOmmSwapCallback {
     ) external;
 }
 
-/// @notice Reverts unless the callback paid exactly `amountIn`.
+/// @notice Quotes `quoteOut` and fills `swapOut`, so a test can make the two disagree. Reverts
+/// unless the callback paid exactly `amountIn`.
 contract MockMetricOmmPool {
     IERC20 public immutable tokenIn;
     IERC20 public immutable tokenOut;
-    uint256 public amountOut;
+    uint256 public quoteOut;
+    uint256 public swapOut;
     bool public broken;
 
     constructor(address tokenIn_, address tokenOut_) {
@@ -45,8 +45,9 @@ contract MockMetricOmmPool {
         tokenOut = IERC20(tokenOut_);
     }
 
-    function set(uint256 amountOut_, bool broken_) external {
-        amountOut = amountOut_;
+    function set(uint256 quoteOut_, uint256 swapOut_, bool broken_) external {
+        quoteOut = quoteOut_;
+        swapOut = swapOut_;
         broken = broken_;
     }
 
@@ -62,13 +63,27 @@ contract MockMetricOmmPool {
         uint256 amountIn = uint256(uint128(amountSpecified));
         uint256 balanceBefore = tokenIn.balanceOf(address(this));
         IMetricOmmSwapCallback(msg.sender)
-            .metricOmmSwapCallback(int256(amountIn), -int256(amountOut), "");
+            .metricOmmSwapCallback(int256(amountIn), -int256(swapOut), "");
         require(
             tokenIn.balanceOf(address(this)) - balanceBefore == amountIn,
             "MockMetricOmmPool: unpaid"
         );
-        tokenOut.transfer(recipient, amountOut);
+        tokenOut.transfer(recipient, swapOut);
         return (0, 0);
+    }
+}
+
+/// @notice Reverts for a pool quoting zero, as the real quoter does for a pool that cannot fill.
+contract MockMetricOmmSwapQuoter is IMetricOmmSwapQuoter {
+    function quoteLiveExactInSingle(
+        address pool,
+        bool, /* zeroForOne */
+        uint128 amountIn,
+        uint128 /* priceLimitX64 */
+    ) external view returns (uint256, uint256) {
+        uint256 quoteOut = MockMetricOmmPool(pool).quoteOut();
+        require(quoteOut > 0, "MockMetricOmmSwapQuoter: no quote");
+        return (amountIn, quoteOut);
     }
 }
 
@@ -87,7 +102,8 @@ contract MetricFallbackRouterTest is Constants {
         router = new MetricFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
+            new MockMetricOmmSwapQuoter()
         );
         executor = new MetricFallbackExecutor(address(router));
         pool = new MockMetricOmmPool(USDC_ADDR, WETH_ADDR);
@@ -96,7 +112,7 @@ contract MetricFallbackRouterTest is Constants {
     }
 
     function testMetricFillsWhenItQuotesHigher() public {
-        pool.set(4 ether, false);
+        pool.set(4 ether, 4 ether, false);
 
         vm.recordLogs();
         _swap(bytes(hex"01"));
@@ -107,11 +123,12 @@ contract MetricFallbackRouterTest is Constants {
         _assertRouterDrained();
     }
 
-    /// The quote simulation rolls back, so the pool is untouched when the fallback wins.
     function testFallsBackWhenMetricQuotesLower() public {
-        pool.set(3 ether, false);
+        pool.set(3 ether, 3 ether, false);
 
-        _expectFallbackSwap();
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
         _swap(bytes(hex"01"));
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
@@ -120,20 +137,35 @@ contract MetricFallbackRouterTest is Constants {
         _assertRouterDrained();
     }
 
-    function testFallsBackWhenMetricReverts() public {
-        pool.set(4 ether, true);
+    /// The pool is not paid, since its swap is never attempted.
+    function testFallsBackWhenQuoterReverts() public {
+        pool.set(0, 4 ether, false);
 
-        _expectFallbackSwap();
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
         _swap(bytes(hex"01"));
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
+        _assertRouterDrained();
+    }
+
+    function testFallsBackWhenMetricRevertsAfterWinningQuote() public {
+        pool.set(4 ether, 4 ether, true);
+
+        _expectFallbackSwap(TychoFallbackRouter.FallbackReason.PrimaryFailed);
+        _swap(bytes(hex"01"));
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
         _assertRouterDrained();
     }
 
     function testFallsBackWhenMetricPaysNothing() public {
-        pool.set(0, false);
+        pool.set(4 ether, 0, false);
 
-        _expectFallbackSwap();
+        _expectFallbackSwap(TychoFallbackRouter.FallbackReason.PrimaryFailed);
         _swap(bytes(hex"01"));
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
@@ -156,13 +188,18 @@ contract MetricFallbackRouterTest is Constants {
         _swap(bytes(hex"0100"));
     }
 
-    function testSimulateMetricRejectsExternalCaller() public {
-        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.simulateMetric(_swapStruct(), address(pool), bytes(hex"01"));
+    function testConstructorRejectsZeroQuoter() public {
+        vm.expectRevert(MetricFallbackRouter__AddressZero.selector);
+        new MetricFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
+            IMetricOmmSwapQuoter(address(0))
+        );
     }
 
     function testExecutorSwap() public {
-        pool.set(4 ether, false);
+        pool.set(4 ether, 4 ether, false);
 
         executor.swap(USDC_IN, _executorData(), BOB);
 
@@ -235,7 +272,9 @@ contract MetricFallbackRouterTest is Constants {
         );
     }
 
-    function _expectFallbackSwap() internal {
+    function _expectFallbackSwap(TychoFallbackRouter.FallbackReason reason)
+        internal
+    {
         vm.expectEmit(address(router));
         emit TychoFallbackRouter.FallbackSwap(
             address(pool),
@@ -243,7 +282,7 @@ contract MetricFallbackRouterTest is Constants {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+            reason
         );
     }
 
@@ -274,6 +313,9 @@ contract MetricFallbackRouterBaseTest is Constants {
         0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address constant BASE_STATIC_QUOTER =
         0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb;
+    /// The quoter of the factory that created `METRIC_WETH_USDC_POOL`.
+    IMetricOmmSwapQuoter constant METRIC_QUOTER =
+        IMetricOmmSwapQuoter(0xaB6C48D981B943F62A23bb4EB2db125182E6753c);
     uint256 constant WETH_IN = 1 ether;
     /// WETH is the pool's token0.
     bytes constant ZERO_FOR_ONE = hex"01";
@@ -285,7 +327,8 @@ contract MetricFallbackRouterBaseTest is Constants {
         router = new MetricFallbackRouter(
             IPoolManager(BASE_POOL_MANAGER),
             address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER)
+            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
+            METRIC_QUOTER
         );
         deal(BASE_WETH, address(router), WETH_IN);
     }
@@ -294,10 +337,9 @@ contract MetricFallbackRouterBaseTest is Constants {
         TychoFallbackRouter.Swap memory swap_ = _swapStruct();
         bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
 
-        vm.startPrank(address(router));
+        vm.prank(address(router));
         uint256 v3Out = router.quoteFallback(swap_, v3);
-        uint256 metricOut = _metricQuote(swap_);
-        vm.stopPrank();
+        uint256 metricOut = _metricQuote();
         assertGt(metricOut, 0);
         assertGt(v3Out, 0);
 
@@ -308,7 +350,9 @@ contract MetricFallbackRouterBaseTest is Constants {
         assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
     }
 
-    function testMetricFillsThroughCallback() public {
+    /// The quote is the fill.
+    function testMetricFillsTheQuotedAmount() public {
+        uint256 metricOut = _metricQuote();
         uint256 poolWethBefore =
             IERC20(BASE_WETH).balanceOf(METRIC_WETH_USDC_POOL);
 
@@ -319,7 +363,7 @@ contract MetricFallbackRouterBaseTest is Constants {
             FallbackSwaps.uniswapV3(address(0xdead))
         );
 
-        assertGt(IERC20(BASE_USDC).balanceOf(BOB), 0);
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
         assertEq(
             IERC20(BASE_WETH).balanceOf(METRIC_WETH_USDC_POOL) - poolWethBefore,
             WETH_IN
@@ -351,30 +395,10 @@ contract MetricFallbackRouterBaseTest is Constants {
         assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
     }
 
-    function _metricQuote(TychoFallbackRouter.Swap memory swap_)
-        internal
-        returns (uint256 amountOut)
-    {
-        try router.simulateMetric(swap_, METRIC_WETH_USDC_POOL, ZERO_FOR_ONE) {
-            revert("simulateMetric returned");
-        } catch (bytes memory revertData) {
-            assertEq(
-                bytes4(revertData),
-                TychoFallbackRouter__SimulatedAmountOut.selector
-            );
-            (amountOut) = abi.decode(_tail(revertData), (uint256));
-        }
-    }
-
-    function _tail(bytes memory revertData)
-        internal
-        pure
-        returns (bytes memory tail)
-    {
-        tail = new bytes(revertData.length - 4);
-        for (uint256 i = 0; i < tail.length; i++) {
-            tail[i] = revertData[i + 4];
-        }
+    function _metricQuote() internal returns (uint256 amountOut) {
+        (, amountOut) = METRIC_QUOTER.quoteLiveExactInSingle(
+            METRIC_WETH_USDC_POOL, true, uint128(WETH_IN), 0
+        );
     }
 
     function _swapStruct()
