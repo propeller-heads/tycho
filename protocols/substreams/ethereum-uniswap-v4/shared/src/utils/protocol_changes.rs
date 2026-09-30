@@ -20,6 +20,7 @@ pub fn collect_transaction_changes(
     balances_store_deltas: StoreDeltas,
     ticks_map_deltas: TickDeltas,
     ticks_store_deltas: StoreDeltas,
+    ticks_gross_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
 ) -> Vec<TransactionChanges> {
@@ -76,27 +77,21 @@ pub fn collect_transaction_changes(
     ticks_store_deltas
         .deltas
         .into_iter()
+        .zip(ticks_gross_store_deltas.deltas)
         .zip(ticks_map_deltas.deltas)
-        .for_each(|(store_delta, tick_delta)| {
+        .for_each(|((store_delta, gross_store_delta), tick_delta)| {
             let new_value_bigint =
                 BigInt::from_str(&String::from_utf8(store_delta.new_value).unwrap()).unwrap();
 
-            // If old value is empty or the int value is 0, it's considered as a creation.
-            let is_creation = store_delta.old_value.is_empty() ||
-                BigInt::from_str(&String::from_utf8(store_delta.old_value).unwrap())
-                    .unwrap()
-                    .is_zero();
             let attribute_name = format!("ticks/{}/net-liquidity", tick_delta.tick_index);
             let attribute = Attribute {
                 name: attribute_name,
                 value: new_value_bigint.to_signed_bytes_be(),
-                change: if is_creation {
-                    ChangeType::Creation.into()
-                } else if new_value_bigint.is_zero() {
-                    ChangeType::Deletion.into()
-                } else {
-                    ChangeType::Update.into()
-                },
+                change: tick_change_type_from_gross(
+                    &gross_store_delta.old_value,
+                    &gross_store_delta.new_value,
+                )
+                .into(),
             };
             let tx = tick_delta.transaction.unwrap();
             let builder = transaction_changes
@@ -221,5 +216,63 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddres
             ]
         }
         _ => vec![],
+    }
+}
+
+fn tick_change_type_from_gross(old_value: &[u8], new_value: &[u8]) -> ChangeType {
+    let old_is_zero = old_value.is_empty() || gross_value_is_zero(old_value);
+    let new_is_zero = gross_value_is_zero(new_value);
+
+    if new_is_zero {
+        ChangeType::Deletion
+    } else if old_is_zero {
+        ChangeType::Creation
+    } else {
+        ChangeType::Update
+    }
+}
+
+fn gross_value_is_zero(value: &[u8]) -> bool {
+    BigInt::from_str(std::str::from_utf8(value).unwrap())
+        .unwrap()
+        .is_zero()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gross_liquidity_classifies_tick_lifecycle() {
+        assert_eq!(tick_change_type_from_gross(b"", b"100"), ChangeType::Creation);
+        assert_eq!(tick_change_type_from_gross(b"100", b"200"), ChangeType::Update);
+        assert_eq!(tick_change_type_from_gross(b"100", b"0"), ChangeType::Deletion);
+    }
+
+    #[test]
+    fn adjacent_positions_keep_a_zero_net_tick_as_an_update() {
+        let (net_liquidity, gross_liquidity) = [(100, 100), (-100, 100)]
+            .into_iter()
+            .fold((0, 0), |(net, gross), (net_delta, gross_delta)| {
+                (net + net_delta, gross + gross_delta)
+            });
+
+        assert_eq!(net_liquidity, 0);
+        assert_eq!(gross_liquidity, 200);
+        assert_eq!(tick_change_type_from_gross(b"100", b"200"), ChangeType::Update);
+    }
+
+    #[test]
+    fn burning_both_adjacent_positions_deletes_at_zero_gross_liquidity() {
+        let (net_liquidity, gross_liquidity) = [(-100, -100), (100, -100)]
+            .into_iter()
+            .fold((0, 200), |(net, gross), (net_delta, gross_delta)| {
+                (net + net_delta, gross + gross_delta)
+            });
+
+        assert_eq!(net_liquidity, 0);
+        assert_eq!(gross_liquidity, 0);
+        assert_eq!(tick_change_type_from_gross(b"200", b"100"), ChangeType::Update);
+        assert_eq!(tick_change_type_from_gross(b"100", b"0"), ChangeType::Deletion);
     }
 }

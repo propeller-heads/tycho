@@ -129,11 +129,33 @@ impl TickList {
             .binary_search_by(|t| t.index.cmp(&tick))
         {
             Ok(existing_idx) => {
-                let tick = &mut self.ticks[existing_idx];
-                tick.net_liquidity = liquidity;
-                if tick.net_liquidity == 0 {
+                if liquidity == 0 {
                     self.ticks.remove(existing_idx);
+                } else {
+                    self.ticks[existing_idx].net_liquidity = liquidity;
                 }
+            }
+            Err(insert_idx) if liquidity != 0 => {
+                self.ticks
+                    .insert(insert_idx, TickInfo::new(tick, liquidity)?);
+            }
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Updates a V4 tick while retaining a zero net-liquidity initialized boundary.
+    pub(crate) fn upsert_tick_liquidity(
+        &mut self,
+        tick: i32,
+        liquidity: i128,
+    ) -> Result<(), SimulationError> {
+        match self
+            .ticks
+            .binary_search_by(|entry| entry.index.cmp(&tick))
+        {
+            Ok(existing_idx) => {
+                self.ticks[existing_idx].net_liquidity = liquidity;
             }
             Err(insert_idx) => {
                 self.ticks
@@ -141,6 +163,15 @@ impl TickList {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn remove_tick(&mut self, tick: i32) {
+        if let Ok(existing_idx) = self
+            .ticks
+            .binary_search_by(|entry| entry.index.cmp(&tick))
+        {
+            self.ticks.remove(existing_idx);
+        }
     }
 
     fn is_below_smallest(&self, tick: i32) -> bool {
@@ -174,20 +205,7 @@ impl TickList {
     }
 
     pub(crate) fn has_initialized_ticks(&self) -> bool {
-        // If the tick list is empty, there are no initialized ticks
-        if self.ticks.is_empty() {
-            return false;
-        }
-
-        // Check if any ticks have non-zero net liquidity (are initialized)
-        for tick_info in &self.ticks {
-            if tick_info.net_liquidity != 0 {
-                return true;
-            }
-        }
-
-        // All ticks have zero net liquidity, so no initialized ticks
-        false
+        !self.ticks.is_empty()
     }
 
     fn next_initialized_tick(&self, index: i32, lte: bool) -> Result<&TickInfo, TickListError> {
@@ -304,6 +322,37 @@ mod tests {
         let tick_list = create_tick_list();
         assert_eq!(tick_list.ticks.len(), 3);
         assert_eq!(tick_list.tick_spacing, 10);
+    }
+
+    #[test]
+    fn set_tick_liquidity_removes_zero_liquidity_ticks() {
+        let mut tick_list = TickList::from(10, Vec::new()).unwrap();
+
+        tick_list
+            .set_tick_liquidity(10, 100)
+            .unwrap();
+        tick_list
+            .set_tick_liquidity(10, 0)
+            .unwrap();
+        assert!(tick_list.get_tick(10).is_err());
+        assert!(!tick_list.has_initialized_ticks());
+    }
+
+    #[test]
+    fn upsert_tick_liquidity_retains_zero_liquidity_ticks() {
+        let mut tick_list = TickList::from(10, Vec::new()).unwrap();
+
+        tick_list
+            .upsert_tick_liquidity(10, 0)
+            .unwrap();
+        assert_eq!(
+            tick_list
+                .get_tick(10)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+        assert!(tick_list.has_initialized_ticks());
     }
 
     #[test]

@@ -31,8 +31,10 @@ message TickDelta {
   bytes pool_address = 1;
   // The index of the tick.
   int32 tick_index = 2;
-  // The liquidity net delta of this tick. Bigint encoded as signed little endian bytes.
+  // The liquidity net delta of this tick. Bigint encoded as signed big endian bytes.
   bytes liquidity_net_delta = 3;
+  // The liquidity gross delta of this tick. Bigint encoded as signed big endian bytes.
+  bytes liquidity_gross_delta = 6;
   // Used to determine the order of the balance changes. Necessary for the balance store.
   uint64 ordinal = 4;
   Transaction transaction = 5;
@@ -47,7 +49,7 @@ message TickDeltas {
 message LiquidityChange {
   // The address of the pool.
   bytes pool_address = 1;
-  // The liquidity changed amount. Bigint encoded as signed little endian bytes.
+  // The liquidity changed amount. Bigint encoded as signed big endian bytes.
   bytes value = 2;
   // The type of update, can be absolute or delta.
   LiquidityChangeType change_type = 3;

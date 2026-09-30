@@ -1,9 +1,5 @@
 # Changelog
 
-## v0.4.3
+## v0.7.1
 
 - Preserve initialized Uniswap V4 ticks whose net liquidity is zero.
-
-## v0.4.2
-
-- Add the Robinhood Chain Uniswap V4 no-hooks manifest.
