@@ -84,7 +84,7 @@
     },
     "pricelevelstream": { "contract": "PropAMMExecutor", "args": [] },
     "fallback": {
-      "contract": "FallbackExecutor",
+      "contract": "PropAMMFallbackExecutor",
       "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]
     },
     "rfq:metric": {
@@ -142,7 +142,7 @@
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
     "fallback": {
-      "contract": "FallbackExecutor",
+      "contract": "PropAMMFallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
     },
     "rfq:metric": {

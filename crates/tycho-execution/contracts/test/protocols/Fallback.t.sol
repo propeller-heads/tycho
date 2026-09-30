@@ -8,10 +8,12 @@ import {AerodromeV1TestBase} from "./AerodromeV1.t.sol";
 import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
-    FallbackExecutor,
     FallbackExecutor__AddressZero,
     FallbackExecutor__InvalidDataLength
 } from "../../src/executors/FallbackExecutor.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../../src/executors/PropAMMFallbackExecutor.sol";
 import {
     TychoFallbackRouter,
     TychoFallbackRouter__CallbackTokenMismatch,
@@ -23,6 +25,9 @@ import {
     TychoFallbackRouter__UnknownProtocol,
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
+import {
+    PropAMMFallbackRouter
+} from "../../src/fallback/PropAMMFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 
@@ -236,18 +241,18 @@ contract UnquotablePropAMM {
     }
 }
 
-/// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every fallback
+/// @notice Deploys a `PropAMMFallbackRouter` on a fork and holds the assertions every fallback
 /// test repeats. Subclasses name the fork block, since the protocols are not all live at the
 /// same one.
 abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
-    TychoFallbackRouter router;
+    PropAMMFallbackRouter router;
     MockPropAMM pamm;
 
     function getForkBlock() internal pure virtual returns (uint256);
 
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
-        router = new TychoFallbackRouter(
+        router = new PropAMMFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -507,7 +512,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMFailed
+            TychoFallbackRouter.FallbackReason.PrimaryFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -857,7 +862,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMFailed
+            TychoFallbackRouter.FallbackReason.PrimaryFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -914,12 +919,13 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// `executePropAMM` is external only so `swap` can wrap it in try/catch.
-    function testExecutePropAMMRejectsExternalCaller() public {
+    /// `executePrimary` is external only so `swap` can wrap it in try/catch.
+    function testExecutePrimaryRejectsExternalCaller() public {
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.executePropAMM(
+        router.executePrimary(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
-            address(pamm)
+            address(pamm),
+            bytes("")
         );
     }
 
@@ -973,7 +979,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 
 /// @notice The deployment shapes a chain missing a singleton gets, on the mainnet fork so the
 /// zeroed slot is the only difference from `TychoFallbackRouterTest`. Split out from it because
-/// the extra `new TychoFallbackRouter` sites pushed that contract past a solc assembler limit.
+/// the extra `new PropAMMFallbackRouter` sites pushed that contract past a solc assembler limit.
 contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
     /// `TychoFallbackRouterTest`'s block and USDC/WETH figures, so the two contracts assert the
     /// same numbers.
@@ -989,7 +995,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
     /// byte then quotes by reverting with its name, which `swap` counts as zero,
     /// and running it reverts the same way instead of calling `address(0)`.
     function testUniswapV4UnavailableWithoutPoolManager() public {
-        TychoFallbackRouter noV4 = new TychoFallbackRouter(
+        PropAMMFallbackRouter noV4 = new PropAMMFallbackRouter(
             IPoolManager(address(0)),
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -1013,7 +1019,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
 
     /// Same for a chain without Fluid.
     function testFluidV1UnavailableWithoutLiquidity() public {
-        TychoFallbackRouter noFluid = new TychoFallbackRouter(
+        PropAMMFallbackRouter noFluid = new PropAMMFallbackRouter(
             IPoolManager(POOL_MANAGER),
             address(0),
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -1037,7 +1043,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
     /// the quote is the fill, the simulation rolls back, and a pAMM quoting
     /// below the pool is displaced exactly as it is on a quoted deployment.
     function testUniswapV3QuotedBySimulationWithoutStaticQuoter() public {
-        TychoFallbackRouter simulated = new TychoFallbackRouter(
+        PropAMMFallbackRouter simulated = new PropAMMFallbackRouter(
             IPoolManager(address(0)),
             address(0),
             IUniswapV3StaticQuoter(address(0))
@@ -1206,7 +1212,7 @@ contract TychoFallbackRouterAerodromeTest is
 
     function setUp() public override {
         vm.createSelectFork(vm.rpcUrl("base"), getForkBlock());
-        router = new TychoFallbackRouter(
+        router = new PropAMMFallbackRouter(
             IPoolManager(BASE_POOL_MANAGER),
             address(0),
             IUniswapV3StaticQuoter(BASE_STATIC_QUOTER)
@@ -1419,7 +1425,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
     function testConstructorRejectsZeroAddress() public {
         vm.expectRevert(FallbackExecutor__AddressZero.selector);
-        new FallbackExecutor(address(0));
+        new PropAMMFallbackExecutor(address(0));
     }
 
     /// The whole swap: a dead pAMM still settles, at the Uniswap V3 price.

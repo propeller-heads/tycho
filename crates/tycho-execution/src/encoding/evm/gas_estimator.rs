@@ -1,7 +1,10 @@
 use num_bigint::BigUint;
 
 use super::{
-    constants::{FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX},
+    constants::{
+        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+        PRICE_LEVEL_STREAM_PREFIX,
+    },
     group_swaps::group_swaps,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
@@ -73,7 +76,7 @@ pub fn needs_approval(protocol_system: &str) -> bool {
     PROTOCOLS_NEEDING_APPROVAL.contains(&protocol_system)
 }
 
-/// Extra gas the `TychoFallbackRouter` adds around a pAMM fill: the `executePropAMM` try/catch
+/// Extra gas the `TychoFallbackRouter` adds around a pAMM fill: the `executePrimary` try/catch
 /// self-call, the router->pAMM transfer, the `nonReentrant` guard and the no-output balance
 /// check. The router is push-funded, so the input transfer is charged separately and this sits on
 /// top of it.
@@ -133,6 +136,10 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
+        // `MetricFallbackRouter`'s quoter runs the pool's swap up to its callback.
+        if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
+            total_gas += &group.estimated_gas;
+        }
     }
 
     // Add user transfer overhead
@@ -242,6 +249,12 @@ fn estimate_transfer_overhead(
     // fallback router — comes on top.
     if protocol_system.starts_with(FALLBACK_PREFIX) {
         overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
+    }
+
+    // `BebopFallbackRouter` approves the settlement itself and forwards the output it receives.
+    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM {
+        overhead += BigUint::from(TOKEN_APPROVAL_GAS);
+        overhead += transfer_token_gas(token_out);
     }
 
     // Output transfer: router -> receiver/next pool (only when outputToRouter).
@@ -381,6 +394,33 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
         assert_eq!(gas, BigUint::from(240_000u64));
+    }
+
+    #[test]
+    fn test_single_metric_fallback_router() {
+        let solution = make_solution(vec![make_swap(METRIC_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // pool gas                            100_000
+        // simulated quote                     100_000  ← the pool gas again
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(340_000u64));
+    }
+
+    #[test]
+    fn test_single_bebop_fallback_router() {
+        let solution = make_solution(vec![make_swap(BEBOP_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // settlement approval                  25_000  ← TOKEN_APPROVAL_GAS
+        // output forward                       60_000  ← TOKEN_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(325_000u64));
     }
 
     #[test]
