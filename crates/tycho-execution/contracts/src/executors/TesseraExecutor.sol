@@ -48,6 +48,9 @@ contract TesseraExecutor is IExecutor {
     {
         (address tokenIn, address tokenOut) = _decodeData(data);
         // Empty data intentionally selects fee tag 0. Non-empty tags can reduce output.
+        // Output also depends on the transaction's priority fee: above
+        // TesseraSwap's threshold it is 4 bps below Tycho's quote, which is
+        // simulated at zero priority fee.
         tesseraSwap.tesseraSwapWithAllowances(
             tokenIn, tokenOut, int256(amountIn), 0, receiver, ""
         );

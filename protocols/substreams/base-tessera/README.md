@@ -60,6 +60,12 @@ liquidity can be underestimated. `HardLimits` is not advertised.
 `price` is a finite difference of view quotes, with an input step large enough to buy at
 least 1,000 raw output units.
 
+Quotes depend on the transaction's priority fee. TesseraSwap prices 4 bps lower, at any size
+and in both directions, once `tx.gasprice` exceeds `block.basefee` by more than an
+operator-set threshold (0.002 gwei at block 50,548,423, 0.01 gwei at 51,977,873). The Tycho VM
+simulates with zero gas price and base fee, so quotes and limits are the zero-priority-fee
+price; a fill that pays a priority fee above the threshold receives 4 bps less.
+
 ## Tests
 
 - Substreams: unit tests for discovery, the storage-change filter, balance deltas (seed
