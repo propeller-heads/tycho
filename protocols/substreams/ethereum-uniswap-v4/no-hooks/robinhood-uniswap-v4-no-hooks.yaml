@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "robinhood_uniswap_v4_no_hooks"
-  version: v0.4.2
+  version: v0.4.3
   url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/ethereum-uniswap-v4/no-hooks"
 
 protobuf:

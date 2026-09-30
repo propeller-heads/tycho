@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "unichain_uniswap_v4"
-  version: v0.4.1
+  version: v0.4.3
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/no-hooks"
 
 protobuf:
