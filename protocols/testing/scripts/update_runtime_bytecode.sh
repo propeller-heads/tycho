@@ -96,6 +96,7 @@ EXECUTOR_FIXTURES=(
     "RingSwapV2|ethereum|ring_swap_v2"
     "Sky|ethereum|sky"
     "LidoV4|ethereum|lido_v4"
+    "Tessera|base|vm:tessera"
 )
 
 if [[ -z "${RPC_URL:-}" ]]; then

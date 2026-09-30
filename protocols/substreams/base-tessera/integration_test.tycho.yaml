@@ -16,5 +16,3 @@ tests:
           - "0x4200000000000000000000000000000000000006"
           - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
         creation_tx: "0x8978cc5e137cde75d4aaf4323d493511858971c05860b00abc2d6a922a5e29c6"
-        skip_simulation: true # Gen-1 gas-price branch panics in VM; current generation tested on fork.
-        skip_execution: true # No executor deployed on Base; full router execution tested on fork.
