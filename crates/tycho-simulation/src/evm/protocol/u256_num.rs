@@ -108,7 +108,10 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
 
 #[inline]
 pub fn u256_to_biguint(value: U256) -> BigUint {
-    BigUint::from_bytes_le(&value.to_le_bytes::<32>())
+    let digits = value
+        .as_limbs()
+        .map(|limb| [limb as u32, (limb >> 32) as u32]);
+    BigUint::from_slice(digits.as_flattened())
 }
 
 pub fn biguint_to_u256(value: &BigUint) -> U256 {
@@ -162,5 +165,26 @@ mod test {
         let res = u256_to_f64(inp).expect("convert U256 to f64");
 
         assert_eq!(res, out);
+    }
+
+    #[test]
+    fn test_u256_biguint_round_trip() {
+        let values = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(u32::MAX),
+            U256::from(u64::MAX),
+            U256::from(u128::MAX),
+            U256::from_limbs([0, 0, 0, 1]),
+            U256::from_limbs([0x0123_4567_89ab_cdef, 0, 0xfedc_ba98_7654_3210, 0]),
+            U256::MAX,
+        ];
+
+        for value in values {
+            let converted = u256_to_biguint(value);
+
+            assert_eq!(converted, BigUint::from_bytes_le(&value.to_le_bytes::<32>()));
+            assert_eq!(biguint_to_u256(&converted), value);
+        }
     }
 }
