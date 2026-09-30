@@ -20,13 +20,11 @@ use crate::evm::protocol::{
     u256_num::u256_to_biguint,
     utils::uniswap::{
         liquidity_math,
+        pool_tick::PoolTick,
         sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
         swap_math,
         tick_list::{TickInfo, TickList, TickListErrorKind},
-        tick_math::{
-            get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-            MIN_SQRT_RATIO, MIN_TICK,
-        },
+        tick_math::{get_sqrt_ratio_at_tick, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK},
         StepComputation, SwapResults, SwapState,
     },
 };
@@ -43,7 +41,7 @@ pub struct VelodromeSlipstreamsState {
     default_fee: u32,
     custom_fee: u32,
     tick_spacing: i32,
-    tick: i32,
+    tick: PoolTick,
     ticks: TickList,
 }
 
@@ -75,7 +73,7 @@ impl VelodromeSlipstreamsState {
             default_fee,
             custom_fee,
             tick_spacing,
-            tick,
+            tick: tick.into(),
             ticks: tick_list,
         })
     }
@@ -120,7 +118,7 @@ impl VelodromeSlipstreamsState {
             amount_remaining: amount_specified,
             amount_calculated: I256::from_raw(U256::from(0u64)),
             sqrt_price: self.sqrt_price,
-            tick: self.tick,
+            tick: self.tick.value().into(),
             liquidity: self.liquidity,
         };
         let mut gas_used = U256::from(130_000);
@@ -131,7 +129,7 @@ impl VelodromeSlipstreamsState {
         {
             let (mut next_tick, initialized) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
                 Ok((tick, init)) => (tick, init),
                 Err(tick_err) => match tick_err.kind {
@@ -203,9 +201,10 @@ impl VelodromeSlipstreamsState {
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_TICK))?;
                 }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
+                state.tick =
+                    PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                state.tick = PoolTick::at_sqrt_price(state.sqrt_price)?;
             }
             gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_LOOP))?;
         }
@@ -300,7 +299,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
         }
 
         let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
+        let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_amount_in = U256::from(0u64);
@@ -409,7 +408,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             self.custom_fee = u32::from(custom_fee.clone());
         }
         if let Some(tick) = delta.updated_attributes.get("tick") {
-            self.tick = i32::from(tick.clone());
+            self.tick = i32::from(tick.clone()).into();
         }
 
         // apply tick & observations changes
@@ -524,14 +523,14 @@ mod tests {
 
         assert_ne!(result.sqrt_price, pool.sqrt_price);
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
-        assert_ne!(expected_tick, pool.tick);
-        assert_eq!(result.tick, expected_tick);
+        assert_ne!(expected_tick, pool.tick.value());
+        assert_eq!(result.tick.value(), expected_tick);
     }
 
     #[test]
     fn test_swap_keeps_boundary_tick_when_price_does_not_move() {
         let mut pool = create_basic_test_pool();
-        pool.tick = -1;
+        pool.tick = PoolTick::from(-1);
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1u64)).unwrap();
 
         let result = pool

@@ -25,12 +25,12 @@ use crate::evm::protocol::{
         add_fee_markup,
         uniswap::{
             liquidity_math,
+            pool_tick::PoolTick,
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
             swap_math,
             tick_list::{TickInfo, TickList, TickListErrorKind},
             tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                MIN_SQRT_RATIO, MIN_TICK,
+                get_sqrt_ratio_at_tick, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
             },
             StepComputation, SwapResults, SwapState,
         },
@@ -76,7 +76,7 @@ pub struct RamsesV3State {
     liquidity: u128,
     sqrt_price: U256,
     fee: u32,
-    tick: i32,
+    tick: PoolTick,
     tick_spacing: u16,
     ticks: TickList,
 }
@@ -100,7 +100,14 @@ impl RamsesV3State {
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
         let tick_list = TickList::from(tick_spacing, ticks)?;
-        Ok(RamsesV3State { liquidity, sqrt_price, fee, tick, tick_spacing, ticks: tick_list })
+        Ok(RamsesV3State {
+            liquidity,
+            sqrt_price,
+            fee,
+            tick: tick.into(),
+            tick_spacing,
+            ticks: tick_list,
+        })
     }
 
     fn swap(
@@ -135,7 +142,7 @@ impl RamsesV3State {
             amount_remaining: amount_specified,
             amount_calculated: I256::from_raw(U256::from(0u64)),
             sqrt_price: self.sqrt_price,
-            tick: self.tick,
+            tick: self.tick.value().into(),
             liquidity: self.liquidity,
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
@@ -145,7 +152,7 @@ impl RamsesV3State {
         {
             let (mut next_tick, initialized) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
                 Ok((tick, init)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
@@ -219,9 +226,10 @@ impl RamsesV3State {
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_INITIALIZED_TICK_CROSS))?;
                 }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
+                state.tick =
+                    PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                state.tick = PoolTick::at_sqrt_price(state.sqrt_price)?;
             }
         }
         Ok(SwapResults {
@@ -314,7 +322,7 @@ impl ProtocolSim for RamsesV3State {
         }
 
         let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
+        let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_amount_in = U256::ZERO;
@@ -429,7 +437,7 @@ impl ProtocolSim for RamsesV3State {
             self.sqrt_price = U256::from_be_slice(sqrt_price);
         }
         if let Some(tick) = delta.updated_attributes.remove("tick") {
-            self.tick = tick.into();
+            self.tick = i32::from(tick).into();
         }
         // The Ramses swap fee is governance-mutable, so apply fee updates here.
         if let Some(fee) = delta.updated_attributes.remove("fee") {

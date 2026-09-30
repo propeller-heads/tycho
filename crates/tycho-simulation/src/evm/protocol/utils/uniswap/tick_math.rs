@@ -172,13 +172,19 @@ fn most_significant_bit(x: U256) -> Result<usize, SimulationError> {
     Ok(x.bit_len() - 1)
 }
 
-pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
+/// Fails exactly when `get_tick_at_sqrt_ratio` fails.
+pub(crate) fn check_sqrt_price_in_range(sqrt_price: U256) -> Result<(), SimulationError> {
     if sqrt_price < MIN_SQRT_RATIO || sqrt_price >= MAX_SQRT_RATIO {
         return Err(SimulationError::FatalError(format!(
             "sqrt_price {} is outside valid range [{}, {})",
             sqrt_price, MIN_SQRT_RATIO, MAX_SQRT_RATIO
         )));
     }
+    Ok(())
+}
+
+pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
+    check_sqrt_price_in_range(sqrt_price)?;
     let ratio_x128 = sqrt_price << 32;
     let msb = most_significant_bit(ratio_x128)?;
 
