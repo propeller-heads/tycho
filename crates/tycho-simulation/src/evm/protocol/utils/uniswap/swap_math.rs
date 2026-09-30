@@ -3,7 +3,7 @@ use tycho_common::simulation::errors::SimulationError;
 
 use super::sqrt_price_math;
 use crate::evm::protocol::{
-    safe_math::safe_sub_u256,
+    safe_math::safe_add_u256,
     utils::solidity_math::{mul_div, mul_div_rounding_up},
 };
 
@@ -13,7 +13,7 @@ pub(crate) fn compute_swap_step(
     liquidity: u128,
     amount_remaining: I256,
     fee_pips: u32,
-) -> Result<(U256, U256, U256, U256), SimulationError> {
+) -> Result<(U256, U256, U256), SimulationError> {
     let zero_for_one = sqrt_ratio_current >= sqrt_ratio_target;
     let exact_in = amount_remaining >= I256::from_raw(U256::from(0u64));
     let sqrt_ratio_next: U256;
@@ -82,16 +82,14 @@ pub(crate) fn compute_swap_step(
     let max = sqrt_ratio_target == sqrt_ratio_next;
 
     if zero_for_one {
-        amount_in = if max && exact_in {
-            amount_in
-        } else {
-            sqrt_price_math::get_amount0_delta(
+        if !exact_in {
+            amount_in = sqrt_price_math::get_amount0_delta(
                 sqrt_ratio_next,
                 sqrt_ratio_current,
                 liquidity,
                 true,
-            )?
-        };
+            )?;
+        }
         amount_out = if max && !exact_in {
             amount_out
         } else {
@@ -103,16 +101,14 @@ pub(crate) fn compute_swap_step(
             )?
         }
     } else {
-        amount_in = if max && exact_in {
-            amount_in
-        } else {
-            sqrt_price_math::get_amount1_delta(
+        if !exact_in {
+            amount_in = sqrt_price_math::get_amount1_delta(
                 sqrt_ratio_current,
                 sqrt_ratio_next,
                 liquidity,
                 true,
-            )?
-        };
+            )?;
+        }
         amount_out = if max && !exact_in {
             amount_out
         } else {
@@ -129,12 +125,36 @@ pub(crate) fn compute_swap_step(
         amount_out = amount_remaining.abs().into_raw();
     }
 
-    let fee_amount = if exact_in && sqrt_ratio_next != sqrt_ratio_target {
-        safe_sub_u256(amount_remaining.abs().into_raw(), amount_in)?
+    // An exact-input step that stops short of its target spends everything that remains, the fee
+    // being whatever its input leaves over, so its input alone is never needed.
+    let amount_in_with_fee = if exact_in && !max {
+        let amount_remaining = amount_remaining.into_raw();
+        debug_assert!(
+            if zero_for_one {
+                sqrt_price_math::get_amount0_delta(
+                    sqrt_ratio_next,
+                    sqrt_ratio_current,
+                    liquidity,
+                    true,
+                )
+            } else {
+                sqrt_price_math::get_amount1_delta(
+                    sqrt_ratio_current,
+                    sqrt_ratio_next,
+                    liquidity,
+                    true,
+                )
+            }
+            .is_ok_and(|amount_in| amount_in <= amount_remaining),
+            "a step stopping short of its target needs no more input than remains"
+        );
+        amount_remaining
     } else {
-        mul_div_rounding_up(amount_in, U256::from(fee_pips), U256::from(1_000_000 - fee_pips))?
+        let fee_amount =
+            mul_div_rounding_up(amount_in, U256::from(fee_pips), U256::from(1_000_000 - fee_pips))?;
+        safe_add_u256(amount_in, fee_amount)?
     };
-    Ok((sqrt_ratio_next, amount_in, amount_out, fee_amount))
+    Ok((sqrt_ratio_next, amount_in_with_fee, amount_out))
 }
 
 #[cfg(test)]
@@ -232,7 +252,8 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(res, case.exp);
+            let (sqrt_price, amount_in, amount_out, fee_amount) = case.exp;
+            assert_eq!(res, (sqrt_price, amount_in + fee_amount, amount_out));
         }
     }
 }

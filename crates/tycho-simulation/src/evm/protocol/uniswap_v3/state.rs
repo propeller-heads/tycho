@@ -167,7 +167,7 @@ impl UniswapV3State {
                 Some(info) if info.index == next_tick => info.sqrt_price,
                 _ => get_sqrt_ratio_at_tick(next_tick)?,
             };
-            let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
+            let (sqrt_price, amount_in_with_fee, amount_out) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
                 state.liquidity,
@@ -181,29 +181,24 @@ impl UniswapV3State {
                 tick_next: next_tick,
                 initialized,
                 sqrt_price_next,
-                amount_in,
+                amount_in_with_fee,
                 amount_out,
-                fee_amount,
             };
 
             gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_SWAP_MATH_STEP))?;
 
             if exact_input {
-                state.amount_remaining -= I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_remaining -=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
                 state.amount_calculated -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
             } else {
                 state.amount_remaining +=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_calculated +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
