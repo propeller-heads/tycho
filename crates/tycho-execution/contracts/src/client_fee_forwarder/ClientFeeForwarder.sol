@@ -44,6 +44,8 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
     }
 
     /// @notice For native ETH input, send `amountIn` as `msg.value`.
+    // _afterSwap writes after the router call; safe because of nonReentrant
+    // slither-disable-next-line reentrancy-benign
     function singleSwap(
         uint256 amountIn,
         address tokenIn,
@@ -67,6 +69,8 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _afterSwap(tokenOut);
     }
 
+    // _afterSwap writes after the router call; safe because of nonReentrant
+    // slither-disable-next-line reentrancy-benign
     function sequentialSwap(
         uint256 amountIn,
         address tokenIn,
@@ -90,6 +94,8 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _afterSwap(tokenOut);
     }
 
+    // _afterSwap writes after the router call; safe because of nonReentrant
+    // slither-disable-next-line reentrancy-benign
     function splitSwap(
         uint256 amountIn,
         address tokenIn,
