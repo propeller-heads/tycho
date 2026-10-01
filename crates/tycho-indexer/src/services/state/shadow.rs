@@ -203,15 +203,27 @@ pub(crate) fn compare_contract_state(
 }
 
 /// Compares the two answers of a sampled `/protocol_state` request.
-#[allow(unused_variables, reason = "shadow mode skeleton")]
 pub(crate) fn compare_protocol_state(
     include_balances: bool,
     db: &Result<dto::ProtocolStateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::ProtocolStateRequestResponse>,
 ) -> Comparison {
-    // Does what `compare_contract_state` does, for component states. It also erases balances
-    // that were not requested and empty unknown components.
-    todo!()
+    // No protocol-state error names an address.
+    let (db, mut cache) = match pair(db, cache, |_| false) {
+        Ok(answers) => answers,
+        Err(comparison) => return comparison,
+    };
+    // The client still gets the database answer as it is.
+    let mut db = db.clone();
+    normalize_states(&mut db.states, include_balances);
+    normalize_states(&mut cache.states, include_balances);
+    if db == cache {
+        return Comparison::without_diffs(Outcome::Match);
+    }
+    let mut diffs = Vec::new();
+    walk("pagination", &to_value(&db.pagination), &to_value(&cache.pagination), &mut diffs);
+    locate(&db.states, &cache.states, |state| state.component_id.clone(), &mut diffs);
+    Comparison::mismatch(diffs)
 }
 
 /// Erases the known account differences, then orders the accounts by address.
@@ -225,6 +237,20 @@ fn normalize_accounts(accounts: &mut [dto::ResponseAccount]) {
         account.code_hash = Bytes::default();
     }
     accounts.sort_by(|a, b| a.address.cmp(&b.address));
+}
+
+/// Erases the known component differences, then orders the states by component id.
+fn normalize_states(states: &mut Vec<dto::ResponseProtocolState>, include_balances: bool) {
+    if !include_balances {
+        // The database path applies window balances even when they are not requested.
+        for state in states.iter_mut() {
+            state.balances.clear();
+        }
+    }
+    // The service serves an unknown component id as an empty state; the database path leaves it
+    // out.
+    states.retain(|state| !(state.attributes.is_empty() && state.balances.is_empty()));
+    states.sort_by(|a, b| a.component_id.cmp(&b.component_id));
 }
 
 /// Returns both answers when both sides answered. Otherwise returns the comparison of the
@@ -586,6 +612,93 @@ mod test {
         let comparison = compare_contracts(vec![db], vec![account(1)]);
 
         assert_eq!(comparison.outcome, Outcome::Match);
+    }
+
+    fn state(id: &str, x: u64) -> dto::ResponseProtocolState {
+        dto::ResponseProtocolState {
+            component_id: id.to_string(),
+            attributes: HashMap::from([("x".to_string(), Bytes::from(x))]),
+            balances: HashMap::from([(address(9), Bytes::from(1u64))]),
+        }
+    }
+
+    fn states(
+        states: Vec<dto::ResponseProtocolState>,
+        total: usize,
+    ) -> dto::ProtocolStateRequestResponse {
+        dto::ProtocolStateRequestResponse::new(
+            states,
+            PaginationResponse::new(0, 100, total as i64),
+        )
+    }
+
+    fn compare_states(
+        include_balances: bool,
+        db: Vec<dto::ResponseProtocolState>,
+        cache: Vec<dto::ResponseProtocolState>,
+    ) -> Comparison {
+        compare_protocol_state(
+            include_balances,
+            &Ok(states(db, 2)),
+            CacheAnswer::Answered(states(cache, 2)),
+        )
+    }
+
+    #[test]
+    fn equal_states_match_in_any_order() {
+        let comparison = compare_states(
+            true,
+            vec![state("c1", 1), state("c2", 2)],
+            vec![state("c2", 2), state("c1", 1)],
+        );
+
+        assert_eq!(comparison.outcome, Outcome::Match);
+    }
+
+    #[test]
+    fn a_corrupted_attribute_is_located() {
+        let comparison = compare_states(true, vec![state("c1", 1)], vec![state("c1", 2)]);
+
+        assert_eq!(comparison.outcome, Outcome::Mismatch);
+        assert_eq!(
+            comparison.diffs,
+            vec!["c1.attributes.x: db=0x0000000000000001 cache=0x0000000000000002"]
+        );
+    }
+
+    #[test]
+    fn an_empty_state_only_the_cache_serves_matches() {
+        let empty =
+            dto::ResponseProtocolState { component_id: "c2".to_string(), ..Default::default() };
+
+        let comparison = compare_states(true, vec![state("c1", 1)], vec![state("c1", 1), empty]);
+
+        assert_eq!(comparison.outcome, Outcome::Match);
+    }
+
+    #[test]
+    fn a_non_empty_state_only_the_cache_serves_is_located() {
+        let comparison =
+            compare_states(true, vec![state("c1", 1)], vec![state("c1", 1), state("c3", 3)]);
+
+        assert_eq!(comparison.outcome, Outcome::Mismatch);
+        assert!(comparison.diffs[0].starts_with("c3: db=null cache="));
+    }
+
+    #[rstest]
+    #[case::balances_not_requested(false, Outcome::Match)]
+    #[case::balances_requested(true, Outcome::Mismatch)]
+    fn balances_only_the_database_serves(
+        #[case] include_balances: bool,
+        #[case] expected: Outcome,
+    ) {
+        let mut without_balances = state("c1", 1);
+        without_balances.balances.clear();
+
+        let comparison =
+            compare_states(include_balances, vec![state("c1", 1)], vec![without_balances]);
+
+        assert_eq!(comparison.outcome, expected);
     }
 
     /// A counter's name, its labels sorted by key, and its value.
