@@ -48,7 +48,7 @@ pub(crate) fn get_sqrt_ratio_at_tick_cached(tick: i32) -> Result<U256, Simulatio
 }
 
 pub(crate) fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError> {
-    if tick.abs() > MAX_TICK {
+    if tick.unsigned_abs() > MAX_TICK.unsigned_abs() {
         return Err(SimulationError::FatalError(format!(
             "Tick {} is outside valid range [{}, {}]",
             tick, -MAX_TICK, MAX_TICK
@@ -253,6 +253,11 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[test]
+    fn test_get_sqrt_ratio_at_tick_i32_min() {
+        assert!(get_sqrt_ratio_at_tick(i32::MIN).is_err());
+    }
 
     #[test]
     fn test_get_sqrt_ratio_at_tick_cached_matches_uncached() {
