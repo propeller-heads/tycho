@@ -150,7 +150,7 @@ PropAMM (a single generic executor shared by all pAMMs implementing the standard
 address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback").
 
-### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/PropAMMFallbackRouter.sol`, `executors/FallbackExecutor.sol`, `executors/PropAMMFallbackExecutor.sol`)
+### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
 `swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
@@ -168,8 +168,31 @@ TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> pAMM     (rever
 runs the quote-then-fallback sequence below. A concrete router names the primary venue: it implements
 `_quotePrimary` (zero means the primary cannot fill) and `_swapPrimary` (pays the primary and delivers to the
 receiver), and exposes an external `swap` that calls `_swap(swap_, primary, primaryData, fallbackSwap)`.
-`PropAMMFallbackRouter` is the only concrete router today: its primary is a pAMM, and `primaryData` is empty.
-The sections below describe it; "pAMM" is the primary there.
+Each concrete router has its own executor, and each executor holds one router address:
+
+| Router | Executor | Primary quote | Executor swap data |
+|---|---|---|---|
+| `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
+| `MetricFallbackRouter` | `MetricFallbackExecutor` | Metric's `MetricOmmSwapQuoter.quoteLiveExactInSingle` (`metricQuoter` immutable) | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+| `BebopFallbackRouter` | `BebopFallbackExecutor` | `PRIMARY_FIRST` | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
+
+A primary that quotes `PRIMARY_FIRST` (`type(uint256).max`) has its price fixed off-chain: it runs first and the
+fallback quote is skipped, so the fallback runs only when the primary fails.
+
+`MetricFallbackRouter` quotes through Metric's `MetricOmmSwapQuoter`, a lens that runs the pool's swap up to its
+callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. The quoter must belong to the
+factory that created the pools the router serves. The router pays the pool's `metricOmmSwapCallback` through the
+catch-all `fallback`, which sends the full `amountIn` to the pool the swap called, as the Dispatcher does for
+`MetricExecutor`.
+
+`BebopFallbackRouter` runs a signed Bebop order. `bebopData` is `[partialFillOffset: 1][originalFilledTakerAmount: 32]
+[calldata]`, the same fields `BebopExecutor` takes. The order MUST name the fallback router as taker and receiver.
+`swap` checks the target and selector against the immutable `bebopSettlement` and `bebopRouter` before anything runs.
+The router approves the target for the fill amount, calls it, revokes the approval, and forwards the output to the
+receiver. The order fills at most `originalFilledTakerAmount`; the rest of `amountIn` goes back to the caller, as
+`BebopExecutor` leaves it in the TychoRouter.
+
+The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
 fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
@@ -259,14 +282,22 @@ Constraints:
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
-- `scripts/deploy-fallback-router.js` deploys `PropAMMFallbackRouter` through the CREATE2 factory, reading `poolManager` and
-  `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
-  static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
-  missing. The `PropAMMFallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
-  `fallback` entry with the printed router address to `executor_deployments.json` and list `fallback` under the
-  chain. Deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`, executor
-  `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router `0xd38142E88f3d1011D8258737f257c709Dd0e2204`,
-  executor `0x08f22285d13533d68aA8bE5949536322DB3538De`).
+- `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`
+  or `bebop`) through the CREATE2 factory, reading `poolManager` and `fluidLiquidity` from the chain's `uniswap_v4`
+  and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
+  `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Metric adds the chain's quoter
+  from `METRIC_SWAP_QUOTERS` and fails without one; Bebop adds the `rfq:bebop` settlement and router.
+- The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
+  to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
+  `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`). The Metric
+  and Bebop entries hold the zero address until their router is deployed; the executor constructor rejects it. A
+  Bebop router also needs its address as `fallback_router` under `fallback:rfq:bebop` in
+  `protocol_specific_addresses.json`.
+- The pAMM router and executor are deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`,
+  executor `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router
+  `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
+  built before the base-router split, so their verified sources are named `TychoFallbackRouter` and
+  `FallbackExecutor`. A redeploy from `executor_deployments.json` builds `PropAMMFallbackExecutor` at a new address.
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
@@ -393,7 +424,7 @@ resolve generically: a single `pricelevelstream` config entry serves the whole f
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
 `pricelevelstream:{protocol}` entries overriding per protocol.
 
-`fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
+`fallback:{protocol}` is the same liquidity executed through `PropAMMFallbackRouter` (see "protocol
 fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It
 resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `PropAMMFallbackExecutor`). The fallback protocol —
 one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
@@ -408,6 +439,21 @@ parameters the contract decodes: a solver builds the variant for the pool it pic
 `serde_json` serializes it into the `user_data` the encoder reads back, so the JSON shape is
 defined once. The encoder rejects a protocol the chain's router does not run with an
 `InvalidInput` error instead of letting it revert on chain.
+
+`fallback:rfq:metric` and `fallback:rfq:bebop` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
+`BEBOP_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
+exact executor-config entry, which `get_encoder` matches before the `fallback` family. They read the
+same `FallbackSwapData` `user_data`:
+
+- `MetricFallbackSwapEncoder` appends the fallback to the `rfq:metric` swap data.
+- `BebopFallbackSwapEncoder` requests the signed quote with the chain's `BebopFallbackRouter` as
+  taker and receiver. It reads that address from `fallback_router` under `fallback:rfq:bebop` in
+  `protocol_specific_addresses.json` and fails to build without it. It then inserts the
+  `bebopDataLength` prefix and appends the fallback.
+
+Neither router is deployed, so no chain lists these entries yet. The gas estimator charges a
+Metric leg its pool gas twice (the quoter runs the pool's swap), and a Bebop leg the router's approval and
+output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
