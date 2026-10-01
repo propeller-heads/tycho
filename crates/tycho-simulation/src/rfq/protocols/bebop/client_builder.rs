@@ -47,6 +47,7 @@ pub struct BebopClientBuilder {
     origin_address: Option<Bytes>,
     origin_target: Option<Bytes>,
     origin_source: Option<String>,
+    via_fallback_router: bool,
 }
 
 impl BebopClientBuilder {
@@ -61,6 +62,7 @@ impl BebopClientBuilder {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            via_fallback_router: false,
         }
     }
 
@@ -109,6 +111,12 @@ impl BebopClientBuilder {
         self
     }
 
+    /// Executes the swaps through Tycho's `BebopFallbackRouter`. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<BebopClient, RFQError> {
         let quote_tokens;
         if let Some(tokens) = self.quote_tokens {
@@ -117,7 +125,7 @@ impl BebopClientBuilder {
             quote_tokens = default_quote_tokens_for_chain(&self.chain)?
         }
 
-        BebopClient::new(
+        let client = BebopClient::new(
             self.chain,
             self.tokens,
             self.tvl,
@@ -127,6 +135,7 @@ impl BebopClientBuilder {
             self.origin_address,
             self.origin_target,
             self.origin_source,
-        )
+        )?;
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

@@ -77,10 +77,23 @@ pub struct BebopClient {
     origin_target: Option<Bytes>,
     /// Stable identifier for the upstream flow source when aggregating multiple sources.
     origin_source: Option<String>,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    BebopClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl BebopClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:bebop";
+    /// Components executed through Tycho's `BebopFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:bebop";
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
+    }
 
     /// Creates a fully configured client. Prefer constructing through
     /// [`BebopClientBuilder`](super::client_builder::BebopClientBuilder).
@@ -109,6 +122,7 @@ impl BebopClient {
             origin_address,
             origin_target,
             origin_source,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
     }
 
@@ -121,7 +135,7 @@ impl BebopClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "bebop_pool".to_string(),
             chain: self.chain,
             tokens,
@@ -586,7 +600,9 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     use super::*;
-    use crate::rfq::constants::get_bebop_auth;
+    use crate::rfq::{
+        constants::get_bebop_auth, protocols::bebop::client_builder::BebopClientBuilder,
+    };
 
     /// BebopSettlement.swapSingle
     const SWAP_SINGLE_SELECTOR: [u8; 4] = [0x4d, 0xce, 0xbc, 0xba];
@@ -594,6 +610,32 @@ mod tests {
     const SWAP_AGGREGATE_SELECTOR: [u8; 4] = [0xa2, 0xf7, 0x48, 0x93];
     /// BebopRouter.swap
     const ROUTER_SWAP_SELECTOR: [u8; 4] = [0x95, 0x86, 0xd0, 0xe8];
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let direct = BebopClientBuilder::new(Chain::Ethereum, String::new())
+            .build()
+            .unwrap();
+        let via_router = BebopClientBuilder::new(Chain::Ethereum, String::new())
+            .with_fallback_router()
+            .build()
+            .unwrap();
+        let price_data = BebopPriceData::default();
+
+        let component = |client: &BebopClient| {
+            client
+                .create_component_with_state(String::from("bebop"), vec![], &price_data, 0.0)
+                .component
+                .protocol_system
+        };
+
+        assert_eq!(component(&direct), BebopClient::PROTOCOL_SYSTEM);
+        assert_eq!(component(&via_router), BebopClient::FALLBACK_PROTOCOL_SYSTEM);
+        assert_eq!(
+            BebopClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::BEBOP_FALLBACK_PROTOCOL_SYSTEM
+        );
+    }
 
     #[tokio::test]
     #[ignore] // Requires network access and setting proper env vars
@@ -792,6 +834,7 @@ mod tests {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
         };
 
         let start_time = std::time::Instant::now();
@@ -1145,6 +1188,7 @@ mod tests {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
         }
     }
 
@@ -1313,6 +1357,7 @@ mod tests {
                 Bytes::from_str("0xdA892C989d07A18B5DD3F392d949f00dF15C5736").unwrap(),
             ),
             origin_source: Some("tycho".to_string()),
+            protocol_system: BebopClient::PROTOCOL_SYSTEM.to_string(),
         };
 
         let serialized = serde_json::to_string(&original).unwrap();
