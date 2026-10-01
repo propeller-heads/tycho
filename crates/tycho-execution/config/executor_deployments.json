@@ -87,6 +87,10 @@
       "contract": "PropAMMFallbackExecutor",
       "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]
     },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
@@ -144,6 +148,14 @@
     "fallback": {
       "contract": "PropAMMFallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
