@@ -259,6 +259,8 @@ pub fn encode_client_fee_forwarder_call(
     encoded_solution: EncodedSolution,
     solution: &Solution,
     native_address: &Bytes,
+    fee_wallet: &Bytes,
+    client_fee_bps: u32,
 ) -> Result<Transaction, EncodingError> {
     let amount_in = biguint_to_u256(solution.amount_in());
     let expected_amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -270,6 +272,7 @@ pub fn encode_client_fee_forwarder_call(
     let token_out = bytes_to_address(solution.token_out())?;
     let token_out = if token_out == native_addr { router_eth } else { token_out };
     let receiver = bytes_to_address(solution.receiver())?;
+    let fee_wallet = bytes_to_address(fee_wallet)?;
     let swaps = encoded_solution.swaps().to_vec();
 
     let function_signature = encoded_solution.function_signature();
@@ -282,11 +285,23 @@ pub fn encode_client_fee_forwarder_call(
             min_amount_out,
             U256::from(encoded_solution.n_tokens()),
             receiver,
+            fee_wallet,
+            client_fee_bps,
             swaps,
         )
             .abi_encode()
     } else {
-        (amount_in, token_in, token_out, expected_amount_out, min_amount_out, receiver, swaps)
+        (
+            amount_in,
+            token_in,
+            token_out,
+            expected_amount_out,
+            min_amount_out,
+            receiver,
+            fee_wallet,
+            client_fee_bps,
+            swaps,
+        )
             .abi_encode()
     };
 

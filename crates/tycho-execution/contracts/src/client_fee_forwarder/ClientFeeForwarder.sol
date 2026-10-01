@@ -18,15 +18,13 @@ error ClientFeeForwarder__InvalidReceiver(address receiver);
 error ClientFeeForwarder__UnexpectedSender(address sender);
 
 /// @title ClientFeeForwarder
-/// @notice Charges a client fee for a client without a signing EOA and sends
-///         it to the client's wallet in the same transaction.
+/// @notice Charges a client fee for clients without a signing EOA and sends
+///         it to the caller's chosen fee wallet in the same transaction.
 /// @dev See "Client fee forwarder" in crates/tycho-execution/CLAUDE.md.
 contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     TychoRouterV3 public immutable router;
-    address public immutable feeWallet;
-    uint32 public immutable clientFeeBps;
 
     bool private transient _swapping;
 
@@ -34,13 +32,9 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         address indexed token, uint256 amount, address indexed feeWallet
     );
 
-    constructor(address router_, address feeWallet_, uint32 clientFeeBps_) {
-        if (router_ == address(0) || feeWallet_ == address(0)) {
-            revert ClientFeeForwarder__AddressZero();
-        }
+    constructor(address router_) {
+        if (router_ == address(0)) revert ClientFeeForwarder__AddressZero();
         router = TychoRouterV3(payable(router_));
-        feeWallet = feeWallet_;
-        clientFeeBps = clientFeeBps_;
     }
 
     /// @notice For native ETH input, send `amountIn` as `msg.value`.
@@ -53,9 +47,11 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         uint256 expectedAmountOut,
         uint256 minAmountOut,
         address receiver,
+        address feeWallet,
+        uint32 clientFeeBps,
         bytes calldata swapData
     ) external payable nonReentrant returns (uint256 amountOut) {
-        _beforeSwap(tokenIn, amountIn, receiver);
+        _beforeSwap(tokenIn, amountIn, receiver, feeWallet);
         amountOut = router.singleSwap{value: msg.value}(
             amountIn,
             tokenIn,
@@ -63,10 +59,10 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
             expectedAmountOut,
             minAmountOut,
             receiver,
-            _clientFeeParams(),
+            _clientFeeParams(clientFeeBps),
             swapData
         );
-        _afterSwap(tokenOut);
+        _afterSwap(tokenOut, feeWallet);
     }
 
     // _afterSwap writes after the router call; safe because of nonReentrant
@@ -78,9 +74,11 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         uint256 expectedAmountOut,
         uint256 minAmountOut,
         address receiver,
+        address feeWallet,
+        uint32 clientFeeBps,
         bytes calldata swaps
     ) external payable nonReentrant returns (uint256 amountOut) {
-        _beforeSwap(tokenIn, amountIn, receiver);
+        _beforeSwap(tokenIn, amountIn, receiver, feeWallet);
         amountOut = router.sequentialSwap{value: msg.value}(
             amountIn,
             tokenIn,
@@ -88,10 +86,10 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
             expectedAmountOut,
             minAmountOut,
             receiver,
-            _clientFeeParams(),
+            _clientFeeParams(clientFeeBps),
             swaps
         );
-        _afterSwap(tokenOut);
+        _afterSwap(tokenOut, feeWallet);
     }
 
     // _afterSwap writes after the router call; safe because of nonReentrant
@@ -104,9 +102,11 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         uint256 minAmountOut,
         uint256 nTokens,
         address receiver,
+        address feeWallet,
+        uint32 clientFeeBps,
         bytes calldata swaps
     ) external payable nonReentrant returns (uint256 amountOut) {
-        _beforeSwap(tokenIn, amountIn, receiver);
+        _beforeSwap(tokenIn, amountIn, receiver, feeWallet);
         amountOut = router.splitSwap{value: msg.value}(
             amountIn,
             tokenIn,
@@ -115,10 +115,10 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
             minAmountOut,
             nTokens,
             receiver,
-            _clientFeeParams(),
+            _clientFeeParams(clientFeeBps),
             swaps
         );
-        _afterSwap(tokenOut);
+        _afterSwap(tokenOut, feeWallet);
     }
 
     /// @notice Valid only during this contract's own router call.
@@ -140,9 +140,15 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         }
     }
 
-    function _beforeSwap(address tokenIn, uint256 amountIn, address receiver)
-        private
-    {
+    function _beforeSwap(
+        address tokenIn,
+        uint256 amountIn,
+        address receiver,
+        address feeWallet
+    ) private {
+        if (feeWallet == address(0)) {
+            revert ClientFeeForwarder__AddressZero();
+        }
         // The router would credit the output to this contract's vault
         if (receiver == address(router) || receiver == address(this)) {
             revert ClientFeeForwarder__InvalidReceiver(receiver);
@@ -155,7 +161,7 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _swapping = true;
     }
 
-    function _afterSwap(address tokenOut) private {
+    function _afterSwap(address tokenOut, address feeWallet) private {
         _swapping = false;
         uint256 fee =
             router.balanceOf(address(this), uint256(uint160(tokenOut)));
@@ -171,7 +177,11 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         }
     }
 
-    function _clientFeeParams() private view returns (ClientFeeParams memory) {
+    function _clientFeeParams(uint32 clientFeeBps)
+        private
+        view
+        returns (ClientFeeParams memory)
+    {
         return ClientFeeParams({
             clientFeeBps: clientFeeBps,
             clientFeeReceiver: address(this),

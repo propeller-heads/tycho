@@ -32,9 +32,7 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
 
     function setUp() public override {
         super.setUp();
-        _forwarder = new ClientFeeForwarder(
-            tychoRouterAddr, _feeWallet, _CLIENT_FEE_BPS
-        );
+        _forwarder = new ClientFeeForwarder(tychoRouterAddr);
     }
 
     function _wethDaiSwap() private view returns (bytes memory) {
@@ -58,6 +56,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             _DAI_AMOUNT_OUT,
             _DAI_AMOUNT_OUT * 9500 / 10000,
             ALICE,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             _wethDaiSwap()
         );
         vm.stopPrank();
@@ -75,6 +75,48 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
         assertEq(IERC20(WETH_ADDR).balanceOf(address(_forwarder)), 0);
     }
 
+    function testEachSwapPaysItsOwnFeeWallet() public {
+        // Two clients share the forwarder: client B charges 2%.
+        address feeWalletB = makeAddr("clientFeeWalletB");
+        deal(WETH_ADDR, ALICE, 1 ether);
+        deal(WETH_ADDR, BOB, 1 ether);
+
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(_forwarder), 1 ether);
+        _forwarder.singleSwap(
+            1 ether,
+            WETH_ADDR,
+            DAI_ADDR,
+            _DAI_AMOUNT_OUT,
+            _DAI_AMOUNT_OUT * 9500 / 10000,
+            ALICE,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
+            _wethDaiSwap()
+        );
+        vm.stopPrank();
+
+        vm.startPrank(BOB);
+        IERC20(WETH_ADDR).approve(address(_forwarder), 1 ether);
+        uint256 amountOutB = _forwarder.singleSwap(
+            1 ether,
+            WETH_ADDR,
+            DAI_ADDR,
+            1 ether,
+            1,
+            BOB,
+            feeWalletB,
+            2 * _CLIENT_FEE_BPS,
+            _wethDaiSwap()
+        );
+        vm.stopPrank();
+
+        assertEq(IERC20(DAI_ADDR).balanceOf(_feeWallet), _DAI_CLIENT_FEE);
+        uint256 feeB = IERC20(DAI_ADDR).balanceOf(feeWalletB);
+        assertEq(feeB, (amountOutB + feeB) * 2 / 100);
+        assertEq(IERC20(DAI_ADDR).balanceOf(address(_forwarder)), 0);
+    }
+
     function testSingleSwapForwardsRouterShareOfClientFee() public {
         // The router keeps 10% of the client fee; the fee wallet gets the rest.
         vm.prank(FEE_SETTER);
@@ -90,6 +132,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             _DAI_AMOUNT_OUT,
             _DAI_AMOUNT_OUT * 9500 / 10000,
             ALICE,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             _wethDaiSwap()
         );
         vm.stopPrank();
@@ -120,6 +164,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             1 ether,
             0.98 ether,
             ALICE,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             encodeSingleSwap(
                 address(nativeWrapExecutor), abi.encodePacked(uint8(0))
             )
@@ -142,6 +188,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             1 ether,
             0.98 ether,
             ALICE,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             encodeSingleSwap(
                 address(nativeWrapExecutor), abi.encodePacked(uint8(1))
             )
@@ -216,6 +264,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             _DAI_AMOUNT_OUT,
             _DAI_AMOUNT_OUT * 9500 / 10000,
             tychoRouterAddr,
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             swap
         );
     }
@@ -235,6 +285,8 @@ contract ClientFeeForwarderTest is TychoRouterTestSetup {
             _DAI_AMOUNT_OUT,
             _DAI_AMOUNT_OUT * 9500 / 10000,
             address(_forwarder),
+            _feeWallet,
+            _CLIENT_FEE_BPS,
             swap
         );
     }

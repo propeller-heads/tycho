@@ -50,8 +50,18 @@ fn test_client_fee_forwarder_single_swap() {
         .encode_solutions(vec![solution.clone()])
         .unwrap()
         .remove(0);
-    let transaction =
-        encode_client_fee_forwarder_call(encoded_solution, &solution, &eth()).unwrap();
+    // makeAddr("clientFeeWallet") in ClientFeeForwarder.t.sol
+    let fee_wallet = Bytes::from_str("0x683C82e4B6796e3d733dcbFac2841e101ad2b8fD").unwrap();
+    // 1%
+    let client_fee_bps = 1_000_000;
+    let transaction = encode_client_fee_forwarder_call(
+        encoded_solution,
+        &solution,
+        &eth(),
+        &fee_wallet,
+        client_fee_bps,
+    )
+    .unwrap();
 
     assert_eq!(transaction.to, client_fee_forwarder_address());
     assert_eq!(transaction.value, BigUint::ZERO);

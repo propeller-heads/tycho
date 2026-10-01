@@ -196,13 +196,13 @@ impl ClientFeeForwarderEncoder {
         let router_function = router_solution.function_signature();
         let function_signature = match router_function.split('(').next() {
             Some("singleSwap") => {
-                "singleSwap(uint256,address,address,uint256,uint256,address,bytes)"
+                "singleSwap(uint256,address,address,uint256,uint256,address,address,uint32,bytes)"
             }
             Some("sequentialSwap") => {
-                "sequentialSwap(uint256,address,address,uint256,uint256,address,bytes)"
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,address,uint32,bytes)"
             }
             Some("splitSwap") => {
-                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,bytes)"
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,address,uint32,bytes)"
             }
             _ => {
                 return Err(EncodingError::FatalError(format!(
@@ -869,7 +869,7 @@ mod tests {
                 dai(),
                 vec![uniswap_v2_swap("0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11", weth(), dai())],
             ),
-            "singleSwap(uint256,address,address,uint256,uint256,address,bytes)"
+            "singleSwap(uint256,address,address,uint256,uint256,address,address,uint32,bytes)"
         )]
         #[case::sequential(
             solution(
@@ -880,7 +880,7 @@ mod tests {
                     uniswap_v2_swap("0x004375Dff511095CC5A197A54140a24eFEF3A416", wbtc(), usdc()),
                 ],
             ),
-            "sequentialSwap(uint256,address,address,uint256,uint256,address,bytes)"
+            "sequentialSwap(uint256,address,address,uint256,uint256,address,address,uint32,bytes)"
         )]
         #[case::split(
             solution(
@@ -888,7 +888,7 @@ mod tests {
                 eth(),
                 vec![swap_usdc_eth_univ4().with_split(0.5), swap_usdc_eth_univ4()],
             ),
-            "splitSwap(uint256,address,address,uint256,uint256,uint256,address,bytes)"
+            "splitSwap(uint256,address,address,uint256,uint256,uint256,address,address,uint32,bytes)"
         )]
         fn test_encodes_router_swaps_for_forwarder(
             #[case] solution: Solution,
