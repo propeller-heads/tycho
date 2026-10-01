@@ -76,17 +76,8 @@ contract BebopFallbackRouter is TychoFallbackRouter {
         }
     }
 
-    function _quotePrimary(
-        Swap calldata, /* swap_ */
-        address, /* target */
-        bytes calldata /* bebopData */
-    )
-        internal
-        pure
-        override
-        returns (uint256 amountOut)
-    {
-        return PRIMARY_FIRST;
+    function _runsPrimaryFirst() internal pure override returns (bool) {
+        return true;
     }
 
     function _swapPrimary(

@@ -68,17 +68,8 @@ contract HashflowFallbackRouter is TychoFallbackRouter {
         }
     }
 
-    function _quotePrimary(
-        Swap calldata, /* swap_ */
-        address, /* pool */
-        bytes calldata /* hashflowQuote */
-    )
-        internal
-        pure
-        override
-        returns (uint256 amountOut)
-    {
-        return PRIMARY_FIRST;
+    function _runsPrimaryFirst() internal pure override returns (bool) {
+        return true;
     }
 
     function _swapPrimary(

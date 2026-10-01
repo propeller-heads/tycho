@@ -174,11 +174,11 @@ Each concrete router has its own executor, and each executor holds one router ad
 |---|---|---|---|
 | `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
 | `MetricFallbackRouter` | `MetricFallbackExecutor` | Metric's `MetricOmmSwapQuoter.quoteLiveExactInSingle` (`metricQuoter` immutable) | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
-| `BebopFallbackRouter` | `BebopFallbackExecutor` | `PRIMARY_FIRST` | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
-| `HashflowFallbackRouter` | `HashflowFallbackExecutor` | `PRIMARY_FIRST` | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
+| `BebopFallbackRouter` | `BebopFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
+| `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
 
-A primary that quotes `PRIMARY_FIRST` (`type(uint256).max`) has its price fixed off-chain: it runs first and the
-fallback quote is skipped, so the fallback runs only when the primary fails.
+A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
+quoted, and the fallback runs only when the primary fails.
 
 `MetricFallbackRouter` quotes through Metric's `MetricOmmSwapQuoter`, a lens that runs the pool's swap up to its
 callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. The quoter must belong to the
