@@ -51,10 +51,23 @@ pub struct HashflowClient {
     quote_tokens: HashSet<Bytes>,
     poll_time: Duration,
     quote_timeout: Duration,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    HashflowClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl HashflowClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:hashflow";
+    /// Components executed through Tycho's `HashflowFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:hashflow";
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -79,6 +92,7 @@ impl HashflowClient {
             quote_tokens,
             poll_time,
             quote_timeout,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
     }
 
@@ -126,7 +140,7 @@ impl HashflowClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "hashflow_pool".to_string(),
             chain: self.chain,
             tokens,
@@ -645,7 +659,10 @@ mod tests {
     use super::*;
     use crate::rfq::{
         constants::get_hashflow_auth,
-        protocols::hashflow::models::{HashflowPair, HashflowPriceLevel},
+        protocols::hashflow::{
+            client_builder::HashflowClientBuilder,
+            models::{HashflowPair, HashflowPriceLevel},
+        },
     };
 
     #[test]
@@ -685,6 +702,44 @@ mod tests {
         assert!(result.is_ok());
         // 2 ETH * 3000 USDC/ETH = 6000 USDC
         assert_eq!(result.unwrap(), 6000.0);
+    }
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let level = HashflowMarketMakerLevels {
+            pair: HashflowPair { base_token: weth.clone(), quote_token: usdc.clone() },
+            levels: vec![HashflowPriceLevel { quantity: 1.0, price: 3000.0 }],
+        };
+        let builder = || HashflowClientBuilder::new(Chain::Ethereum, String::new(), String::new());
+        let label = |client: HashflowClient| {
+            client
+                .create_component_with_state(
+                    String::from("hashflow"),
+                    vec![weth.clone(), usdc.clone()],
+                    "test_mm",
+                    &level,
+                    0.0,
+                )
+                .component
+                .protocol_system
+        };
+
+        assert_eq!(label(builder().build().unwrap()), HashflowClient::PROTOCOL_SYSTEM);
+        assert_eq!(
+            label(
+                builder()
+                    .with_fallback_router()
+                    .build()
+                    .unwrap()
+            ),
+            HashflowClient::FALLBACK_PROTOCOL_SYSTEM
+        );
+        assert_eq!(
+            HashflowClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::HASHFLOW_FALLBACK_PROTOCOL_SYSTEM
+        );
     }
 
     #[test]
@@ -995,6 +1050,7 @@ mod tests {
             quote_tokens: HashSet::new(),
             poll_time: Duration::from_secs(0),
             quote_timeout,
+            protocol_system: HashflowClient::PROTOCOL_SYSTEM.to_string(),
         }
     }
 
@@ -1222,6 +1278,7 @@ mod tests {
             quote_tokens: HashSet::from([quote_token.clone()]),
             poll_time: Duration::from_secs(10),
             quote_timeout: Duration::from_millis(5500),
+            protocol_system: HashflowClient::PROTOCOL_SYSTEM.to_string(),
         };
 
         let serialized = serde_json::to_string(&original).unwrap();

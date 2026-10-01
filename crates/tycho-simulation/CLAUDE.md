@@ -32,9 +32,9 @@ for any protocol indexed by Tycho.
     protocols without a native implementation
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
   `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP.
-  `with_fallback_router()` on the Bebop and Metric builders labels components
-  `fallback:rfq:bebop` / `fallback:rfq:metric`, so they execute through the Bebop and Metric
-  fallback routers. Off by default: those routers are not deployed yet
+  `with_fallback_router()` on the Bebop, Hashflow and Metric builders labels components
+  `fallback:rfq:bebop` / `fallback:rfq:hashflow` / `fallback:rfq:metric`, so they execute through
+  those venues' fallback routers. Off by default: those routers are not deployed yet
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are

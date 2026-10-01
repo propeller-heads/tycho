@@ -165,6 +165,9 @@ pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 /// Bebop components executed through `BebopFallbackRouter`.
 pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
 
+/// Hashflow components executed through `HashflowFallbackRouter`.
+pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +180,7 @@ mod tests {
         assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
         assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

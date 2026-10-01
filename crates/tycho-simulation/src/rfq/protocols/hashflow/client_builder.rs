@@ -39,6 +39,7 @@ pub struct HashflowClientBuilder {
     quote_tokens: Option<HashSet<Bytes>>,
     poll_time: Duration,
     quote_timeout: Duration,
+    via_fallback_router: bool,
 }
 
 impl HashflowClientBuilder {
@@ -52,6 +53,7 @@ impl HashflowClientBuilder {
             quote_tokens: None,
             poll_time: Duration::from_secs(5), // Default 5 second polling
             quote_timeout: Duration::from_secs(5), // Default 5 second timeout
+            via_fallback_router: false,
         }
     }
 
@@ -86,6 +88,12 @@ impl HashflowClientBuilder {
         self
     }
 
+    /// Executes the swaps through Tycho's `HashflowFallbackRouter`. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<HashflowClient, RFQError> {
         let quote_tokens;
         if let Some(tokens) = self.quote_tokens {
@@ -94,7 +102,7 @@ impl HashflowClientBuilder {
             quote_tokens = default_quote_tokens_for_chain(&self.chain)?
         }
 
-        HashflowClient::new(
+        let client = HashflowClient::new(
             self.chain,
             self.tokens,
             self.tvl,
@@ -103,6 +111,7 @@ impl HashflowClientBuilder {
             self.auth_key,
             self.poll_time,
             self.quote_timeout,
-        )
+        )?;
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

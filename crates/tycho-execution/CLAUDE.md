@@ -175,6 +175,7 @@ Each concrete router has its own executor, and each executor holds one router ad
 | `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
 | `MetricFallbackRouter` | `MetricFallbackExecutor` | Metric's `MetricOmmSwapQuoter.quoteLiveExactInSingle` (`metricQuoter` immutable) | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
 | `BebopFallbackRouter` | `BebopFallbackExecutor` | `PRIMARY_FIRST` | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
+| `HashflowFallbackRouter` | `HashflowFallbackExecutor` | `PRIMARY_FIRST` | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
 
 A primary that quotes `PRIMARY_FIRST` (`type(uint256).max`) has its price fixed off-chain: it runs first and the
 fallback quote is skipped, so the fallback runs only when the primary fails.
@@ -191,6 +192,12 @@ catch-all `fallback`, which sends the full `amountIn` to the pool the swap calle
 The router approves the target for the fill amount, calls it, revokes the approval, and forwards the output to the
 receiver. The order fills at most `originalFilledTakerAmount`; the rest of `amountIn` goes back to the caller, as
 `BebopExecutor` leaves it in the TychoRouter.
+
+`HashflowFallbackRouter` runs a signed Hashflow RFQ-T quote through the immutable `hashflowRouter`. The quote is the
+345 bytes `HashflowExecutor` takes, and it MUST name the fallback router as trader. The router fills at most the quote's
+`baseTokenAmount`, approves the Hashflow router for the fill, calls `tradeRFQT`, revokes the approval, and forwards the
+output to the receiver. The rest of `amountIn` goes back to the caller, as for Bebop. The quote's pool is the primary
+in `FallbackSwap`.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
@@ -286,13 +293,14 @@ Constraints:
   or `bebop`) through the CREATE2 factory, reading `poolManager` and `fluidLiquidity` from the chain's `uniswap_v4`
   and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
   `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Metric adds the chain's quoter
-  from `METRIC_SWAP_QUOTERS` and fails without one; Bebop adds the `rfq:bebop` settlement and router.
+  from `METRIC_SWAP_QUOTERS` and fails without one; Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
+  the `rfq:hashflow` router.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
   to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
-  `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`). The Metric
-  and Bebop entries hold the zero address until their router is deployed; the executor constructor rejects it. A
-  Bebop router also needs its address as `fallback_router` under `fallback:rfq:bebop` in
-  `protocol_specific_addresses.json`.
+  `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
+  `fallback:rfq:hashflow` for `HashflowFallbackExecutor`). The Metric, Bebop and Hashflow entries hold the zero
+  address until their router is deployed; the executor constructor rejects it. A Bebop or Hashflow router also needs
+  its address as `fallback_router` under its protocol in `protocol_specific_addresses.json`.
 - The pAMM router and executor are deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`,
   executor `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router
   `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
@@ -440,8 +448,8 @@ parameters the contract decodes: a solver builds the variant for the pool it pic
 defined once. The encoder rejects a protocol the chain's router does not run with an
 `InvalidInput` error instead of letting it revert on chain.
 
-`fallback:rfq:metric` and `fallback:rfq:bebop` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
-`BEBOP_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
+`fallback:rfq:metric`, `fallback:rfq:bebop` and `fallback:rfq:hashflow` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
+`BEBOP_FALLBACK_PROTOCOL_SYSTEM`, `HASHFLOW_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
 exact executor-config entry, which `get_encoder` matches before the `fallback` family. They read the
 same `FallbackSwapData` `user_data`:
 
@@ -450,10 +458,12 @@ same `FallbackSwapData` `user_data`:
   taker and receiver. It reads that address from `fallback_router` under `fallback:rfq:bebop` in
   `protocol_specific_addresses.json` and fails to build without it. It then inserts the
   `bebopDataLength` prefix and appends the fallback.
+- `HashflowFallbackSwapEncoder` requests the signed quote with the chain's `HashflowFallbackRouter` as trader, read
+  from `fallback_router` under `fallback:rfq:hashflow`, and wraps the 345-byte quote in the tokens and the fallback.
 
-Neither router is deployed, so no chain lists these entries yet. The gas estimator charges a
-Metric leg its pool gas twice (the quoter runs the pool's swap), and a Bebop leg the router's approval and
-output forward.
+None of these routers is deployed, so no chain lists these entries yet. The gas estimator charges a
+Metric leg its pool gas twice (the quoter runs the pool's swap), and a Bebop or Hashflow leg the router's approval
+and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid

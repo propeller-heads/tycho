@@ -91,6 +91,10 @@
       "contract": "BebopFallbackExecutor",
       "args": ["0x0000000000000000000000000000000000000000"]
     },
+    "fallback:rfq:hashflow": {
+      "contract": "HashflowFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

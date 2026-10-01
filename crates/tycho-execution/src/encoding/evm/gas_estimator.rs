@@ -2,8 +2,8 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-        PRICE_LEVEL_STREAM_PREFIX,
+        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
     },
     group_swaps::group_swaps,
 };
@@ -250,8 +250,10 @@ fn estimate_transfer_overhead(
         overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
     }
 
-    // `BebopFallbackRouter` approves the settlement itself and forwards the output it receives.
-    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM {
+    // The Bebop and Hashflow routers approve the venue themselves and forward the output.
+    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM ||
+        protocol_system == HASHFLOW_FALLBACK_PROTOCOL_SYSTEM
+    {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
         overhead += transfer_token_gas(token_out);
     }
@@ -419,6 +421,15 @@ mod tests {
         // output forward                       60_000  ← TOKEN_GAS
         // pool gas                            100_000
         // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(325_000u64));
+    }
+
+    #[test]
+    fn test_single_hashflow_fallback_router() {
+        let solution = make_solution(vec![make_swap(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // The same charges as the Bebop fallback router.
         assert_eq!(gas, BigUint::from(325_000u64));
     }
 
