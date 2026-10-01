@@ -87,7 +87,9 @@ pub struct UniswapV4State {
     sqrt_price: U256,
     fees: UniswapV4Fees,
     tick: i32,
-    ticks: TickList,
+    /// Shared by clones of this state and the states its swaps return, so a quote does not copy
+    /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
+    ticks: Arc<TickList>,
     tick_spacing: i32,
     pub hook: Option<Box<dyn HookHandler>>,
     /// Storage and block environment a pending quote runs the hook under. `None` on confirmed
@@ -180,7 +182,7 @@ impl UniswapV4State {
             sqrt_price,
             fees,
             tick,
-            ticks: tick_list,
+            ticks: Arc::new(tick_list),
             tick_spacing,
             hook: None,
             pending_overrides: None,
@@ -975,7 +977,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -990,7 +992,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
