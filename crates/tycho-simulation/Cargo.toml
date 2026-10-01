@@ -89,6 +89,7 @@ balancer-maths-rust = "0.5.0"
 alloy-chains = "0.2.37"
 async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+metrics = { version = "0.24", optional = true }
 hex-literal = { workspace = true }
 http = { version = "1.0", optional = true }
 prost = { version = "0.13", optional = true }
@@ -102,6 +103,7 @@ tokio-tungstenite = { version = "0.28.0", features = [
 [dev-dependencies]
 tycho-execution = { workspace = true }
 tokio-test = "0.4.4"
+metrics-util = { version = "0.20", features = ["debugging"] }
 approx = "0.5.1"
 rstest = "0.23.0"
 rstest_reuse = "0.7.0"
@@ -120,7 +122,7 @@ criterion = "0.8.2"
 [features]
 default = ["evm", "rfq", "price-level-stream"]
 network_tests = []
-price-level-stream = ["dep:async-stream", "dep:tokio-tungstenite"]
+price-level-stream = ["dep:async-stream", "dep:metrics", "dep:tokio-tungstenite"]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",
