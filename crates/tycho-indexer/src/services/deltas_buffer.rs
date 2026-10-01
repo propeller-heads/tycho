@@ -419,23 +419,18 @@ impl PendingDeltasBuffer for PendingDeltas {
         version: Option<BlockNumberOrTimestamp>,
         protocol_system: &str,
     ) -> Result<()> {
-        let mut missing_addresses: HashSet<Bytes> = addresses
-            .unwrap_or_default()
-            .iter()
-            .cloned()
-            .collect();
-
-        // update db states with buffered deltas
+        let mut found: HashSet<Bytes> = HashSet::new();
         for state in db_states.iter_mut() {
             self.update_vm_state(state, version, protocol_system)?;
-            missing_addresses.remove(&state.address);
+            found.insert(state.address.clone());
         }
 
-        // for new accounts (not in the db yet), build a new state from the buffered deltas
-        // and add it to the db states
-        for address in missing_addresses {
-            let account = self.get_account(address, version)?;
-            db_states.push(account);
+        // For new accounts (not in the db yet), build a new state from the buffered deltas. Walk
+        // the request in order, so a missing account fails with the first missing address.
+        for address in addresses.unwrap_or_default() {
+            if found.insert(address.clone()) {
+                db_states.push(self.get_account(address.clone(), version)?);
+            }
         }
 
         Ok(())
@@ -1243,6 +1238,30 @@ mod test {
 
         assert_eq!(&state[0], &exp0);
         assert_eq!(&state[1], &exp1);
+    }
+
+    #[test]
+    fn test_update_vm_states_names_the_first_missing_address() {
+        let buffer = PendingDeltas::new(["vm:extractor"]);
+        buffer
+            .insert(&Arc::new(vm_block_deltas()))
+            .unwrap();
+        let unknown: Vec<Bytes> = (1..=8u64)
+            .map(|n| Bytes::from(n).lpad(20, 0))
+            .collect();
+
+        let err = buffer
+            .update_vm_states(Some(&unknown), &mut vec![], None, "vm:extractor")
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PendingDeltasError::ReorgBufferError(StorageError::NotFound(kind, id))
+                    if kind == "Contract" && id == &unknown[0].to_string()
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
