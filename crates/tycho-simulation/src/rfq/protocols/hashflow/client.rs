@@ -236,10 +236,11 @@ impl HashflowClient {
         })?;
 
         if price_response.status != "success" {
-            return Err(RFQError::InvalidInput(format!(
-                "API returned error status: {}",
-                price_response.error.unwrap_or_default()
-            )));
+            let error = match price_response.error {
+                Some(error) => error.to_string(),
+                None => "no error details".to_string(),
+            };
+            return Err(RFQError::InvalidInput(format!("API returned error status: {error}")));
         }
 
         price_response
@@ -615,10 +616,12 @@ impl RFQClient for HashflowClient {
                     }
                 }
                 "fail" => {
-                    return Err(RFQError::FatalError(format!(
-                        "Hashflow API error: {:?}",
-                        quote_response.error
-                    )));
+                    let Some(error) = quote_response.error else {
+                        return Err(RFQError::FatalError(
+                            "Hashflow API error: request failed without an error".to_string(),
+                        ));
+                    };
+                    return Err(RFQError::FatalError(format!("Hashflow API error: {error}")));
                 }
                 _ => {
                     return Err(RFQError::FatalError(

@@ -30,6 +30,9 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
+/// The protocol system of a Uniswap V4 pool whose pool key names a hook.
+const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
+
 /// Registry containing all supported `SwapEncoders`.
 #[derive(Clone)]
 pub struct SwapEncoderRegistry {
@@ -103,10 +106,16 @@ impl SwapEncoderRegistry {
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
     /// `fallback:{protocol}` resolves the same way against `fallback`.
+    ///
+    /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
+    /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
+        }
+        if protocol_system == UNISWAP_V4_HOOKS {
+            return self.encoders.get("uniswap_v4");
         }
         if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
             return self
@@ -152,7 +161,9 @@ impl SwapEncoderRegistry {
             p if UNISWAP_V3_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v4" => {
+            // A hooked pool swaps through the same PoolManager as a core one; the encoder reads
+            // the pool's hook out of its `hooks` attribute either way.
+            "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ekubo_v2" => {
@@ -242,6 +253,8 @@ impl SwapEncoderRegistry {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// A single `pricelevelstream` config entry serves the whole protocol family: the bare
@@ -320,6 +333,53 @@ mod tests {
                 "chain {chain} is missing the uniswap_v3 encoder"
             );
         }
+    }
+
+    /// A hooked V4 pool encodes through the Uniswap V4 encoder, at the chain's `uniswap_v4`
+    /// executor address, whether or not the registry carries an explicit `uniswap_v4_hooks`
+    /// entry. A swap on such a pool is what the Robinhood Pons pools and the Ethereum Angstrom
+    /// pools both are.
+    #[rstest]
+    #[case::ethereum(Chain::Ethereum)]
+    #[case::robinhood(Chain::Robinhood)]
+    fn test_uniswap_v4_hooks_resolves_to_the_uniswap_v4_encoder(#[case] chain: Chain) {
+        let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap();
+
+        let core = registry
+            .get_encoder("uniswap_v4")
+            .expect("every chain configures the uniswap_v4 executor");
+        let hooked = registry
+            .get_encoder("uniswap_v4_hooks")
+            .expect("a hooked V4 pool must resolve to an encoder");
+
+        assert_eq!(hooked.executor_address(), core.executor_address());
+    }
+
+    /// A registry configured with `uniswap_v4_hooks` alone — what the integration-test harness
+    /// builds from a test config's protocol system — resolves both names to that entry's
+    /// executor rather than failing to build.
+    #[test]
+    fn test_registry_configured_with_uniswap_v4_hooks_alone_builds() {
+        let executor = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
+        let executors = format!(r#"{{"robinhood": {{"uniswap_v4_hooks": "{executor}"}}}}"#);
+
+        let registry = SwapEncoderRegistry::new(Chain::Robinhood)
+            .add_default_encoders(Some(executors))
+            .expect("a uniswap_v4_hooks entry must build an encoder");
+
+        let expected = Bytes::from_str(executor).unwrap();
+        assert_eq!(
+            registry
+                .get_encoder("uniswap_v4_hooks")
+                .expect("the configured protocol resolves")
+                .executor_address(),
+            &expected
+        );
+        // The fallback runs one way only, which is why the integration-test harness registers
+        // its executor under both names: swaps are grouped under `uniswap_v4` before the lookup.
+        assert!(registry
+            .get_encoder("uniswap_v4")
+            .is_none());
     }
 
     #[test]

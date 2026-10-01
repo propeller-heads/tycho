@@ -88,7 +88,7 @@ impl Default for WindowConfig {
 }
 
 /// Drops every folded block.
-// Placeholder until the entity cache (ENG-6291) provides the real sink.
+// Placeholder until ENG-6305 wires the entity cache in as the real sink.
 pub(crate) struct DiscardSink;
 
 impl FoldSink for DiscardSink {
@@ -508,16 +508,6 @@ mod test {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
     }
 
-    fn with_component_delta(
-        mut m: BlockAggregatedChanges,
-        id: &str,
-        x: u64,
-    ) -> BlockAggregatedChanges {
-        m.state_deltas
-            .insert(id.to_string(), testing::state_delta(id, x));
-        m
-    }
-
     fn with_component_balance(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
         m.component_balances
             .insert(id.to_string(), HashMap::new());
@@ -628,7 +618,7 @@ mod test {
         for n in 1..=6u64 {
             let mut m = msg(n, 0, None);
             if n % 2 == 0 {
-                m = with_component_delta(m, "c1", n);
+                m = testing::with_state_delta(m, "c1", n);
             }
             if n == 3 || n == 5 {
                 m = with_account_delta(m, &address, n);
@@ -667,7 +657,8 @@ mod test {
             .unwrap();
         let mut w = window(128, 1);
         for number in 40..=42 {
-            put(&mut w, with_component_delta(arc_msg(number, timestamp), "c1", number)).unwrap();
+            put(&mut w, testing::with_state_delta(arc_msg(number, timestamp), "c1", number))
+                .unwrap();
         }
 
         let patch = w
@@ -717,7 +708,7 @@ mod test {
     fn capture_patch_below_the_floor_yields_the_floor_block_alone() {
         let mut w = window(128, 1);
         for n in 5..=7u64 {
-            put(&mut w, with_component_delta(msg(n, 0, None), "c1", n)).unwrap();
+            put(&mut w, testing::with_state_delta(msg(n, 0, None), "c1", n)).unwrap();
         }
 
         let patch = w

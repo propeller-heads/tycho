@@ -1,0 +1,27 @@
+substreams_yaml_path: ./arc-uniswap-v4-no-hooks.yaml
+# Uniswap V4 balances are held by the pool manager rather than individual pool IDs.
+skip_balance_check: true
+protocol_type_names:
+  - "uniswap_v4_pool"
+protocol_system: "uniswap_v4"
+module_name: "map_protocol_changes"
+initialized_accounts:
+  - "0x8366a39CC670B4001A1121B8F6A443A643e40951" # pool manager
+tests:
+  # This no-hooks pool initializes in block 1954869, receives liquidity in 1954872,
+  # and first swaps in 1954876.
+  - name: test_first_no_hooks_pool
+    start_block: 1954869
+    stop_block: 1954876
+    expected_components:
+      - id: "0x611ec10e5fbe93056d4c24c4c35447408bafdae1ec98769052c1cf9382787d77"
+        tokens:
+          - "0x8093c294fa1e683c61e3f98ff5a20cf6d1aa7934"
+          - "0xa9da76039759cd7002f9340ba83fa31cfe5aeb64"
+        static_attributes:
+          tick_spacing: "0x3c"
+          hooks: "0x0000000000000000000000000000000000000000"
+          key_lp_fee: "0x0bb8"
+        creation_tx: "0xbb6a0ad20bd167005843937a5660cd1c12b882def5eaf361b156494a57f16043"
+        skip_simulation: false
+        skip_execution: true

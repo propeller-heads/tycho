@@ -1,4 +1,42 @@
-//! In-memory serving of state requests. Currently holds the per-extractor block window
-//! ([`window`]).
+//! In-memory serving of state requests.
+//!
+//! This module holds the block window ([`window`]) and the entity cache ([`cache`]) it folds
+//! into. Locking is described in the [`cache`] module doc.
+//!
+//! # Planned end state
+//!
+//! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The request
+//! routing layer is not built yet (ENG-6293); the cache is built at startup by
+//! [`cache::EntityCache::load`] when the mode is not `off`, and every request still reads the
+//! database.
+//!
+//! State responses are built as `cached base ⊕ window deltas up to the requested version`, where
+//! `⊕` applies deltas on top of a base and the highest block wins for each value. The database is
+//! read only for entities the cache has never seen.
+//!
+//! A read collects the window patch for its keys first, then reads the entries, and applies the
+//! patch changes that are not older than each value's write timestamp — the rule folds use;
+//! re-applying a change with an equal timestamp is harmless because delta values are absolute. If
+//! an entry has already moved past the requested version (folding is batched), that request is
+//! served the way uncommitted versions are served today — latest from the DB plus the buffered
+//! window changes — because the cache keeps no history.
+//!
+//! Versions below the window go to the versioned DB path. Deletions folded into the cache are
+//! always below the window floor by then, so a below-window read never misses them.
 
+pub(crate) mod cache;
 pub(crate) mod window;
+
+/// Rollout stage of the entity cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum EntityCacheMode {
+    /// No cache is loaded; every request reads the database.
+    #[default]
+    Off,
+    /// The cache is loaded at startup. Folding the windows into it and comparing it with the
+    /// database land in ENG-6293 and ENG-6295; requests read the database.
+    Shadow,
+    /// The cache is loaded at startup. Folding the windows into it and serving from it land in
+    /// ENG-6293; requests read the database.
+    Serve,
+}

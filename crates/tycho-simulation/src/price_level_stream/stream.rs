@@ -20,7 +20,7 @@ use super::{
     state::{PriceLevelStreamQuote, PriceLevelStreamState},
     titan::{
         self, ConnectionSettings, TitanPairLevels, TitanPammLevels, TitanPriceLevel,
-        TitanPriceLevelMessage, TITAN_PRICE_LEVEL_URL,
+        TitanPriceLevelMessage, TITAN_PRICE_LEVEL_URL, TITAN_PRICE_LEVEL_URL_ENV,
     },
 };
 use crate::protocol::models::{ProtocolComponent, Update};
@@ -100,7 +100,9 @@ impl PriceLevelStreamBuilder {
     }
 
     /// Overrides the stream endpoint, e.g. to connect to a closer Titan region than the default
-    /// (see <https://docs.titanbuilder.xyz/propamms/takers>).
+    /// (see <https://docs.titanbuilder.xyz/propamms/takers>). Without it, the
+    /// `TITAN_PAMM_PRICE_LEVEL_URL` environment variable is used when set, else the built-in
+    /// default.
     pub fn endpoint(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -238,7 +240,10 @@ impl PriceLevelStreamBuilder {
                  will never produce an update"
             );
         }
-        let url = url.unwrap_or_else(|| TITAN_PRICE_LEVEL_URL.to_string());
+        let url = url.unwrap_or_else(|| {
+            std::env::var(TITAN_PRICE_LEVEL_URL_ENV)
+                .unwrap_or_else(|_| TITAN_PRICE_LEVEL_URL.to_string())
+        });
         let auto_detected_gas_cost =
             auto_detected_gas_cost.unwrap_or_else(|| BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
 

@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Debug, str::FromStr};
+use std::{any::Any, collections::HashMap, fmt::Debug, str::FromStr, sync::Arc};
 
 use alloy::{
     primitives::{keccak256, Address, Signed, Uint, I128, U256},
@@ -37,7 +37,7 @@ use crate::evm::{
             tycho_simulation_contract::TychoSimulationContract,
         },
     },
-    simulation::SimulationEngine,
+    simulation::{PendingOverrides, SimulationEngine},
 };
 
 const EULER_LENS_BYTECODE_BYTES: &[u8] = include_bytes!("assets/EulerLimitsLens.evm.runtime");
@@ -53,6 +53,8 @@ where
     pool_manager: Address,
     limits_entrypoint: Option<String>,
     is_euler: bool,
+    /// `None` for confirmed state.
+    pending_overrides: Option<Arc<PendingOverrides>>,
 }
 
 impl<D: EngineDatabaseInterface + Clone + Debug> PartialEq for GenericVMHookHandler<D>
@@ -87,6 +89,7 @@ where
             pool_manager,
             limits_entrypoint,
             is_euler,
+            pending_overrides: None,
         })
     }
 
@@ -112,6 +115,7 @@ where
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+        let pending_overrides = self.pending_overrides.as_deref();
         let mut transient_storage_params = self.unlock_pool_manager();
         if let Some(input_params) = transient_storage {
             transient_storage_params.extend(input_params);
@@ -134,6 +138,7 @@ where
         if let Some(input_overwrites) = overwrites {
             final_overwrites.extend(input_overwrites)
         }
+        let final_overwrites = over_pending_storage(pending_overrides, final_overwrites);
 
         let args = (
             params.sender,
@@ -162,7 +167,8 @@ where
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
-            None,
+            pending_overrides.and_then(|p| p.block.clone()),
+            pending_overrides.and_then(|p| p.native_balances.clone()),
         )?;
 
         let decoded = BeforeSwapSolOutput::abi_decode(&res.return_value).map_err(|e| {
@@ -193,6 +199,7 @@ where
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+        let pending_overrides = self.pending_overrides.as_deref();
         let mut transient_storage_params = self.unlock_pool_manager();
         if let Some(input_params) = transient_storage {
             transient_storage_params.extend(input_params);
@@ -221,11 +228,12 @@ where
         let res = self.contract.call(
             selector,
             args,
-            overwrites,
+            Some(over_pending_storage(pending_overrides, overwrites.unwrap_or_default())),
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
-            None,
+            pending_overrides.and_then(|p| p.block.clone()),
+            pending_overrides.and_then(|p| p.native_balances.clone()),
         )?;
 
         let decoded = AfterSwapSolReturn::abi_decode(&res.return_value).map_err(|e| {
@@ -319,14 +327,16 @@ where
                 TychoSimulationContract::new(contract_address, self.contract.engine.clone())?
             };
 
+            let pending_overrides = self.pending_overrides.as_deref();
             let res = limits_contract.call(
                 function_signature,
                 args,
-                overwrites,       // overwrites
-                None,             // caller
-                U256::from(0u64), // value
-                None,             // transient_storage
-                None,             // block_overrides
+                Some(over_pending_storage(pending_overrides, overwrites.unwrap_or_default())),
+                None,
+                U256::from(0u64),
+                None,
+                pending_overrides.and_then(|p| p.block.clone()),
+                pending_overrides.and_then(|p| p.native_balances.clone()),
             )?;
 
             let decoded = GetLimitsSolReturn::abi_decode(&res.return_value).map_err(|e| {
@@ -346,6 +356,10 @@ where
                 "limits_entrypoint is not set for this GenericVMHookHandler".to_string(),
             ))
         }
+    }
+
+    fn set_pending_overrides(&mut self, overrides: Arc<PendingOverrides>) {
+        self.pending_overrides = Some(overrides);
     }
 
     fn delta_transition(
@@ -384,6 +398,24 @@ where
     }
 }
 
+/// `overwrites` slot by slot over the pending block's storage, so a hook call sees the pending
+/// block's writes except where the caller overrides them.
+fn over_pending_storage(
+    pending_overrides: Option<&PendingOverrides>,
+    overwrites: HashMap<Address, HashMap<U256, U256>>,
+) -> HashMap<Address, HashMap<U256, U256>> {
+    let Some(mut layered) = pending_overrides.and_then(|p| p.storage.clone()) else {
+        return overwrites;
+    };
+    for (address, slots) in overwrites {
+        layered
+            .entry(address)
+            .or_default()
+            .extend(slots);
+    }
+    layered
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -410,6 +442,7 @@ mod tests {
             },
             vm::constants::MAX_BALANCE,
         },
+        simulation::BlockEnvOverrides,
     };
 
     #[test]
@@ -796,6 +829,7 @@ mod tests {
             pool_manager: Address::ZERO,
             limits_entrypoint: None,
             is_euler: true,
+            pending_overrides: None,
         };
 
         assert!(hook_handler.limits_entrypoint.is_none());
@@ -824,5 +858,48 @@ mod tests {
 
         // Verify the limits_entrypoint was updated correctly
         assert_eq!(hook_handler.limits_entrypoint.unwrap(), limits_entrypoint_value);
+    }
+
+    #[test]
+    fn test_caller_overwrites_win_over_pending_storage_slot_by_slot() {
+        let hook = Address::repeat_byte(1);
+        let other = Address::repeat_byte(2);
+        let pending = PendingOverrides {
+            storage: Some(HashMap::from([
+                (
+                    hook,
+                    HashMap::from([
+                        (U256::from(1), U256::from(10)),
+                        (U256::from(2), U256::from(20)),
+                    ]),
+                ),
+                (other, HashMap::from([(U256::from(1), U256::from(30))])),
+            ])),
+            native_balances: None,
+            block: Some(BlockEnvOverrides { number: Some(1), timestamp: Some(2) }),
+        };
+        let overwrites = HashMap::from([(hook, HashMap::from([(U256::from(1), U256::from(11))]))]);
+
+        let layered = over_pending_storage(Some(&pending), overwrites);
+
+        assert_eq!(layered[&hook][&U256::from(1)], U256::from(11), "the caller's slot wins");
+        assert_eq!(
+            layered[&hook][&U256::from(2)],
+            U256::from(20),
+            "the pending block's other slot of the same account survives"
+        );
+        assert_eq!(layered[&other][&U256::from(1)], U256::from(30));
+    }
+
+    #[test]
+    fn test_no_pending_storage_leaves_overwrites_untouched() {
+        let hook = Address::repeat_byte(1);
+        let overwrites = HashMap::from([(hook, HashMap::from([(U256::from(1), U256::from(11))]))]);
+
+        assert_eq!(over_pending_storage(None, overwrites.clone()), overwrites);
+        assert_eq!(
+            over_pending_storage(Some(&PendingOverrides::default()), overwrites.clone()),
+            overwrites
+        );
     }
 }

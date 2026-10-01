@@ -75,7 +75,7 @@ REPOSITORY=${REPOSITORY:-"s3://repo.propellerheads-propellerheads/substreams"}
 repository_path="$REPOSITORY/$version_prefix/$version_prefix-$version.spkg"
 output_file="./target/spkg/$version_prefix-$version.spkg"
 
-set -e  # Exit the script if any command fails
+set -e # Exit the script if any command fails
 
 echo ""
 echo "Substreams package: $package"
@@ -92,7 +92,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-set -e  # Exit the script if any command fails
+set -e # Exit the script if any command fails
 
 # Build the package (using resolved Cargo package name)
 cargo build --target wasm32-unknown-unknown --release -p "$cargo_package_name"
@@ -120,4 +120,3 @@ aws s3 cp "$output_file" "$repository_path"
 echo "------------------------------------------------------"
 echo "PUBLISHED SUBSTREAMS PACKAGE: '$repository_path'"
 echo "------------------------------------------------------"
-

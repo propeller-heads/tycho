@@ -409,10 +409,12 @@ fn calculate_gas_fees(block: &Block) -> miette::Result<(U256, U256)> {
         .header
         .base_fee_per_gas
         .ok_or_else(|| miette::miette!("Block does not have base fee (pre-EIP-1559)"))?;
-    // Set max_priority_fee_per_gas to a reasonable value (2 Gwei)
-    let max_priority_fee_per_gas = U256::from(2_000_000_000u64);
-    // Set max_fee_per_gas to base_fee * 2 + max_priority_fee_per_gas to handle fee fluctuations
-    let max_fee_per_gas = U256::from(base_fee) * U256::from(2u64) + max_priority_fee_per_gas;
+    // A simulated swap competes for no block space, so it pays no priority fee. Contracts that
+    // read the priority fee then see the conditions the off-chain quote assumed: some Metric pools
+    // on OP Stack chains revert swaps whose priority fee exceeds a small cap.
+    let max_priority_fee_per_gas = U256::ZERO;
+    // Set max_fee_per_gas to base_fee * 2 to handle fee fluctuations
+    let max_fee_per_gas = U256::from(base_fee) * U256::from(2u64);
     debug!(
         "Gas pricing: base_fee={}, max_priority_fee_per_gas={}, max_fee_per_gas={}",
         base_fee, max_priority_fee_per_gas, max_fee_per_gas
@@ -696,6 +698,26 @@ pub fn setup_router_overwrites(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_with_base_fee(base_fee: Option<u64>) -> Block {
+        let mut block: Block = Block::empty(Default::default());
+        block.header.inner.base_fee_per_gas = base_fee;
+        block
+    }
+
+    #[test]
+    fn test_gas_fees_pay_no_priority_fee() {
+        let (max_fee_per_gas, max_priority_fee_per_gas) =
+            calculate_gas_fees(&block_with_base_fee(Some(5_000_000))).unwrap();
+
+        assert_eq!(max_priority_fee_per_gas, U256::ZERO);
+        assert_eq!(max_fee_per_gas, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn test_gas_fees_require_a_base_fee() {
+        assert!(calculate_gas_fees(&block_with_base_fee(None)).is_err());
+    }
 
     #[test]
     fn test_fermiswap_lane_timestamp_preserves_payload() {

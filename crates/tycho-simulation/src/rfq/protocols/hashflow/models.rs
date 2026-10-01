@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
@@ -9,11 +9,24 @@ use tycho_common::{
 
 use crate::rfq::errors::RFQError;
 
+/// The error Hashflow reports on a rejected request, sent as an object alongside HTTP 200.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashflowError {
+    pub code: u64,
+    pub message: String,
+}
+
+impl fmt::Display for HashflowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (code {})", self.message, self.code)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowPriceLevelsResponse {
     pub status: String, // "success" or "fail"
     pub levels: Option<HashMap<String, Vec<HashflowMarketMakerLevels>>>,
-    pub error: Option<String>,
+    pub error: Option<HashflowError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,7 +203,7 @@ pub struct HashflowRFQ {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowQuoteResponse {
     pub status: String,
-    pub error: Option<String>,
+    pub error: Option<HashflowError>,
     #[serde(rename = "rfqId")]
     rfq_id: String,
     #[serde(rename = "internalRfqIds")]
@@ -292,6 +305,19 @@ mod tests {
                 HashflowPriceLevel { quantity: 2.0, price: 2999.0 },
             ],
         }
+    }
+
+    /// Hashflow answers a rejected RFQ with HTTP 200 and an `error` object, so the quote response
+    /// has to deserialize that shape rather than only the successful one.
+    #[test]
+    fn test_deserialize_rejected_quote_response() {
+        let body = r#"{"status":"fail","rfqId":"0x2250000000000000000000000000000f",
+            "error":{"code":82,"message":"No maker supports this request"}}"#;
+
+        let response: HashflowQuoteResponse = serde_json::from_str(body).unwrap();
+
+        assert_eq!(response.status, "fail");
+        assert_eq!(response.error.unwrap().to_string(), "No maker supports this request (code 82)");
     }
 
     #[test]

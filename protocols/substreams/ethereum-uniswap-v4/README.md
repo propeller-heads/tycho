@@ -21,7 +21,14 @@ Tracks Protocol Components **WITHOUT** swap hooks:
 Tracks Protocol Components **WITH** swap hooks:
 - Only includes pools that have `beforeSwap` or `afterSwap` hook permissions  
 - Uses `HookPermissionsDetector::has_swap_hooks() == true`
-- Configuration: `ethereum-uniswap-v4-with-hooks.yaml`
+- Configuration: `ethereum-uniswap-v4-with-hooks.yaml`, `robinhood-uniswap-v4-with-hooks.yaml`
+
+On Robinhood, `map_pons_enriched_block_changes` decodes a Pons V2 MemeHook pool's `hookFeeBps` and
+`creatorTaxBps` straight from the storage writes its creation transaction's `registerPool` call
+makes, rather than from an event or a stored attribute the hook exposes. The module reads the hook
+addresses it treats as Pons from one parameter, `pons_hooks=<address>[,<address>...]`, and the
+manifest sets it to the canonical deployment. Per-call storage writes only reach a Substreams
+module on extended blocks, so a provider serving this manifest needs `DetailLevel: EXTENDED`.
 
 ## Hook Permission Detection
 

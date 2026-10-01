@@ -69,6 +69,16 @@ Via the safe wallet UI:
 5. Set the executors addresses
 6. Set fee amounts in FeeCalculator
 7. Set the pauser wallets
+
+### Publish the deployment
+
+1. Add the complete deployment snapshot under the chain's `scheduled_successor` field. Keep the current deployment active during the notice period.
+2. Set the notice publication date, effective date, matching migration deadline, deployment commit, dependency snapshot, and `status: scheduled`.
+3. Publish the successor at least 30 days before its effective date. For an urgent material security risk, add a `notice_exception` with `kind: material_security_risk` and a nonempty reason.
+4. Treat any change to the router, FeeCalculator, executor set, or pinned dependency configuration as a successor change.
+5. At the effective time, move the previous active deployment into the chain's `superseded` list, promote the scheduled successor, and set `scheduled_successor` to `null`. Do not remove history.
+6. Update `docs/for-solvers/execution/contract-addresses.md` when scheduling and promoting the successor.
+
 ### Revoke roles
 
 1. If you wish to revoke a role for a certain address, run: `npx hardhat run scripts/revoke-role.js --network NETWORK`
