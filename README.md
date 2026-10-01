@@ -68,11 +68,11 @@ Tycho consists of several crates, each responsible for different aspects of the 
 
 - `tycho-simulation`: Provides tools for interacting with protocol states, calculating spot prices, and quoting token swaps. More detailed docs [here](https://docs.propellerheads.xyz/tycho/for-solvers/simulation).
 - `tycho-execution`: Modules for encoding and executing swaps against Tycho router and protocol executors. [here](https://docs.propellerheads.xyz/tycho/for-solvers/execution)
-- `tycho-common`: Defines the common structs and traits used throughout the Tycho system. More detailed docs [here](./tycho-common/README.md).
-- `tycho-indexer`: Contains the main logic used to process incoming data and propogate the relevant information to clients and storage. Includes the RPC service. More detailed docs [here](./tycho-indexer/README.md).
-- `tycho-storage`: Manages the underlying database and provides gateways for data access. More detailed docs [here](./tycho-storage/README.md).
-- `tycho-client`: A rust client to simplify the start-up and managing of data from a Tycho connection. More detailed docs [here](./tycho-client/README.md).
-- `tycho-client-py`: A python interface for the rust client and RPC service. More detailed docs [here](./tycho-client-py/README.md).
-- `tycho-ethereum`: A module that integrates Ethereum-specific blockchain functionalities into Tycho. More detailed docs [here](./tycho-ethereum/README.md).
+- `tycho-common`: Defines the common structs and traits used throughout the Tycho system. More detailed docs [here](./crates/tycho-common/README.md).
+- `tycho-indexer`: Contains the main logic used to process incoming data and propogate the relevant information to clients and storage. Includes the RPC service. More detailed docs [here](./crates/tycho-indexer/README.md).
+- `tycho-storage`: Manages the underlying database and provides gateways for data access. More detailed docs [here](./crates/tycho-storage/README.md).
+- `tycho-client`: A rust client to simplify the start-up and managing of data from a Tycho connection. More detailed docs [here](./crates/tycho-client/README.md).
+- `tycho-client-py`: A python interface for the rust client and RPC service. More detailed docs [here](./crates/tycho-client-py/README.md).
+- `tycho-ethereum`: A module that integrates Ethereum-specific blockchain functionalities into Tycho. More detailed docs [here](./crates/tycho-ethereum/README.md).
 
 [tg-url]: https://t.me/+B4CNQwv7dgIyYTJl
