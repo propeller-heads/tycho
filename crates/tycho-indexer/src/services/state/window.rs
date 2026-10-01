@@ -170,12 +170,28 @@ pub(crate) struct DeltaWindow {
     db_committed: Option<u64>,
     /// Highest `finalized_block_height` seen on any inserted message.
     finalized: Option<u64>,
+    /// Moves on every insert (a block or a revert) and every clear. A fold does not move it: it
+    /// runs under the same lock as the insert or the clear that makes it due. Two equal readings
+    /// mean the window did not change in between.
+    generation: u64,
 }
 
 impl DeltaWindow {
     /// Creates an empty window.
     pub(crate) fn new(extractor: String, config: WindowConfig) -> Self {
-        Self { extractor, buffer: ReorgBuffer::new(), config, db_committed: None, finalized: None }
+        Self {
+            extractor,
+            buffer: ReorgBuffer::new(),
+            config,
+            db_committed: None,
+            finalized: None,
+            generation: 0,
+        }
+    }
+
+    /// The change counter; see the `generation` field.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Applies one full-block message to the window.
@@ -196,6 +212,7 @@ impl DeltaWindow {
         &mut self,
         message: &Arc<BlockAggregatedChanges>,
     ) -> Result<(), StorageError> {
+        self.generation += 1;
         if message.revert {
             return self.revert_to(message);
         }
@@ -285,6 +302,7 @@ impl DeltaWindow {
     /// Empties the window and forgets both watermarks. The configuration stays. The next
     /// inserted block starts a new chain, whatever its parent.
     pub(crate) fn clear(&mut self) {
+        self.generation += 1;
         self.buffer = ReorgBuffer::new();
         self.db_committed = None;
         self.finalized = None;
@@ -614,6 +632,32 @@ mod test {
 
     fn revert_msg(number: u64) -> BlockAggregatedChanges {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
+    }
+
+    #[test]
+    fn generation_moves_on_every_change() {
+        let mut w =
+            DeltaWindow::new(EXTRACTOR.to_string(), WindowConfig { depth: 1, min_fold_batch: 1 });
+        let mut seen = vec![w.generation()];
+
+        w.insert(&Arc::new(msg(1, 1, Some(1))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(msg(2, 1, Some(1))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(msg(3, 2, Some(2))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(revert_msg(3)))
+            .unwrap();
+        seen.push(w.generation());
+        w.clear();
+        seen.push(w.generation());
+
+        let mut distinct = seen.clone();
+        distinct.dedup();
+        assert_eq!(distinct, seen, "every change must move the generation: {seen:?}");
     }
 
     fn with_component_balance(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {

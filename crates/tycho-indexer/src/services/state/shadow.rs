@@ -9,8 +9,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     hash::{DefaultHasher, Hash, Hasher},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use metrics::{counter, gauge, histogram};
@@ -59,7 +60,6 @@ impl Sampler {
 
 /// Shadow mode: the state service it compares with, and which requests it compares.
 pub(crate) struct Shadow {
-    #[allow(dead_code, reason = "shadow mode skeleton")]
     service: Arc<StateService>,
     sampler: Sampler,
 }
@@ -81,7 +81,6 @@ impl Shadow {
     /// A comparison that straddled a change to the window or the cache is discarded. A panic is
     /// reported even when it straddled one: a panic under the window lock poisons it, and that
     /// alone moves the straddle token.
-    #[allow(unused_variables, reason = "shadow mode skeleton")]
     pub(crate) async fn run<R>(
         &self,
         request: SampledRequest<'_>,
@@ -89,16 +88,27 @@ impl Shadow {
         cache: impl FnOnce(&StateService) -> Result<R, StateServiceError>,
         compare: impl FnOnce(&StateService, &Result<R, RpcError>, CacheAnswer<R>) -> Comparison,
     ) -> Result<R, RpcError> {
-        // Reads the straddle token, awaits `db`, then runs `cache` through `run_cache_path` and
-        // reads the token again. Compares with `compare`, unless the read straddled a change and
-        // did not panic: then the outcome is `Discarded`. Records the comparison and returns the
-        // database answer.
-        todo!()
+        let before = self
+            .service
+            .straddle_token(request.protocol_system);
+        let answer = db.await;
+        let started = Instant::now();
+        let cache = run_cache_path(|| cache(&self.service));
+        let straddled = self
+            .service
+            .straddle_token(request.protocol_system) !=
+            before;
+        let comparison = if straddled && !matches!(cache, CacheAnswer::Panicked) {
+            Comparison::without_diffs(Outcome::Discarded)
+        } else {
+            compare(&self.service, &answer, cache)
+        };
+        record(&request, &comparison, started.elapsed());
+        answer
     }
 }
 
 /// What the cache path returned for a sampled request.
-#[allow(dead_code, reason = "shadow mode skeleton")]
 pub(crate) enum CacheAnswer<R> {
     Answered(R),
     /// The cache cannot answer the request; serve mode would ask the database path.
@@ -109,11 +119,13 @@ pub(crate) enum CacheAnswer<R> {
 
 /// Runs the cache path and turns a panic into [`CacheAnswer::Panicked`], so a cache bug cannot
 /// fail the client's request.
-#[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
 fn run_cache_path<R>(read: impl FnOnce() -> Result<R, StateServiceError>) -> CacheAnswer<R> {
-    // Runs `read` under `catch_unwind`. `Fallback` becomes `CacheAnswer::Fallback`, another error
-    // `CacheAnswer::Failed`, and a panic `CacheAnswer::Panicked`.
-    todo!()
+    match catch_unwind(AssertUnwindSafe(read)) {
+        Ok(Ok(answer)) => CacheAnswer::Answered(answer),
+        Ok(Err(StateServiceError::Fallback(_))) => CacheAnswer::Fallback,
+        Ok(Err(err)) => CacheAnswer::Failed(err),
+        Err(_) => CacheAnswer::Panicked,
+    }
 }
 
 /// How a sampled request compared.
@@ -432,7 +444,6 @@ pub(crate) fn register_metrics(sample_rate: f64) {
 
 /// Records one comparison: its outcome, the time the cache path and the comparison took, and a
 /// warning with the differences for a mismatch.
-#[allow(dead_code, reason = "shadow mode skeleton")]
 fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Duration) {
     let endpoint = request.endpoint.label();
     counter!(
@@ -456,6 +467,40 @@ fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Durati
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use metrics_util::{
+        debugging::{DebugValue, Snapshotter},
+        MetricKind,
+    };
+
+    /// The comparison counters that moved, as `(endpoint, outcome, count)`, sorted.
+    pub(crate) fn moved_comparisons(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
+        let mut moved: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter &&
+                    key.key().name() == "entity_cache_shadow_comparisons_total"
+            })
+            .filter_map(|(key, _, _, value)| {
+                let DebugValue::Counter(count) = value else { return None };
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                };
+                (count > 0).then(|| (label("endpoint"), label("outcome"), count))
+            })
+            .collect();
+        moved.sort();
+        moved
+    }
+}
+
+#[cfg(test)]
 mod test {
     use std::collections::HashMap;
 
@@ -467,6 +512,11 @@ mod test {
     use tycho_common::dto::PaginationResponse;
 
     use super::*;
+    use crate::services::state::{
+        cache::EntityCache,
+        service::FallbackReason,
+        window::{new_windows, WindowConfig},
+    };
 
     #[test]
     fn zero_rate_samples_nothing() {
@@ -708,6 +758,26 @@ mod test {
         assert_eq!(comparison.diffs, vec!["error: db=ok cache=Failed to parse JSON: boom"]);
     }
 
+    #[test]
+    fn run_cache_path_turns_a_panic_into_panicked() {
+        let answer = run_cache_path::<()>(|| panic!("cache path bug"));
+
+        assert!(matches!(answer, CacheAnswer::Panicked));
+    }
+
+    #[test]
+    fn run_cache_path_maps_the_service_errors() {
+        assert!(matches!(
+            run_cache_path::<()>(|| Err(StateServiceError::Fallback(FallbackReason::BelowWindow))),
+            CacheAnswer::Fallback
+        ));
+        assert!(matches!(
+            run_cache_path::<()>(|| Err(StateServiceError::ContractNotFound(Bytes::from(1u64)))),
+            CacheAnswer::Failed(StateServiceError::ContractNotFound(_))
+        ));
+        assert!(matches!(run_cache_path(|| Ok(1)), CacheAnswer::Answered(1)));
+    }
+
     fn state(id: &str, x: u64) -> dto::ResponseProtocolState {
         dto::ResponseProtocolState {
             component_id: id.to_string(),
@@ -860,6 +930,44 @@ mod test {
                 ],
                 1
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_reports_a_panic_that_straddled_a_change() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let windows = new_windows(["ex"], WindowConfig::default());
+        let window = windows["ex"].clone();
+        let shadow = Shadow::new(
+            Arc::new(StateService::new(windows, Arc::new(EntityCache::new()))),
+            Sampler::new(1.0),
+        );
+        let version = dto::VersionParam::default();
+        let request = SampledRequest {
+            endpoint: Endpoint::ContractState,
+            protocol_system: "ex",
+            version: &version,
+            id_count: 1,
+        };
+
+        let answer = shadow
+            .run(
+                request,
+                async { Ok(contracts(vec![account(1)], 1)) },
+                |_| -> Result<dto::StateRequestResponse, StateServiceError> {
+                    let _guard = window.lock().unwrap();
+                    panic!("cache path bug");
+                },
+                |_, db, cache| compare_contract_state(db, cache, |_| false),
+            )
+            .await;
+
+        assert!(answer.is_ok());
+        assert_eq!(
+            testing::moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "cache_panicked".to_string(), 1)]
         );
     }
 }
