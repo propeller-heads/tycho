@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
+import {TestUtils} from "../TestUtils.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {FallbackRouterAssertions, FallbackSwaps} from "./Fallback.t.sol";
 import {
@@ -23,7 +24,7 @@ import {
 } from "../../src/fallback/BebopFallbackRouter.sol";
 
 /// @dev Uses `BebopExecutorTest.testSingleOrder`'s signed order, whose taker is `TAKER`.
-contract BebopFallbackRouterTest is FallbackRouterAssertions {
+contract BebopFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     uint256 constant FORK_BLOCK = 23_124_275;
     address constant TAKER = 0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f;
     /// The order's `expiry`.
@@ -160,10 +161,16 @@ contract BebopFallbackRouterTest is FallbackRouterAssertions {
         );
     }
 
-    function testExecutorSwap() public {
+    /// The swap data comes from the Rust encoder's
+    /// `test_encode_bebop_fallback_for_solidity`.
+    function testExecutorSwapsRustEncodedData() public {
         deal(WETH_ADDR, address(router), SIGNED_WETH_IN);
 
-        executor.swap(SIGNED_WETH_IN, _executorData(), BOB);
+        executor.swap(
+            SIGNED_WETH_IN,
+            loadCallDataFromFile("test_encode_bebop_fallback_for_solidity"),
+            BOB
+        );
 
         assertEq(IERC20(WBTC_ADDR).balanceOf(BOB), SIGNED_WBTC_OUT);
         _assertRouterDrained(address(router), WETH_ADDR, WBTC_ADDR);

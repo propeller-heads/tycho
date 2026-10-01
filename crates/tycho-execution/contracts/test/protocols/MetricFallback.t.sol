@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
+import {TestUtils} from "../TestUtils.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {FallbackRouterAssertions, FallbackSwaps} from "./Fallback.t.sol";
 import {
@@ -279,7 +280,7 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
     }
 }
 
-contract MetricFallbackRouterBaseTest is FallbackRouterAssertions {
+contract MetricFallbackRouterBaseTest is FallbackRouterAssertions, TestUtils {
     /// The block `TychoRouterForMetricTest` forks at, where the pool's oracle is fresh.
     uint256 constant FORK_BLOCK = 48_957_697;
     address constant METRIC_WETH_USDC_POOL =
@@ -298,6 +299,7 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions {
     bytes constant ZERO_FOR_ONE = hex"01";
 
     MetricFallbackRouter router;
+    MetricFallbackExecutor executor;
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
@@ -307,6 +309,7 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions {
             IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
             METRIC_QUOTER
         );
+        executor = new MetricFallbackExecutor(address(router));
         deal(BASE_WETH, address(router), WETH_IN);
     }
 
@@ -321,6 +324,21 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions {
 
         assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
         _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
+        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+    }
+
+    /// The swap data comes from the Rust encoder's
+    /// `test_encode_metric_fallback_for_solidity`.
+    function testExecutorSwapsRustEncodedData() public {
+        uint256 metricOut = _metricQuote();
+
+        executor.swap(
+            WETH_IN,
+            loadCallDataFromFile("test_encode_metric_fallback_for_solidity"),
+            BOB
+        );
+
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
         _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
     }
 

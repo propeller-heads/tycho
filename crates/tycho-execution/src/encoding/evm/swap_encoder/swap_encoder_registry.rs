@@ -6,13 +6,14 @@ use crate::encoding::{
     errors::EncodingError,
     evm::{
         constants::{
-            DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_KEY,
-            PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG, SLIPSTREAMS_FORKS,
-            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
+            METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
+            bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
@@ -20,7 +21,8 @@ use crate::encoding::{
             lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
             maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
-            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
+            native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
             uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
@@ -102,7 +104,8 @@ impl SwapEncoderRegistry {
     /// Price-level-stream protocols (`pricelevelstream:{protocol}`) without an exact entry fall
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
-    /// `fallback:{protocol}` resolves the same way against `fallback`.
+    /// `fallback:{protocol}` resolves the same way against `fallback`, except the RFQ fallback
+    /// routers, which have no family entry.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
@@ -113,7 +116,10 @@ impl SwapEncoderRegistry {
                 .encoders
                 .get(PRICE_LEVEL_STREAM_KEY);
         }
-        if protocol_system.starts_with(FALLBACK_PREFIX) {
+        if protocol_system.starts_with(FALLBACK_PREFIX) &&
+            protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+            protocol_system != BEBOP_FALLBACK_PROTOCOL_SYSTEM
+        {
             return self.encoders.get(FALLBACK_KEY);
         }
         None
@@ -227,7 +233,14 @@ impl SwapEncoderRegistry {
             "lido_v4" => {
                 Ok(Box::new(LidoV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            // The TychoFallbackRouter path carries the fallback protocol in the swap data, so it
+            // Matched before the `fallback:` family.
+            METRIC_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(MetricFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(BebopFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // The PropAMMFallbackRouter path carries the fallback protocol in the swap data, so it
             // needs its own encoder; the family resolves like the price-level-stream one.
             f if f == FALLBACK_KEY || f.starts_with(FALLBACK_PREFIX) => {
                 Ok(Box::new(FallbackSwapEncoder::new(executor_address, self.chain, config)?))
@@ -269,7 +282,7 @@ mod tests {
             .is_none());
     }
 
-    /// The TychoFallbackRouter family resolves like the price-level-stream family: the single
+    /// The PropAMMFallbackRouter family resolves like the price-level-stream family: the single
     /// `fallback` config entry serves the bare key and every `fallback:{protocol}` protocol,
     /// against the `PropAMMFallbackExecutor` address.
     #[test]
@@ -294,6 +307,31 @@ mod tests {
         // The family fallback is scoped to the prefix.
         assert!(registry
             .get_encoder("fallbackless_protocol")
+            .is_none());
+    }
+
+    /// An exact entry wins over the `fallback` family entry.
+    #[test]
+    fn test_rfq_fallback_routers_resolve_before_the_family() {
+        let family = "0x1111111111111111111111111111111111111111";
+        let metric = "0x2222222222222222222222222222222222222222";
+        let executors = format!(
+            r#"{{"ethereum": {{"fallback": "{family}", "fallback:rfq:metric": "{metric}"}}}}"#
+        );
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+
+        let resolved = registry
+            .get_encoder("fallback:rfq:metric")
+            .unwrap();
+        assert_eq!(resolved.executor_address(), &Bytes::from_str(metric).unwrap());
+        let resolved = registry
+            .get_encoder("fallback:fermiswap")
+            .unwrap();
+        assert_eq!(resolved.executor_address(), &Bytes::from_str(family).unwrap());
+        assert!(registry
+            .get_encoder(BEBOP_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
     }
 
