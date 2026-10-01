@@ -31,7 +31,7 @@ use crate::evm::protocol::{
             swap_math,
             tick_list::{TickInfo, TickList, TickListErrorKind},
             tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
                 MIN_SQRT_RATIO, MIN_TICK,
             },
             StepComputation, SwapResults, SwapState,
@@ -163,7 +163,7 @@ impl UniswapV3State {
             let initialized = initialized_sqrt_price.is_some();
             let sqrt_price_next = match initialized_sqrt_price {
                 Some(sqrt_price) => sqrt_price,
-                None => get_sqrt_ratio_at_tick(next_tick)?,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
@@ -336,7 +336,7 @@ impl ProtocolSim for UniswapV3State {
 
             let sqrt_price_next = match initialized_sqrt_price {
                 Some(sqrt_price) => sqrt_price,
-                None => get_sqrt_ratio_at_tick(next_tick)?,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
@@ -585,7 +585,10 @@ mod tests {
     use super::*;
     use crate::{
         evm::protocol::{
-            uniswap_v3::enums::FeeAmount, utils::uniswap::sqrt_price_math::get_sqrt_price_q96,
+            uniswap_v3::enums::FeeAmount,
+            utils::uniswap::{
+                sqrt_price_math::get_sqrt_price_q96, tick_math::get_sqrt_ratio_at_tick,
+            },
         },
         protocol::models::{DecoderContext, TryFromWithBlock},
     };
