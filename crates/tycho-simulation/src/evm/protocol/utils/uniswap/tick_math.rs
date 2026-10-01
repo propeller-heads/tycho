@@ -213,7 +213,7 @@ pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, Simulation
     let mut r = if msb >= 128 { ratio_x128 >> (msb - 127) } else { ratio_x128 << (127 - msb) };
 
     for i in 0..14 {
-        r = r.pow(U256::from_limbs([2u64, 0, 0, 0])) >> 127;
+        r = (r * r) >> 127;
         let f = r >> 128;
         let shift_value = I256::checked_from_sign_and_abs(Sign::Positive, f << (63 - i))
             .ok_or_else(|| {
