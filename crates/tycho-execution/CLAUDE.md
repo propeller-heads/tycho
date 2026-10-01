@@ -47,6 +47,7 @@ Entry (e.g. splitSwap)
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
 | `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes more; a pAMM that wins the quote but fails still falls through. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
+| `client_fee_forwarder/ClientFeeForwarder.sol` | Wraps TychoRouterV3 for a client without a signing EOA. One deployment per client, with an immutable fee wallet and `clientFeeBps`. It is the `clientFeeReceiver`: it takes the input from the caller, calls the router, then withdraws its vault balance of `tokenOut` and transfers it to the fee wallet. See "Client fee forwarder" below. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
@@ -135,6 +136,32 @@ output. `amountOut = amountIn - clientPortion - totalRouterFee`.
 **Accounting**: FeeCalculator only computes amounts (called via staticcall). Actual distribution happens in
 TychoRouterV3's `_takeFees()`, which credits fee receivers' vault balances via `_creditVault()`. `_settleOutput()` then
 handles the remaining output (transfer to receiver or vault credit).
+
+### Client fee forwarder (`client_fee_forwarder/ClientFeeForwarder.sol`)
+
+The router credits a client fee to the `clientFeeReceiver`'s vault balance, and only that address can `withdraw` it.
+`ClientFeeForwarder` is that address, so the fee reaches the client's wallet in the swap transaction:
+
+```
+caller --transferFrom--> ClientFeeForwarder --singleSwap/sequentialSwap/splitSwap--> TychoRouterV3
+                         ClientFeeForwarder --withdraw(tokenOut)--> fee wallet
+```
+
+- **Signature.** The forwarder passes an empty `clientSignature`. The ECDSA check fails, so the router calls
+  `isValidSignature` on the forwarder. It returns the ERC-1271 magic value only when the router calls it during the
+  forwarder's own router call (a `transient` flag). The router is `nonReentrant`, so that call has exactly one
+  signature check. Any other caller that names the forwarder as `clientFeeReceiver` reverts
+  `TychoRouter__InvalidClientSignature`.
+- **Funding.** ERC20 `transferFrom` from the caller, or native ETH as `msg.value`. Permit2 and vault funding are not
+  supported, and `maxClientContribution` is 0: the forwarder holds no vault balance between transactions.
+- **Receiver.** The router and the forwarder are rejected as `receiver`. With the router as receiver, the output would
+  credit the forwarder's vault balance and go to the fee wallet.
+- **Gas.** About 120k on top of the router call (`CLIENT_FEE_FORWARDER_OVERHEAD_GAS`).
+
+`TychoRouterEncoderBuilder::client_fee_forwarder(address)` builds a `ClientFeeForwarderEncoder`. It encodes the same
+swaps bytes as `TychoRouterEncoder`, sets `interacting_with` to the forwarder and maps the router function to the
+forwarder function of the same strategy, which takes the router's arguments without `ClientFeeParams`. It rejects
+solutions whose `user_transfer_type` is not `TransferFrom`.
 
 ### Executors (`contracts/src/executors/`)
 

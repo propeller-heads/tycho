@@ -6,6 +6,7 @@ use tycho_common::Bytes;
 use crate::encoding::{
     errors::EncodingError,
     evm::{
+        gas_estimator::CLIENT_FEE_FORWARDER_OVERHEAD_GAS,
         group_swaps::group_swaps,
         strategy_encoder::strategy_encoders::{
             SequentialSwapStrategyEncoder, SingleSwapStrategyEncoder, SplitSwapStrategyEncoder,
@@ -13,7 +14,7 @@ use crate::encoding::{
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::map_on_threads,
     },
-    models::{EncodedSolution, Solution},
+    models::{EncodedSolution, Solution, UserTransferType},
     tycho_encoder::TychoEncoder,
 };
 
@@ -173,6 +174,88 @@ impl TychoEncoder for TychoRouterEncoder {
             }
         }
         Ok(())
+    }
+}
+
+/// Encodes solutions to be used by a `ClientFeeForwarder`, which calls the TychoRouterV3 with a
+/// fixed client fee and sends the fee to the client's wallet.
+///
+/// The swaps are the same bytes the TychoRouterV3 takes. Only `UserTransferType::TransferFrom`
+/// is supported: the forwarder takes the input from the sender with `transferFrom` and holds no
+/// vault balance.
+#[derive(Clone)]
+pub(crate) struct ClientFeeForwarderEncoder {
+    router_encoder: TychoRouterEncoder,
+    forwarder_address: Bytes,
+}
+
+impl ClientFeeForwarderEncoder {
+    pub(crate) fn new(router_encoder: TychoRouterEncoder, forwarder_address: Bytes) -> Self {
+        ClientFeeForwarderEncoder { router_encoder, forwarder_address }
+    }
+
+    /// Replaces the router target and function with the forwarder's function of the same
+    /// strategy. The forwarder's functions take the router's arguments without `ClientFeeParams`.
+    fn to_forwarder_call(
+        &self,
+        router_solution: EncodedSolution,
+    ) -> Result<EncodedSolution, EncodingError> {
+        let router_function = router_solution.function_signature();
+        let function_signature = match router_function.split('(').next() {
+            Some("singleSwap") => {
+                "singleSwap(uint256,address,address,uint256,uint256,address,bytes)"
+            }
+            Some("sequentialSwap") => {
+                "sequentialSwap(uint256,address,address,uint256,uint256,address,bytes)"
+            }
+            Some("splitSwap") => {
+                "splitSwap(uint256,address,address,uint256,uint256,uint256,address,bytes)"
+            }
+            _ => {
+                return Err(EncodingError::FatalError(format!(
+                    "ClientFeeForwarder has no function for router function {router_function}"
+                )))
+            }
+        };
+        Ok(EncodedSolution::new(
+            router_solution.swaps().to_vec(),
+            self.forwarder_address.clone(),
+            function_signature.to_string(),
+            router_solution.n_tokens(),
+            router_solution.estimated_gas() + CLIENT_FEE_FORWARDER_OVERHEAD_GAS,
+        ))
+    }
+}
+
+impl TychoEncoder for ClientFeeForwarderEncoder {
+    fn encode_solutions(
+        &self,
+        solutions: Vec<Solution>,
+    ) -> Result<Vec<EncodedSolution>, EncodingError> {
+        for solution in &solutions {
+            self.validate_solution(solution)?;
+        }
+        let router_solutions = self
+            .router_encoder
+            .encode_solutions(solutions)?;
+        let mut forwarder_solutions = Vec::with_capacity(router_solutions.len());
+        for router_solution in router_solutions {
+            forwarder_solutions.push(self.to_forwarder_call(router_solution)?);
+        }
+        Ok(forwarder_solutions)
+    }
+
+    /// Raises an `EncodingError` if the solution is invalid for the TychoRouterV3 or does not
+    /// use `UserTransferType::TransferFrom`.
+    fn validate_solution(&self, solution: &Solution) -> Result<(), EncodingError> {
+        if *solution.user_transfer_type() != UserTransferType::TransferFrom {
+            return Err(EncodingError::InvalidInput(format!(
+                "ClientFeeForwarder supports only UserTransferType::TransferFrom, got {:?}",
+                solution.user_transfer_type()
+            )));
+        }
+        self.router_encoder
+            .validate_solution(solution)
     }
 }
 
@@ -748,6 +831,113 @@ mod tests {
             let result = encoder.validate_solution(&solution);
 
             assert!(result.is_ok());
+        }
+    }
+
+    mod client_fee_forwarder_encoder {
+        use super::*;
+
+        fn forwarder_address() -> Bytes {
+            Bytes::from_str("0x8227724C33C1748A42d1C1cD06e21AB8Deb6eB0A").unwrap()
+        }
+
+        fn get_forwarder_encoder() -> ClientFeeForwarderEncoder {
+            ClientFeeForwarderEncoder::new(get_tycho_router_encoder(), forwarder_address())
+        }
+
+        fn uniswap_v2_swap(pool: &str, token_in: Bytes, token_out: Bytes) -> Swap {
+            Swap::new(
+                ProtocolComponent {
+                    id: pool.to_string(),
+                    protocol_system: "uniswap_v2".to_string(),
+                    ..Default::default()
+                },
+                default_token(token_in),
+                default_token(token_out),
+                BigUint::ZERO,
+            )
+        }
+
+        fn solution(token_in: Bytes, token_out: Bytes, swaps: Vec<Swap>) -> Solution {
+            Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                token_in,
+                token_out,
+                BigUint::from(1_000_000_000u64),
+                BigUint::from(1_000_000u64),
+                BigUint::from(990_000u64),
+                swaps,
+            )
+        }
+
+        #[rstest]
+        #[case::single(
+            solution(
+                weth(),
+                dai(),
+                vec![uniswap_v2_swap("0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11", weth(), dai())],
+            ),
+            "singleSwap(uint256,address,address,uint256,uint256,address,bytes)"
+        )]
+        #[case::sequential(
+            solution(
+                weth(),
+                usdc(),
+                vec![
+                    uniswap_v2_swap("0xBb2b8038a1640196FbE3e38816F3e67Cba72D940", weth(), wbtc()),
+                    uniswap_v2_swap("0x004375Dff511095CC5A197A54140a24eFEF3A416", wbtc(), usdc()),
+                ],
+            ),
+            "sequentialSwap(uint256,address,address,uint256,uint256,address,bytes)"
+        )]
+        #[case::split(
+            solution(
+                usdc(),
+                eth(),
+                vec![swap_usdc_eth_univ4().with_split(0.5), swap_usdc_eth_univ4()],
+            ),
+            "splitSwap(uint256,address,address,uint256,uint256,uint256,address,bytes)"
+        )]
+        fn test_encodes_router_swaps_for_forwarder(
+            #[case] solution: Solution,
+            #[case] expected_signature: &str,
+        ) {
+            let router_solution = get_tycho_router_encoder()
+                .encode_solution(&solution)
+                .unwrap();
+
+            let forwarder_solution = get_forwarder_encoder()
+                .encode_solutions(vec![solution])
+                .unwrap()
+                .remove(0);
+
+            assert_eq!(forwarder_solution.interacting_with(), &forwarder_address());
+            assert_eq!(forwarder_solution.function_signature(), expected_signature);
+            assert_eq!(forwarder_solution.swaps(), router_solution.swaps());
+            assert_eq!(forwarder_solution.n_tokens(), router_solution.n_tokens());
+            assert_eq!(
+                forwarder_solution.estimated_gas(),
+                &(router_solution.estimated_gas() + CLIENT_FEE_FORWARDER_OVERHEAD_GAS)
+            );
+        }
+
+        #[rstest]
+        #[case::permit2(UserTransferType::TransferFromPermit2)]
+        #[case::vault(UserTransferType::UseVaultsFunds)]
+        fn test_rejects_transfer_types_other_than_transfer_from(
+            #[case] user_transfer_type: UserTransferType,
+        ) {
+            let solution = solution(
+                weth(),
+                dai(),
+                vec![uniswap_v2_swap("0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11", weth(), dai())],
+            )
+            .with_user_transfer_type(user_transfer_type);
+
+            let result = get_forwarder_encoder().encode_solutions(vec![solution]);
+
+            assert!(matches!(result, Err(EncodingError::InvalidInput(_))));
         }
     }
 }

@@ -383,6 +383,9 @@ impl EncodedSolution {
     }
 
     /// Byte offset within TychoRouterV3 calldata where the client fee signature starts.
+    ///
+    /// `ClientFeeForwarder` calldata has no client fee signature, so the offset is meaningless for
+    /// solutions from `ClientFeeForwarderEncoder`.
     pub fn client_fee_signature_offset(&self) -> usize {
         let name = self
             .function_signature
