@@ -144,11 +144,11 @@ The router credits a client fee to the `clientFeeReceiver`'s vault balance, and 
 the swap transaction. One deployment per client; router, fee wallet and `clientFeeBps` are immutable.
 
 ```
-caller ──swap──> ClientFeeForwarder ──swap, client fee to itself──> TychoRouterV3
-                                    <──isValidSignature────────────
-                                    ──valid during its own call────>
-                                    ──withdraw client fee──────────>
-                 ClientFeeForwarder ──client fee──> fee wallet
+client ──swap────────> ClientFeeForwarder ──swap, client fee to itself──> TychoRouterV3
+                                          <──isValidSignature────────────
+                                          ──valid during its own call────>
+                                          ──withdraw client fee──────────>
+client <──client fee── ClientFeeForwarder
 ```
 
 - Any other caller naming the forwarder as `clientFeeReceiver` reverts `TychoRouter__InvalidClientSignature`.
