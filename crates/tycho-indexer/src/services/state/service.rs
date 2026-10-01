@@ -186,11 +186,13 @@ impl StateService {
     }
 
     /// Reads the [`StraddleToken`] of `protocol_system`.
-    #[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
     pub(crate) fn straddle_token(&self, protocol_system: &str) -> StraddleToken {
-        // Reads the generation of the window of `protocol_system` (`None` without a window or
-        // with a poisoned lock) and the cache fold count.
-        todo!()
+        let window_generation = self
+            .windows
+            .get(protocol_system)
+            .and_then(|window| window.lock().ok())
+            .map(|window| window.generation());
+        StraddleToken { window_generation, folds: self.cache.folds() }
     }
 
     /// Whether a window other than the one of `protocol_system` holds a delta for `address`: an
@@ -521,6 +523,38 @@ mod test {
                 .fold_evictable(self.cache.as_ref())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn straddle_token_moves_with_a_block_or_a_fold() {
+        let harness = Harness::new(2);
+        let empty = harness.service.straddle_token(SYSTEM);
+
+        harness.push(msg(1));
+        let one_block = harness.service.straddle_token(SYSTEM);
+        // A fold from another extractor can change a shared account, so it moves the token too.
+        harness
+            .cache
+            .fold(&testing::aggregated_changes("other", 7, 7, Some(7)))
+            .unwrap();
+
+        assert_ne!(empty, one_block);
+        assert_ne!(one_block, harness.service.straddle_token(SYSTEM));
+    }
+
+    #[test]
+    fn straddle_token_moves_when_the_window_lock_is_poisoned() {
+        let harness = Harness::new(2);
+        let before = harness.service.straddle_token(SYSTEM);
+        let window = harness.window.clone();
+
+        let _ = std::thread::spawn(move || {
+            let _guard = window.lock().unwrap();
+            panic!("cache path bug");
+        })
+        .join();
+
+        assert_ne!(harness.service.straddle_token(SYSTEM), before);
     }
 
     #[test]
