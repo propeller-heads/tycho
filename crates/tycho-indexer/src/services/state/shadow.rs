@@ -17,10 +17,10 @@ use metrics::{counter, gauge, histogram};
 use serde::Serialize;
 use serde_json::Value;
 use tracing::warn;
-use tycho_common::{dto, Bytes};
+use tycho_common::{dto, storage::StorageError, Bytes};
 
 use super::service::{StateService, StateServiceError};
-use crate::services::rpc::RpcError;
+use crate::services::{deltas_buffer::PendingDeltasError, rpc::RpcError};
 
 /// Most differences one comparison collects and logs.
 const MAX_LOGGED_DIFFS: usize = 20;
@@ -289,24 +289,32 @@ fn pair<R>(
 }
 
 /// Whether the database-path error `db` is a failure of the database itself.
-#[allow(unused_variables, reason = "shadow mode skeleton")]
 fn db_failed(db: &RpcError) -> bool {
-    // True for a lost connection and for an unexpected storage error.
-    todo!()
+    matches!(db, RpcError::Connection(_) | RpcError::Storage(StorageError::Unexpected(_)))
 }
 
 /// Whether the cache-path error `cache` is a known difference. `db` is the database-path error,
 /// `None` when the database path answered. `held_elsewhere` says whether another extractor's
 /// window holds an address.
-#[allow(unused_variables, reason = "shadow mode skeleton")]
 fn known_error(
     db: Option<&RpcError>,
     cache: &StateServiceError,
     held_elsewhere: impl Fn(&Bytes) -> bool,
 ) -> bool {
-    // True for an account that only another extractor's window holds, and for an account that
-    // neither path finds.
-    todo!()
+    match (db, cache) {
+        // The service builds an uncached address only from the window of the requested system;
+        // the database path scans every window.
+        (None, StateServiceError::ContractNotFound(address)) => held_elsewhere(address),
+        // Neither path finds the account: the database path answers 500, the service 404.
+        // TODO: answer a missing account with one status on both paths, then remove this case.
+        (
+            Some(RpcError::DeltasError(PendingDeltasError::ReorgBufferError(
+                StorageError::NotFound(kind, id),
+            ))),
+            StateServiceError::ContractNotFound(address),
+        ) => kind == "Contract" && *id == address.to_string(),
+        _ => false,
+    }
 }
 
 /// Adds where the entities of two normalized answers differ, as `id.path: db=… cache=…`, up to
@@ -612,6 +620,92 @@ mod test {
         let comparison = compare_contracts(vec![db], vec![account(1)]);
 
         assert_eq!(comparison.outcome, Outcome::Match);
+    }
+
+    #[rstest]
+    #[case::cache_error_only(
+        Ok(contracts(vec![account(1)], 1)),
+        CacheAnswer::Failed(StateServiceError::InvalidVersion("bad".to_string())),
+        Outcome::Mismatch
+    )]
+    #[case::same_error_on_both(
+        Err(RpcError::Parse("bad".to_string())),
+        CacheAnswer::Failed(StateServiceError::InvalidVersion("bad".to_string())),
+        Outcome::Match
+    )]
+    #[case::same_variant_other_error(
+        Err(RpcError::Parse("bad".to_string())),
+        CacheAnswer::Failed(StateServiceError::InvalidVersion("worse".to_string())),
+        Outcome::Mismatch
+    )]
+    #[case::account_missing_on_both(
+        Err(RpcError::DeltasError(PendingDeltasError::ReorgBufferError(StorageError::NotFound(
+            "Contract".to_string(),
+            address(1).to_string(),
+        )))),
+        CacheAnswer::Failed(StateServiceError::ContractNotFound(address(1))),
+        Outcome::KnownError
+    )]
+    #[case::different_accounts_missing(
+        Err(RpcError::DeltasError(PendingDeltasError::ReorgBufferError(StorageError::NotFound(
+            "Contract".to_string(),
+            address(1).to_string(),
+        )))),
+        CacheAnswer::Failed(StateServiceError::ContractNotFound(address(2))),
+        Outcome::Mismatch
+    )]
+    #[case::database_fails_unexpectedly(
+        Err(RpcError::Storage(StorageError::Unexpected("db down".to_string()))),
+        CacheAnswer::Answered(contracts(vec![account(1)], 1)),
+        Outcome::DbFailed
+    )]
+    #[case::database_fails_unexpectedly_and_the_cache_fails(
+        Err(RpcError::Storage(StorageError::Unexpected("db down".to_string()))),
+        CacheAnswer::Failed(StateServiceError::InvalidVersion("bad".to_string())),
+        Outcome::DbFailed
+    )]
+    #[case::only_the_database_fails(
+        Err(RpcError::Unknown("boom".to_string())),
+        CacheAnswer::Answered(contracts(vec![account(1)], 1)),
+        Outcome::Mismatch
+    )]
+    #[case::fallback(Ok(contracts(vec![account(1)], 1)), CacheAnswer::Fallback, Outcome::Fallback)]
+    #[case::panicked(Ok(contracts(vec![account(1)], 1)), CacheAnswer::Panicked, Outcome::CachePanicked)]
+    fn errors_classify_by_side(
+        #[case] db: Result<dto::StateRequestResponse, RpcError>,
+        #[case] cache: CacheAnswer<dto::StateRequestResponse>,
+        #[case] expected: Outcome,
+    ) {
+        let comparison = compare_contract_state(&db, cache, |_| false);
+
+        assert_eq!(comparison.outcome, expected);
+    }
+
+    #[rstest]
+    #[case::held_by_another_window(true, Outcome::KnownError)]
+    #[case::held_nowhere(false, Outcome::Mismatch)]
+    fn an_account_only_the_database_path_finds(
+        #[case] held_elsewhere: bool,
+        #[case] expected: Outcome,
+    ) {
+        let comparison = compare_contract_state(
+            &Ok(contracts(vec![account(1)], 1)),
+            CacheAnswer::Failed(StateServiceError::ContractNotFound(address(1))),
+            |_| held_elsewhere,
+        );
+
+        assert_eq!(comparison.outcome, expected);
+    }
+
+    #[test]
+    fn an_error_mismatch_logs_both_errors() {
+        let comparison = compare_contract_state(
+            &Ok(contracts(vec![account(1)], 1)),
+            CacheAnswer::Failed(StateServiceError::InvalidVersion("boom".to_string())),
+            |_| false,
+        );
+
+        assert_eq!(comparison.diffs, vec!["error: db=ok cache=Failed to parse JSON: boom"]);
     }
 
     fn state(id: &str, x: u64) -> dto::ResponseProtocolState {
