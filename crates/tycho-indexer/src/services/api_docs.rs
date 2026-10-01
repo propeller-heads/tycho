@@ -1,13 +1,13 @@
 use tycho_common::dto::{
-    AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
-    ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
-    PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
-    ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
-    ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
-    RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
-    StateRequestResponse, StorageOverride, TokensRequestBody, TokensRequestResponse,
-    TracedEntryPointRequestBody, TracedEntryPointRequestResponse, TracingParams, TracingResult,
-    VersionParam,
+    AccountOverrides, AccountUpdate, AppVersion, BlockParam, Chain, ChangeType,
+    ComponentTvlRequestBody, ComponentTvlRequestResponse, ContractId, EntryPoint,
+    EntryPointWithTracingParams, Health, PaginationParams, PaginationResponse, ProtocolComponent,
+    ProtocolComponentRequestResponse, ProtocolComponentsRequestBody, ProtocolId,
+    ProtocolStateDelta, ProtocolStateRequestBody, ProtocolStateRequestResponse,
+    ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse, RPCTracerParams, ResponseAccount,
+    ResponseProtocolState, ResponseToken, StateRequestBody, StateRequestResponse, StorageOverride,
+    TokensRequestBody, TokensRequestResponse, TracedEntryPointRequestBody,
+    TracedEntryPointRequestResponse, TracingParams, TracingResult, VersionParam,
 };
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
@@ -36,6 +36,7 @@ impl Modify for SecurityAddon {
     info(title = "Tycho-Indexer RPC",),
     paths(
         rpc::health,
+        rpc::version,
         rpc::protocol_systems,
         rpc::tokens,
         rpc::protocol_components,
@@ -70,6 +71,7 @@ impl Modify for SecurityAddon {
         schemas(ChangeType),
         schemas(ProtocolStateDelta),
         schemas(Health),
+        schemas(AppVersion),
         schemas(ProtocolSystemsRequestBody),
         schemas(ProtocolSystemsRequestResponse),
         schemas(ComponentTvlRequestBody),
