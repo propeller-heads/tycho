@@ -29,6 +29,7 @@ use crate::{
                 i24_be_bytes_to_i32, liquidity_math,
                 sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
                 swap_math,
+                swap_step_cache::{CachedStep, SwapStepCache},
                 tick_list::{TickInfo, TickList, TickListErrorKind},
                 tick_math::{
                     get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO,
@@ -84,6 +85,11 @@ pub struct AerodromeSlipstreamsState {
     /// Shared by clones of this state and the states its swaps return, so a quote does not copy
     /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
     ticks: Arc<TickList>,
+    /// Swap steps already taken from this state, shared by its clones. Correct only for this
+    /// state's price, tick, liquidity, fee and ticks: `delta_transition` and every state a swap
+    /// returns start an empty cache, and any other code that changes those fields must too.
+    #[serde(skip)]
+    step_cache: SwapStepCache,
     observations: Observations,
     dfc: DynamicFeeConfig,
     /// What quotes may assume about the swap's position within its execution block; see
@@ -135,6 +141,7 @@ impl AerodromeSlipstreamsState {
             tick_spacing,
             tick,
             ticks: Arc::new(tick_list),
+            step_cache: SwapStepCache::default(),
             observations: Observations::new(observations),
             dfc,
             position_assumption: BlockPositionAssumption::default(),
@@ -224,6 +231,20 @@ impl AerodromeSlipstreamsState {
         let mut n_loops = 0;
 
         let fee = resolved_fee.fee;
+        let mut recorder = if exact_input && sqrt_price_limit.is_none() {
+            let origin = CachedStep::origin(self.sqrt_price, self.tick, self.liquidity, gas_used);
+            self.step_cache
+                .begin(zero_for_one, origin, amount_specified.into_raw(), fee)
+        } else {
+            None
+        };
+        if let Some(recorder) = &recorder {
+            gas_used = recorder
+                .start()
+                .resume(&mut state, amount_specified);
+            // The first loop's overhead is in the cached gas already.
+            n_loops = recorder.steps_taken();
+        }
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
@@ -235,6 +256,7 @@ impl AerodromeSlipstreamsState {
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
+                        new_state.step_cache = SwapStepCache::default();
                         // Best effort in an error path: a failed write only degrades the fee of
                         // a chained simulation on this partial result, and must not mask the
                         // more informative TicksExceeded error below.
@@ -265,13 +287,14 @@ impl AerodromeSlipstreamsState {
                 Some(sqrt_price) => sqrt_price,
                 None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
+            let sqrt_ratio_target = AerodromeSlipstreamsState::get_sqrt_ratio_target(
+                sqrt_price_next,
+                price_limit,
+                zero_for_one,
+            );
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
-                AerodromeSlipstreamsState::get_sqrt_ratio_target(
-                    sqrt_price_next,
-                    price_limit,
-                    zero_for_one,
-                ),
+                sqrt_ratio_target,
                 state.liquidity,
                 state.amount_remaining,
                 fee,
@@ -325,6 +348,9 @@ impl AerodromeSlipstreamsState {
                 gas_used = safe_add_u256(gas_used, U256::from(FIRST_LOOP_OVERHEAD))?;
             }
             n_loops += 1;
+            let reached_target = state.sqrt_price == sqrt_ratio_target;
+            recorder = recorder
+                .and_then(|recorder| recorder.after_step(&state, &step, reached_target, gas_used));
         }
         Ok(SwapResults {
             amount_calculated: state.amount_calculated,
@@ -401,6 +427,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let mut new_state = self.clone();
+        new_state.step_cache = SwapStepCache::default();
         new_state.record_observation(result.tick)?;
         new_state.liquidity = result.liquidity;
         new_state.tick = result.tick;
@@ -520,6 +547,8 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // Swap steps taken from the old state do not hold for the new one.
+        self.step_cache = SwapStepCache::default();
         // apply attribute changes
         if let Some(liquidity) = delta
             .updated_attributes
@@ -1240,5 +1269,167 @@ mod tick_list_sharing_tests {
                 .net_liquidity,
             10000
         );
+    }
+}
+
+#[cfg(test)]
+mod step_cache_tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        str::FromStr,
+    };
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::swap_step_cache::test_fixtures::{
+        amount_orders, test_amounts, test_ticks, wbtc_weth, LIQUIDITY, SQRT_PRICE, TICK,
+    };
+
+    fn test_pool() -> AerodromeSlipstreamsState {
+        AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            LIQUIDITY,
+            U256::from_str(SQRT_PRICE).unwrap(),
+            0,
+            1,
+            500,
+            10,
+            TICK,
+            test_ticks(),
+            vec![Observation::default()],
+            DynamicFeeConfig::new(500, 10_000, 1, false, 0),
+        )
+        .unwrap()
+    }
+
+    /// A quote's amount, gas and new state, or its error, as text.
+    fn outcome(
+        pool: &AerodromeSlipstreamsState,
+        amount: &BigUint,
+        sell: &Token,
+        buy: &Token,
+    ) -> String {
+        match pool.get_amount_out(amount.clone(), sell, buy) {
+            Ok(result) => {
+                let state = result
+                    .new_state
+                    .as_any()
+                    .downcast_ref::<AerodromeSlipstreamsState>()
+                    .unwrap();
+                format!(
+                    "{} {} {} {} {}",
+                    result.amount, result.gas, state.sqrt_price, state.tick, state.liquidity
+                )
+            }
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_in_any_order() {
+        let (wbtc, weth) = wbtc_weth();
+        for (sell, buy, smallest) in [(&wbtc, &weth, 1_000u64), (&weth, &wbtc, 1_000_000_000)] {
+            for order in amount_orders(&test_amounts(smallest)) {
+                let shared = test_pool();
+                for amount in &order {
+                    assert_eq!(
+                        outcome(&shared, amount, sell, buy),
+                        outcome(&test_pool(), amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+                let steps = shared
+                    .step_cache
+                    .min_inputs(sell < buy)
+                    .len();
+                assert!(steps > 2, "only {steps} steps cached");
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_at_each_cached_step() {
+        let (wbtc, weth) = wbtc_weth();
+        // Amounts that run past the last tick, so the cache covers the whole tick list. Selling
+        // WETH needs a far larger amount to leave its first tick.
+        for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
+            let cached = test_pool();
+            let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
+            let boundaries = cached.step_cache.min_inputs(sell < buy);
+            assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());
+            for boundary in boundaries.into_iter().skip(1) {
+                for amount in [boundary - U256::from(1u64), boundary, boundary + U256::from(1u64)] {
+                    let amount = u256_to_biguint(amount);
+                    assert_eq!(
+                        outcome(&cached, &amount, sell, buy),
+                        outcome(&test_pool(), &amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_of_a_swapped_state() {
+        let (wbtc, weth) = wbtc_weth();
+        let pool = test_pool();
+        let swapped = pool
+            .get_amount_out(BigUint::from(300_000_000u64), &wbtc, &weth)
+            .unwrap()
+            .new_state;
+        let swapped = swapped
+            .as_any()
+            .downcast_ref::<AerodromeSlipstreamsState>()
+            .unwrap();
+        // A serde round trip gives the same state with an empty step cache.
+        let fresh: AerodromeSlipstreamsState =
+            serde_json::from_value(serde_json::to_value(swapped).unwrap()).unwrap();
+
+        for amount in test_amounts(1_000).iter().rev() {
+            assert_eq!(
+                outcome(swapped, amount, &wbtc, &weth),
+                outcome(&fresh, amount, &wbtc, &weth),
+                "selling {amount} WBTC"
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_cache_restarts_after_delta_transition() {
+        let (wbtc, weth) = wbtc_weth();
+        let large = BigUint::from(3_000_000_000u64);
+        // Only a crossed tick's liquidity changes, so the price, tick and liquidity the cache
+        // starts from stay the same.
+        let delta = || ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/255820/net_liquidity".to_string(),
+                Bytes::from(
+                    1_000_000_000_000_000i128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        let mut cached = test_pool();
+        cached
+            .get_amount_out(large.clone(), &wbtc, &weth)
+            .unwrap();
+        let mut fresh = test_pool();
+
+        cached
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+        fresh
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(outcome(&cached, &large, &wbtc, &weth), outcome(&fresh, &large, &wbtc, &weth));
     }
 }

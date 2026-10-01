@@ -172,6 +172,11 @@ impl StepRecorder<'_> {
         &self.last
     }
 
+    /// How many steps the swap took before the cached step it starts from.
+    pub(crate) fn steps_taken(&self) -> usize {
+        self.index
+    }
+
     /// Caches the step the swap loop just applied to `state`, when this swap's input took the step
     /// all the way to its target. Returns `None` once a step depends on the input or the cache is
     /// full, since no later step can then be cached.
