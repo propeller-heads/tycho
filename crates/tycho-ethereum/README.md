@@ -15,7 +15,7 @@ The Token Analyzer assesses the behavior and quality of an ERC20 token. It evalu
 - Gas usage per token transfer
 - Potential transfer taxes
 
-The analysis is done by simulating swaps and transfers for the token using the `trace_callMany` method.
+The analysis is done by simulating transfers for the token using `eth_call` with bytecode state overrides.
 
 ### Token Pre-Processor
 
@@ -25,6 +25,5 @@ The Token Pre-Processor gathers essential token information, such as the number 
 
 To run Tycho on Ethereum, you will need an RPC connection that supports all the following Ethereum endpoints:
 
-- `eth_call`, `eth_getCode` and `eth_getBalance`
-- [trace_callMany](https://www.quicknode.com/docs/ethereum/trace_callMany) for token analysis
+- `eth_call` (with [state override](https://www.quicknode.com/docs/ethereum/eth_call) support, used for token analysis), `eth_getCode` and `eth_getBalance`
 - [debug_storageRangeAt](https://www.quicknode.com/docs/ethereum/debug_storageRangeAt) to retrieve full accounts storage
