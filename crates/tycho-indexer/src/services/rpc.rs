@@ -33,7 +33,10 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
-        state::service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
+        state::{
+            service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
+            shadow::{self, Endpoint, SampledRequest, Shadow},
+        },
     },
 };
 
@@ -115,7 +118,7 @@ pub struct RpcHandler<G, T> {
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
     /// Which path answers state requests. `Off` without extractors.
-    state_service: EntityCacheSetup<Arc<StateService>>,
+    state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -176,7 +179,7 @@ where
     /// Sets which path answers the state endpoints.
     pub(crate) fn with_state_service(
         mut self,
-        state_service: EntityCacheSetup<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Self {
         if matches!(state_service, EntityCacheSetup::Serve(_)) {
             register_db_path_counters();
@@ -189,9 +192,17 @@ where
     fn serving_state_service(&self) -> Option<&StateService> {
         match &self.state_service {
             EntityCacheSetup::Serve(service) => Some(service),
-            // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
-            // it with the database answer.
             EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
+        }
+    }
+
+    /// The shadow comparison, when `shadow` compares `request`.
+    fn sampling_shadow(&self, request: &impl std::hash::Hash) -> Option<&Shadow> {
+        match &self.state_service {
+            EntityCacheSetup::Shadow(shadow) if shadow.samples(request) => Some(shadow),
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Serve(_) | EntityCacheSetup::Off => {
+                None
+            }
         }
     }
 
@@ -279,7 +290,8 @@ where
     }
 
     /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path.
+    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
+    /// the client still gets the database answer.
     async fn get_contract_state_routed(
         &self,
         request: dto::StateRequestBody,
@@ -287,9 +299,34 @@ where
         if let Some(service) = self.serving_state_service() {
             match service.contract_state(&request) {
                 Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ContractState, reason)
+                }
                 Err(err) => return Err(err.into()),
             }
+        }
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ContractState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .contract_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_contract_state_inner(request.clone()),
+                    |service| service.contract_state(&request),
+                    |service, db, cache| {
+                        shadow::compare_contract_state(db, cache, |address| {
+                            service.other_window_holds(&request.protocol_system, address)
+                        })
+                    },
+                )
+                .await;
         }
         self.get_contract_state_inner(request)
             .await
@@ -520,7 +557,8 @@ where
     }
 
     /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path.
+    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
+    /// the client still gets the database answer.
     async fn get_protocol_state_routed(
         &self,
         request: dto::ProtocolStateRequestBody,
@@ -528,9 +566,32 @@ where
         if let Some(service) = self.serving_state_service() {
             match service.protocol_state(&request) {
                 Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ProtocolState, reason)
+                }
                 Err(err) => return Err(err.into()),
             }
+        }
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ProtocolState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .protocol_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_protocol_state_inner(request.clone()),
+                    |service| service.protocol_state(&request),
+                    |_, db, cache| {
+                        shadow::compare_protocol_state(request.include_balances, db, cache)
+                    },
+                )
+                .await;
         }
         self.get_protocol_state_inner(request)
             .await
@@ -1207,17 +1268,17 @@ impl From<StateServiceError> for RpcError {
 }
 
 /// Counts a state request the entity cache handed to the database path.
-fn count_db_path(endpoint: &'static str, reason: FallbackReason) {
-    metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+fn count_db_path(endpoint: Endpoint, reason: FallbackReason) {
+    metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
         .increment(1);
 }
 
 /// Registers every `db_path_requests` series at zero. Alerts read the first value of a new series
 /// as growth, so a series that first appears on its first fallback would fire them.
 fn register_db_path_counters() {
-    for endpoint in ["contract_state", "protocol_state"] {
+    for endpoint in Endpoint::ALL {
         for reason in FallbackReason::ALL {
-            metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+            metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
                 .increment(0);
         }
     }
@@ -1639,6 +1700,7 @@ mod tests {
         extractor::models::fixtures,
         services::state::{
             cache::EntityCache,
+            shadow::Sampler,
             window::{new_windows, WindowConfig},
         },
         testing::{self, evm_contract_slots, MockGateway},
@@ -1970,7 +2032,7 @@ mod tests {
         let service = Arc::new(StateService::new(windows, Arc::new(EntityCache::new())));
         let setup = match mode {
             CacheMode::Serve => EntityCacheSetup::Serve(service),
-            CacheMode::Shadow => EntityCacheSetup::Shadow(service),
+            CacheMode::Shadow => EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(0.0))),
         };
         RpcHandler::new(
             gw,
