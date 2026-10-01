@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::{Sign, I256, U256};
 use num_bigint::BigUint;
@@ -81,7 +81,9 @@ pub struct AerodromeSlipstreamsState {
     default_fee: u32,
     tick_spacing: i32,
     tick: i32,
-    ticks: TickList,
+    /// Shared by clones of this state and the states its swaps return, so a quote does not copy
+    /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
+    ticks: Arc<TickList>,
     observations: Observations,
     dfc: DynamicFeeConfig,
     /// What quotes may assume about the swap's position within its execution block; see
@@ -132,7 +134,7 @@ impl AerodromeSlipstreamsState {
             default_fee,
             tick_spacing,
             tick,
-            ticks: tick_list,
+            ticks: Arc::new(tick_list),
             observations: Observations::new(observations),
             dfc,
             position_assumption: BlockPositionAssumption::default(),
@@ -596,7 +598,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -620,7 +622,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -1179,5 +1181,64 @@ mod tests {
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1000u64)).unwrap();
         let result = pool.swap(true, amount, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+}
+
+#[cfg(test)]
+mod tick_list_sharing_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
+
+    #[test]
+    fn test_delta_transition_leaves_clones_ticks_unchanged() {
+        let original = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            0,
+            1,
+            3000,
+            1,
+            0,
+            vec![TickInfo::new(-120, 10000).unwrap(), TickInfo::new(120, -10000).unwrap()],
+            vec![Observation::default()],
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .unwrap();
+        let mut updated = original.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/-120/net_liquidity".to_string(),
+                Bytes::from(20000_i128.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        updated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .ticks
+                .get_tick(-120)
+                .unwrap()
+                .net_liquidity,
+            20000
+        );
+        assert_eq!(
+            original
+                .ticks
+                .get_tick(-120)
+                .unwrap()
+                .net_liquidity,
+            10000
+        );
     }
 }
