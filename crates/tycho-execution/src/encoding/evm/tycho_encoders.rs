@@ -177,12 +177,7 @@ impl TychoEncoder for TychoRouterEncoder {
     }
 }
 
-/// Encodes solutions to be used by a `ClientFeeForwarder`, which calls the TychoRouterV3 with a
-/// fixed client fee and sends the fee to the client's wallet.
-///
-/// The swaps are the same bytes the TychoRouterV3 takes. Only `UserTransferType::TransferFrom`
-/// is supported: the forwarder takes the input from the sender with `transferFrom` and holds no
-/// vault balance.
+/// Encodes solutions for a `ClientFeeForwarder`. Supports only `UserTransferType::TransferFrom`.
 #[derive(Clone)]
 pub(crate) struct ClientFeeForwarderEncoder {
     router_encoder: TychoRouterEncoder,
@@ -194,8 +189,6 @@ impl ClientFeeForwarderEncoder {
         ClientFeeForwarderEncoder { router_encoder, forwarder_address }
     }
 
-    /// Replaces the router target and function with the forwarder's function of the same
-    /// strategy. The forwarder's functions take the router's arguments without `ClientFeeParams`.
     fn to_forwarder_call(
         &self,
         router_solution: EncodedSolution,
@@ -245,8 +238,6 @@ impl TychoEncoder for ClientFeeForwarderEncoder {
         Ok(forwarder_solutions)
     }
 
-    /// Raises an `EncodingError` if the solution is invalid for the TychoRouterV3 or does not
-    /// use `UserTransferType::TransferFrom`.
     fn validate_solution(&self, solution: &Solution) -> Result<(), EncodingError> {
         if *solution.user_transfer_type() != UserTransferType::TransferFrom {
             return Err(EncodingError::InvalidInput(format!(

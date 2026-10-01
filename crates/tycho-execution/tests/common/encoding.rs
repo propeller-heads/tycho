@@ -255,10 +255,6 @@ pub fn encode_tycho_router_call(
 }
 
 /// Encodes a transaction for a `ClientFeeForwarder` swap function.
-///
-/// The forwarder sets the client fee itself, so the call carries no `ClientFeeParams`, permit or
-/// signature. The same responsibility note as `encode_tycho_router_call` applies to
-/// `expectedAmountOut`, `minAmountOut` and `receiver`.
 pub fn encode_client_fee_forwarder_call(
     encoded_solution: EncodedSolution,
     solution: &Solution,

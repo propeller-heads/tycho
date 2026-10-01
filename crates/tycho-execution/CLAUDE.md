@@ -140,28 +140,43 @@ handles the remaining output (transfer to receiver or vault credit).
 ### Client fee forwarder (`client_fee_forwarder/ClientFeeForwarder.sol`)
 
 The router credits a client fee to the `clientFeeReceiver`'s vault balance, and only that address can `withdraw` it.
-`ClientFeeForwarder` is that address, so the fee reaches the client's wallet in the swap transaction:
+`ClientFeeForwarder` is that address for a client without a signing EOA, so the fee reaches the client's wallet in
+the swap transaction. One deployment per client; router, fee wallet and `clientFeeBps` are immutable.
 
 ```
-caller --transferFrom--> ClientFeeForwarder --singleSwap/sequentialSwap/splitSwap--> TychoRouterV3
-                         ClientFeeForwarder --withdraw(tokenOut)--> fee wallet
+ caller             ClientFeeForwarder                TychoRouterV3                 fee wallet
+   │                        │                               │                            │
+   │ singleSwap(...)        │                               │                            │
+   │ (no ClientFeeParams)   │                               │                            │
+   │───────────────────────>│                               │                            │
+   │<── transferFrom ───────│ approve(router, amountIn)     │                            │
+   │                        │ _swapping = true              │                            │
+   │                        │ singleSwap(..., ClientFeeParams{                           │
+   │                        │   receiver: forwarder, sig: ""})                           │
+   │                        │──────────────────────────────>│                            │
+   │                        │      isValidSignature(hash)   │ ECDSA fails on empty sig   │
+   │                        │<──────────────────────────────│                            │
+   │                        │── magic (router && _swapping)>│                            │
+   │                        │                               │ swap, take fees:           │
+   │                        │                               │ vault[forwarder] += fee    │
+   │<───────────────────────┼──────── output - fees ────────│                            │
+   │                        │ _swapping = false             │                            │
+   │                        │ withdraw(tokenOut, vault bal) │                            │
+   │                        │──────────────────────────────>│                            │
+   │                        │<───────────── fee ────────────│                            │
+   │                        │─────────────────────── transfer fee ──────────────────────>│
 ```
 
-- **Signature.** The forwarder passes an empty `clientSignature`. The ECDSA check fails, so the router calls
-  `isValidSignature` on the forwarder. It returns the ERC-1271 magic value only when the router calls it during the
-  forwarder's own router call (a `transient` flag). The router is `nonReentrant`, so that call has exactly one
-  signature check. Any other caller that names the forwarder as `clientFeeReceiver` reverts
-  `TychoRouter__InvalidClientSignature`.
-- **Funding.** ERC20 `transferFrom` from the caller, or native ETH as `msg.value`. Permit2 and vault funding are not
-  supported, and `maxClientContribution` is 0: the forwarder holds no vault balance between transactions.
-- **Receiver.** The router and the forwarder are rejected as `receiver`. With the router as receiver, the output would
-  credit the forwarder's vault balance and go to the fee wallet.
-- **Gas.** About 120k on top of the router call (`CLIENT_FEE_FORWARDER_OVERHEAD_GAS`).
+- A direct router call naming the forwarder as `clientFeeReceiver` sees `_swapping == false` and reverts
+  `TychoRouter__InvalidClientSignature`. The router is `nonReentrant`, so the forwarder's own call has one check.
+- Funding: ERC20 `transferFrom` or native ETH. No Permit2 or vault funding; `maxClientContribution` is 0.
+- The router and the forwarder are rejected as `receiver`: the router would credit the output to the forwarder's
+  vault, and it would go to the fee wallet.
+- About 120k gas on top of the router call (`CLIENT_FEE_FORWARDER_OVERHEAD_GAS`).
 
-`TychoRouterEncoderBuilder::client_fee_forwarder(address)` builds a `ClientFeeForwarderEncoder`. It encodes the same
-swaps bytes as `TychoRouterEncoder`, sets `interacting_with` to the forwarder and maps the router function to the
-forwarder function of the same strategy, which takes the router's arguments without `ClientFeeParams`. It rejects
-solutions whose `user_transfer_type` is not `TransferFrom`.
+`TychoRouterEncoderBuilder::client_fee_forwarder(address)` builds a `ClientFeeForwarderEncoder`: the router's swaps
+bytes, the forwarder as `interacting_with`, and the forwarder function of the same strategy (router arguments
+without `ClientFeeParams`). Only `TransferFrom` solutions encode.
 
 ### Executors (`contracts/src/executors/`)
 

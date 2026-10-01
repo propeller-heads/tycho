@@ -52,11 +52,7 @@ impl TychoRouterEncoderBuilder {
         self
     }
 
-    /// Targets a `ClientFeeForwarder` deployment instead of the router.
-    ///
-    /// The forwarder calls the router set by `router_address` (or the default router), so the
-    /// forwarder must be deployed against that router. Only `UserTransferType::TransferFrom`
-    /// solutions encode.
+    /// Targets a `ClientFeeForwarder` deployed against this builder's router.
     pub fn client_fee_forwarder(mut self, forwarder_address: Bytes) -> Self {
         self.client_fee_forwarder_address = Some(forwarder_address);
         self

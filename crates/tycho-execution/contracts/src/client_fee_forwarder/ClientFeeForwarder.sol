@@ -17,29 +17,15 @@ error ClientFeeForwarder__AddressZero();
 error ClientFeeForwarder__InvalidReceiver(address receiver);
 error ClientFeeForwarder__UnexpectedSender(address sender);
 
-/**
- * @title ClientFeeForwarder
- * @notice Calls TychoRouterV3 with a fixed client fee and transfers the fee to
- *         the client's wallet in the same transaction.
- * @dev This contract is the `clientFeeReceiver`, so it is also the client
- *      address that the FeeCalculator sees. The router credits the client fee
- *      to this contract's vault balance. The contract then withdraws that
- *      balance and transfers it to `feeWallet`.
- *
- *      The router verifies the client fee through ERC-1271. `isValidSignature`
- *      accepts only while this contract's own router call runs, so no other
- *      caller can use this contract as their `clientFeeReceiver`.
- *
- *      The caller funds the swap with ERC20 `transferFrom` or with native ETH.
- *      Permit2 and vault funding are not supported: the router takes the input
- *      from this contract, which holds no vault balance between transactions.
- */
+/// @title ClientFeeForwarder
+/// @notice Charges a client fee for a client without a signing EOA and sends
+///         it to the client's wallet in the same transaction.
+/// @dev See "Client fee forwarder" in crates/tycho-execution/CLAUDE.md.
 contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     TychoRouterV3 public immutable router;
     address public immutable feeWallet;
-    // In FeeCalculator units: 100_000_000 = 100%
     uint32 public immutable clientFeeBps;
 
     bool private transient _swapping;
@@ -57,12 +43,7 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         clientFeeBps = clientFeeBps_;
     }
 
-    /**
-     * @notice Runs `TychoRouterV3.singleSwap` with this contract's client fee.
-     * @dev Takes `amountIn` of `tokenIn` from the caller. Send `amountIn` as
-     *      `msg.value` when `tokenIn` is `ETH_ADDRESS`.
-     * @return amountOut The output amount the router sent to `receiver`.
-     */
+    /// @notice For native ETH input, send `amountIn` as `msg.value`.
     function singleSwap(
         uint256 amountIn,
         address tokenIn,
@@ -86,13 +67,6 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _afterSwap(tokenOut);
     }
 
-    /**
-     * @notice Runs `TychoRouterV3.sequentialSwap` with this contract's client
-     *         fee.
-     * @dev Takes `amountIn` of `tokenIn` from the caller. Send `amountIn` as
-     *      `msg.value` when `tokenIn` is `ETH_ADDRESS`.
-     * @return amountOut The output amount the router sent to `receiver`.
-     */
     function sequentialSwap(
         uint256 amountIn,
         address tokenIn,
@@ -116,12 +90,6 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _afterSwap(tokenOut);
     }
 
-    /**
-     * @notice Runs `TychoRouterV3.splitSwap` with this contract's client fee.
-     * @dev Takes `amountIn` of `tokenIn` from the caller. Send `amountIn` as
-     *      `msg.value` when `tokenIn` is `ETH_ADDRESS`.
-     * @return amountOut The output amount the router sent to `receiver`.
-     */
     function splitSwap(
         uint256 amountIn,
         address tokenIn,
@@ -147,12 +115,7 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         _afterSwap(tokenOut);
     }
 
-    /**
-     * @notice Accepts the router's client fee check while this contract's own
-     *         router call runs, and rejects it otherwise.
-     * @dev The router is `nonReentrant`, so the only signature check during
-     *      this contract's router call is the one for that call.
-     */
+    /// @notice Valid only during this contract's own router call.
     function isValidSignature(bytes32, bytes calldata)
         external
         view
@@ -164,9 +127,7 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
         return 0xffffffff;
     }
 
-    /**
-     * @dev The router sends native ETH here when it withdraws an ETH fee.
-     */
+    /// @dev Receives native ETH fees from `router.withdraw`.
     receive() external payable {
         if (msg.sender != address(router)) {
             revert ClientFeeForwarder__UnexpectedSender(msg.sender);
@@ -176,8 +137,7 @@ contract ClientFeeForwarder is IERC1271, ReentrancyGuardTransient {
     function _beforeSwap(address tokenIn, uint256 amountIn, address receiver)
         private
     {
-        // With the router as receiver, the router credits the output to this
-        // contract's vault balance, and `_afterSwap` sends it to `feeWallet`.
+        // The router would credit the output to this contract's vault
         if (receiver == address(router) || receiver == address(this)) {
             revert ClientFeeForwarder__InvalidReceiver(receiver);
         }

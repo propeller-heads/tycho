@@ -20,8 +20,7 @@ use crate::common::{
 
 #[test]
 fn test_client_fee_forwarder_single_swap() {
-    // Swaps 1 WETH for DAI on a USV2 pool through the ClientFeeForwarder, which takes its client
-    // fee and sends it to the client's wallet.
+    // 1 WETH -> DAI on USV2 through the forwarder
     let expected_amount_out = BigUint::from_str("2018817438608734439722").unwrap();
     // 2% below the quote
     let min_amount_out = &expected_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64);
