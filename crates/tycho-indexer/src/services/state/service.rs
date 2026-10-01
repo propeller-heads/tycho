@@ -55,11 +55,11 @@ use super::{
 ///
 /// A cache mode without a cache, or `Off` with one, cannot be expressed.
 #[derive(Clone, Debug)]
-pub enum EntityCacheSetup<T> {
+pub enum EntityCacheSetup<T, S = T> {
     /// See [`EntityCacheMode::Off`](super::EntityCacheMode::Off).
     Off,
     /// See [`EntityCacheMode::Shadow`](super::EntityCacheMode::Shadow).
-    Shadow(T),
+    Shadow(S),
     /// See [`EntityCacheMode::Serve`](super::EntityCacheMode::Serve).
     Serve(T),
 }
@@ -79,6 +79,15 @@ impl<T> EntityCacheSetup<T> {
             EntityCacheSetup::Off => EntityCacheSetup::Off,
             EntityCacheSetup::Shadow(cache) => EntityCacheSetup::Shadow(f(cache)),
             EntityCacheSetup::Serve(cache) => EntityCacheSetup::Serve(f(cache)),
+        }
+    }
+
+    /// Replaces the value `Shadow` holds, keeping the mode and the value of `Serve`.
+    pub fn map_shadow<S>(self, f: impl FnOnce(T) -> S) -> EntityCacheSetup<T, S> {
+        match self {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(value) => EntityCacheSetup::Shadow(f(value)),
+            EntityCacheSetup::Serve(value) => EntityCacheSetup::Serve(value),
         }
     }
 }
@@ -153,6 +162,15 @@ pub(crate) enum StateServiceError {
     Merge(#[from] MergeError),
 }
 
+/// What a read depends on besides the request: the window of the requested system and the entity
+/// cache. A read straddles a change when the tokens taken before and after it differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StraddleToken {
+    /// `None` when the system has no window or its lock is poisoned; the read then fails anyway.
+    window_generation: Option<u64>,
+    folds: u64,
+}
+
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
 pub(crate) struct StateService {
     /// One window per protocol system, shared with the pump that writes them.
@@ -166,6 +184,23 @@ impl StateService {
         cache: Arc<EntityCache>,
     ) -> Self {
         Self { windows, cache }
+    }
+
+    /// Reads the [`StraddleToken`] of `protocol_system`.
+    #[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
+    pub(crate) fn straddle_token(&self, protocol_system: &str) -> StraddleToken {
+        // Reads the generation of the window of `protocol_system` (`None` without a window or
+        // with a poisoned lock) and the cache fold count.
+        todo!()
+    }
+
+    /// Whether a window other than the one of `protocol_system` holds a delta for `address`: an
+    /// account that another extractor created and did not fold yet. A poisoned window counts as
+    /// not holding it.
+    #[allow(unused_variables, reason = "shadow mode skeleton")]
+    pub(crate) fn other_window_holds(&self, protocol_system: &str, address: &Bytes) -> bool {
+        // Scans the blocks of every other window for an account delta at `address`.
+        todo!()
     }
 
     /// Serves `/contract_state` from the cache.

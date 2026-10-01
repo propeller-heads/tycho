@@ -556,6 +556,7 @@ async fn create_indexing_tasks(
                 min_fold_batch: global_args.delta_window_fold_batch,
             })
             .entity_cache(entity_cache)
+            .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
             .run()?;
     info!(server_url, "Http and Ws server started");
 
