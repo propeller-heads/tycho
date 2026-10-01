@@ -5,8 +5,12 @@ pub(crate) mod liquidity_math;
 pub(crate) mod lp_fee;
 pub(crate) mod sqrt_price_math;
 pub(crate) mod swap_math;
+pub(crate) mod swap_step_cache;
 pub mod tick_list;
 pub(crate) mod tick_math;
+
+/// Uniswap fees are in pips: hundredths of a basis point, so 1,000,000 pips is the whole amount.
+pub(crate) const FEE_PIPS_DENOMINATOR: u32 = 1_000_000;
 
 #[derive(Debug)]
 pub(crate) struct SwapState {

@@ -1,7 +1,7 @@
 use alloy::primitives::{I256, U256};
 use tycho_common::simulation::errors::SimulationError;
 
-use super::sqrt_price_math;
+use super::{sqrt_price_math, FEE_PIPS_DENOMINATOR};
 use crate::evm::protocol::{
     safe_math::safe_sub_u256,
     utils::solidity_math::{mul_div, mul_div_rounding_up},
@@ -23,8 +23,8 @@ pub(crate) fn compute_swap_step(
     if exact_in {
         let amount_remaining_less_fee = mul_div(
             amount_remaining.into_raw(),
-            U256::from(1_000_000 - fee_pips),
-            U256::from(1_000_000),
+            U256::from(FEE_PIPS_DENOMINATOR - fee_pips),
+            U256::from(FEE_PIPS_DENOMINATOR),
         )?;
         amount_in = if zero_for_one {
             sqrt_price_math::get_amount0_delta(
@@ -132,7 +132,11 @@ pub(crate) fn compute_swap_step(
     let fee_amount = if exact_in && sqrt_ratio_next != sqrt_ratio_target {
         safe_sub_u256(amount_remaining.abs().into_raw(), amount_in)?
     } else {
-        mul_div_rounding_up(amount_in, U256::from(fee_pips), U256::from(1_000_000 - fee_pips))?
+        mul_div_rounding_up(
+            amount_in,
+            U256::from(fee_pips),
+            U256::from(FEE_PIPS_DENOMINATOR - fee_pips),
+        )?
     };
     Ok((sqrt_ratio_next, amount_in, amount_out, fee_amount))
 }

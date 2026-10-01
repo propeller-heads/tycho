@@ -29,6 +29,7 @@ use crate::evm::protocol::{
             i24_be_bytes_to_i32, liquidity_math,
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
             swap_math,
+            swap_step_cache::{CachedStep, SwapStepCache},
             tick_list::{TickInfo, TickList, TickListErrorKind},
             tick_math::{
                 get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
@@ -65,6 +66,11 @@ pub struct UniswapV3State {
     /// Shared by clones of this state and the states its swaps return, so a quote does not copy
     /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
     ticks: Arc<TickList>,
+    /// Swap steps already taken from this state, shared by its clones. Correct only for this
+    /// state's price, tick, liquidity, fee and ticks: `delta_transition` and `after_swap` start a
+    /// new one, and any other code that changes those fields must too.
+    #[serde(skip)]
+    step_cache: SwapStepCache,
 }
 
 impl UniswapV3State {
@@ -95,7 +101,19 @@ impl UniswapV3State {
             fee: fee.fee(),
             tick,
             ticks: Arc::new(tick_list),
+            step_cache: SwapStepCache::default(),
         })
+    }
+
+    /// A clone of this state at the price, tick and liquidity a swap ended at, with an empty step
+    /// cache.
+    fn after_swap(&self, sqrt_price: U256, tick: i32, liquidity: u128) -> Self {
+        let mut state = self.clone();
+        state.sqrt_price = sqrt_price;
+        state.tick = tick;
+        state.liquidity = liquidity;
+        state.step_cache = SwapStepCache::default();
+        state
     }
 
     fn swap(
@@ -135,6 +153,19 @@ impl UniswapV3State {
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
 
+        let mut recorder = if exact_input && sqrt_price_limit.is_none() {
+            let origin = CachedStep::origin(self.sqrt_price, self.tick, self.liquidity, gas_used);
+            self.step_cache
+                .begin(zero_for_one, origin, amount_specified.into_raw(), self.fee)
+        } else {
+            None
+        };
+        if let Some(recorder) = &recorder {
+            gas_used = recorder
+                .start()
+                .resume(&mut state, amount_specified);
+        }
+
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
@@ -148,10 +179,8 @@ impl UniswapV3State {
                 }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
-                        let mut new_state = self.clone();
-                        new_state.liquidity = state.liquidity;
-                        new_state.tick = state.tick;
-                        new_state.sqrt_price = state.sqrt_price;
+                        let new_state =
+                            self.after_swap(state.sqrt_price, state.tick, state.liquidity);
                         return Err(SimulationError::InvalidInput(
                             "Ticks exceeded".into(),
                             Some(GetAmountOutResult::new(
@@ -173,9 +202,11 @@ impl UniswapV3State {
                 Some(sqrt_price) => sqrt_price,
                 None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
+            let sqrt_ratio_target =
+                UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one);
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
-                UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
+                sqrt_ratio_target,
                 state.liquidity,
                 state.amount_remaining,
                 self.fee,
@@ -227,6 +258,9 @@ impl UniswapV3State {
             } else if state.sqrt_price != step.sqrt_price_start {
                 state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
             }
+            let reached_target = state.sqrt_price == sqrt_ratio_target;
+            recorder = recorder
+                .and_then(|recorder| recorder.after_step(&state, &step, reached_target, gas_used));
         }
         Ok(SwapResults {
             amount_calculated: state.amount_calculated,
@@ -291,10 +325,7 @@ impl ProtocolSim for UniswapV3State {
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "V3 SWAP");
-        let mut new_state = self.clone();
-        new_state.liquidity = result.liquidity;
-        new_state.tick = result.tick;
-        new_state.sqrt_price = result.sqrt_price;
+        let new_state = self.after_swap(result.sqrt_price, result.tick, result.liquidity);
 
         Ok(GetAmountOutResult::new(
             u256_to_biguint(
@@ -423,6 +454,8 @@ impl ProtocolSim for UniswapV3State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // Swap steps taken from the old state do not hold for the new one.
+        self.step_cache = SwapStepCache::default();
         // apply attribute changes
         if let Some(liquidity) = delta
             .updated_attributes
@@ -537,10 +570,11 @@ impl ProtocolSim for UniswapV3State {
                     },
                 )?;
 
-                let mut new_state = self.clone();
-                new_state.liquidity = swap_result.liquidity;
-                new_state.tick = swap_result.tick;
-                new_state.sqrt_price = swap_result.sqrt_price;
+                let new_state = self.after_swap(
+                    swap_result.sqrt_price,
+                    swap_result.tick,
+                    swap_result.liquidity,
+                );
 
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
@@ -1643,5 +1677,158 @@ mod tests_forks {
         // Should return some conservative limits
         assert!(limit_in > BigUint::zero());
         assert!(limit_out > BigUint::zero());
+    }
+}
+
+#[cfg(test)]
+mod step_cache_tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        str::FromStr,
+    };
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::{
+        uniswap_v3::enums::FeeAmount,
+        utils::uniswap::swap_step_cache::test_fixtures::{
+            amount_orders, test_amounts, test_ticks, wbtc_weth, LIQUIDITY, SQRT_PRICE, TICK,
+        },
+    };
+
+    fn test_pool() -> UniswapV3State {
+        UniswapV3State::new(
+            LIQUIDITY,
+            U256::from_str(SQRT_PRICE).unwrap(),
+            FeeAmount::Low,
+            TICK,
+            test_ticks(),
+        )
+        .unwrap()
+    }
+
+    /// A quote's amount, gas and new state, or its error, as text.
+    fn outcome(pool: &UniswapV3State, amount: &BigUint, sell: &Token, buy: &Token) -> String {
+        match pool.get_amount_out(amount.clone(), sell, buy) {
+            Ok(result) => {
+                let state = result
+                    .new_state
+                    .as_any()
+                    .downcast_ref::<UniswapV3State>()
+                    .unwrap();
+                format!(
+                    "{} {} {} {} {}",
+                    result.amount, result.gas, state.sqrt_price, state.tick, state.liquidity
+                )
+            }
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_in_any_order() {
+        let (wbtc, weth) = wbtc_weth();
+        for (sell, buy, smallest) in [(&wbtc, &weth, 1_000u64), (&weth, &wbtc, 1_000_000_000)] {
+            for order in amount_orders(&test_amounts(smallest)) {
+                let shared = test_pool();
+                for amount in &order {
+                    assert_eq!(
+                        outcome(&shared, amount, sell, buy),
+                        outcome(&test_pool(), amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+                let steps = shared
+                    .step_cache
+                    .min_inputs(sell < buy)
+                    .len();
+                assert!(steps > 2, "only {steps} steps cached");
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_at_each_cached_step() {
+        let (wbtc, weth) = wbtc_weth();
+        // Amounts that run past the last tick, so the cache covers the whole tick list. Selling
+        // WETH needs a far larger amount to leave its first tick.
+        for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
+            let cached = test_pool();
+            let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
+            let boundaries = cached.step_cache.min_inputs(sell < buy);
+            assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());
+            for boundary in boundaries.into_iter().skip(1) {
+                for amount in [boundary - U256::from(1u64), boundary, boundary + U256::from(1u64)] {
+                    let amount = u256_to_biguint(amount);
+                    assert_eq!(
+                        outcome(&cached, &amount, sell, buy),
+                        outcome(&test_pool(), &amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_of_a_swapped_state() {
+        let (wbtc, weth) = wbtc_weth();
+        let pool = test_pool();
+        let swapped = pool
+            .get_amount_out(BigUint::from(300_000_000u64), &wbtc, &weth)
+            .unwrap()
+            .new_state;
+        let swapped = swapped
+            .as_any()
+            .downcast_ref::<UniswapV3State>()
+            .unwrap();
+        // A serde round trip gives the same state with an empty step cache.
+        let fresh: UniswapV3State =
+            serde_json::from_value(serde_json::to_value(swapped).unwrap()).unwrap();
+
+        for amount in test_amounts(1_000).iter().rev() {
+            assert_eq!(
+                outcome(swapped, amount, &wbtc, &weth),
+                outcome(&fresh, amount, &wbtc, &weth),
+                "selling {amount} WBTC"
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_cache_restarts_after_delta_transition() {
+        let (wbtc, weth) = wbtc_weth();
+        let large = BigUint::from(3_000_000_000u64);
+        // Only a crossed tick's liquidity changes, so the price, tick and liquidity the cache
+        // starts from stay the same.
+        let delta = || ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/255820/net_liquidity".to_string(),
+                Bytes::from(
+                    1_000_000_000_000_000i128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        let mut cached = test_pool();
+        cached
+            .get_amount_out(large.clone(), &wbtc, &weth)
+            .unwrap();
+        let mut fresh = test_pool();
+
+        cached
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+        fresh
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(outcome(&cached, &large, &wbtc, &weth), outcome(&fresh, &large, &wbtc, &weth));
     }
 }
