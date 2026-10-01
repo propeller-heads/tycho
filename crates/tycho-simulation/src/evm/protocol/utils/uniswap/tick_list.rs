@@ -6,11 +6,31 @@ use tycho_common::simulation::errors::SimulationError;
 
 use super::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK};
 
+/// An initialized tick and its sqrt price.
+///
+/// Deserializing computes `sqrt_price` again from `index` and ignores the stored value, so the
+/// price always matches the tick.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredTickInfo")]
 pub struct TickInfo {
     pub(crate) index: i32,
     pub(crate) net_liquidity: i128,
     pub(crate) sqrt_price: U256,
+}
+
+/// The serialized form of [`TickInfo`].
+#[derive(Deserialize)]
+struct StoredTickInfo {
+    index: i32,
+    net_liquidity: i128,
+}
+
+impl TryFrom<StoredTickInfo> for TickInfo {
+    type Error = SimulationError;
+
+    fn try_from(stored: StoredTickInfo) -> Result<Self, Self::Error> {
+        TickInfo::new(stored.index, stored.net_liquidity)
+    }
 }
 
 impl TickInfo {
@@ -229,6 +249,17 @@ impl TickList {
         tick: i32,
         lte: bool,
     ) -> Result<(i32, bool), TickListError> {
+        self.next_initialized_tick_within_one_word_with_sqrt_price(tick, lte)
+            .map(|(next, sqrt_price)| (next, sqrt_price.is_some()))
+    }
+
+    /// [`Self::next_initialized_tick_within_one_word`], with the stored sqrt price of the tick, or
+    /// `None` when the tick is not initialized.
+    pub(crate) fn next_initialized_tick_within_one_word_with_sqrt_price(
+        &self,
+        tick: i32,
+        lte: bool,
+    ) -> Result<(i32, Option<U256>), TickListError> {
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -242,14 +273,12 @@ impl TickList {
 
             if self.is_below_smallest(tick) {
                 let minimum = cmp::max(self.ticks[0].index - spacing, min_in_word);
-                return Ok((minimum, false));
+                return Ok((minimum, None));
             }
 
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::max(idx, min_in_word);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let next = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::max(next.index, min_in_word);
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next.sqrt_price)))
         } else {
             let word_pos = (compressed + 1) >> 8;
             let max_in_word = (((word_pos + 1) << 8) - 1) * spacing;
@@ -261,13 +290,11 @@ impl TickList {
             if self.is_at_or_above_largest(tick) {
                 let maximum =
                     cmp::min(self.ticks[self.ticks.len() - 1].index + spacing, max_in_word);
-                return Ok((maximum, false));
+                return Ok((maximum, None));
             }
-            let idx = self
-                .next_initialized_tick(tick, lte)?
-                .index;
-            let next_tick_idx = cmp::min(max_in_word, idx);
-            Ok((next_tick_idx, next_tick_idx == idx))
+            let next = self.next_initialized_tick(tick, lte)?;
+            let next_tick_idx = cmp::min(max_in_word, next.index);
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next.sqrt_price)))
         }
     }
 }
@@ -287,6 +314,22 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn test_tick_info_deserialize_recomputes_sqrt_price() {
+        let json = r#"{"index": 120, "net_liquidity": 5, "sqrt_price": "0x1"}"#;
+
+        let tick: TickInfo = serde_json::from_str(json).unwrap();
+
+        assert_eq!(tick, TickInfo::new(120, 5).unwrap());
+    }
+
+    #[test]
+    fn test_tick_info_deserialize_out_of_range_tick() {
+        let json = r#"{"index": 887273, "net_liquidity": 5, "sqrt_price": "0x1"}"#;
+
+        assert!(serde_json::from_str::<TickInfo>(json).is_err());
+    }
 
     fn create_tick_list() -> TickList {
         let tick_infos =
