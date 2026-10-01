@@ -43,8 +43,8 @@ use crate::{
                     swap_math,
                     tick_list::{TickInfo, TickList, TickListErrorKind},
                     tick_math::{
-                        get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                        MIN_SQRT_RATIO, MIN_TICK,
+                        get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO,
+                        MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
                     },
                     StepComputation, SwapResults, SwapState,
                 },
@@ -274,7 +274,7 @@ impl UniswapV4State {
             let initialized = initialized_sqrt_price.is_some();
             let sqrt_price_next = match initialized_sqrt_price {
                 Some(sqrt_price) => sqrt_price,
-                None => get_sqrt_ratio_at_tick(next_tick)?,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
             let fee_pips = self
                 .fees
@@ -834,7 +834,7 @@ impl ProtocolSim for UniswapV4State {
 
             let sqrt_price_next = match initialized_sqrt_price {
                 Some(sqrt_price) => sqrt_price,
-                None => get_sqrt_ratio_at_tick(next_tick)?,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
@@ -1116,7 +1116,9 @@ mod tests {
                     models::{AfterSwapDelta, AmountRanges, BeforeSwapOutput, WithGasEstimate},
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
                 },
-                utils::uniswap::{lp_fee, sqrt_price_math::get_sqrt_price_q96},
+                utils::uniswap::{
+                    lp_fee, sqrt_price_math::get_sqrt_price_q96, tick_math::get_sqrt_ratio_at_tick,
+                },
             },
         },
         protocol::models::{DecoderContext, TryFromWithBlock},
