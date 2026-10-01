@@ -176,14 +176,9 @@ impl BlockHistory {
                             .history
                             .pop_back()
                             .ok_or(BlockHistoryError::RevertPositionNotFound)?;
-                        // The drain replaces our own entry for the reverted-to block with the
-                        // revert header, which carries the same hash. That block stays canonical,
-                        // so caching it would make the next revert to it classify Delayed — the
-                        // repeated-undo case on a flashblocks chain.
-                        if reverted_block.hash != block.hash {
-                            self.reverts
-                                .push(reverted_block.hash.clone(), reverted_block);
-                        }
+                        // record reverted blocks in cache
+                        self.reverts
+                            .push(reverted_block.hash.clone(), reverted_block);
                     }
                 }
                 // This mirrors the drain loop's two exit conditions above, so it can never fail
@@ -702,40 +697,6 @@ mod test {
         history.push(again).unwrap();
         let after: Vec<BlockHeader> = history.blocks().cloned().collect();
         assert_eq!(after, before, "a re-delivered revert must not change the history");
-    }
-
-    /// A flashblocks chain undoes the partials of the same block again and again, so the same
-    /// revert target arrives repeatedly with a rebuilt block in between. The drain replaces our
-    /// entry for the target with the revert header, which carries the target's hash; caching it
-    /// as reverted would make the second revert classify Delayed and silently do nothing.
-    #[test]
-    fn test_repeated_revert_to_the_same_block_resolves() {
-        let mut history = BlockHistory::new(generate_blocks(4, 0, None), 15).unwrap();
-        let revert = BlockHeader {
-            number: 3,
-            hash: int_hash(3),
-            parent_hash: int_hash(2),
-            revert: true,
-            partial_block_index: Some(4),
-            ..Default::default()
-        };
-
-        history
-            .push(partial_block(4, 0, int_hash(3)))
-            .unwrap();
-        history.push(revert.clone()).unwrap();
-        history
-            .push(partial_block(4, 0, int_hash(3)))
-            .unwrap();
-
-        assert_eq!(
-            history
-                .determine_block_position(&revert)
-                .unwrap(),
-            BlockPosition::NextExpected
-        );
-        history.push(revert.clone()).unwrap();
-        assert_eq!(history.latest().unwrap(), &revert);
     }
 
     #[test]

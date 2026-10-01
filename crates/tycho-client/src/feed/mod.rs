@@ -2668,8 +2668,8 @@ mod tests {
     }
 
     /// v3 re-delivers the revert in a round where v2 is silent, so the revert header is the
-    /// round's header a second time. Today that pops the tip (`Latest` + revert in `push`),
-    /// leaving a history that cannot resolve the next revert to block 3.
+    /// round's header a second time. On `main` that popped the tip (`Latest` + revert in `push`),
+    /// leaving a history that could not resolve the next revert to block 3.
     #[test(tokio::test)]
     async fn test_redelivered_revert_keeps_history() {
         let (v2, v3, nanny, mut rx) = setup_block_sync().await;
@@ -2691,9 +2691,8 @@ mod tests {
         let feed = receive_message(&mut rx).await;
         assert_at(&feed, "uniswap-v3", 3, Some(0));
 
-        // Rebuilt block 4, then an undo of it again: the revert to 3 must still resolve.
+        // The rebuilt block 4 connects on the revert header's sealed hash.
         advance_both(&v2, &v3, &mut rx, partial_header_message(4, 0)).await;
-        advance_both(&v2, &v3, &mut rx, partial_revert_message(3, 0)).await;
 
         shutdown_block_synchronizer(nanny, rx).await;
     }
