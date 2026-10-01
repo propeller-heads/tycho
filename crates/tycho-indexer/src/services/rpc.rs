@@ -2327,6 +2327,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_shadow_matches_an_account_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let delta = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let mut block = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        block
+            .account_deltas
+            .insert(address.clone(), delta.clone());
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let handler = shadow_handler(
+            gateway_returning(delta.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_matches_a_component_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut block = testing::with_state_delta(
+            testing::aggregated_changes("uniswap_v2", 1, 0, None),
+            "c1",
+            7,
+        );
+        block.new_protocol_components.insert(
+            "c1".to_string(),
+            ProtocolComponent {
+                id: "c1".to_string(),
+                protocol_system: "uniswap_v2".to_string(),
+                ..Default::default()
+            },
+        );
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let state = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(7u64))]),
+            HashMap::new(),
+        );
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![state], total: Some(1) });
+        gw.expect_get_protocol_states()
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
+        let handler = shadow_handler(gw, windows, Arc::new(EntityCache::new()), 1.0);
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            ..Default::default()
+        };
+
+        handler
+            .get_protocol_state_routed(request)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("protocol_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
     /// A state service failure gets the body the database path returns for the same failure.
     #[tokio::test]
     async fn test_state_service_version_above_tip_keeps_the_database_path_body() {
