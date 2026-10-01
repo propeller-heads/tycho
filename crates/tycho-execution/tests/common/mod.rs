@@ -10,7 +10,7 @@ use alloy::{
 use tycho_common::{models::Chain, Bytes};
 use tycho_execution::encoding::{
     evm::{
-        encoder_builders::TychoRouterEncoderBuilder,
+        encoder_builders::{ClientFeeForwarderEncoderBuilder, TychoRouterEncoderBuilder},
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
     tycho_encoder::TychoEncoder,
@@ -101,11 +101,11 @@ pub fn get_client_fee_forwarder_encoder(chain: Chain) -> Box<dyn TychoEncoder> {
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(Some(executors_addresses))
         .unwrap();
-    TychoRouterEncoderBuilder::new()
+    ClientFeeForwarderEncoderBuilder::new()
         .chain(chain)
         .swap_encoder_registry(swap_encoder_registry)
         .router_address(router_address())
-        .client_fee_forwarder(client_fee_forwarder_address())
+        .forwarder_address(client_fee_forwarder_address())
         .build()
         .expect("Failed to build encoder")
 }

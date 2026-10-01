@@ -174,7 +174,7 @@ the swap transaction. One deployment per client; router, fee wallet and `clientF
   vault, and it would go to the fee wallet.
 - About 120k gas on top of the router call (`CLIENT_FEE_FORWARDER_OVERHEAD_GAS`).
 
-`TychoRouterEncoderBuilder::client_fee_forwarder(address)` builds a `ClientFeeForwarderEncoder`: the router's swaps
+`ClientFeeForwarderEncoderBuilder` (requires the forwarder address) builds a `ClientFeeForwarderEncoder`: the router's swaps
 bytes, the forwarder as `interacting_with`, and the forwarder function of the same strategy (router arguments
 without `ClientFeeParams`). Only `TransferFrom` solutions encode.
 
