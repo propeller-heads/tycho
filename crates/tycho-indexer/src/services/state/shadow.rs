@@ -6,6 +6,7 @@
 //! through their JSON form, so it needs no code per response field.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
@@ -13,6 +14,8 @@ use std::{
 };
 
 use metrics::{counter, gauge, histogram};
+use serde::Serialize;
+use serde_json::Value;
 use tracing::warn;
 use tycho_common::{dto, Bytes};
 
@@ -20,12 +23,10 @@ use super::service::{StateService, StateServiceError};
 use crate::services::rpc::RpcError;
 
 /// Most differences one comparison collects and logs.
-#[allow(dead_code, reason = "shadow mode skeleton")]
 const MAX_LOGGED_DIFFS: usize = 20;
 
 /// Longest value a difference logs in full: a 32-byte word in hex. Longer values are logged as
 /// their length and a hash.
-#[allow(dead_code, reason = "shadow mode skeleton")]
 const MAX_LOGGED_VALUE_LEN: usize = 66;
 
 /// Decides which state requests shadow mode compares. The decision depends only on the request
@@ -169,27 +170,36 @@ pub(crate) struct Comparison {
 }
 
 impl Comparison {
-    #[allow(dead_code, reason = "shadow mode skeleton")]
     fn without_diffs(outcome: Outcome) -> Self {
         Self { outcome, diffs: Vec::new() }
     }
 
-    #[allow(dead_code, reason = "shadow mode skeleton")]
     fn mismatch(diffs: Vec<String>) -> Self {
         Self { outcome: Outcome::Mismatch, diffs }
     }
 }
 
 /// Compares the two answers of a sampled `/contract_state` request.
-#[allow(unused_variables, reason = "shadow mode skeleton")]
 pub(crate) fn compare_contract_state(
     db: &Result<dto::StateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::StateRequestResponse>,
     held_elsewhere: impl Fn(&Bytes) -> bool,
 ) -> Comparison {
-    // Pairs the two answers, erases the known account differences from both, and gives `Match`
-    // when they are equal. Otherwise gives a mismatch with the located diffs.
-    todo!()
+    let (db, mut cache) = match pair(db, cache, held_elsewhere) {
+        Ok(answers) => answers,
+        Err(comparison) => return comparison,
+    };
+    // The client still gets the database answer as it is.
+    let mut db = db.clone();
+    normalize_accounts(&mut db.accounts);
+    normalize_accounts(&mut cache.accounts);
+    if db == cache {
+        return Comparison::without_diffs(Outcome::Match);
+    }
+    let mut diffs = Vec::new();
+    walk("pagination", &to_value(&db.pagination), &to_value(&cache.pagination), &mut diffs);
+    locate(&db.accounts, &cache.accounts, |account| account.address.to_string(), &mut diffs);
+    Comparison::mismatch(diffs)
 }
 
 /// Compares the two answers of a sampled `/protocol_state` request.
@@ -204,8 +214,56 @@ pub(crate) fn compare_protocol_state(
     todo!()
 }
 
+/// Erases the known account differences, then orders the accounts by address.
+fn normalize_accounts(accounts: &mut [dto::ResponseAccount]) {
+    for account in accounts.iter_mut() {
+        // Folds and window deltas do not carry the transaction references.
+        account.balance_modify_tx = Bytes::default();
+        account.code_modify_tx = Bytes::default();
+        // The database path does not recompute the hash when a window delta carries code (TODO in
+        // `Account::apply_delta`). The code itself is compared.
+        account.code_hash = Bytes::default();
+    }
+    accounts.sort_by(|a, b| a.address.cmp(&b.address));
+}
+
+/// Returns both answers when both sides answered. Otherwise returns the comparison of the
+/// failure.
+fn pair<R>(
+    db: &Result<R, RpcError>,
+    cache: CacheAnswer<R>,
+    held_elsewhere: impl Fn(&Bytes) -> bool,
+) -> Result<(&R, R), Comparison> {
+    let err = match (db, cache) {
+        (_, CacheAnswer::Fallback) => return Err(Comparison::without_diffs(Outcome::Fallback)),
+        (_, CacheAnswer::Panicked) => return Err(Comparison::without_diffs(Outcome::CachePanicked)),
+        (Err(db_err), _) if db_failed(db_err) => {
+            return Err(Comparison::without_diffs(Outcome::DbFailed))
+        }
+        (Ok(db), CacheAnswer::Answered(cache)) => return Ok((db, cache)),
+        (Err(db_err), CacheAnswer::Answered(_)) => {
+            return Err(Comparison::mismatch(vec![format!("error: db={db_err} cache=ok")]))
+        }
+        (_, CacheAnswer::Failed(err)) => err,
+    };
+    let db_err = db.as_ref().err();
+    if known_error(db_err, &err, held_elsewhere) {
+        return Err(Comparison::without_diffs(Outcome::KnownError));
+    }
+    // Compare the error a client would get in `serve`.
+    let cache_err = RpcError::from(err);
+    let outcome = match db_err {
+        Some(db_err) if db_err.to_string() == cache_err.to_string() => Outcome::Match,
+        Some(db_err) => {
+            return Err(Comparison::mismatch(vec![format!("error: db={db_err} cache={cache_err}")]))
+        }
+        None => return Err(Comparison::mismatch(vec![format!("error: db=ok cache={cache_err}")])),
+    };
+    Err(Comparison::without_diffs(outcome))
+}
+
 /// Whether the database-path error `db` is a failure of the database itself.
-#[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
+#[allow(unused_variables, reason = "shadow mode skeleton")]
 fn db_failed(db: &RpcError) -> bool {
     // True for a lost connection and for an unexpected storage error.
     todo!()
@@ -214,7 +272,7 @@ fn db_failed(db: &RpcError) -> bool {
 /// Whether the cache-path error `cache` is a known difference. `db` is the database-path error,
 /// `None` when the database path answered. `held_elsewhere` says whether another extractor's
 /// window holds an address.
-#[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
+#[allow(unused_variables, reason = "shadow mode skeleton")]
 fn known_error(
     db: Option<&RpcError>,
     cache: &StateServiceError,
@@ -223,6 +281,76 @@ fn known_error(
     // True for an account that only another extractor's window holds, and for an account that
     // neither path finds.
     todo!()
+}
+
+/// Adds where the entities of two normalized answers differ, as `id.path: db=… cache=…`, up to
+/// [`MAX_LOGGED_DIFFS`]. An entity that compares equal is not serialized.
+fn locate<T: Serialize + PartialEq>(
+    db: &[T],
+    cache: &[T],
+    id: impl Fn(&T) -> String,
+    diffs: &mut Vec<String>,
+) {
+    let db: BTreeMap<String, &T> = db
+        .iter()
+        .map(|entity| (id(entity), entity))
+        .collect();
+    let cache: BTreeMap<String, &T> = cache
+        .iter()
+        .map(|entity| (id(entity), entity))
+        .collect();
+    let ids: BTreeSet<&String> = db.keys().chain(cache.keys()).collect();
+    for id in ids {
+        if diffs.len() >= MAX_LOGGED_DIFFS {
+            break;
+        }
+        let (db_entity, cache_entity) = (db.get(id), cache.get(id));
+        if db_entity != cache_entity {
+            let value =
+                |entity: Option<&&T>| entity.map_or(Value::Null, |entity| to_value(*entity));
+            walk(id, &value(db_entity), &value(cache_entity), diffs);
+        }
+    }
+}
+
+/// Adds `path: db=… cache=…` for each leaf where the two values differ. Objects are walked key by
+/// key, in key order; any other value is a leaf. Stops at [`MAX_LOGGED_DIFFS`].
+fn walk(path: &str, db: &Value, cache: &Value, diffs: &mut Vec<String>) {
+    if diffs.len() >= MAX_LOGGED_DIFFS || db == cache {
+        return;
+    }
+    static NULL: Value = Value::Null;
+    if let (Value::Object(db), Value::Object(cache)) = (db, cache) {
+        let keys: BTreeSet<&String> = db.keys().chain(cache.keys()).collect();
+        for key in keys {
+            let (db, cache) = (db.get(key).unwrap_or(&NULL), cache.get(key).unwrap_or(&NULL));
+            walk(&format!("{path}.{key}"), db, cache, diffs);
+        }
+        return;
+    }
+    diffs.push(format!("{path}: db={} cache={}", render(db), render(cache)));
+}
+
+/// The JSON form of a response part. Never fails the request: a serialization error becomes the
+/// value.
+fn to_value(value: &impl Serialize) -> Value {
+    serde_json::to_value(value)
+        .unwrap_or_else(|err| Value::String(format!("unserializable: {err}")))
+}
+
+/// A value short enough to log: in full up to [`MAX_LOGGED_VALUE_LEN`] characters, otherwise its
+/// length and a hash.
+fn render(value: &Value) -> String {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if text.len() <= MAX_LOGGED_VALUE_LEN {
+        return text;
+    }
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("len={} hash={:016x}", text.len(), hasher.finish())
 }
 
 /// The state endpoint a comparison belongs to.
@@ -295,10 +423,14 @@ fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Durati
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use metrics_util::{
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},
         MetricKind,
     };
+    use rstest::rstest;
+    use tycho_common::dto::PaginationResponse;
 
     use super::*;
 
@@ -335,6 +467,125 @@ mod test {
         // The hash is fixed, so this count is deterministic; the range only allows for the
         // hasher's distribution, not for randomness.
         assert!((800..=1_200).contains(&sampled), "sampled {sampled} of 10000");
+    }
+
+    fn address(n: u64) -> Bytes {
+        Bytes::from(n).lpad(20, 0)
+    }
+
+    fn account(n: u64) -> dto::ResponseAccount {
+        dto::ResponseAccount {
+            address: address(n),
+            slots: HashMap::from([(Bytes::from(1u64), Bytes::from(n))]),
+            code: Bytes::from("0x6000"),
+            ..Default::default()
+        }
+    }
+
+    /// Both paths report `total` as the number of requested ids, not of returned entities.
+    fn contracts(accounts: Vec<dto::ResponseAccount>, total: usize) -> dto::StateRequestResponse {
+        dto::StateRequestResponse::new(accounts, PaginationResponse::new(0, 100, total as i64))
+    }
+
+    fn compare_contracts(
+        db: Vec<dto::ResponseAccount>,
+        cache: Vec<dto::ResponseAccount>,
+    ) -> Comparison {
+        compare_contract_state(
+            &Ok(contracts(db, 2)),
+            CacheAnswer::Answered(contracts(cache, 2)),
+            |_| false,
+        )
+    }
+
+    #[test]
+    fn equal_answers_match_in_any_order() {
+        let comparison =
+            compare_contracts(vec![account(1), account(2)], vec![account(2), account(1)]);
+
+        assert_eq!(comparison.outcome, Outcome::Match);
+        assert!(comparison.diffs.is_empty());
+    }
+
+    #[test]
+    fn a_corrupted_slot_is_located() {
+        let mut corrupted = account(1);
+        corrupted
+            .slots
+            .insert(Bytes::from(1u64), Bytes::from(99u64));
+
+        let comparison = compare_contracts(vec![account(1)], vec![corrupted]);
+
+        assert_eq!(comparison.outcome, Outcome::Mismatch);
+        assert_eq!(
+            comparison.diffs,
+            vec![format!(
+                "{}.slots.0x0000000000000001: db=0x0000000000000001 cache=0x0000000000000063",
+                address(1)
+            )]
+        );
+    }
+
+    #[test]
+    fn an_account_missing_from_the_cache_answer_is_located() {
+        let comparison = compare_contracts(vec![account(1), account(2)], vec![account(1)]);
+
+        assert_eq!(comparison.outcome, Outcome::Mismatch);
+        assert_eq!(comparison.diffs.len(), 1);
+        assert!(comparison.diffs[0].starts_with(&format!("{}: db=len=", address(2))));
+        assert!(comparison.diffs[0].ends_with("cache=null"));
+    }
+
+    #[test]
+    fn a_pagination_difference_is_located() {
+        let comparison = compare_contract_state(
+            &Ok(contracts(vec![account(1)], 1)),
+            CacheAnswer::Answered(contracts(vec![account(1)], 2)),
+            |_| false,
+        );
+
+        assert_eq!(comparison.diffs, vec!["pagination.total: db=1 cache=2"]);
+    }
+
+    #[test]
+    fn a_long_value_is_logged_as_its_length_and_hash() {
+        let mut cache = account(1);
+        cache.code = Bytes::from(vec![0x60; 100]);
+
+        let comparison = compare_contracts(vec![account(1)], vec![cache]);
+
+        assert_eq!(comparison.diffs.len(), 1);
+        assert!(comparison.diffs[0]
+            .starts_with(&format!("{}.code: db=0x6000 cache=len=202 hash=", address(1))));
+    }
+
+    #[test]
+    fn locate_stops_at_the_most_logged_diffs() {
+        let mut cache = account(1);
+        cache.slots = (0..MAX_LOGGED_DIFFS as u64 + 5)
+            .map(|n| (Bytes::from(n + 100), Bytes::from(n)))
+            .collect();
+
+        let comparison = compare_contracts(vec![account(1)], vec![cache]);
+
+        assert_eq!(comparison.diffs.len(), MAX_LOGGED_DIFFS);
+    }
+
+    #[rstest]
+    #[case::transaction_references(|account: &mut dto::ResponseAccount| {
+        account.balance_modify_tx = Bytes::from(1u64);
+        account.code_modify_tx = Bytes::from(2u64);
+    })]
+    #[case::stale_code_hash(|account: &mut dto::ResponseAccount| {
+        account.code_hash = Bytes::from(7u64);
+    })]
+    fn known_account_differences_match(#[case] change: fn(&mut dto::ResponseAccount)) {
+        let mut db = account(1);
+        change(&mut db);
+
+        let comparison = compare_contracts(vec![db], vec![account(1)]);
+
+        assert_eq!(comparison.outcome, Outcome::Match);
     }
 
     /// A counter's name, its labels sorted by key, and its value.
