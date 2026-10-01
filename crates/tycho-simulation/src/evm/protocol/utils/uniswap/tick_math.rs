@@ -3,7 +3,7 @@ use std::ops::BitOr;
 use alloy::primitives::{Sign, I256, U256};
 use tycho_common::simulation::errors::SimulationError;
 
-use crate::evm::protocol::safe_math::{div_mod_u256, safe_div_u256, safe_mul_u256};
+use crate::evm::protocol::safe_math::{safe_div_u256, safe_mul_u256};
 
 pub(crate) const MIN_TICK: i32 = -887272;
 pub(crate) const MAX_TICK: i32 = 887272;
@@ -148,8 +148,8 @@ pub(crate) fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError>
         ratio = safe_div_u256(U256::MAX, ratio)?;
     }
 
-    let (_, rest) = div_mod_u256(ratio, U256::from(1u64) << 32)?;
-    Ok((ratio >> 32) + if rest == U256::from(0u64) { U256::from(0u64) } else { U256::from(1u64) })
+    let has_remainder = ratio.as_limbs()[0] & u64::from(u32::MAX) != 0;
+    Ok((ratio >> 32) + if has_remainder { U256::from(1u64) } else { U256::ZERO })
 }
 
 fn most_significant_bit(x: U256) -> Result<usize, SimulationError> {
