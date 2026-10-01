@@ -603,9 +603,10 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         pool = IAerodromeV1Pool(address(bytes20(data[0:20])));
     }
 
-    /// @notice Pays a Uniswap V3-style pool from the callback context.
-    /// @dev Catch-all so it answers to every V3 fork's callback name. Token and amount come from
-    /// the context, which `_consumeCallbackContext` ties to the pool `_swapUniswapV3` armed.
+    /// @notice Pays the pool that armed the callback context: a Uniswap V3-style pool or a Metric
+    /// pool.
+    /// @dev Catch-all so it answers to every callback name. Token and amount come from the
+    /// context, which `_consumeCallbackContext` ties to the pool `_setCallbackContext` armed.
     fallback() external {
         (address tokenIn, uint256 amountIn) = _consumeCallbackContext();
         IERC20(tokenIn).safeTransfer(msg.sender, amountIn);
