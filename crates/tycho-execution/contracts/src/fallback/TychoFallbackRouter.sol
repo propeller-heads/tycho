@@ -101,6 +101,9 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         bytes hookData;
     }
 
+    /// @notice The `_quotePrimary` result for a price signed off-chain: the primary runs first.
+    uint256 internal constant PRIMARY_FIRST = type(uint256).max;
+
     // keccak256("TychoFallbackRouter#CALLBACK_SOURCE")
     bytes32 private constant _CALLBACK_SOURCE_SLOT =
         0xf69ae8e0008b818aeb91c2b052698e485056e760fad9d0aa28144b842debe4f7;
@@ -164,11 +167,13 @@ abstract contract TychoFallbackRouter is ReentrancyGuardTransient {
         // Uniswap V4 is a simulated swap.
         if (primaryAmountOut > 0) {
             uint256 fallbackAmountOut = 0;
-            try this.quoteFallback(swap_, fallbackSwap) returns (
-                uint256 amountOut
-            ) {
-                fallbackAmountOut = amountOut;
-            } catch {}
+            if (primaryAmountOut != PRIMARY_FIRST) {
+                try this.quoteFallback(swap_, fallbackSwap) returns (
+                    uint256 amountOut
+                ) {
+                    fallbackAmountOut = amountOut;
+                } catch {}
+            }
 
             if (fallbackAmountOut <= primaryAmountOut) {
                 try this.executePrimary(swap_, primary, primaryData) {
