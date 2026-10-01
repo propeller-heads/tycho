@@ -12,6 +12,8 @@ use std::{
     time::Duration,
 };
 
+use metrics::{counter, gauge, histogram};
+use tracing::warn;
 use tycho_common::{dto, Bytes};
 
 use super::service::{StateService, StateServiceError};
@@ -134,7 +136,6 @@ enum Outcome {
 }
 
 impl Outcome {
-    #[allow(dead_code, reason = "shadow mode skeleton")]
     const ALL: [Outcome; 7] = [
         Outcome::Match,
         Outcome::KnownError,
@@ -145,7 +146,6 @@ impl Outcome {
         Outcome::CachePanicked,
     ];
 
-    #[allow(dead_code, reason = "shadow mode skeleton")]
     fn label(self) -> &'static str {
         match self {
             Outcome::Match => "match",
@@ -161,7 +161,6 @@ impl Outcome {
 
 /// The result of comparing one sampled request.
 #[derive(Debug)]
-#[allow(dead_code, reason = "shadow mode skeleton")]
 pub(crate) struct Comparison {
     outcome: Outcome,
     /// For a mismatch, where the answers differ, as `path: db=… cache=…`; at most
@@ -245,7 +244,6 @@ impl Endpoint {
 }
 
 /// The request fields a comparison log names.
-#[allow(dead_code, reason = "shadow mode skeleton")]
 pub(crate) struct SampledRequest<'a> {
     pub(crate) endpoint: Endpoint,
     pub(crate) protocol_system: &'a str,
@@ -256,24 +254,52 @@ pub(crate) struct SampledRequest<'a> {
 /// Registers every comparison counter at zero, so the first event of a series counts as growth,
 /// and sets the sample-rate gauge. The duration histogram appears with its first sample, like the
 /// other histograms of the indexer.
-#[allow(unused_variables, reason = "shadow mode skeleton")]
 pub(crate) fn register_metrics(sample_rate: f64) {
-    // Registers each (endpoint, outcome) comparison counter at zero and sets the sample-rate
-    // gauge.
-    todo!()
+    for endpoint in Endpoint::ALL {
+        for outcome in Outcome::ALL {
+            counter!(
+                "entity_cache_shadow_comparisons_total",
+                "endpoint" => endpoint.label(),
+                "outcome" => outcome.label()
+            )
+            .increment(0);
+        }
+    }
+    gauge!("entity_cache_shadow_sample_rate").set(sample_rate);
 }
 
 /// Records one comparison: its outcome, the time the cache path and the comparison took, and a
 /// warning with the differences for a mismatch.
-#[allow(dead_code, unused_variables, reason = "shadow mode skeleton")]
+#[allow(dead_code, reason = "shadow mode skeleton")]
 fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Duration) {
-    // Counts the outcome, records the duration, and logs a warning with the diffs for a
-    // mismatch.
-    todo!()
+    let endpoint = request.endpoint.label();
+    counter!(
+        "entity_cache_shadow_comparisons_total",
+        "endpoint" => endpoint,
+        "outcome" => comparison.outcome.label()
+    )
+    .increment(1);
+    histogram!("entity_cache_shadow_duration_seconds", "endpoint" => endpoint)
+        .record(elapsed.as_secs_f64());
+    if comparison.outcome == Outcome::Mismatch {
+        warn!(
+            endpoint,
+            protocol_system = request.protocol_system,
+            version = ?request.version,
+            id_count = request.id_count,
+            diffs = %comparison.diffs.join("; "),
+            "Entity cache shadow mismatch"
+        );
+    }
 }
 
 #[cfg(test)]
 mod test {
+    use metrics_util::{
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+        MetricKind,
+    };
+
     use super::*;
 
     #[test]
@@ -309,5 +335,73 @@ mod test {
         // The hash is fixed, so this count is deterministic; the range only allows for the
         // hasher's distribution, not for randomness.
         assert!((800..=1_200).contains(&sampled), "sampled {sampled} of 10000");
+    }
+
+    /// A counter's name, its labels sorted by key, and its value.
+    type Counter = (String, Vec<(String, String)>, u64);
+
+    fn counters(snapshotter: &Snapshotter) -> Vec<Counter> {
+        let mut counters: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.kind() == MetricKind::Counter)
+            .map(|(key, _, _, value)| {
+                let mut labels: Vec<_> = key
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                labels.sort();
+                let DebugValue::Counter(count) = value else { panic!("not a counter") };
+                (key.key().name().to_string(), labels, count)
+            })
+            .collect();
+        counters.sort();
+        counters
+    }
+
+    #[test]
+    fn register_metrics_starts_every_series_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || register_metrics(0.25));
+
+        let counters = counters(&snapshotter);
+        assert_eq!(counters.len(), Endpoint::ALL.len() * Outcome::ALL.len());
+        assert!(counters
+            .iter()
+            .all(|(_, _, count)| *count == 0));
+    }
+
+    #[test]
+    fn record_counts_the_outcome_once() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let version = dto::VersionParam::default();
+        let sampled = SampledRequest {
+            endpoint: Endpoint::ContractState,
+            protocol_system: "ex",
+            version: &version,
+            id_count: 2,
+        };
+        let comparison = Comparison::mismatch(vec!["pagination.total: db=1 cache=2".to_string()]);
+
+        metrics::with_local_recorder(&recorder, || {
+            record(&sampled, &comparison, std::time::Duration::from_millis(1))
+        });
+
+        assert_eq!(
+            counters(&snapshotter),
+            vec![(
+                "entity_cache_shadow_comparisons_total".to_string(),
+                vec![
+                    ("endpoint".to_string(), "contract_state".to_string()),
+                    ("outcome".to_string(), "mismatch".to_string())
+                ],
+                1
+            )]
+        );
     }
 }
