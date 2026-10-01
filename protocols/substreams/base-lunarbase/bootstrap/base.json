@@ -1,0 +1,91 @@
+{
+  "chain": "base",
+  "pool": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+  "quote_caller": "0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67",
+  "provenance": {
+    "rpc_endpoint": "https://base-rpc.publicnode.com",
+    "source": "Observed JSON-RPC responses from block-pinned eth_call, eth_getStorageAt, eth_getBlockByNumber and eth_getLogs.",
+    "canonicality_check": "Parent block hash was re-read after collection and matched; bootstrap header parentHash matched the snapshot block hash.",
+    "snapshot_encoding": "Snapshot attribute bytes are fixed-width big-endian encodings of observed getter values, not simulated values.",
+    "quote_encoding": "Quote amounts and result words are decimal strings from eth_call with from set to quote_caller; result order is amountOut, pNext, fee."
+  },
+  "bootstrap_block": 51297755,
+  "bootstrap_block_hash": "0xccb8acc64b6261325956b68f9d3400ef4405c1decdcc189f014df16a72339f98",
+  "discovery_tx": "0x89f3ab2178d63f32a9b15caf7c53225f1dca3bef15e147a2f393487712fff7e6",
+  "implementation": "0x4e87177c1084fc322a44105654f05bde83d4d7e2",
+  "implementation_storage_word": "0x0000000000000000000000004e87177c1084fc322a44105654f05bde83d4d7e2",
+  "snapshot": {
+    "block_number": 51297754,
+    "block_hash": "0x206fa0a273e401dd2eea44d9a2fae97bb3aeff4e15e3a9a6e85d5fae96810a27",
+    "quote_caller": "0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67",
+    "attributes": {
+      "anchor_price_x96": "0x00000000000000000003492619b3c53560000000",
+      "fee_ask_x24": "0x00000720",
+      "fee_bid_x24": "0x00001ff2",
+      "latest_update_block": "0x00000000030ebdda",
+      "reserve_x": "0x000000000000000086622032fdde2529",
+      "reserve_y": "0x00000000000000000000000568b2386d",
+      "max_punishment_x24": "0x00027100",
+      "block_delay": "0x0000000000000003",
+      "paused": "0x00",
+      "blacklist_fee_multiplier": "0x0000000000000000000000000000000000000000000000000000000000000064",
+      "quote_caller_whitelisted": "0x00"
+    }
+  },
+  "observed_quotes": [
+    {
+      "signature": "quoteXToY(uint256)",
+      "amount_in": "1000000000000000",
+      "result": [
+        "2391056",
+        "3972213040408877401636864",
+        "122600"
+      ]
+    },
+    {
+      "signature": "quoteXToY(uint256)",
+      "amount_in": "100000000000000000",
+      "result": [
+        "237845431",
+        "3972213040408877401636864",
+        "13520200"
+      ]
+    },
+    {
+      "signature": "quoteXToY(uint256)",
+      "amount_in": "1000000000000000000",
+      "result": [
+        "2264451418",
+        "3972213040408877401636864",
+        "249204900"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "amount_in": "1000000",
+      "result": [
+        "393492246202321",
+        "3972213040408877401636864",
+        "4334613680000"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "amount_in": "100000000",
+      "result": [
+        "39270262566836230",
+        "3972213040408877401636864",
+        "512423422473000"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "amount_in": "1000000000",
+      "result": [
+        "385524903781326414",
+        "3972213040408877401636864",
+        "12301956111945400"
+      ]
+    }
+  ]
+}

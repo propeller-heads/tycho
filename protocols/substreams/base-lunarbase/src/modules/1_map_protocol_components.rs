@@ -13,6 +13,13 @@ pub fn map_protocol_components(
     block: eth::v2::Block,
 ) -> Result<tycho::BlockTransactionProtocolComponents> {
     let config = Config::parse(&params)?;
+    config.validate_bootstrap_parent(
+        block.number,
+        block
+            .header
+            .as_ref()
+            .map(|header| header.parent_hash.as_slice()),
+    )?;
     let mut tx_components = Vec::<tycho::TransactionProtocolComponents>::new();
     for pool in config
         .pools
@@ -25,7 +32,12 @@ pub fn map_protocol_components(
         else {
             continue;
         };
-        let component = lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y);
+        let component = lunarbase::protocol_component(
+            pool.pool,
+            pool.token_x,
+            pool.token_y,
+            config.quote_caller,
+        );
         if let Some(existing) = tx_components
             .iter_mut()
             .find(|tx_components| {

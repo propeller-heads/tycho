@@ -6,18 +6,23 @@ use crate::lunarbase::{
 };
 
 pub fn initial_entity_change(component_id: &str) -> tycho::EntityChanges {
+    // The getter maps an untouched zero storage slot to effective multiplier 1.
+    let mut blacklist_fee_multiplier = vec![0; 32];
+    blacklist_fee_multiplier[31] = 1;
     tycho::EntityChanges {
         component_id: component_id.to_owned(),
         attributes: vec![
-            creation_attribute(attrs::ANCHOR_PRICE_X96, 0u128.to_be_bytes().to_vec()),
+            creation_attribute(attrs::ANCHOR_PRICE_X96, vec![0u8; 20]),
             creation_attribute(attrs::FEE_ASK_X24, 0u32.to_be_bytes().to_vec()),
             creation_attribute(attrs::FEE_BID_X24, 0u32.to_be_bytes().to_vec()),
             creation_attribute(attrs::LATEST_UPDATE_BLOCK, 0u64.to_be_bytes().to_vec()),
             creation_attribute(attrs::RESERVE_X, 0u128.to_be_bytes().to_vec()),
             creation_attribute(attrs::RESERVE_Y, 0u128.to_be_bytes().to_vec()),
-            creation_attribute(attrs::CONCENTRATION_K, 0u32.to_be_bytes().to_vec()),
+            creation_attribute(attrs::MAX_PUNISHMENT_X24, 0u32.to_be_bytes().to_vec()),
+            creation_attribute(attrs::BLACKLIST_FEE_MULTIPLIER, blacklist_fee_multiplier),
+            creation_attribute(attrs::QUOTE_CALLER_WHITELISTED, vec![0u8]),
             creation_attribute(attrs::BLOCK_DELAY, 2u64.to_be_bytes().to_vec()),
-            creation_attribute(attrs::PAUSED, vec![0u8]),
+            creation_attribute(attrs::PAUSED, vec![1u8]),
         ],
     }
 }
@@ -67,6 +72,26 @@ mod tests {
 
     const TOKEN_X: [u8; 20] = [0x11; 20];
     const TOKEN_Y: [u8; 20] = [0x22; 20];
+
+    #[test]
+    fn fresh_pool_starts_paused_with_punishment_disabled() {
+        let change = initial_entity_change("0xpool");
+        let value = |name: &str| {
+            &change
+                .attributes
+                .iter()
+                .find(|attr| attr.name == name)
+                .unwrap()
+                .value
+        };
+        assert_eq!(*value(attrs::PAUSED), vec![1]);
+        assert_eq!(*value(attrs::MAX_PUNISHMENT_X24), 0u32.to_be_bytes());
+        assert_eq!(*value(attrs::ANCHOR_PRICE_X96), vec![0; 20]);
+        let mut effective_multiplier = vec![0; 32];
+        effective_multiplier[31] = 1;
+        assert_eq!(*value(attrs::BLACKLIST_FEE_MULTIPLIER), effective_multiplier);
+        assert_eq!(*value(attrs::QUOTE_CALLER_WHITELISTED), vec![0]);
+    }
 
     #[test]
     fn sync_emits_absolute_reserve_balances() {

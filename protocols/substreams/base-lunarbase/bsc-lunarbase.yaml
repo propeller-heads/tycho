@@ -1,0 +1,55 @@
+specVersion: v0.1.0
+package:
+  name: "bsc_lunarbase"
+  version: v0.2.0
+  url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/base-lunarbase"
+  description: "LunarBase Prop AMM indexing on BNB Smart Chain"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_lunarbase.wasm
+
+# Seed verified state from the parent block, then replay this block onward.
+# Capture provenance is in bootstrap/bsc.json; the JSON is embedded below.
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 121835899
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 121835899
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 121835899
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: 'pool=0x00007904d186680C709519e71f4Dc3e2DF8f1b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x55d398326f99059fF775485246999027B3197955&bootstrap_block=121835899&quote_caller=0x7f3D12BBaFb8955E51B3ab9588b34c8ad95BDA4e&bootstrap_states={"0x00007904d186680c709519e71f4dc3e2df8f1b99":{"block_number":121835898,"block_hash":"0x723d5311d9e312cf0040da3dca6b056a80814889cc6abc23b3c27f68b734d461","quote_caller":"0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e","attributes":{"anchor_price_x96":"0x000000000000001adfd9283ac14b000000000000","fee_ask_x24":"0x00000c14","fee_bid_x24":"0x00000228","latest_update_block":"0x0000000007431172","reserve_x":"0x000000000000000238c0725ed8cfdb30","reserve_y":"0x00000000000007f049c166c75d3b7fd7","max_punishment_x24":"0x0001e848","block_delay":"0x0000000000000019","paused":"0x00","blacklist_fee_multiplier":"0x0000000000000000000000000000000000000000000000000000000000000001","quote_caller_whitelisted":"0x00"}}}'
+  map_protocol_changes: 'pool=0x00007904d186680C709519e71f4Dc3e2DF8f1b99&token_x=0x0000000000000000000000000000000000000000&token_y=0x55d398326f99059fF775485246999027B3197955&bootstrap_block=121835899&quote_caller=0x7f3D12BBaFb8955E51B3ab9588b34c8ad95BDA4e&bootstrap_states={"0x00007904d186680c709519e71f4dc3e2df8f1b99":{"block_number":121835898,"block_hash":"0x723d5311d9e312cf0040da3dca6b056a80814889cc6abc23b3c27f68b734d461","quote_caller":"0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e","attributes":{"anchor_price_x96":"0x000000000000001adfd9283ac14b000000000000","fee_ask_x24":"0x00000c14","fee_bid_x24":"0x00000228","latest_update_block":"0x0000000007431172","reserve_x":"0x000000000000000238c0725ed8cfdb30","reserve_y":"0x00000000000007f049c166c75d3b7fd7","max_punishment_x24":"0x0001e848","block_delay":"0x0000000000000019","paused":"0x00","blacklist_fee_multiplier":"0x0000000000000000000000000000000000000000000000000000000000000001","quote_caller_whitelisted":"0x00"}}}'
+
+network: bsc

@@ -17,11 +17,11 @@ pub fn register_lunarbase_decoder(decoder: &mut TychoStreamDecoder<BlockHeader>)
 mod tests {
     use std::collections::HashMap;
 
-    use num_bigint::BigUint;
+    use lunarbase_pmm_math::U256;
     use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
     use tycho_common::{
         dto::{ProtocolComponent, ProtocolStateDelta, ResponseProtocolState},
-        models::{token::Token, Chain},
+        models::Chain,
         simulation::protocol_sim::{Balances, ProtocolSim},
         Bytes,
     };
@@ -41,40 +41,20 @@ mod tests {
         [byte; 20]
     }
 
-    fn address(hex: &str) -> Address {
-        let hex = hex.strip_prefix("0x").unwrap_or(hex);
-        assert_eq!(hex.len(), 40);
-        let mut out = [0u8; 20];
-        for i in 0..20 {
-            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
-        }
-        out
-    }
-
-    fn token(address: Address, symbol: &str, decimals: u32) -> Token {
-        Token::new(
-            &Bytes::from(address.to_vec()),
-            symbol,
-            decimals,
-            100,
-            &[Some(100_000)],
-            Chain::Base,
-            100,
-        )
-    }
-
     fn state() -> LunarBaseState {
         LunarBaseState {
             pool: addr(9),
             token_x: addr(1),
             token_y: addr(2),
-            anchor_price_x96: 1u128 << 96,
+            anchor_price_x96: U256::from(1u128 << 96),
             fee_ask_x24: 0,
             fee_bid_x24: 0,
             latest_update_block: 100,
             reserve_x: 1_000_000,
             reserve_y: 2_000_000,
-            concentration_k: 0,
+            max_punishment_x24: 0,
+            blacklist_fee_multiplier: U256::from(1u64),
+            quote_caller_whitelisted: false,
             block_delay: 2,
             paused: false,
             head_block: 100,
@@ -173,45 +153,51 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual live-state smoke test using a known Base LunarBase pool snapshot"]
-    fn live_base_pool_quote_smoke_test() {
-        let native = addr(0);
-        let usdc = address("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-        let state = LunarBaseState {
-            pool: address("0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99"),
-            token_x: native,
-            token_y: usdc,
-            anchor_price_x96: u128::from_str_radix("000000000002ffb42f3bb2b1c0000000", 16).unwrap(),
-            fee_ask_x24: u32::from_str_radix("000006f6", 16).unwrap(),
-            fee_bid_x24: u32::from_str_radix("000021ba", 16).unwrap(),
-            latest_update_block: 46_498_514,
-            reserve_x: u128::from_str_radix("000000000000000091c69269d1d44388", 16).unwrap(),
-            reserve_y: u128::from_str_radix("00000000000000000000000446add763", 16).unwrap(),
-            concentration_k: 0,
-            block_delay: 2,
-            paused: false,
-            head_block: 46_498_514,
-        };
-
-        let eth_token = token(native, "ETH", 18);
-        let usdc_token = token(usdc, "USDC", 6);
-        let amount_in = BigUint::from(10_000_000_000_000_000u64);
-        let quote = state
-            .get_amount_out(amount_in.clone(), &eth_token, &usdc_token)
-            .unwrap();
-        let next = quote
-            .new_state
-            .as_any()
-            .downcast_ref::<LunarBaseState>()
-            .unwrap();
-
-        assert!(quote.amount > BigUint::ZERO);
-        assert!(quote.amount < BigUint::from(state.reserve_y));
-        assert_eq!(next.reserve_x, state.reserve_x + 10_000_000_000_000_000u128);
-        assert!(next.reserve_y < state.reserve_y);
-        println!(
-            "LunarBase live quote: 0.01 ETH -> {} USDC base units at block {}",
-            quote.amount, state.head_block
+    fn snapshot_requires_punishment_configuration_instead_of_legacy_concentration() {
+        let mut snapshot = snapshot(state());
+        snapshot
+            .state
+            .attributes
+            .remove("max_punishment_x24");
+        snapshot
+            .state
+            .attributes
+            .insert("concentration_k".to_owned(), Bytes::from(0u32));
+        let error = decode_lunarbase_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(error, crate::protocol::errors::InvalidSnapshotError::MissingAttribute(name) if name == "max_punishment_x24")
         );
+    }
+
+    #[test]
+    fn snapshot_preserves_full_width_anchor_and_punishment() {
+        let mut expected = state();
+        expected.anchor_price_x96 = (U256::from(1u64) << 159usize) + U256::from(123u64);
+        expected.max_punishment_x24 = lunarbase_pmm_math::MAX_U24;
+        let decoded = decode_lunarbase_snapshot(&snapshot(expected.clone())).unwrap();
+        expected.head_block = 0;
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn snapshot_rejects_anchor_larger_than_wire_uint160() {
+        let mut snapshot = snapshot(state());
+        snapshot
+            .state
+            .attributes
+            .insert("anchor_price_x96".to_owned(), Bytes::from(vec![1u8; 21]));
+        assert!(decode_lunarbase_snapshot(&snapshot).is_err());
+    }
+
+    #[test]
+    fn snapshot_requires_explicit_caller_fee_policy() {
+        for name in ["blacklist_fee_multiplier", "quote_caller_whitelisted"] {
+            let mut snapshot = snapshot(state());
+            snapshot.state.attributes.remove(name);
+            let error = decode_lunarbase_snapshot(&snapshot).unwrap_err();
+            assert!(
+                matches!(error, crate::protocol::errors::InvalidSnapshotError::MissingAttribute(missing) if missing == name)
+            );
+        }
     }
 }
