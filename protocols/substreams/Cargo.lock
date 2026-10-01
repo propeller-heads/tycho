@@ -64,6 +64,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "arbitrum-camelot-v3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "hex",
+ "itertools 0.10.5",
+ "num-bigint",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "substreams-helper 0.0.2",
+ "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

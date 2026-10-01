@@ -1,0 +1,75 @@
+specVersion: v0.1.0
+package:
+  name: "arbitrum_camelot_v3"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/arbitrum-camelot-v3"
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/arbitrum_camelot_v3.wasm
+
+# Every module starts at the AlgebraFactory creation block (tx
+# 0x2420d9fe941f8ff2d9ac39a05f8d97535b7dbfa8a31830ddf3b1fd34c6d13ea7) so that the factory's
+# code and storage are witnessed: pools read the factory's `vaultAddress` on every swap that
+# pays a community fee. The first `Pool` event is at block 101213149.
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 101163738
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 101163738
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_component_balances
+    kind: map
+    initialBlock: 101163738
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 101163738
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_component_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 101163738
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - map: map_relative_component_balances
+      - store: store_protocol_components
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: "factory=1a3c9b1d2f0529d97f2afc5136cc23e58f1fd35b"
+  map_protocol_changes: "factory=1a3c9b1d2f0529d97f2afc5136cc23e58f1fd35b"

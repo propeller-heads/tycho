@@ -37,6 +37,27 @@ pub fn balancer_v2_pool_filter(component: &ComponentWithState) -> bool {
     true
 }
 
+/// Filters out Camelot V3 pools that have an active incentive.
+///
+/// Such a pool calls its incentive's virtual pool on every swap and tick crossing. That contract
+/// is not indexed, so the pool cannot be simulated. The Substreams package mirrors the pool's
+/// `activeIncentive` storage value in the `active_incentive` state attribute; a pool is usable
+/// while that attribute is absent or the zero address.
+pub fn camelot_v3_pool_filter(component: &ComponentWithState) -> bool {
+    let has_active_incentive = component
+        .state
+        .attributes
+        .get("active_incentive")
+        .is_some_and(|address| address.iter().any(|byte| *byte != 0));
+    if has_active_incentive {
+        debug!(
+            "Filtering out Camelot V3 pool {} because it has an active incentive.",
+            component.component.id
+        );
+    }
+    !has_active_incentive
+}
+
 /// Filters out uniswap v4 pools with non-Euler hooks
 pub fn uniswap_v4_euler_hook_pool_filter(component: &ComponentWithState) -> bool {
     component

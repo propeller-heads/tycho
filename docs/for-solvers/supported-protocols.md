@@ -21,6 +21,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum, Robinhood</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
 <tr><td><code>vm:maverick_v2</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>vm:camelot_v3</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Arbitrum</td><td>Pools with an active incentive are unsupported. Use <code>camelot_v3_pool_filter</code>. Swaps execute through the Uniswap V3 executor.</td></tr>
 <tr><td><code>aerodrome_v1</code></td><td>Native (<code>AerodromeV1State</code>)</td><td>3 μs (0.003 ms)</td><td>Base</td><td></td></tr>
 <tr><td><code>aerodrome_slipstreams</code></td><td><p>Native</p><p>(<code>AerodromeSlipstreamsState</code>)</p></td><td>-</td><td>Base</td><td>Dynamic-fee pools untouched so far in the execution block quote the worse of the initial and dynamic fee, so the output is never over-quoted. If your submission path lands the swap first in the block, opt in per registration: <code>exchange_with_decoder_context</code> with <code>DecoderContext::new().assume_first_in_block(true)</code>.</td></tr>
 <tr><td><code>velodrome_slipstreams</code></td><td><p>Native</p><p>(<code>VelodromeSlipstreamsState</code>)</p></td><td>-</td><td>Unichain</td><td></td></tr>
@@ -101,6 +102,14 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+        }
+        Chain::Arbitrum => {
+            builder = builder
+                .exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:camelot_v3", tvl_filter.clone(), Some(camelot_v3_pool_filter))
         }
         Chain::Robinhood => {
             builder = builder

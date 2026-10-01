@@ -279,7 +279,7 @@ mod tests {
     use super::*;
     use crate::evm::{
         engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface},
-        protocol::vm::constants::{BALANCER_V2, CURVE},
+        protocol::vm::constants::{BALANCER_V2, CAMELOT_V3, CURVE},
         tycho_models::AccountUpdate,
     };
 
@@ -287,6 +287,7 @@ mod tests {
     fn test_to_adapter_file_name() {
         assert_eq!(get_adapter_file("balancer_v2").unwrap(), BALANCER_V2);
         assert_eq!(get_adapter_file("curve").unwrap(), CURVE);
+        assert_eq!(get_adapter_file("camelot_v3").unwrap(), CAMELOT_V3);
     }
 
     fn vm_component() -> ProtocolComponent {
