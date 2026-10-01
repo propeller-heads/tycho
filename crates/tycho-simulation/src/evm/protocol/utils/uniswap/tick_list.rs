@@ -244,18 +244,9 @@ impl TickList {
         }
     }
 
+    /// The next tick a swap step moves to, within the word of `tick`: the next initialized tick
+    /// with its stored sqrt price, or the word boundary with `None`. `lte` searches downwards.
     pub(crate) fn next_initialized_tick_within_one_word(
-        &self,
-        tick: i32,
-        lte: bool,
-    ) -> Result<(i32, bool), TickListError> {
-        self.next_initialized_tick_within_one_word_with_sqrt_price(tick, lte)
-            .map(|(next, sqrt_price)| (next, sqrt_price.is_some()))
-    }
-
-    /// [`Self::next_initialized_tick_within_one_word`], with the stored sqrt price of the tick, or
-    /// `None` when the tick is not initialized.
-    pub(crate) fn next_initialized_tick_within_one_word_with_sqrt_price(
         &self,
         tick: i32,
         lte: bool,
@@ -314,6 +305,13 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    /// The next tick within one word, and whether it is initialized.
+    fn next_tick(tick_list: &TickList, tick: i32, lte: bool) -> Result<(i32, bool), TickListError> {
+        tick_list
+            .next_initialized_tick_within_one_word(tick, lte)
+            .map(|(next, sqrt_price)| (next, sqrt_price.is_some()))
+    }
 
     #[test]
     fn test_tick_info_deserialize_recomputes_sqrt_price() {
@@ -567,9 +565,7 @@ mod tests {
 
         for case in cases {
             assert_eq!(
-                tick_list
-                    .next_initialized_tick_within_one_word(case.args.0, case.args.1)
-                    .unwrap(),
+                next_tick(&tick_list, case.args.0, case.args.1).unwrap(),
                 case.exp,
                 "{}",
                 case.id,
@@ -583,18 +579,8 @@ mod tests {
         let tick_list1 = TickList::from(1, tick_infos.clone()).unwrap();
         let tick_list2 = TickList::from(2, tick_infos).unwrap();
 
-        assert_eq!(
-            tick_list1
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (255, false)
-        );
-        assert_eq!(
-            tick_list2
-                .next_initialized_tick_within_one_word(0, false)
-                .unwrap(),
-            (510, false)
-        );
+        assert_eq!(next_tick(&tick_list1, 0, false).unwrap(), (255, false));
+        assert_eq!(next_tick(&tick_list2, 0, false).unwrap(), (510, false));
     }
 
     struct TestCaseNextTickError {
@@ -673,7 +659,7 @@ mod tests {
         ];
 
         for case in cases {
-            let res = tick_list.next_initialized_tick_within_one_word(case.args.0, case.args.1);
+            let res = next_tick(&tick_list, case.args.0, case.args.1);
             match case.err {
                 Some(kind) => {
                     let err = res.unwrap_err();

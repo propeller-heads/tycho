@@ -24,7 +24,7 @@ use crate::evm::protocol::{
         swap_math,
         tick_list::{TickInfo, TickList, TickListErrorKind},
         tick_math::{
-            get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+            get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
             MIN_SQRT_RATIO, MIN_TICK,
         },
         StepComputation, SwapResults, SwapState,
@@ -129,11 +129,11 @@ impl VelodromeSlipstreamsState {
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized) = match self
+            let (mut next_tick, initialized_sqrt_price) = match self
                 .ticks
                 .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => (tick, init),
+                Ok((tick, sqrt_price)) => (tick, sqrt_price),
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
@@ -156,7 +156,11 @@ impl VelodromeSlipstreamsState {
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
             let sqrt_price_start = state.sqrt_price;
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let initialized = initialized_sqrt_price.is_some();
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 VelodromeSlipstreamsState::get_sqrt_ratio_target(
@@ -313,15 +317,18 @@ impl ProtocolSim for VelodromeSlipstreamsState {
 
         // Iterate through all ticks in the direction of the swap
         // Continues until there is no more liquidity in the pool or no more ticks to process
-        while let Ok((tick, initialized)) = self
+        while let Ok((tick, initialized_sqrt_price)) = self
             .ticks
             .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
+            let initialized = initialized_sqrt_price.is_some();
             // Clamp the tick value to ensure it's within valid range
             let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
 
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out

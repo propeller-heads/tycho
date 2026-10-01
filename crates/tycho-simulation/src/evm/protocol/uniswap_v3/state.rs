@@ -171,7 +171,7 @@ impl UniswapV3State {
         {
             let (mut next_tick, initialized_sqrt_price) = match self
                 .ticks
-                .next_initialized_tick_within_one_word_with_sqrt_price(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
                 Ok((tick, sqrt_price)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
@@ -361,7 +361,7 @@ impl ProtocolSim for UniswapV3State {
         // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
         while let Ok((tick, initialized_sqrt_price)) = self
             .ticks
-            .next_initialized_tick_within_one_word_with_sqrt_price(current_tick, zero_for_one)
+            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
             let initialized = initialized_sqrt_price.is_some();
             // Cap iteration to prevent exceeding Ethereum's gas limit
