@@ -130,13 +130,13 @@ impl UniswapV3State {
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized) = match self
+            let (mut next_tick, initialized_sqrt_price) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word_with_sqrt_price(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => {
+                Ok((tick, sqrt_price)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
-                    (tick, init)
+                    (tick, sqrt_price)
                 }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
@@ -160,7 +160,11 @@ impl UniswapV3State {
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
             let sqrt_price_start = state.sqrt_price;
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let initialized = initialized_sqrt_price.is_some();
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick(next_tick)?,
+            };
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
@@ -316,10 +320,11 @@ impl ProtocolSim for UniswapV3State {
 
         // Iterate through ticks in the direction of the swap
         // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
-        while let Ok((tick, initialized)) = self
+        while let Ok((tick, initialized_sqrt_price)) = self
             .ticks
-            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
+            .next_initialized_tick_within_one_word_with_sqrt_price(current_tick, zero_for_one)
         {
+            let initialized = initialized_sqrt_price.is_some();
             // Cap iteration to prevent exceeding Ethereum's gas limit
             if ticks_crossed >= MAX_TICKS_CROSSED {
                 break;
@@ -329,8 +334,10 @@ impl ProtocolSim for UniswapV3State {
             // Clamp the tick value to ensure it's within valid range
             let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
 
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick(next_tick)?,
+            };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out
