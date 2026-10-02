@@ -159,9 +159,16 @@ async function main() {
             console.log(`${contractName} already deployed, skipping deployment`);
         } else {
             const deploymentData = ethers.utils.concat([salt, bytecode]);
+            // Some RPC nodes estimate the exact gas the CREATE2 factory call
+            // used in simulation, and that limit runs out of gas on chain.
+            const gasEstimate = await deployer.estimateGas({
+                to: create2FactoryAddress,
+                data: deploymentData,
+            });
             const tx = await deployer.sendTransaction({
                 to: create2FactoryAddress,
                 data: deploymentData,
+                gasLimit: gasEstimate.mul(120).div(100),
             });
             await tx.wait();
             console.log(`${contractName} deployed to: ${computedAddress}`);
