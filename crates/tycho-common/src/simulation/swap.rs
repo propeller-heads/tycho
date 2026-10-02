@@ -332,6 +332,14 @@ impl Quote {
     pub fn new_state(&self) -> Option<Arc<dyn SwapQuoter>> {
         self.new_state.clone()
     }
+
+    /// Consumes the quote and returns the new pool state after the swap, if available.
+    ///
+    /// Unlike [`Quote::new_state`], this leaves the state with a single owner, so
+    /// [`SwapQuoter::into_protocol_sim`] can unwrap it without a copy.
+    pub fn into_new_state(self) -> Option<Arc<dyn SwapQuoter>> {
+        self.new_state
+    }
 }
 
 /// The result of an exact-input quote in native 256-bit amounts, see
@@ -1059,6 +1067,18 @@ pub trait SwapQuoter: fmt::Debug + Send + Sync + 'static {
 
     #[deprecated(note = "ProtocolSim is deprecated. This method will be removed in v1.0.0")]
     fn to_protocol_sim(&self) -> Box<dyn ProtocolSim>;
+
+    /// Converts this pool into a `ProtocolSim` box, copying the state only when the `Arc` is
+    /// shared.
+    ///
+    /// # Default Implementation
+    /// Copies the state through [`to_protocol_sim`](Self::to_protocol_sim) whether or not the
+    /// `Arc` is shared.
+    #[deprecated(note = "ProtocolSim is deprecated. This method will be removed in v1.0.0")]
+    fn into_protocol_sim(self: Arc<Self>) -> Box<dyn ProtocolSim> {
+        #[allow(deprecated)]
+        self.to_protocol_sim()
+    }
 }
 
 /// Testing extension trait for SwapQuoter implementations.
