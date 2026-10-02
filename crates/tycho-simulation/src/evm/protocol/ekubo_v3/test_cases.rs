@@ -31,7 +31,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
+use super::{pool::concentrated::ConcentratedPool, state::EkuboV3PoolState};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
@@ -57,8 +57,8 @@ const TOKEN1: Address = address!("0x0000000000000000000000000000000000000001");
 pub struct TestCase {
     pub component: ProtocolComponent,
 
-    pub state_before_transition: EkuboV3State,
-    pub state_after_transition: EkuboV3State,
+    pub state_before_transition: EkuboV3PoolState,
+    pub state_after_transition: EkuboV3PoolState,
 
     pub required_attributes: HashSet<String>,
     pub transition_attributes: HashMap<String, Bytes>,
@@ -144,7 +144,7 @@ pub fn concentrated() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::Concentrated(
+        state_before_transition: EkuboV3PoolState::Concentrated(
             ConcentratedPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {
@@ -157,7 +157,7 @@ pub fn concentrated() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::Concentrated(
+        state_after_transition: EkuboV3PoolState::Concentrated(
             ConcentratedPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {
@@ -250,14 +250,14 @@ pub fn full_range() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::FullRange(
+        state_before_transition: EkuboV3PoolState::FullRange(
             FullRangePool::new(
                 POOL_KEY,
                 EvmFullRangePoolState { sqrt_ratio: EVM_MIN_SQRT_RATIO, liquidity: LIQUIDITY },
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::FullRange(
+        state_after_transition: EkuboV3PoolState::FullRange(
             FullRangePool::new(
                 POOL_KEY,
                 EvmFullRangePoolState { sqrt_ratio: SQRT_RATIO, liquidity: LIQUIDITY },
@@ -329,14 +329,14 @@ pub fn stableswap() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::Stableswap(
+        state_before_transition: EkuboV3PoolState::Stableswap(
             StableswapPool::new(
                 POOL_KEY,
                 EvmStableswapPoolState { sqrt_ratio: EVM_MIN_SQRT_RATIO, liquidity: LIQUIDITY },
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::Stableswap(
+        state_after_transition: EkuboV3PoolState::Stableswap(
             StableswapPool::new(
                 POOL_KEY,
                 EvmStableswapPoolState { sqrt_ratio: SQRT_RATIO, liquidity: LIQUIDITY },
@@ -387,7 +387,7 @@ pub fn ve33() -> TestCase {
     const SWAP_FEE: u64 = u64::MAX / 16;
 
     let pool = |sqrt_ratio, swap_fee| {
-        EkuboV3State::Ve33(
+        EkuboV3PoolState::Ve33(
             Ve33Pool::new(
                 Ve33UnderlyingPool::FullRange(
                     FullRangePool::new(
@@ -493,14 +493,14 @@ pub fn oracle() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::Oracle(
+        state_before_transition: EkuboV3PoolState::Oracle(
             OraclePool::new(
                 POOL_KEY,
                 EvmFullRangePoolState { sqrt_ratio: EVM_MIN_SQRT_RATIO, liquidity: 0 },
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::Oracle(
+        state_after_transition: EkuboV3PoolState::Oracle(
             OraclePool::new(
                 POOL_KEY,
                 EvmFullRangePoolState { sqrt_ratio: SQRT_RATIO, liquidity: LIQUIDITY },
@@ -578,7 +578,7 @@ pub fn twamm() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::Twamm(
+        state_before_transition: EkuboV3PoolState::Twamm(
             TwammPool::new(
                 POOL_KEY,
                 EvmTwammPoolState {
@@ -605,7 +605,7 @@ pub fn twamm() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::Twamm(
+        state_after_transition: EkuboV3PoolState::Twamm(
             TwammPool::new(
                 POOL_KEY,
                 EvmTwammPoolState {
@@ -779,7 +779,7 @@ pub fn boosted_fees() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::BoostedFees(
+        state_before_transition: EkuboV3PoolState::BoostedFees(
             BoostedFeesPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {
@@ -807,7 +807,7 @@ pub fn boosted_fees() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::BoostedFees(
+        state_after_transition: EkuboV3PoolState::BoostedFees(
             BoostedFeesPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {
@@ -990,7 +990,7 @@ pub fn mev_capture() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::MevCapture(
+        state_before_transition: EkuboV3PoolState::MevCapture(
             MevCapturePool::new(
                 POOL_KEY,
                 TICK_INDEX_BETWEEN,
@@ -1003,7 +1003,7 @@ pub fn mev_capture() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::MevCapture(
+        state_after_transition: EkuboV3PoolState::MevCapture(
             MevCapturePool::new(
                 POOL_KEY,
                 TICK_INDEX_BETWEEN,
@@ -1101,7 +1101,7 @@ pub fn signed_exclusive_swap() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboV3State::Concentrated(
+        state_before_transition: EkuboV3PoolState::Concentrated(
             ConcentratedPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {
@@ -1114,7 +1114,7 @@ pub fn signed_exclusive_swap() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboV3State::Concentrated(
+        state_after_transition: EkuboV3PoolState::Concentrated(
             ConcentratedPool::new(
                 POOL_KEY,
                 EvmConcentratedPoolState {

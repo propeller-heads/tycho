@@ -17,10 +17,10 @@ use tycho_common::{models::token::Token, Bytes};
 use super::{
     attributes::{sale_rate_deltas_from_attributes, ticks_from_attributes},
     pool::{base::BasePool, full_range::FullRangePool, oracle::OraclePool, twamm::TwammPool},
-    state::EkuboState,
+    state::{EkuboPoolState, EkuboState},
 };
 use crate::{
-    evm::protocol::ekubo::pool::mev_resist::MevResistPool,
+    evm::protocol::{ekubo::pool::mev_resist::MevResistPool, swap_quoter::AttachedComponent},
     protocol::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock},
@@ -59,9 +59,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component = AttachedComponent::from_snapshot(&snapshot.component, all_tokens);
         let static_attrs = snapshot.component.static_attributes;
         let state_attrs = snapshot.state.attributes;
 
@@ -106,10 +107,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
 
         let key = NodeKey { token0, token1, config };
 
-        Ok(match extension_id {
+        let pool = match extension_id {
             EkuboExtension::Base => {
                 if tick_spacing.is_zero() {
-                    Self::FullRange(FullRangePool::new(
+                    EkuboPoolState::FullRange(FullRangePool::new(
                         key,
                         FullRangePoolState { sqrt_ratio, liquidity },
                     )?)
@@ -123,10 +124,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
 
                     ticks.sort_unstable_by_key(|tick| tick.index);
 
-                    Self::Base(BasePool::new(key, ticks, sqrt_ratio, liquidity, tick)?)
+                    EkuboPoolState::Base(BasePool::new(key, ticks, sqrt_ratio, liquidity, tick)?)
                 }
             }
-            EkuboExtension::Oracle => Self::Oracle(OraclePool::new(
+            EkuboExtension::Oracle => EkuboPoolState::Oracle(OraclePool::new(
                 &key,
                 OraclePoolState {
                     full_range_pool_state: FullRangePoolState { sqrt_ratio, liquidity },
@@ -155,7 +156,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
 
                 virtual_order_deltas.sort_unstable_by_key(|delta| delta.time);
 
-                Self::Twamm(TwammPool::new(
+                EkuboPoolState::Twamm(TwammPool::new(
                     &key,
                     TwammPoolState {
                         full_range_pool_state: FullRangePoolState { sqrt_ratio, liquidity },
@@ -176,9 +177,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
 
                 ticks.sort_unstable_by_key(|tick| tick.index);
 
-                Self::MevResist(MevResistPool::new(key, ticks, sqrt_ratio, liquidity, tick)?)
+                EkuboPoolState::MevResist(MevResistPool::new(
+                    key, ticks, sqrt_ratio, liquidity, tick,
+                )?)
             }
-        })
+        };
+
+        Ok(EkuboState::from(pool).with_component(component))
     }
 }
 
@@ -219,7 +224,7 @@ mod tests {
             .await
             .expect("reconstructing state");
 
-        assert_eq!(result, case.state_before_transition);
+        assert_eq!(result, EkuboState::from(case.state_before_transition));
     }
 
     #[apply(all_cases)]

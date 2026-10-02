@@ -20,12 +20,12 @@ use tycho_common::{
     Bytes,
 };
 
-use super::state::EkuboV3State;
+use super::state::EkuboV3PoolState;
 pub struct EkuboPoolQuote {
     pub consumed_amount: i128,
     pub calculated_amount: u128,
     pub gas: u64,
-    pub new_state: EkuboV3State,
+    pub new_state: EkuboV3PoolState,
 }
 
 #[enum_delegate::register]

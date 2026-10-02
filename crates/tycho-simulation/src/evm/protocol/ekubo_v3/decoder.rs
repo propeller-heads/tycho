@@ -42,11 +42,14 @@ use super::{
         twamm::TwammPool,
         ve33::{Ve33Pool, Ve33UnderlyingPool},
     },
-    state::EkuboV3State,
+    state::{EkuboV3PoolState, EkuboV3State},
 };
-use crate::protocol::{
-    errors::InvalidSnapshotError,
-    models::{DecoderContext, TryFromWithBlock},
+use crate::{
+    evm::protocol::swap_quoter::AttachedComponent,
+    protocol::{
+        errors::InvalidSnapshotError,
+        models::{DecoderContext, TryFromWithBlock},
+    },
 };
 
 pub enum ExtensionType {
@@ -99,9 +102,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component = AttachedComponent::from_snapshot(&snapshot.component, all_tokens);
         let chain = snapshot.component.chain;
         let static_attrs = snapshot.component.static_attributes;
         let state_attrs = snapshot.state.attributes;
@@ -179,10 +183,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
         let ext_type = extension_type_from_attributes_or_address(&static_attrs, extension, chain)?;
 
-        Ok(match ext_type {
+        let pool = match ext_type {
             ExtensionType::NoSwapCallPoints => match pool_type_config {
                 EvmPoolTypeConfig::FullRange(pool_type_config) => {
-                    Self::FullRange(FullRangePool::new(
+                    EkuboV3PoolState::FullRange(FullRangePool::new(
                         FullRangePoolKey {
                             token0,
                             token1,
@@ -192,7 +196,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     )?)
                 }
                 EvmPoolTypeConfig::Stableswap(pool_type_config) => {
-                    Self::Stableswap(StableswapPool::new(
+                    EkuboV3PoolState::Stableswap(StableswapPool::new(
                         StableswapPoolKey {
                             token0,
                             token1,
@@ -205,10 +209,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     let (key, state, tick, ticks) =
                         concentrated_pool(&state_attrs, pool_type_config)?;
 
-                    Self::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
+                    EkuboV3PoolState::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
                 }
             },
-            ExtensionType::Oracle => Self::Oracle(OraclePool::new(
+            ExtensionType::Oracle => EkuboV3PoolState::Oracle(OraclePool::new(
                 EvmOraclePoolKey {
                     token0,
                     token1,
@@ -228,7 +232,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     rate_deltas: virtual_order_deltas,
                 } = timed_state_details(state_attrs)?;
 
-                Self::Twamm(TwammPool::new(
+                EkuboV3PoolState::Twamm(TwammPool::new(
                     EvmTwammPoolKey {
                         token0,
                         token1,
@@ -257,7 +261,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                 let (key, concentrated_state, tick, ticks) =
                     concentrated_pool(&state_attrs, pool_type_config)?;
 
-                Self::MevCapture(MevCapturePool::new(key, tick, concentrated_state, ticks)?)
+                EkuboV3PoolState::MevCapture(MevCapturePool::new(
+                    key,
+                    tick,
+                    concentrated_state,
+                    ticks,
+                )?)
             }
             ExtensionType::SignedExclusiveSwap => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
@@ -269,7 +278,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
 
                 let (key, state, tick, ticks) = concentrated_pool(&state_attrs, pool_type_config)?;
 
-                Self::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
+                EkuboV3PoolState::Concentrated(ConcentratedPool::new(key, state, tick, ticks)?)
             }
             ExtensionType::BoostedFees => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
@@ -288,7 +297,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     rate_deltas: donate_rate_deltas,
                 } = timed_state_details(state_attrs)?;
 
-                Self::BoostedFees(BoostedFeesPool::new(
+                EkuboV3PoolState::BoostedFees(BoostedFeesPool::new(
                     key,
                     concentrated_pool_state,
                     donate_rate0,
@@ -340,9 +349,11 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                         })?,
                 );
 
-                Self::Ve33(Ve33Pool::new(underlying_pool, swap_fee)?)
+                EkuboV3PoolState::Ve33(Ve33Pool::new(underlying_pool, swap_fee)?)
             }
-        })
+        };
+
+        Ok(EkuboV3State::from(pool).with_component(component))
     }
 }
 
@@ -452,7 +463,7 @@ mod tests {
             .await
             .expect("reconstructing state");
 
-        assert_eq!(result, case.state_before_transition);
+        assert_eq!(result, EkuboV3State::from(case.state_before_transition));
     }
 
     /// Tests backward compatibility with the legacy attribute format:
@@ -465,14 +476,14 @@ mod tests {
     #[tokio::test]
     async fn test_try_from_legacy_format(case: TestCase) {
         let extension_id: i32 = match &case.state_before_transition {
-            EkuboV3State::Concentrated(_) |
-            EkuboV3State::FullRange(_) |
-            EkuboV3State::Stableswap(_) => 1,
-            EkuboV3State::Oracle(_) => 2,
-            EkuboV3State::Twamm(_) => 3,
-            EkuboV3State::MevCapture(_) => 4,
+            EkuboV3PoolState::Concentrated(_) |
+            EkuboV3PoolState::FullRange(_) |
+            EkuboV3PoolState::Stableswap(_) => 1,
+            EkuboV3PoolState::Oracle(_) => 2,
+            EkuboV3PoolState::Twamm(_) => 3,
+            EkuboV3PoolState::MevCapture(_) => 4,
             // BoostedFees is new, no legacy format
-            EkuboV3State::BoostedFees(_) | EkuboV3State::Ve33(_) => return,
+            EkuboV3PoolState::BoostedFees(_) | EkuboV3PoolState::Ve33(_) => return,
         };
 
         let mut component = case.component;
@@ -515,7 +526,7 @@ mod tests {
             .await
             .expect("reconstructing state from legacy format");
 
-        assert_eq!(result, case.state_before_transition);
+        assert_eq!(result, EkuboV3State::from(case.state_before_transition));
     }
 
     #[apply(all_cases)]
@@ -584,6 +595,6 @@ mod tests {
             .await
             .expect("reconstructing Ve33 state");
 
-        assert!(matches!(result, EkuboV3State::Ve33(_)));
+        assert!(matches!(result.pool, EkuboV3PoolState::Ve33(_)));
     }
 }
