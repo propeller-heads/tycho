@@ -30,7 +30,7 @@ use tycho_common::{
 use crate::{
     deltas::{DeltasClient, SubscriptionOptions},
     feed::{
-        component_tracker::{ComponentFilter, ComponentTracker},
+        component_tracker::{substreams_pause_control, ComponentFilter, ComponentTracker},
         BlockHeader, HeaderLike,
     },
     rpc::{
@@ -1089,12 +1089,16 @@ where
                 {
                     value = None;
                 } else if let Some(updated) = delta.updated_attributes.get("paused") {
-                    value = Some(updated);
+                    // A DCI reason must not mask a Substreams pause in the snapshot.
+                    if substreams_pause_control(updated).is_some() {
+                        value = Some(updated);
+                    }
                 }
             }
-            if value.is_some_and(|v| v.iter().any(|b| *b != 0)) {
+            let control = value.map_or(Some(false), |v| substreams_pause_control(v));
+            if control == Some(true) {
                 tracker.paused.insert(id.clone());
-            } else if initial {
+            } else if initial && control == Some(false) {
                 tracker.paused.remove(id);
             }
         }
@@ -4727,6 +4731,56 @@ mod test {
         assert!(!snapshot.states.contains_key("pool"));
         assert!(snapshot.states.contains_key("other"));
         assert_eq!(sync.snapshot_queue.get("pool"), Some(&SnapshotStatus::InFlight));
+    }
+
+    #[test]
+    fn snapshots_ignore_dci_reasons_without_clearing_substreams_pause() {
+        for initial in [false, true] {
+            for reason in ["0x02", "0x03", "0x04"] {
+                for previously_paused in [false, true] {
+                    let mut sync = with_mocked_clients(true, true, None, None);
+                    if previously_paused {
+                        sync.component_tracker
+                            .paused
+                            .insert("pool".into());
+                    }
+                    let mut snapshot = pause_test_snapshot(&["pool"], false);
+                    snapshot
+                        .states
+                        .get_mut("pool")
+                        .unwrap()
+                        .state
+                        .attributes
+                        .insert("paused".into(), Bytes::from(reason));
+                    let mut msg = StateSyncMessage { snapshots: snapshot, ..Default::default() };
+                    sync.filter_paused_components(&mut msg, initial);
+                    assert_eq!(
+                        msg.snapshots
+                            .states
+                            .contains_key("pool"),
+                        !previously_paused
+                    );
+                    assert_eq!(
+                        sync.component_tracker
+                            .paused
+                            .contains("pool"),
+                        previously_paused
+                    );
+                }
+                let mut sync = with_mocked_clients(true, true, None, None);
+                let mut msg = StateSyncMessage {
+                    snapshots: pause_test_snapshot(&["pool"], true),
+                    deltas: Some(pause_test_delta(2, Some(Some(Bytes::from(reason))))),
+                    ..Default::default()
+                };
+                sync.filter_paused_components(&mut msg, initial);
+                assert!(msg.snapshots.states.is_empty());
+                assert!(sync
+                    .component_tracker
+                    .paused
+                    .contains("pool"));
+            }
+        }
     }
 
     #[test]

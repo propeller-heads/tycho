@@ -123,8 +123,9 @@ stopped tracking them.
 
 You can request individual pools, or use a minimum TVL threshold to filter the components. If you choose minimum TVL tracking, tycho-client will automatically add snapshots for any components that exceed the TVL threshold, e.g. because more liquidity was provided. It will also notify you and remove any components that fall below the TVL threshold. Note that the TVL values are estimates intended solely for filtering the most relevant components.
 
-With state tracking enabled, components whose `paused` state attribute contains any
-nonzero byte are excluded. A pause removes a tracked component via `removed_components`
+With state tracking enabled, components whose `paused` state attribute has reason `0x01`
+(Substreams) are excluded. DCI reasons `0x02` (tracing) and `0x03` (metadata), and unknown
+reasons, neither trigger removal nor clear an already observed Substreams pause. A pause removes a tracked component via `removed_components`
 and cancels pending snapshots. An explicit zero value or deletion of `paused` makes the
 component eligible for a fresh snapshot request. It is admitted only after checking the
 configured filters, including the TVL returned with that snapshot. Omitting `paused`

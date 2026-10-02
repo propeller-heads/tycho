@@ -12,6 +12,17 @@ use crate::{
     RPCError,
 };
 
+/// Decodes the Substreams pause control. DCI reasons (2/3) and unknown reasons must not
+/// change it: the shared attribute can be overwritten by another pause producer.
+pub(super) fn substreams_pause_control(value: &[u8]) -> Option<bool> {
+    let significant = value.iter().position(|byte| *byte != 0);
+    match significant {
+        None => Some(false),
+        Some(index) if value[index..] == [1] => Some(true),
+        Some(_) => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ComponentFilterVariant {
     Ids(Vec<ComponentId>),
@@ -450,7 +461,10 @@ where
             {
                 false
             } else if let Some(value) = delta.updated_attributes.get("paused") {
-                value.iter().any(|byte| *byte != 0)
+                let Some(paused) = substreams_pause_control(value) else {
+                    continue;
+                };
+                paused
             } else {
                 continue; // Missing from a sparse delta does not mean unpaused.
             };
@@ -694,6 +708,31 @@ mod test {
                 },
             )]),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dci_and_unknown_reasons_do_not_change_substreams_pause() {
+        for reason in ["0x02", "0x03", "0x04", "0x0100"] {
+            let mut tracker = ComponentTracker::new(
+                Chain::Ethereum,
+                "test",
+                ComponentFilter::Ids(vec!["pool".into()]),
+                MockRPCClient::new(),
+            );
+            let delta = pause_delta("pool", Some(Bytes::from(reason)));
+            assert_eq!(tracker.filter_updated_components(&delta), (vec![], vec![]));
+            assert!(tracker.paused.is_empty());
+            tracker.filter_updated_components(&pause_delta("pool", Some(Bytes::from("0x01"))));
+            assert_eq!(tracker.filter_updated_components(&delta), (vec![], vec![]));
+            assert!(tracker.paused.contains("pool"));
+            assert_eq!(
+                tracker
+                    .filter_updated_components(&pause_delta("pool", None))
+                    .0,
+                vec!["pool"]
+            );
+            assert!(tracker.paused.is_empty());
         }
     }
 

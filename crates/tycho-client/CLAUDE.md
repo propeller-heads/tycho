@@ -44,7 +44,8 @@ TychoStreamBuilder (stream.rs)
 3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
 
-State-enabled feeds remove paused components through `removed_components`. Explicit
+State-enabled feeds remove Substreams-paused components (`paused=0x01`) through
+`removed_components`. DCI/unknown reasons neither remove nor clear a known Substreams pause. Explicit
 zero/deletion permits a fresh snapshot, subject to ID/TVL/blocklist filters. Sparse deltas
 without `paused` preserve its status. Only paused IDs are retained; resync queries their
 metadata and state again to recover missed unpauses. Late results for paused IDs are discarded.
