@@ -13,7 +13,8 @@ const {deployCreate2} = require("./utils");
 // `SUPPORTED_PROTOCOLS` in the Rust encoder must agree with what this deploys;
 // its tests check that against executor_deployments.json.
 //
-// MetricFallbackRouter also takes Metric's swap quoter, from METRIC_SWAP_QUOTERS.
+// MetricFallbackRouter also takes Metric's swap quoter, from METRIC_SWAP_QUOTERS. A
+// missing one is deployed as address(0): the Metric pool is quoted by simulation.
 // BebopFallbackRouter also takes the Bebop settlement and router, from the chain's
 // `rfq:bebop` entry. HashflowFallbackRouter also takes the Hashflow router, from the
 // chain's `rfq:hashflow` entry.
@@ -75,14 +76,7 @@ async function main() {
     }
     const args = [poolManager, fluidLiquidity, staticQuoter];
     if (kind === "metric") {
-        const metricQuoter = METRIC_SWAP_QUOTERS[base];
-        if (!metricQuoter) {
-            throw new Error(
-                `No Metric swap quoter for network '${base}': add it to ` +
-                "METRIC_SWAP_QUOTERS"
-            );
-        }
-        args.push(metricQuoter);
+        args.push(METRIC_SWAP_QUOTERS[base] ?? ZERO_ADDRESS);
     }
     if (kind === "bebop") {
         const bebopArgs = deployments["rfq:bebop"]?.args;
@@ -120,7 +114,9 @@ async function main() {
     );
 
     if (kind === "metric") {
-        console.log(`- metricQuoter: ${args[3]}`);
+        console.log(
+            `- metricQuoter: ${describe(args[3], "Metric quoted by simulation")}`
+        );
     }
     if (kind === "bebop") {
         console.log(`- bebopSettlement: ${args[3]}`);

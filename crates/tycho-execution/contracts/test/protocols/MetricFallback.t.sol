@@ -13,11 +13,13 @@ import {
 import {
     MetricFallbackExecutor
 } from "../../src/executors/MetricFallbackExecutor.sol";
-import {TychoFallbackRouter} from "../../src/fallback/TychoFallbackRouter.sol";
+import {
+    TychoFallbackRouter,
+    TychoFallbackRouter__NotSelf
+} from "../../src/fallback/TychoFallbackRouter.sol";
 import {
     IMetricOmmSwapQuoter,
     MetricFallbackRouter,
-    MetricFallbackRouter__AddressZero,
     MetricFallbackRouter__InvalidDataLength
 } from "../../src/fallback/MetricFallbackRouter.sol";
 
@@ -186,14 +188,54 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         _swap(bytes(hex"0100"));
     }
 
-    function testConstructorRejectsZeroQuoter() public {
-        vm.expectRevert(MetricFallbackRouter__AddressZero.selector);
-        new MetricFallbackRouter(
-            IPoolManager(POOL_MANAGER),
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
-            IMetricOmmSwapQuoter(address(0))
+    /// The pool's quote is zero, so only the simulated swap can price it. The pool is paid
+    /// once: the simulation rolls back.
+    function testSimulatedQuoteFillsWhenMetricQuotesHigher() public {
+        _deployWithoutQuoter();
+        pool.set(0, 4 ether, false);
+
+        vm.recordLogs();
+        _swap(bytes(hex"01"));
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 4 ether);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), USDC_IN);
+        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
+        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
+    }
+
+    function testSimulatedQuoteFallsBackWhenMetricQuotesLower() public {
+        _deployWithoutQuoter();
+        pool.set(0, 3 ether, false);
+
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
         );
+        _swap(bytes(hex"01"));
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(address(pool)), 100 ether);
+        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
+    }
+
+    /// A pool that reverts in the simulation quotes zero.
+    function testSimulatedQuoteFallsBackWhenMetricReverts() public {
+        _deployWithoutQuoter();
+        pool.set(0, 4 ether, true);
+
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        _swap(bytes(hex"01"));
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
+        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
+    }
+
+    function testSimulatePrimaryRejectsExternalCaller() public {
+        vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
+        router.simulatePrimary(_swapStruct(), address(pool), hex"01");
     }
 
     function testExecutorSwap() public {
@@ -236,6 +278,16 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
             )
         );
         executor.getTransferData(data);
+    }
+
+    function _deployWithoutQuoter() internal {
+        router = new MetricFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
+            IMetricOmmSwapQuoter(address(0))
+        );
+        deal(USDC_ADDR, address(router), USDC_IN);
     }
 
     function _swap(bytes memory metricData) internal {
@@ -361,6 +413,30 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions, TestUtils {
             WETH_IN
         );
         assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
+    }
+
+    /// Without a quoter, the simulated swap prices the pool at the quoter's amount.
+    function testSimulatedQuoteMatchesQuoter() public {
+        uint256 metricOut = _metricQuote();
+        router = new MetricFallbackRouter(
+            IPoolManager(BASE_POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
+            IMetricOmmSwapQuoter(address(0))
+        );
+        deal(BASE_WETH, address(router), WETH_IN);
+
+        vm.recordLogs();
+        router.swap(
+            _swapStruct(),
+            METRIC_WETH_USDC_POOL,
+            ZERO_FOR_ONE,
+            FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3)
+        );
+
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
+        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
+        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
     }
 
     /// A day later the pool's oracle is stale.
