@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::{Sign, I256, U256};
 use num_bigint::BigUint;
@@ -29,10 +29,11 @@ use crate::{
                 i24_be_bytes_to_i32, liquidity_math,
                 sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
                 swap_math,
+                swap_step_cache::{CachedStep, SwapStepCache},
                 tick_list::{TickInfo, TickList, TickListErrorKind},
                 tick_math::{
-                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                    MIN_SQRT_RATIO, MIN_TICK,
+                    get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO,
+                    MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
                 },
                 StepComputation, SwapResults, SwapState,
             },
@@ -81,7 +82,14 @@ pub struct AerodromeSlipstreamsState {
     default_fee: u32,
     tick_spacing: i32,
     tick: i32,
-    ticks: TickList,
+    /// Shared by clones of this state and the states its swaps return, so a quote does not copy
+    /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
+    ticks: Arc<TickList>,
+    /// Swap steps already taken from this state, shared by its clones. Correct only for this
+    /// state's price, tick, liquidity, fee and ticks: `delta_transition` and every state a swap
+    /// returns start an empty cache, and any other code that changes those fields must too.
+    #[serde(skip)]
+    step_cache: SwapStepCache,
     observations: Observations,
     dfc: DynamicFeeConfig,
     /// What quotes may assume about the swap's position within its execution block; see
@@ -132,7 +140,8 @@ impl AerodromeSlipstreamsState {
             default_fee,
             tick_spacing,
             tick,
-            ticks: tick_list,
+            ticks: Arc::new(tick_list),
+            step_cache: SwapStepCache::default(),
             observations: Observations::new(observations),
             dfc,
             position_assumption: BlockPositionAssumption::default(),
@@ -222,17 +231,32 @@ impl AerodromeSlipstreamsState {
         let mut n_loops = 0;
 
         let fee = resolved_fee.fee;
+        let mut recorder = if exact_input && sqrt_price_limit.is_none() {
+            let origin = CachedStep::origin(self.sqrt_price, self.tick, self.liquidity, gas_used);
+            self.step_cache
+                .begin(zero_for_one, origin, amount_specified.into_raw(), fee)
+        } else {
+            None
+        };
+        if let Some(recorder) = &recorder {
+            gas_used = recorder
+                .start()
+                .resume(&mut state, amount_specified);
+            // The first loop's overhead is in the cached gas already.
+            n_loops = recorder.steps_taken();
+        }
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized) = match self
+            let (mut next_tick, initialized_sqrt_price) = match self
                 .ticks
                 .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, init)) => (tick, init),
+                Ok((tick, sqrt_price)) => (tick, sqrt_price),
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
+                        new_state.step_cache = SwapStepCache::default();
                         // Best effort in an error path: a failed write only degrades the fee of
                         // a chained simulation on this partial result, and must not mask the
                         // more informative TicksExceeded error below.
@@ -258,14 +282,19 @@ impl AerodromeSlipstreamsState {
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
             let sqrt_price_start = state.sqrt_price;
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let initialized = initialized_sqrt_price.is_some();
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
+            let sqrt_ratio_target = AerodromeSlipstreamsState::get_sqrt_ratio_target(
+                sqrt_price_next,
+                price_limit,
+                zero_for_one,
+            );
             let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
                 state.sqrt_price,
-                AerodromeSlipstreamsState::get_sqrt_ratio_target(
-                    sqrt_price_next,
-                    price_limit,
-                    zero_for_one,
-                ),
+                sqrt_ratio_target,
                 state.liquidity,
                 state.amount_remaining,
                 fee,
@@ -319,6 +348,9 @@ impl AerodromeSlipstreamsState {
                 gas_used = safe_add_u256(gas_used, U256::from(FIRST_LOOP_OVERHEAD))?;
             }
             n_loops += 1;
+            let reached_target = state.sqrt_price == sqrt_ratio_target;
+            recorder = recorder
+                .and_then(|recorder| recorder.after_step(&state, &step, reached_target, gas_used));
         }
         Ok(SwapResults {
             amount_calculated: state.amount_calculated,
@@ -395,6 +427,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
 
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let mut new_state = self.clone();
+        new_state.step_cache = SwapStepCache::default();
         new_state.record_observation(result.tick)?;
         new_state.liquidity = result.liquidity;
         new_state.tick = result.tick;
@@ -432,10 +465,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         // Iterate through all ticks in the direction of the swap
         // Continues until there is no more liquidity in the pool or no more ticks to process
         let mut ticks_crossed: u64 = 0;
-        while let Ok((tick, initialized)) = self
+        while let Ok((tick, initialized_sqrt_price)) = self
             .ticks
             .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
+            let initialized = initialized_sqrt_price.is_some();
             if ticks_crossed >= MAX_TICKS_CROSSED {
                 break;
             }
@@ -443,8 +477,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // Clamp the tick value to ensure it's within valid range
             let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
 
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = match initialized_sqrt_price {
+                Some(sqrt_price) => sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out
@@ -511,6 +547,8 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // Swap steps taken from the old state do not hold for the new one.
+        self.step_cache = SwapStepCache::default();
         // apply attribute changes
         if let Some(liquidity) = delta
             .updated_attributes
@@ -589,7 +627,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -613,7 +651,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -1172,5 +1210,226 @@ mod tests {
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1000u64)).unwrap();
         let result = pool.swap(true, amount, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+}
+
+#[cfg(test)]
+mod tick_list_sharing_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
+
+    #[test]
+    fn test_delta_transition_leaves_clones_ticks_unchanged() {
+        let original = AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            100_000_000_000_000_000_000u128,
+            get_sqrt_ratio_at_tick(0).unwrap(),
+            0,
+            1,
+            3000,
+            1,
+            0,
+            vec![TickInfo::new(-120, 10000).unwrap(), TickInfo::new(120, -10000).unwrap()],
+            vec![Observation::default()],
+            DynamicFeeConfig::new(3000, 10_000, 1, false, 0),
+        )
+        .unwrap();
+        let mut updated = original.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/-120/net_liquidity".to_string(),
+                Bytes::from(20000_i128.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        updated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .ticks
+                .get_tick(-120)
+                .unwrap()
+                .net_liquidity,
+            20000
+        );
+        assert_eq!(
+            original
+                .ticks
+                .get_tick(-120)
+                .unwrap()
+                .net_liquidity,
+            10000
+        );
+    }
+}
+
+#[cfg(test)]
+mod step_cache_tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        str::FromStr,
+    };
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::swap_step_cache::test_fixtures::{
+        amount_orders, test_amounts, test_ticks, wbtc_weth, LIQUIDITY, SQRT_PRICE, TICK,
+    };
+
+    fn test_pool() -> AerodromeSlipstreamsState {
+        AerodromeSlipstreamsState::new(
+            "test-pool".to_string(),
+            1_000_000,
+            LIQUIDITY,
+            U256::from_str(SQRT_PRICE).unwrap(),
+            0,
+            1,
+            500,
+            10,
+            TICK,
+            test_ticks(),
+            vec![Observation::default()],
+            DynamicFeeConfig::new(500, 10_000, 1, false, 0),
+        )
+        .unwrap()
+    }
+
+    /// A quote's amount, gas and new state, or its error, as text.
+    fn outcome(
+        pool: &AerodromeSlipstreamsState,
+        amount: &BigUint,
+        sell: &Token,
+        buy: &Token,
+    ) -> String {
+        match pool.get_amount_out(amount.clone(), sell, buy) {
+            Ok(result) => {
+                let state = result
+                    .new_state
+                    .as_any()
+                    .downcast_ref::<AerodromeSlipstreamsState>()
+                    .unwrap();
+                format!(
+                    "{} {} {} {} {}",
+                    result.amount, result.gas, state.sqrt_price, state.tick, state.liquidity
+                )
+            }
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_in_any_order() {
+        let (wbtc, weth) = wbtc_weth();
+        for (sell, buy, smallest) in [(&wbtc, &weth, 1_000u64), (&weth, &wbtc, 1_000_000_000)] {
+            for order in amount_orders(&test_amounts(smallest)) {
+                let shared = test_pool();
+                for amount in &order {
+                    assert_eq!(
+                        outcome(&shared, amount, sell, buy),
+                        outcome(&test_pool(), amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+                let steps = shared
+                    .step_cache
+                    .min_inputs(sell < buy)
+                    .len();
+                assert!(steps > 2, "only {steps} steps cached");
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_at_each_cached_step() {
+        let (wbtc, weth) = wbtc_weth();
+        // Amounts that run past the last tick, so the cache covers the whole tick list. Selling
+        // WETH needs a far larger amount to leave its first tick.
+        for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
+            let cached = test_pool();
+            let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
+            let boundaries = cached.step_cache.min_inputs(sell < buy);
+            assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());
+            for boundary in boundaries.into_iter().skip(1) {
+                for amount in [boundary - U256::from(1u64), boundary, boundary + U256::from(1u64)] {
+                    let amount = u256_to_biguint(amount);
+                    assert_eq!(
+                        outcome(&cached, &amount, sell, buy),
+                        outcome(&test_pool(), &amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_of_a_swapped_state() {
+        let (wbtc, weth) = wbtc_weth();
+        let pool = test_pool();
+        let swapped = pool
+            .get_amount_out(BigUint::from(300_000_000u64), &wbtc, &weth)
+            .unwrap()
+            .new_state;
+        let swapped = swapped
+            .as_any()
+            .downcast_ref::<AerodromeSlipstreamsState>()
+            .unwrap();
+        // A serde round trip gives the same state with an empty step cache.
+        let fresh: AerodromeSlipstreamsState =
+            serde_json::from_value(serde_json::to_value(swapped).unwrap()).unwrap();
+
+        for amount in test_amounts(1_000).iter().rev() {
+            assert_eq!(
+                outcome(swapped, amount, &wbtc, &weth),
+                outcome(&fresh, amount, &wbtc, &weth),
+                "selling {amount} WBTC"
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_cache_restarts_after_delta_transition() {
+        let (wbtc, weth) = wbtc_weth();
+        let large = BigUint::from(3_000_000_000u64);
+        // Only a crossed tick's liquidity changes, so the price, tick and liquidity the cache
+        // starts from stay the same.
+        let delta = || ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/255820/net_liquidity".to_string(),
+                Bytes::from(
+                    1_000_000_000_000_000i128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        let mut cached = test_pool();
+        cached
+            .get_amount_out(large.clone(), &wbtc, &weth)
+            .unwrap();
+        let mut fresh = test_pool();
+
+        cached
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+        fresh
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(outcome(&cached, &large, &wbtc, &weth), outcome(&fresh, &large, &wbtc, &weth));
     }
 }

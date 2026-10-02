@@ -9,7 +9,7 @@ use crate::evm::protocol::{
         div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
     },
     u256_num::{biguint_to_u256, u256_to_f64},
-    utils::solidity_math::{mul_div, mul_div_rounding_up},
+    utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
 };
 
 const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
@@ -67,12 +67,9 @@ pub(crate) fn get_amount1_delta(
 ) -> Result<U256, SimulationError> {
     let (sqrt_ratio_a, sqrt_ratio_b) = maybe_flip_ratios(a, b);
     if round_up {
-        mul_div_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a, Q96)
+        mul_div_q96_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     } else {
-        safe_div_u256(
-            safe_mul_u256(U256::from(liquidity), safe_sub_u256(sqrt_ratio_b, sqrt_ratio_a)?)?,
-            Q96,
-        )
+        Ok(safe_mul_u256(U256::from(liquidity), safe_sub_u256(sqrt_ratio_b, sqrt_ratio_a)?)? >> 96)
     }
 }
 
