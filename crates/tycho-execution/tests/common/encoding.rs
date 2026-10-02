@@ -254,6 +254,71 @@ pub fn encode_tycho_router_call(
     })
 }
 
+/// Encodes a transaction for a `ClientFeeForwarder` swap function.
+pub fn encode_client_fee_forwarder_call(
+    encoded_solution: EncodedSolution,
+    solution: &Solution,
+    native_address: &Bytes,
+    fee_wallet: &Bytes,
+    client_fee_bps: u32,
+) -> Result<Transaction, EncodingError> {
+    let amount_in = biguint_to_u256(solution.amount_in());
+    let expected_amount_out = biguint_to_u256(solution.expected_amount_out());
+    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+    let native_addr = bytes_to_address(native_address)?;
+    let router_eth = bytes_to_address(&ROUTER_ETH_ADDRESS)?;
+    let token_in = bytes_to_address(solution.token_in())?;
+    let token_in = if token_in == native_addr { router_eth } else { token_in };
+    let token_out = bytes_to_address(solution.token_out())?;
+    let token_out = if token_out == native_addr { router_eth } else { token_out };
+    let receiver = bytes_to_address(solution.receiver())?;
+    let fee_wallet = bytes_to_address(fee_wallet)?;
+    let swaps = encoded_solution.swaps().to_vec();
+
+    let function_signature = encoded_solution.function_signature();
+    let method_calldata = if function_signature.starts_with("splitSwap") {
+        (
+            amount_in,
+            token_in,
+            token_out,
+            expected_amount_out,
+            min_amount_out,
+            U256::from(encoded_solution.n_tokens()),
+            receiver,
+            fee_wallet,
+            client_fee_bps,
+            swaps,
+        )
+            .abi_encode()
+    } else {
+        (
+            amount_in,
+            token_in,
+            token_out,
+            expected_amount_out,
+            min_amount_out,
+            receiver,
+            fee_wallet,
+            client_fee_bps,
+            swaps,
+        )
+            .abi_encode()
+    };
+
+    let value = if solution.token_in() == native_address {
+        solution.amount_in().clone()
+    } else {
+        BigUint::ZERO
+    };
+    Ok(Transaction {
+        to: encoded_solution
+            .interacting_with()
+            .clone(),
+        value,
+        data: encode_input(function_signature, method_calldata),
+    })
+}
+
 /// Signs `ClientFeeParams` using EIP-712, with the hardcoded `CLIENT_FEE_RECEIVER_PK`
 /// that matches `foundry/test/Constants.sol`.
 ///

@@ -82,6 +82,9 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
+/// Gas a `ClientFeeForwarder` adds to the router call (mainnet fork, cold fee wallet).
+pub const CLIENT_FEE_FORWARDER_OVERHEAD_GAS: u64 = 120_000;
+
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =

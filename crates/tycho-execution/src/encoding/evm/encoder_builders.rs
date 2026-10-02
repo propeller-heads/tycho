@@ -3,8 +3,9 @@ use tycho_common::{models::Chain, Bytes};
 use crate::encoding::{
     errors::EncodingError,
     evm::{
-        constants::get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-        tycho_encoders::TychoRouterEncoder,
+        constants::get_router_address,
+        swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+        tycho_encoders::{ClientFeeForwarderEncoder, TychoRouterEncoder},
     },
     tycho_encoder::TychoEncoder,
 };
@@ -63,5 +64,69 @@ impl TychoRouterEncoderBuilder {
                     .to_string(),
             ))
         }
+    }
+}
+
+/// Builds an encoder that targets a `ClientFeeForwarder` deployed against the router.
+pub struct ClientFeeForwarderEncoderBuilder {
+    chain: Option<Chain>,
+    swap_encoder_registry: Option<SwapEncoderRegistry>,
+    router_address: Option<Bytes>,
+    forwarder_address: Option<Bytes>,
+}
+
+impl Default for ClientFeeForwarderEncoderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClientFeeForwarderEncoderBuilder {
+    pub fn new() -> Self {
+        ClientFeeForwarderEncoderBuilder {
+            chain: None,
+            swap_encoder_registry: None,
+            router_address: None,
+            forwarder_address: None,
+        }
+    }
+
+    pub fn chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
+    pub fn swap_encoder_registry(mut self, swap_encoder_registry: SwapEncoderRegistry) -> Self {
+        self.swap_encoder_registry = Some(swap_encoder_registry);
+        self
+    }
+
+    /// Defaults to the chain's router in config/router_addresses.json.
+    pub fn router_address(mut self, router_address: Bytes) -> Self {
+        self.router_address = Some(router_address);
+        self
+    }
+
+    pub fn forwarder_address(mut self, forwarder_address: Bytes) -> Self {
+        self.forwarder_address = Some(forwarder_address);
+        self
+    }
+
+    pub fn build(self) -> Result<Box<dyn TychoEncoder>, EncodingError> {
+        let (Some(chain), Some(swap_encoder_registry), Some(forwarder_address)) =
+            (self.chain, self.swap_encoder_registry, self.forwarder_address)
+        else {
+            return Err(EncodingError::FatalError(
+                "Please set the chain, swap encoder registry and forwarder address before \
+                 building the encoder"
+                    .to_string(),
+            ));
+        };
+        let router_address = match self.router_address {
+            Some(address) => address,
+            None => get_router_address(&chain)?.clone(),
+        };
+        let router_encoder = TychoRouterEncoder::new(swap_encoder_registry, router_address)?;
+        Ok(Box::new(ClientFeeForwarderEncoder::new(router_encoder, forwarder_address)))
     }
 }
