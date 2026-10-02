@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ekubo_sdk::{
     chain::evm::{
@@ -28,7 +31,7 @@ const GAS_COST_OF_UPDATING_SNAPSHOT: u64 = 9_709;
 
 #[derive(Debug, Eq, Clone, Serialize, Deserialize)]
 pub struct OraclePool {
-    imp: EvmOraclePool,
+    imp: Arc<EvmOraclePool>,
     swap_state: OraclePoolSwapState,
 }
 
@@ -52,7 +55,7 @@ impl OraclePool {
             0,
         )
         .map(|imp| Self {
-            imp,
+            imp: Arc::new(imp),
             swap_state: OraclePoolSwapState {
                 sdk_state: full_range_sdk_state,
                 swapped_this_block: false,
@@ -97,7 +100,7 @@ impl EkuboPool for OraclePool {
                 calculated_amount: quote.calculated_amount,
                 gas: gas_costs(quote.execution_resources),
                 new_state: Self {
-                    imp: self.imp.clone(),
+                    imp: Arc::clone(&self.imp),
                     swap_state: OraclePoolSwapState {
                         sdk_state: quote.state_after.full_range_pool_state,
                         swapped_this_block: true,

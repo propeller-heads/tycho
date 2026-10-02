@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -19,7 +22,7 @@ use crate::protocol::errors::InvalidSnapshotError;
 
 #[derive(Debug, Eq, Clone, Serialize, Deserialize)]
 pub struct OraclePool {
-    imp: quoting::oracle_pool::OraclePool,
+    imp: Arc<quoting::oracle_pool::OraclePool>,
     state: OraclePoolState,
 
     swapped_this_block: bool,
@@ -36,16 +39,18 @@ impl OraclePool {
 
     pub fn new(key: &NodeKey, state: OraclePoolState) -> Result<Self, InvalidSnapshotError> {
         Ok(Self {
-            imp: quoting::oracle_pool::OraclePool::new(
-                key.token1,
-                key.config.extension,
-                state.full_range_pool_state.sqrt_ratio,
-                state.full_range_pool_state.liquidity,
-                state.last_snapshot_time,
-            )
-            .map_err(|err| {
-                InvalidSnapshotError::ValueError(format!("creating oracle pool: {err:?}"))
-            })?,
+            imp: Arc::new(
+                quoting::oracle_pool::OraclePool::new(
+                    key.token1,
+                    key.config.extension,
+                    state.full_range_pool_state.sqrt_ratio,
+                    state.full_range_pool_state.liquidity,
+                    state.last_snapshot_time,
+                )
+                .map_err(|err| {
+                    InvalidSnapshotError::ValueError(format!("creating oracle pool: {err:?}"))
+                })?,
+            ),
             state,
             swapped_this_block: false,
         })
@@ -104,7 +109,7 @@ impl EkuboPool for OraclePool {
                         .snapshots_written,
                 ) * Self::GAS_COST_OF_UPDATING_ORACLE_SNAPSHOT,
             new_state: Self {
-                imp: self.imp.clone(),
+                imp: Arc::clone(&self.imp),
                 state: quote.state_after,
                 swapped_this_block: true,
             }

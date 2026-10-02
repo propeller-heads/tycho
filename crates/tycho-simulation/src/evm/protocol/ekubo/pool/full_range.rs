@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -19,7 +22,7 @@ use crate::protocol::errors::InvalidSnapshotError;
 
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct FullRangePool {
-    imp: quoting::full_range_pool::FullRangePool,
+    imp: Arc<quoting::full_range_pool::FullRangePool>,
     state: FullRangePoolState,
 }
 
@@ -35,9 +38,11 @@ impl FullRangePool {
     pub fn new(key: NodeKey, state: FullRangePoolState) -> Result<Self, InvalidSnapshotError> {
         Ok(Self {
             state,
-            imp: quoting::full_range_pool::FullRangePool::new(key, state).map_err(|err| {
-                InvalidSnapshotError::ValueError(format!("creating full range pool: {err:?}"))
-            })?,
+            imp: Arc::new(quoting::full_range_pool::FullRangePool::new(key, state).map_err(
+                |err| {
+                    InvalidSnapshotError::ValueError(format!("creating full range pool: {err:?}"))
+                },
+            )?),
         })
     }
 
@@ -78,7 +83,7 @@ impl EkuboPool for FullRangePool {
             consumed_amount: quote.consumed_amount,
             calculated_amount: quote.calculated_amount,
             gas: Self::gas_costs(),
-            new_state: Self { imp: self.imp.clone(), state: quote.state_after }.into(),
+            new_state: Self { imp: Arc::clone(&self.imp), state: quote.state_after }.into(),
         })
     }
 

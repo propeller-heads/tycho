@@ -21,6 +21,7 @@ use tycho_common::{
 };
 
 use super::state::EkuboV3State;
+
 pub struct EkuboPoolQuote {
     pub consumed_amount: i128,
     pub calculated_amount: u128,

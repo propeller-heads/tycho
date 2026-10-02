@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use evm_ekubo_sdk::{
     math::uint::U256,
@@ -28,9 +31,9 @@ use crate::{
 
 #[derive(Debug, Eq, Clone, Serialize, Deserialize)]
 pub struct MevResistPool {
-    imp: quoting::mev_resist_pool::MEVResistPool,
+    imp: Arc<quoting::mev_resist_pool::MEVResistPool>,
 
-    ticks: Vec<Tick>,
+    ticks: Arc<Vec<Tick>>,
     base_pool_state: BasePoolState,
     last_tick: i32,
 
@@ -79,10 +82,12 @@ impl MevResistPool {
         };
 
         Ok(Self {
-            imp: impl_from_state(key, base_pool_state, ticks.clone(), tick).map_err(|err| {
-                InvalidSnapshotError::ValueError(format!("creating MEV-resist pool: {err:?}"))
-            })?,
-            ticks,
+            imp: Arc::new(impl_from_state(key, base_pool_state, ticks.clone(), tick).map_err(
+                |err| {
+                    InvalidSnapshotError::ValueError(format!("creating MEV-resist pool: {err:?}"))
+                },
+            )?),
+            ticks: Arc::new(ticks),
             base_pool_state,
             last_tick: tick,
             active_tick: Some(tick),
@@ -138,8 +143,8 @@ impl EkuboPool for MevResistPool {
                         .base_pool_resources,
                 ),
             new_state: Self {
-                imp: self.imp.clone(),
-                ticks: self.ticks.clone(),
+                imp: Arc::clone(&self.imp),
+                ticks: Arc::clone(&self.ticks),
                 base_pool_state: quote.state_after.base_pool_state,
                 last_tick: self.last_tick,
                 active_tick: None,
@@ -152,7 +157,7 @@ impl EkuboPool for MevResistPool {
         base::get_limit(
             token_in,
             self.sqrt_ratio(),
-            &self.imp,
+            self.imp.as_ref(),
             MEVResistPoolState { last_update_time: 0, base_pool_state: self.base_pool_state },
             0,
             |r| r.base_pool_resources,
@@ -183,21 +188,22 @@ impl EkuboPool for MevResistPool {
 
         let new_initialized_ticks = !changed_ticks.is_empty();
 
-        for tick in changed_ticks {
-            let res = self
-                .ticks
-                .binary_search_by_key(&tick.index, |t| t.index);
+        if new_initialized_ticks {
+            let ticks = Arc::make_mut(&mut self.ticks);
+            for tick in changed_ticks {
+                let res = ticks.binary_search_by_key(&tick.index, |t| t.index);
 
-            match res {
-                Ok(idx) => {
-                    if tick.liquidity_delta.is_zero() {
-                        self.ticks.remove(idx);
-                    } else {
-                        self.ticks[idx] = tick;
+                match res {
+                    Ok(idx) => {
+                        if tick.liquidity_delta.is_zero() {
+                            ticks.remove(idx);
+                        } else {
+                            ticks[idx] = tick;
+                        }
                     }
-                }
-                Err(idx) => {
-                    self.ticks.insert(idx, tick);
+                    Err(idx) => {
+                        ticks.insert(idx, tick);
+                    }
                 }
             }
         }
@@ -220,17 +226,19 @@ impl EkuboPool for MevResistPool {
         }
 
         if new_initialized_ticks {
-            self.imp = impl_from_state(
-                *self.key(),
-                self.base_pool_state,
-                self.ticks.clone(),
-                self.last_tick,
-            )
-            .map_err(|err| {
-                TransitionError::SimulationError(SimulationError::RecoverableError(format!(
-                    "reinstantiate base pool: {err:?}"
-                )))
-            })?;
+            self.imp = Arc::new(
+                impl_from_state(
+                    *self.key(),
+                    self.base_pool_state,
+                    self.ticks.as_ref().clone(),
+                    self.last_tick,
+                )
+                .map_err(|err| {
+                    TransitionError::SimulationError(SimulationError::RecoverableError(format!(
+                        "reinstantiate base pool: {err:?}"
+                    )))
+                })?,
+            );
         }
 
         Ok(())

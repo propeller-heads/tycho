@@ -1,6 +1,9 @@
-use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::time::SystemTime;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use alloy::eips::merge::SLOT_DURATION_SECS;
 use evm_ekubo_sdk::{
@@ -27,7 +30,7 @@ use crate::{
 
 #[derive(Debug, Eq, Clone, Serialize, Deserialize)]
 pub struct TwammPool {
-    imp: quoting::twamm_pool::TwammPool,
+    imp: Arc<quoting::twamm_pool::TwammPool>,
     state: TwammPoolState,
 
     swapped_this_block: bool,
@@ -72,9 +75,9 @@ impl TwammPool {
         virtual_order_deltas: Vec<TwammSaleRateDelta>,
     ) -> Result<Self, InvalidSnapshotError> {
         Ok(Self {
-            imp: impl_from_state(key, state, virtual_order_deltas).map_err(|err| {
+            imp: Arc::new(impl_from_state(key, state, virtual_order_deltas).map_err(|err| {
                 InvalidSnapshotError::ValueError(format!("creating TWAMM pool: {err:?}"))
-            })?,
+            })?),
             state,
             swapped_this_block: false,
         })
@@ -139,7 +142,7 @@ impl EkuboPool for TwammPool {
                         .virtual_order_delta_times_crossed,
                 ) * Self::GAS_COST_OF_ONE_VIRTUAL_ORDER_DELTA,
             new_state: Self {
-                imp: self.imp.clone(),
+                imp: Arc::clone(&self.imp),
                 state: quote.state_after,
                 swapped_this_block: true,
             }
@@ -267,12 +270,13 @@ impl EkuboPool for TwammPool {
                 }
             }
 
-            self.imp =
+            self.imp = Arc::new(
                 impl_from_state(self.key(), self.state, virtual_order_deltas).map_err(|err| {
                     TransitionError::SimulationError(SimulationError::RecoverableError(format!(
                         "reinstantiate TWAMM pool: {err:?}"
                     )))
-                })?;
+                })?,
+            );
         }
 
         self.swapped_this_block = false;
