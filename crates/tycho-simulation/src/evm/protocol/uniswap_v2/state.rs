@@ -25,7 +25,6 @@ use crate::evm::protocol::{
     },
     safe_math::{safe_add_u256, safe_sub_u256},
     swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
-    u256_num::{biguint_to_u256, u256_to_biguint},
     utils::add_fee_markup,
 };
 
@@ -78,7 +77,7 @@ impl ProtocolSim for UniswapV2State {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let (amount_out, gas, new_state) =
-            self.quote_exact_in(&amount_in, &token_in.address, &token_out.address, true)?;
+            self.quote_exact_in_biguint(&amount_in, &token_in.address, &token_out.address, true)?;
         let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
         Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
@@ -181,12 +180,11 @@ impl NativeQuote for UniswapV2State {
 
     fn quote_exact_in(
         &self,
-        amount_in: &BigUint,
+        amount_in: U256,
         token_in: &Bytes,
         token_out: &Bytes,
         with_state: bool,
-    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
-        let amount_in = biguint_to_u256(amount_in);
+    ) -> SimulationResult<(U256, U256, Option<Self>)> {
         let zero2one = token_in < token_out;
         let (reserve_in, reserve_out) =
             if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
@@ -205,7 +203,7 @@ impl NativeQuote for UniswapV2State {
         } else {
             None
         };
-        Ok((u256_to_biguint(amount_out), BigUint::from(SWAP_BASE_GAS), new_state))
+        Ok((amount_out, U256::from(SWAP_BASE_GAS), new_state))
     }
 }
 
@@ -233,7 +231,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::evm::protocol::u256_num::biguint_to_u256;
+    use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
 
     fn token_0() -> Token {
         Token::new(

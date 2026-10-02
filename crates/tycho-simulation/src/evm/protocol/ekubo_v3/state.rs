@@ -34,7 +34,7 @@ use crate::evm::protocol::{
         },
     },
     swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
-    u256_num::u256_to_f64,
+    u256_num::{biguint_to_u256, u256_to_f64},
 };
 
 /// Gas cost of `Core.forward`, the signature check and the signed-fee accounting, on top of the
@@ -138,11 +138,11 @@ impl ProtocolSim for EkuboV3State {
         &self,
         amount_in: BigUint,
         token_in: &Token,
-        token_out: &Token,
+        _token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let (amount_out, gas, new_state) =
-            self.quote_exact_in(&amount_in, &token_in.address, &token_out.address, true)?;
-        let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
+            self.quote_i128(amount_as_i128(amount_in)?, &token_in.address, true)?;
+        let new_state = new_state.expect("quote_i128 builds the state it is asked for");
         Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
 
@@ -229,35 +229,19 @@ impl ProtocolSim for EkuboV3State {
     }
 }
 
-impl NativeQuote for EkuboV3State {
-    fn attached_component(&self) -> &AttachedComponent {
-        &self.component
-    }
-
-    fn swap_fee(&self, _zero_for_one: bool) -> f64 {
-        ProtocolSim::fee(self)
-    }
-
-    fn quote_exact_in(
+impl EkuboV3State {
+    /// Quotes selling `amount_in` of `token_in`; the pool math takes the amount as an `i128`.
+    fn quote_i128(
         &self,
-        amount_in: &BigUint,
+        amount_in: i128,
         token_in: &Bytes,
-        _token_out: &Bytes,
         with_state: bool,
     ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
         let token_amount = EvmTokenAmount {
             token: Address::try_from(&token_in[..]).map_err(|err| {
                 SimulationError::InvalidInput(format!("token_in invalid: {err}"), None)
             })?,
-            amount: amount_in
-                .clone()
-                .try_into()
-                .map_err(|_| {
-                    SimulationError::InvalidInput(
-                        "amount in must fit into a i128".to_string(),
-                        None,
-                    )
-                })?,
+            amount: amount_in,
         };
 
         let quote = self.pool.quote(token_amount)?;
@@ -282,6 +266,38 @@ impl NativeQuote for EkuboV3State {
         }
 
         Ok((amount_out, gas, with_state.then_some(new_state)))
+    }
+}
+
+fn amount_as_i128(amount_in: BigUint) -> SimulationResult<i128> {
+    amount_in
+        .try_into()
+        .map_err(|_| amount_overflow())
+}
+
+fn amount_overflow() -> SimulationError {
+    SimulationError::InvalidInput("amount in must fit into a i128".to_string(), None)
+}
+
+impl NativeQuote for EkuboV3State {
+    fn attached_component(&self) -> &AttachedComponent {
+        &self.component
+    }
+
+    fn swap_fee(&self, _zero_for_one: bool) -> f64 {
+        ProtocolSim::fee(self)
+    }
+
+    fn quote_exact_in(
+        &self,
+        amount_in: alloy::primitives::U256,
+        token_in: &Bytes,
+        _token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(alloy::primitives::U256, alloy::primitives::U256, Option<Self>)> {
+        let amount_in = i128::try_from(amount_in).map_err(|_| amount_overflow())?;
+        let (amount_out, gas, new_state) = self.quote_i128(amount_in, token_in, with_state)?;
+        Ok((biguint_to_u256(&amount_out), biguint_to_u256(&gas), new_state))
     }
 }
 
