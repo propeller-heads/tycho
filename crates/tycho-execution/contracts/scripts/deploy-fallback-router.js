@@ -29,9 +29,11 @@ const executorDeployments = require("../../config/executor_deployments.json");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
-// Metric's MetricOmmSwapQuoter, per chain. It must belong to the factory that
-// created the pools the Metric API serves: on Base that is factory
-// 0x622911384e7973439b8be305f5e3Fc3c5736EDe4.
+// Metric's MetricOmmSwapQuoter, per chain. This is Metric's previous-version
+// quoter: it quotes the v1 pools inside a transaction. The v1 quoter
+// (0x803Dd787ef9734c34696877ca6F20194fBcBFbF8) works only in an eth_call from
+// address(0), so the router cannot use it:
+// https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/smart-contracts-reference/get-quote
 const METRIC_SWAP_QUOTERS = {
     base: "0xaB6C48D981B943F62A23bb4EB2db125182E6753c",
 };

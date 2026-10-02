@@ -332,28 +332,161 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
     }
 }
 
-contract MetricFallbackRouterBaseTest is FallbackRouterAssertions, TestUtils {
-    /// The block `TychoRouterForMetricTest` forks at, where the pool's oracle is fresh.
-    uint256 constant FORK_BLOCK = 48_957_697;
+/// @notice Runs the router against a live Metric v1 pool, with the chain's Uniswap V3 pool as
+/// fallback. Swaps 1 WETH for USDC; WETH is the pool's token0 on both chains.
+abstract contract MetricFallbackRouterForkTest is FallbackRouterAssertions {
+    /// Metric's previous-version quoter. It quotes the v1 pools on Ethereum and Base.
+    IMetricOmmSwapQuoter constant METRIC_QUOTER =
+        IMetricOmmSwapQuoter(0xaB6C48D981B943F62A23bb4EB2db125182E6753c);
+    uint256 constant WETH_IN = 1 ether;
+    bytes constant ZERO_FOR_ONE = hex"01";
+
+    MetricFallbackRouter router;
+    MetricFallbackExecutor executor;
+
+    /// @dev Forks a block where the pool's oracle is fresh and deploys `router`.
+    function _forkAndDeploy() internal virtual;
+
+    function _metricPool() internal view virtual returns (address);
+
+    function _uniswapV3Pool() internal view virtual returns (address);
+
+    function _weth() internal view virtual returns (address);
+
+    function _usdc() internal view virtual returns (address);
+
+    function setUp() public {
+        _forkAndDeploy();
+        executor = new MetricFallbackExecutor(address(router));
+        deal(_weth(), address(router), WETH_IN);
+    }
+
+    /// Metric quotes above the Uniswap V3 pool at the fork block, so Metric fills.
+    function testPaysTheHigherQuote() public {
+        bytes memory v3 = FallbackSwaps.uniswapV3(_uniswapV3Pool());
+        uint256 metricOut = _metricQuote();
+        assertGt(metricOut, _quoteFallback(v3));
+
+        vm.recordLogs();
+        router.swap(_swapStruct(), _metricPool(), ZERO_FOR_ONE, v3);
+
+        assertEq(IERC20(_usdc()).balanceOf(BOB), metricOut);
+        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
+        _assertRouterDrained(address(router), _weth(), _usdc());
+    }
+
+    /// The quote is the fill.
+    function testMetricFillsTheQuotedAmount() public {
+        uint256 metricOut = _metricQuote();
+        uint256 poolWethBefore = IERC20(_weth()).balanceOf(_metricPool());
+
+        router.swap(
+            _swapStruct(),
+            _metricPool(),
+            ZERO_FOR_ONE,
+            FallbackSwaps.uniswapV3(address(0xdead))
+        );
+
+        assertEq(IERC20(_usdc()).balanceOf(BOB), metricOut);
+        assertEq(
+            IERC20(_weth()).balanceOf(_metricPool()) - poolWethBefore, WETH_IN
+        );
+        assertEq(IERC20(_weth()).balanceOf(address(router)), 0);
+    }
+
+    /// A day later the pool's oracle is stale.
+    function testStaleMetricFallsBack() public {
+        vm.warp(block.timestamp + 1 days);
+        bytes memory v3 = FallbackSwaps.uniswapV3(_uniswapV3Pool());
+        uint256 v3Out = _quoteFallback(v3);
+
+        _expectFallbackSwap(
+            address(router),
+            _metricPool(),
+            _weth(),
+            _usdc(),
+            WETH_IN,
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        router.swap(_swapStruct(), _metricPool(), ZERO_FOR_ONE, v3);
+
+        assertEq(IERC20(_usdc()).balanceOf(BOB), v3Out);
+        _assertRouterDrained(address(router), _weth(), _usdc());
+    }
+
+    function _quoteFallback(bytes memory fallbackSwap)
+        internal
+        returns (uint256)
+    {
+        vm.prank(address(router));
+        return router.quoteFallback(_swapStruct(), fallbackSwap);
+    }
+
+    function _metricQuote() internal returns (uint256 amountOut) {
+        (, amountOut) = METRIC_QUOTER.quoteLiveExactInSingle(
+            _metricPool(), true, uint128(WETH_IN), 0
+        );
+    }
+
+    function _swapStruct()
+        internal
+        view
+        returns (TychoFallbackRouter.Swap memory)
+    {
+        return FallbackSwaps.swap(_weth(), _usdc(), WETH_IN, BOB);
+    }
+}
+
+/// Ethereum has no quoter in `METRIC_SWAP_QUOTERS`, so the router quotes Metric by simulation.
+contract MetricFallbackRouterEthereumTest is MetricFallbackRouterForkTest {
+    /// The feed was stale in the blocks around this one.
+    uint256 constant FORK_BLOCK = 26_105_909;
     address constant METRIC_WETH_USDC_POOL =
-        0x600668566fc5E9d471A1A235937221e39aC0ed04;
+        0xF85AfbADeCC7F23Dd173ed706f07d9C7e2473e24;
+
+    function _forkAndDeploy() internal override {
+        vm.createSelectFork(vm.rpcUrl("mainnet"), FORK_BLOCK);
+        router = new MetricFallbackRouter(
+            IPoolManager(POOL_MANAGER),
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
+            IMetricOmmSwapQuoter(address(0))
+        );
+    }
+
+    function _metricPool() internal pure override returns (address) {
+        return METRIC_WETH_USDC_POOL;
+    }
+
+    function _uniswapV3Pool() internal view override returns (address) {
+        return USDC_WETH_USV3;
+    }
+
+    function _weth() internal view override returns (address) {
+        return WETH_ADDR;
+    }
+
+    function _usdc() internal view override returns (address) {
+        return USDC_ADDR;
+    }
+}
+
+contract MetricFallbackRouterBaseTest is
+    MetricFallbackRouterForkTest,
+    TestUtils
+{
+    uint256 constant FORK_BLOCK = 52_085_032;
+    address constant METRIC_WETH_USDC_POOL =
+        0x258bE4EA05f674e0B26AA71dfC08E0c87c499Fb0;
     address constant BASE_USDC_WETH_USV3 =
         0xd0b53D9277642d899DF5C87A3966A349A798F224;
     address constant BASE_POOL_MANAGER =
         0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address constant BASE_STATIC_QUOTER =
         0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb;
-    /// The quoter of the factory that created `METRIC_WETH_USDC_POOL`.
-    IMetricOmmSwapQuoter constant METRIC_QUOTER =
-        IMetricOmmSwapQuoter(0xaB6C48D981B943F62A23bb4EB2db125182E6753c);
-    uint256 constant WETH_IN = 1 ether;
-    /// WETH is the pool's token0.
-    bytes constant ZERO_FOR_ONE = hex"01";
 
-    MetricFallbackRouter router;
-    MetricFallbackExecutor executor;
-
-    function setUp() public {
+    function _forkAndDeploy() internal override {
         vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
         router = new MetricFallbackRouter(
             IPoolManager(BASE_POOL_MANAGER),
@@ -361,22 +494,6 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions, TestUtils {
             IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
             METRIC_QUOTER
         );
-        executor = new MetricFallbackExecutor(address(router));
-        deal(BASE_WETH, address(router), WETH_IN);
-    }
-
-    /// Metric quotes above the Uniswap V3 pool at `FORK_BLOCK`, so Metric fills.
-    function testPaysTheHigherQuote() public {
-        bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
-        uint256 metricOut = _metricQuote();
-        assertGt(metricOut, _quoteFallback(v3));
-
-        vm.recordLogs();
-        router.swap(_swapStruct(), METRIC_WETH_USDC_POOL, ZERO_FOR_ONE, v3);
-
-        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
-        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
-        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
     }
 
     /// The swap data comes from the Rust encoder's
@@ -394,91 +511,19 @@ contract MetricFallbackRouterBaseTest is FallbackRouterAssertions, TestUtils {
         _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
     }
 
-    /// The quote is the fill.
-    function testMetricFillsTheQuotedAmount() public {
-        uint256 metricOut = _metricQuote();
-        uint256 poolWethBefore =
-            IERC20(BASE_WETH).balanceOf(METRIC_WETH_USDC_POOL);
-
-        router.swap(
-            _swapStruct(),
-            METRIC_WETH_USDC_POOL,
-            ZERO_FOR_ONE,
-            FallbackSwaps.uniswapV3(address(0xdead))
-        );
-
-        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
-        assertEq(
-            IERC20(BASE_WETH).balanceOf(METRIC_WETH_USDC_POOL) - poolWethBefore,
-            WETH_IN
-        );
-        assertEq(IERC20(BASE_WETH).balanceOf(address(router)), 0);
+    function _metricPool() internal pure override returns (address) {
+        return METRIC_WETH_USDC_POOL;
     }
 
-    /// Without a quoter, the simulated swap prices the pool at the quoter's amount.
-    function testSimulatedQuoteMatchesQuoter() public {
-        uint256 metricOut = _metricQuote();
-        router = new MetricFallbackRouter(
-            IPoolManager(BASE_POOL_MANAGER),
-            address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
-            IMetricOmmSwapQuoter(address(0))
-        );
-        deal(BASE_WETH, address(router), WETH_IN);
-
-        vm.recordLogs();
-        router.swap(
-            _swapStruct(),
-            METRIC_WETH_USDC_POOL,
-            ZERO_FOR_ONE,
-            FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3)
-        );
-
-        assertEq(IERC20(BASE_USDC).balanceOf(BOB), metricOut);
-        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
-        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+    function _uniswapV3Pool() internal pure override returns (address) {
+        return BASE_USDC_WETH_USV3;
     }
 
-    /// A day later the pool's oracle is stale.
-    function testStaleMetricFallsBack() public {
-        vm.warp(block.timestamp + 1 days);
-        bytes memory v3 = FallbackSwaps.uniswapV3(BASE_USDC_WETH_USV3);
-        uint256 v3Out = _quoteFallback(v3);
-
-        _expectFallbackSwap(
-            address(router),
-            METRIC_WETH_USDC_POOL,
-            BASE_WETH,
-            BASE_USDC,
-            WETH_IN,
-            TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
-        );
-        router.swap(_swapStruct(), METRIC_WETH_USDC_POOL, ZERO_FOR_ONE, v3);
-
-        assertEq(IERC20(BASE_USDC).balanceOf(BOB), v3Out);
-        _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
+    function _weth() internal pure override returns (address) {
+        return BASE_WETH;
     }
 
-    function _quoteFallback(bytes memory fallbackSwap)
-        internal
-        returns (uint256)
-    {
-        vm.prank(address(router));
-        return router.quoteFallback(_swapStruct(), fallbackSwap);
-    }
-
-    function _metricQuote() internal returns (uint256 amountOut) {
-        (, amountOut) = METRIC_QUOTER.quoteLiveExactInSingle(
-            METRIC_WETH_USDC_POOL, true, uint128(WETH_IN), 0
-        );
-    }
-
-    function _swapStruct()
-        internal
-        view
-        returns (TychoFallbackRouter.Swap memory)
-    {
-        return FallbackSwaps.swap(BASE_WETH, BASE_USDC, WETH_IN, BOB);
+    function _usdc() internal pure override returns (address) {
+        return BASE_USDC;
     }
 }

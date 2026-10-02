@@ -181,8 +181,10 @@ A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the
 quoted, and the fallback runs only when the primary fails.
 
 `MetricFallbackRouter` quotes through Metric's `MetricOmmSwapQuoter`, a lens that runs the pool's swap up to its
-callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. The quoter must belong to the
-factory that created the pools the router serves. A chain without a quoter deploys `metricQuoter` as
+callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. Base uses Metric's previous-version quoter
+`0xaB6C48D981B943F62A23bb4EB2db125182E6753c`, which quotes the v1 pools inside a transaction. Metric's v1 quoter
+`0x803Dd787ef9734c34696877ca6F20194fBcBFbF8` reverts there: the v1 oracle reverts for a price read from the v1
+quoter, and returns a price only in an `eth_call` from `address(0)`. A chain without a quoter deploys `metricQuoter` as
 `address(0)`: `simulatePrimary` then runs the pool's swap and reverts with the amount the receiver got, and a pool
 revert quotes zero. This costs the callback payment and the output transfer more than the quoter. The router pays the pool's `metricOmmSwapCallback` through the
 catch-all `fallback`, which sends the full `amountIn` to the pool the swap called, as the Dispatcher does for

@@ -72,7 +72,7 @@ mod tests {
 
     const WETH: &str = "4200000000000000000000000000000000000006";
     const USDC: &str = "833589fcd6edb6e08f4c7c32d4f71b54bda02913";
-    const METRIC_POOL: &str = "600668566fc5e9d471a1a235937221e39ac0ed04";
+    const METRIC_POOL: &str = "258be4ea05f674e0b26aa71dfc08e0c87c499fb0";
     const USDC_WETH_USV3: &str = "d0b53d9277642d899df5c87a3966a349a798f224";
 
     fn encode_weth_usdc(user_data: Option<&str>) -> Result<String, EncodingError> {
