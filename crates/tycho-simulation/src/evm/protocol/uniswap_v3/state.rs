@@ -26,7 +26,9 @@ use crate::evm::protocol::{
     utils::{
         add_fee_markup,
         uniswap::{
-            i24_be_bytes_to_i32, liquidity_math,
+            i24_be_bytes_to_i32,
+            limits_memo::LimitsMemo,
+            liquidity_math,
             pool_tick::PoolTick,
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
             swap_math,
@@ -63,6 +65,8 @@ pub struct UniswapV3State {
     fee: u32,
     tick: PoolTick,
     ticks: TickList,
+    #[serde(skip)]
+    limits: LimitsMemo,
 }
 
 impl UniswapV3State {
@@ -93,7 +97,109 @@ impl UniswapV3State {
             fee: fee.fee(),
             tick: tick.into(),
             ticks: tick_list,
+            limits: LimitsMemo::default(),
         })
+    }
+
+    fn compute_limits(&self, zero_for_one: bool) -> Result<(BigUint, BigUint), SimulationError> {
+        // If the pool has no liquidity, return zeros for both limits
+        if self.liquidity == 0 {
+            return Ok((BigUint::zero(), BigUint::zero()));
+        }
+
+        let mut current_tick = self.tick.value();
+        let mut current_sqrt_price = self.sqrt_price;
+        let mut current_liquidity = self.liquidity;
+        let mut total_amount_in = U256::from(0u64);
+        let mut total_amount_out = U256::from(0u64);
+        let mut ticks_crossed: u64 = 0;
+
+        // Iterate through ticks in the direction of the swap
+        // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
+        while let Ok((tick, initialized)) = self
+            .ticks
+            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
+        {
+            // Cap iteration to prevent exceeding Ethereum's gas limit
+            if ticks_crossed >= MAX_TICKS_CROSSED {
+                break;
+            }
+            ticks_crossed += 1;
+
+            // Clamp the tick value to ensure it's within valid range
+            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
+
+            // Calculate the sqrt price at the next tick boundary
+            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+
+            // Calculate the amount of tokens swapped when moving from current_sqrt_price to
+            // sqrt_price_next. Direction determines which token is being swapped in vs out
+            let (amount_in, amount_out) = if zero_for_one {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                (amount0, amount1)
+            } else {
+                let amount0 = get_amount0_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    false,
+                )?;
+                let amount1 = get_amount1_delta(
+                    sqrt_price_next,
+                    current_sqrt_price,
+                    current_liquidity,
+                    true,
+                )?;
+                (amount1, amount0)
+            };
+
+            // Accumulate total amounts for this tick range
+            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
+            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
+
+            // If this tick is "initialized" (meaning its someone's position boundary), update the
+            // liquidity when crossing it
+            // For zero_for_one, liquidity is removed when crossing a tick
+            // For one_for_zero, liquidity is added when crossing a tick
+            if initialized {
+                let liquidity_raw = self
+                    .ticks
+                    .get_tick(next_tick)
+                    .unwrap()
+                    .net_liquidity;
+                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
+
+                // Check if applying this liquidity delta would cause underflow
+                // If so, stop here rather than continuing with invalid state
+                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
+                    Ok(new_liquidity) => {
+                        current_liquidity = new_liquidity;
+                    }
+                    Err(_) => {
+                        // Liquidity would underflow, stop iteration here
+                        // This represents the maximum liquidity we can actually use
+                        break;
+                    }
+                }
+            }
+
+            // Move to the next tick position
+            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
+            current_sqrt_price = sqrt_price_next;
+        }
+
+        Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
     }
 
     fn swap(
@@ -147,6 +253,7 @@ impl UniswapV3State {
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
+                        new_state.limits = LimitsMemo::default();
                         new_state.liquidity = state.liquidity;
                         new_state.tick = state.tick;
                         new_state.sqrt_price = state.sqrt_price;
@@ -282,6 +389,7 @@ impl ProtocolSim for UniswapV3State {
 
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "V3 SWAP");
         let mut new_state = self.clone();
+        new_state.limits = LimitsMemo::default();
         new_state.liquidity = result.liquidity;
         new_state.tick = result.tick;
         new_state.sqrt_price = result.sqrt_price;
@@ -303,105 +411,9 @@ impl ProtocolSim for UniswapV3State {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
-            return Ok((BigUint::zero(), BigUint::zero()));
-        }
-
         let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick.value();
-        let mut current_sqrt_price = self.sqrt_price;
-        let mut current_liquidity = self.liquidity;
-        let mut total_amount_in = U256::from(0u64);
-        let mut total_amount_out = U256::from(0u64);
-        let mut ticks_crossed: u64 = 0;
-
-        // Iterate through ticks in the direction of the swap
-        // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
-        while let Ok((tick, initialized)) = self
-            .ticks
-            .next_initialized_tick_within_one_word(current_tick, zero_for_one)
-        {
-            // Cap iteration to prevent exceeding Ethereum's gas limit
-            if ticks_crossed >= MAX_TICKS_CROSSED {
-                break;
-            }
-            ticks_crossed += 1;
-
-            // Clamp the tick value to ensure it's within valid range
-            let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
-
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
-
-            // Calculate the amount of tokens swapped when moving from current_sqrt_price to
-            // sqrt_price_next. Direction determines which token is being swapped in vs out
-            let (amount_in, amount_out) = if zero_for_one {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                (amount0, amount1)
-            } else {
-                let amount0 = get_amount0_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    false,
-                )?;
-                let amount1 = get_amount1_delta(
-                    sqrt_price_next,
-                    current_sqrt_price,
-                    current_liquidity,
-                    true,
-                )?;
-                (amount1, amount0)
-            };
-
-            // Accumulate total amounts for this tick range
-            total_amount_in = safe_add_u256(total_amount_in, amount_in)?;
-            total_amount_out = safe_add_u256(total_amount_out, amount_out)?;
-
-            // If this tick is "initialized" (meaning its someone's position boundary), update the
-            // liquidity when crossing it
-            // For zero_for_one, liquidity is removed when crossing a tick
-            // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-
-                // Check if applying this liquidity delta would cause underflow
-                // If so, stop here rather than continuing with invalid state
-                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
-                    Ok(new_liquidity) => {
-                        current_liquidity = new_liquidity;
-                    }
-                    Err(_) => {
-                        // Liquidity would underflow, stop iteration here
-                        // This represents the maximum liquidity we can actually use
-                        break;
-                    }
-                }
-            }
-
-            // Move to the next tick position
-            current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-            current_sqrt_price = sqrt_price_next;
-        }
-
-        Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
+        self.limits
+            .get_or_compute(zero_for_one, || self.compute_limits(zero_for_one))
     }
 
     fn delta_transition(
@@ -410,6 +422,7 @@ impl ProtocolSim for UniswapV3State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        self.limits = LimitsMemo::default();
         // apply attribute changes
         if let Some(liquidity) = delta
             .updated_attributes
@@ -525,6 +538,7 @@ impl ProtocolSim for UniswapV3State {
                 )?;
 
                 let mut new_state = self.clone();
+                new_state.limits = LimitsMemo::default();
                 new_state.liquidity = swap_result.liquidity;
                 new_state.tick = swap_result.tick;
                 new_state.sqrt_price = swap_result.sqrt_price;

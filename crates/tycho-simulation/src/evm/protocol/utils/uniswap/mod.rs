@@ -2,6 +2,7 @@ use alloy::primitives::{I256, U256};
 use pool_tick::PoolTick;
 use tycho_common::Bytes;
 
+pub(crate) mod limits_memo;
 pub(crate) mod liquidity_math;
 pub(crate) mod lp_fee;
 pub(crate) mod pool_tick;
