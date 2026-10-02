@@ -132,6 +132,7 @@ impl BlockHistory {
 
     /// Add the block as next block.
     ///
+    /// A block already at the tip, including a re-delivered revert header, changes nothing.
     /// May error if the block does not fit the tip of the chain, or if history is empty and the
     /// block is a revert.
     pub fn push(&mut self, block: BlockHeader) -> Result<(), BlockHistoryError> {
@@ -233,26 +234,7 @@ impl BlockHistory {
                 self.history.push_back(block);
                 Ok(())
             }
-            BlockPosition::Latest => {
-                // Partial revert always points to the latest partial block. Only 1 partial block is
-                // kept at the tip so we just pop it.
-                if block.revert {
-                    let latest = self
-                        .history
-                        .back()
-                        .ok_or(BlockHistoryError::EmptyHistory)?;
-                    if latest.is_partial() {
-                        let reverted = self
-                            .history
-                            .pop_back()
-                            .ok_or(BlockHistoryError::RevertPositionNotFound)?;
-                        self.reverts
-                            .push(reverted.hash.clone(), reverted);
-                    }
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+            BlockPosition::Latest | BlockPosition::Delayed | BlockPosition::Advanced => Ok(()),
         }
     }
 
@@ -272,6 +254,12 @@ impl BlockHistory {
         Ok(if block.parent_hash == latest.hash {
             // if the block is the next expected block.
             BlockPosition::NextExpected
+        } else if block.hash == latest.hash {
+            // The block is already the tip: a duplicate partial, a lagging stream re-delivering a
+            // revert, or another extractor reporting the same undo with a different
+            // dropped-partial index. The hash identifies the block; index and parent say nothing
+            // more.
+            BlockPosition::Latest
         } else if block.number == latest.number && block.is_partial() {
             // For a partial block at the same height, determine its position relative to latest.
             // If the latest is also a partial block, we can compare their partial indices.
@@ -286,9 +274,6 @@ impl BlockHistory {
                 }
                 _ => BlockPosition::Delayed,
             }
-        } else if (block.hash == latest.hash) & !block.revert {
-            // if the block is the latest block and it is not a revert.
-            BlockPosition::Latest
         } else if self.reverts.contains(&block.hash) {
             // if the block is still on an already reverted branch.
             BlockPosition::Delayed
@@ -567,7 +552,7 @@ mod test {
         let mut history = BlockHistory::new(blocks.clone(), 5).expect("failed to create history");
         let detached = BlockHeader {
             number: 2,
-            hash: int_hash(2),
+            hash: random_hash(),
             parent_hash: random_hash(),
             revert: true,
             ..Default::default()
@@ -612,7 +597,8 @@ mod test {
     #[case::latest(14, 13, false, BlockPosition::Latest)]
     #[case::advanced(16, 15, false, BlockPosition::Advanced)]
     #[case::delayed_in_history(12, 11, false, BlockPosition::Delayed)]
-    #[case::revert_is_next_expected(14, 13, true, BlockPosition::NextExpected)]
+    #[case::revert_below_tip_is_next_expected(13, 12, true, BlockPosition::NextExpected)]
+    #[case::revert_to_tip_is_latest(14, 13, true, BlockPosition::Latest)]
     #[case::delayed_before_history(1, 0, false, BlockPosition::Delayed)]
     fn test_determine_position(
         #[case] number: u64,
@@ -675,6 +661,42 @@ mod test {
             .expect("failed to determine position");
 
         assert_eq!(result, BlockPosition::Delayed);
+    }
+
+    /// After a revert is applied, the tip is the revert header. A lagging stream delivers the
+    /// same revert one round later. Two extractors may also report the same undo with different
+    /// dropped-partial indices. Both are the block already at the tip: Latest, and a no-op.
+    #[rstest]
+    #[case::same_dropped_index(4)]
+    #[case::lower_dropped_index(1)]
+    #[case::higher_dropped_index(7)]
+    fn test_revert_equal_to_tip_is_latest_and_noop(#[case] redelivered_idx: u32) {
+        let mut history = BlockHistory::new(generate_blocks(4, 0, None), 15).unwrap();
+        history
+            .push(partial_block(4, 0, int_hash(3)))
+            .unwrap();
+        let revert = BlockHeader {
+            number: 3,
+            hash: int_hash(3),
+            parent_hash: int_hash(2),
+            revert: true,
+            partial_block_index: Some(4),
+            ..Default::default()
+        };
+        history.push(revert.clone()).unwrap();
+        let before: Vec<BlockHeader> = history.blocks().cloned().collect();
+        assert_eq!(before.last().unwrap(), &revert);
+
+        let again = BlockHeader { partial_block_index: Some(redelivered_idx), ..revert };
+        assert_eq!(
+            history
+                .determine_block_position(&again)
+                .unwrap(),
+            BlockPosition::Latest
+        );
+        history.push(again).unwrap();
+        let after: Vec<BlockHeader> = history.blocks().cloned().collect();
+        assert_eq!(after, before, "a re-delivered revert must not change the history");
     }
 
     #[test]
@@ -967,8 +989,9 @@ mod test {
     }
 
     #[test]
-    fn test_partial_block_revert_reverts_to_last_full_block() {
-        // We keep at most one partial at the tip; partial revert pops that one block.
+    fn test_revert_pointing_at_the_tip_partial_is_a_noop() {
+        // A revert header carrying the tip partial's own hash. The indexer never sends this shape
+        // — every revert header is the last valid block — so it must not pop the tip.
         let blocks = generate_blocks(10, 0, None);
         let parent_hash = blocks.last().unwrap().hash.clone();
         let mut history = BlockHistory::new(blocks.clone(), 20).unwrap();
@@ -988,10 +1011,8 @@ mod test {
         history.push(partial_revert).unwrap();
 
         let latest = history.latest().unwrap();
-        assert_eq!(latest.number, 9);
-        assert!(!latest.is_partial());
-        assert_eq!(latest.hash, blocks[9].hash);
-        assert!(history
+        assert_eq!(latest, &partial_1);
+        assert!(!history
             .reverts
             .contains(&partial_1.hash));
     }
