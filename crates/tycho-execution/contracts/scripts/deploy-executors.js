@@ -39,6 +39,9 @@ const deploy_protocols = {
         "lido_v4",
         "etherfi",
         "fallback",
+        "fallback:rfq:metric",
+        "fallback:rfq:bebop",
+        "fallback:rfq:hashflow",
     ],
     "base": [
         "uniswap_v2",

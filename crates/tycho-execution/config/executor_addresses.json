@@ -28,7 +28,10 @@
     "sky": "0x03AD6010948Ac034c0BbF7E449217798B4504E1D",
     "lido_v4": "0xbf33aa159aF2d96f4A10937B83Da8409264A760f",
     "etherfi": "0xA96354Bb15c3914d33332C6b898f801BabE7B814",
-    "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9"
+    "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9",
+    "fallback:rfq:metric": "0x3067880b419209FC6e961F08E0cDFfC1F21d2873",
+    "fallback:rfq:bebop": "0x4dC7b66A563cEB85D3cD5998294c72ce7026894a",
+    "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
