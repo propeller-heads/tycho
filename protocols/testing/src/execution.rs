@@ -35,6 +35,7 @@ const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityPa
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 const LIDO_V4_BYTECODE_JSON: &str = include_str!("../fixtures/LidoV4.runtime.json");
+const TESSERA_BYTECODE_JSON: &str = include_str!("../fixtures/Tessera.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
 static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -63,6 +64,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("vm:tessera", TESSERA_BYTECODE_JSON);
     map
 });
 

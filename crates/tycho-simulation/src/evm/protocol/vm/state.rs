@@ -1174,6 +1174,30 @@ where
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
+        if let Some(owner) = delta
+            .updated_attributes
+            .get("balance_owner")
+        {
+            self.balance_owner = Some(bytes_to_address(owner)?);
+            self.caches.invalidate();
+        }
+        // Deltas are sparse: an upgrade can update only index 1 or 2, so do not
+        // use the snapshot loader's contiguous enumeration here.
+        for (key, address) in &delta.updated_attributes {
+            if let Some(index) = key.strip_prefix("stateless_contract_addr_") {
+                if index.parse::<usize>().is_ok() {
+                    super::utils::init_stateless_contract(
+                        &self.adapter_contract.engine,
+                        address,
+                        delta
+                            .updated_attributes
+                            .get(&format!("stateless_contract_code_{index}")),
+                    )?;
+                    self.caches.invalidate();
+                }
+            }
+        }
+
         if let Some(block_number) = delta
             .updated_attributes
             .get("override_block_number")
@@ -1421,6 +1445,171 @@ mod tests {
             .build(db)
             .await
             .expect("Failed to build pool state")
+    }
+
+    async fn tessera_fixture() -> (EVMPoolState<PreCachedDB>, PreCachedDB, Token, Token, Value) {
+        let fixture: Value =
+            serde_json::from_str(include_str!("assets/tessera_50548423.json")).unwrap();
+        let db = PreCachedDB::new().unwrap();
+        for (address, account) in fixture["accounts"].as_object().unwrap() {
+            let code = Bytecode::new_raw(
+                hex::decode(
+                    account["code"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("0x"),
+                )
+                .unwrap()
+                .into(),
+            );
+            let storage = account["storage"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(slot, value)| {
+                    (
+                        U256::from_str(slot).unwrap(),
+                        U256::from_str(value.as_str().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            db.init_account(
+                Address::from_str(address).unwrap(),
+                AccountInfo { code_hash: code.hash_slow(), code: Some(code), ..Default::default() },
+                Some(storage),
+                false,
+            )
+            .unwrap();
+        }
+        let mut tokens = Vec::new();
+        for (address, symbol, decimals) in [
+            ("0x4200000000000000000000000000000000000006", "WETH", 18),
+            ("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "USDC", 6),
+        ] {
+            let code = Bytecode::new_raw(ERC20_PROXY_BYTECODE.into());
+            db.init_account(
+                Address::from_str(address).unwrap(),
+                AccountInfo { code_hash: code.hash_slow(), code: Some(code), ..Default::default() },
+                None,
+                true,
+            )
+            .unwrap();
+            tokens.push(Token::new(
+                &Bytes::from_str(address).unwrap(),
+                symbol,
+                decimals,
+                0,
+                &[Some(10_000)],
+                Chain::Base,
+                100,
+            ));
+        }
+        db.update(
+            vec![],
+            Some(BlockHeader {
+                number: 50_548_423,
+                timestamp: u64::from_str_radix(
+                    fixture["block"]["timestamp"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap(),
+                hash: Bytes::from_str(
+                    fixture["block"]["hash"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let balances = fixture["balances"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(addr, value)| {
+                (Address::from_str(addr).unwrap(), U256::from_str(value.as_str().unwrap()).unwrap())
+            })
+            .collect();
+        let pool = EVMPoolStateBuilder::new(
+            "0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c".into(),
+            tokens
+                .iter()
+                .map(|t| t.address.clone())
+                .collect(),
+            Address::from_str("0xa2c5c98a892fd6656a7f39a2f63228c0bc846270").unwrap(),
+        )
+        .balances(balances)
+        .balance_owner(Address::from_str("0x3dbe077e7986657e95e1cc50089f17a5a4af0aae").unwrap())
+        .self_contained_tokens(
+            tokens
+                .iter()
+                .map(|t| bytes_to_address(&t.address).unwrap())
+                .collect(),
+        )
+        .adapter_contract_bytecode(Bytecode::new_raw(super::super::constants::TESSERA.into()))
+        .build(db.clone())
+        .await
+        .unwrap();
+        (pool, db, tokens[0].clone(), tokens[1].clone(), fixture)
+    }
+
+    #[tokio::test]
+    async fn test_tessera_returned_state_preserves_two_fills() {
+        let (pool, _db, weth, usdc, fixture) = tessera_fixture().await;
+        let expected = |key: &str| {
+            let bytes = hex::decode(
+                fixture[key]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("0x"),
+            )
+            .unwrap();
+            BigUint::from_bytes_be(&bytes[32..64])
+        };
+        let first = pool
+            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
+            .unwrap();
+        assert_eq!(first.amount, expected("first_quote"));
+        let second = first
+            .new_state
+            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
+            .unwrap();
+        assert_eq!(second.amount, expected("second_quote"));
+        let original_again = pool
+            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
+            .unwrap();
+        assert_eq!(
+            original_again.amount, first.amount,
+            "simulation must not mutate the original snapshot"
+        );
+        let child = first
+            .new_state
+            .as_any()
+            .downcast_ref::<EVMPoolState<PreCachedDB>>()
+            .unwrap();
+        let pair = Address::from_str(&pool.id).unwrap();
+        assert!(child.block_lasting_overwrites[&pair].contains_key(&U256::from(3)));
+    }
+
+    #[tokio::test]
+    async fn test_tessera_vm_uses_indexed_block_for_freshness() {
+        let (pool, db, weth, usdc, _) = tessera_fixture().await;
+        assert!(pool.block_overrides.is_none());
+        assert!(pool
+            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
+            .is_ok());
+        let mut block = db.get_current_block().unwrap();
+        block.number += 100;
+        db.update(vec![], Some(block)).unwrap();
+        assert!(
+            pool.get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
+                .is_err(),
+            "stale quotes must use advanced indexed block"
+        );
     }
 
     #[tokio::test]
@@ -1953,6 +2142,80 @@ mod tests {
         let caches = pool_state.caches.read();
         assert!(!caches.spot_prices.is_empty());
         assert!(!caches.limits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_loads_sparse_stateless_code() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let address = Address::from([0x73; 20]);
+        let code = vec![0x60, 0x01, 0x60, 0x00, 0x52, 0x00];
+        let delta = ProtocolStateDelta {
+            component_id: state.id.clone(),
+            updated_attributes: HashMap::from([
+                (
+                    "stateless_contract_addr_2".into(),
+                    Bytes::from(format!("{address:#x}").into_bytes()),
+                ),
+                ("stateless_contract_code_2".into(), Bytes::from(code.clone())),
+            ]),
+            deleted_attributes: HashSet::new(),
+        };
+        state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+        let account = state
+            .adapter_contract
+            .engine
+            .state
+            .basic_ref(address)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            account
+                .code
+                .unwrap()
+                .original_bytes()
+                .as_ref(),
+            code.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_rejects_non_utf8_stateless_address() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let delta = ProtocolStateDelta {
+            component_id: state.id.clone(),
+            updated_attributes: HashMap::from([
+                ("stateless_contract_addr_1".into(), Bytes::from(vec![0xff])),
+                ("stateless_contract_code_1".into(), Bytes::from(vec![0x00])),
+            ]),
+            deleted_attributes: HashSet::new(),
+        };
+        let error = state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("not UTF-8"));
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_rotates_balance_owner() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let owner = Address::from([0x74; 20]);
+        let delta = ProtocolStateDelta {
+            component_id: state.id.clone(),
+            updated_attributes: HashMap::from([(
+                "balance_owner".into(),
+                Bytes::from(owner.as_slice()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        state
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+        assert_eq!(state.get_balance_owner(), Some(owner));
     }
 
     #[tokio::test]

@@ -1,0 +1,131 @@
+specVersion: v0.1.0
+package:
+  name: "base_tessera"
+  version: v0.1.1
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-tessera"
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - tessera.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto
+  excludePaths:
+    - google
+    - tycho
+    - sf/ethereum
+    - sf/substreams
+    - sf/firehose
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_tessera.wasm
+
+network: base
+
+# Deployment addresses and storage-layout slots. Hex, no `0x` prefix.
+params:
+  map_components: &config "tesseraswap=55555522005bcae1c2424d474bfd5ed477749e3e&engine=31e99e05fee3dce580af777c3fd63ee1b3b40c17&treasury=3dbe077e7986657e95e1cc50089f17a5a4af0aae&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52"
+  map_storage_changes: *config
+  store_treasury: *config
+  store_safety: *config
+  map_relative_balances: *config
+  map_protocol_changes: *config
+
+modules:
+  - name: map_components
+    kind: map
+    initialBlock: 37518600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_components
+    kind: store
+    initialBlock: 37518600
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_components
+
+  - name: store_pairs
+    kind: store
+    initialBlock: 37518600
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_components
+
+  - name: map_storage_changes
+    kind: map
+    initialBlock: 37518600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pairs
+    output:
+      type: proto:tessera.v1.BlockStorageChanges
+
+  - name: store_treasury
+    kind: store
+    initialBlock: 37518600
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - map: map_storage_changes
+
+  - name: store_safety
+    kind: store
+    initialBlock: 37518600
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - map: map_storage_changes
+      - store: store_pairs
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 37518600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
+      - map: map_components
+      - store: store_components
+      - store: store_pairs
+      - store: store_treasury
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 37518600
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 37518600
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_storage_changes
+      - map: map_components
+      - map: map_relative_balances
+      - store: store_pairs
+      - store: store_treasury
+      - store: store_safety
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
