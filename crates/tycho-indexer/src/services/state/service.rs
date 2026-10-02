@@ -54,11 +54,11 @@ use super::{
 ///
 /// A cache mode without a cache, or `Off` with one, cannot be expressed.
 #[derive(Clone, Debug)]
-pub enum EntityCacheSetup<T> {
+pub enum EntityCacheSetup<T, S = T> {
     /// See [`EntityCacheMode::Off`](super::EntityCacheMode::Off).
     Off,
     /// See [`EntityCacheMode::Shadow`](super::EntityCacheMode::Shadow).
-    Shadow(T),
+    Shadow(S),
     /// See [`EntityCacheMode::Serve`](super::EntityCacheMode::Serve).
     Serve(T),
 }
@@ -78,6 +78,15 @@ impl<T> EntityCacheSetup<T> {
             EntityCacheSetup::Off => EntityCacheSetup::Off,
             EntityCacheSetup::Shadow(cache) => EntityCacheSetup::Shadow(f(cache)),
             EntityCacheSetup::Serve(cache) => EntityCacheSetup::Serve(f(cache)),
+        }
+    }
+
+    /// Replaces the value `Shadow` holds, keeping the mode and the value of `Serve`.
+    pub fn map_shadow<S>(self, f: impl FnOnce(T) -> S) -> EntityCacheSetup<T, S> {
+        match self {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(value) => EntityCacheSetup::Shadow(f(value)),
+            EntityCacheSetup::Serve(value) => EntityCacheSetup::Serve(value),
         }
     }
 }
@@ -152,6 +161,15 @@ pub(crate) enum StateServiceError {
     Merge(#[from] MergeError),
 }
 
+/// What a read depends on besides the request: the window of the requested system and the entity
+/// cache. A read straddles a change when the tokens taken before and after it differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StraddleToken {
+    /// `None` when the system has no window or its lock is poisoned; the read then fails anyway.
+    window_generation: Option<u64>,
+    folds: u64,
+}
+
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
 pub(crate) struct StateService {
     /// One window per protocol system, shared with the pump that writes them.
@@ -165,6 +183,37 @@ impl StateService {
         cache: Arc<EntityCache>,
     ) -> Self {
         Self { windows, cache }
+    }
+
+    /// Reads the [`StraddleToken`] of `protocol_system`.
+    pub(crate) fn straddle_token(&self, protocol_system: &str) -> StraddleToken {
+        let window_generation = self
+            .windows
+            .get(protocol_system)
+            .and_then(|window| window.lock().ok())
+            .map(|window| window.generation());
+        StraddleToken { window_generation, folds: self.cache.folds() }
+    }
+
+    /// Whether a window other than the one of `protocol_system` holds a delta for `address`: an
+    /// account that another extractor created and did not fold yet. A poisoned window counts as
+    /// not holding it.
+    pub(crate) fn other_window_holds(&self, protocol_system: &str, address: &Bytes) -> bool {
+        self.windows
+            .iter()
+            .filter(|(system, _)| system.as_str() != protocol_system)
+            .filter_map(|(_, window)| window.lock().ok())
+            .any(|window| {
+                window
+                    .blocks(None, None)
+                    .is_ok_and(|mut blocks| {
+                        blocks.any(|block| {
+                            block
+                                .account_deltas
+                                .contains_key(address)
+                        })
+                    })
+            })
     }
 
     /// Serves `/contract_state` from the cache.
@@ -439,7 +488,7 @@ mod test {
     use super::*;
     use crate::{
         extractor::models::fixtures,
-        services::state::window::{FoldSink, WindowConfig},
+        services::state::window::{new_windows, FoldSink, WindowConfig},
         testing,
     };
 
@@ -474,6 +523,56 @@ mod test {
                 .fold_evictable(self.cache.as_ref())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn straddle_token_moves_with_a_block_or_a_fold() {
+        let harness = Harness::new(2);
+        let empty = harness.service.straddle_token(SYSTEM);
+
+        harness.push(msg(1));
+        let one_block = harness.service.straddle_token(SYSTEM);
+        // A fold from another extractor can change a shared account, so it moves the token too.
+        harness
+            .cache
+            .fold(&testing::aggregated_changes("other", 7, 7, Some(7)))
+            .unwrap();
+
+        assert_ne!(empty, one_block);
+        assert_ne!(one_block, harness.service.straddle_token(SYSTEM));
+    }
+
+    #[test]
+    fn straddle_token_moves_when_the_window_lock_is_poisoned() {
+        let harness = Harness::new(2);
+        let before = harness.service.straddle_token(SYSTEM);
+        let window = harness.window.clone();
+
+        let _ = std::thread::spawn(move || {
+            let _guard = window.lock().unwrap();
+            panic!("cache path bug");
+        })
+        .join();
+
+        assert_ne!(harness.service.straddle_token(SYSTEM), before);
+    }
+
+    #[test]
+    fn other_window_holds_an_account_only_another_extractor_changed() {
+        let windows = new_windows([SYSTEM, "other"], WindowConfig::default());
+        windows["other"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(with_account(
+                testing::aggregated_changes("other", 1, 0, None),
+                account_delta(&addr(1), 1, ChangeType::Creation),
+            )))
+            .unwrap();
+        let service = StateService::new(windows, Arc::new(EntityCache::new()));
+
+        assert!(service.other_window_holds(SYSTEM, &addr(1)));
+        assert!(!service.other_window_holds("other", &addr(1)));
+        assert!(!service.other_window_holds(SYSTEM, &addr(2)));
     }
 
     /// Block `n`, finalized and committed.
