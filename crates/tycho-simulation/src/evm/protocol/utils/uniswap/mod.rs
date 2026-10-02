@@ -23,7 +23,6 @@ pub(crate) struct SwapState {
 pub(crate) struct StepComputation {
     pub(crate) sqrt_price_start: U256,
     pub(crate) tick_next: i32,
-    pub(crate) initialized: bool,
     pub(crate) sqrt_price_next: U256,
     pub(crate) amount_in_with_fee: U256,
     pub(crate) amount_out: U256,

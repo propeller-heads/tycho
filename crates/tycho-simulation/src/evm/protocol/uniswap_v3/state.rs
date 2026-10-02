@@ -164,7 +164,6 @@ impl UniswapV3State {
             };
 
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
-            let initialized = next_tick_info.is_some();
 
             let sqrt_price_start = state.sqrt_price;
             // An initialized tick stores its sqrt price, computed from the same index when the
@@ -185,7 +184,6 @@ impl UniswapV3State {
             let step = StepComputation {
                 sqrt_price_start,
                 tick_next: next_tick,
-                initialized,
                 sqrt_price_next,
                 amount_in_with_fee,
                 amount_out,
