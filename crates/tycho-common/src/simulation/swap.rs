@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt, fmt::Debug, sync::Arc};
 
+use alloy_primitives::U256;
 use itertools::Itertools;
 use num_bigint::BigUint;
 
@@ -331,6 +332,15 @@ impl Quote {
     pub fn new_state(&self) -> Option<Arc<dyn SwapQuoter>> {
         self.new_state.clone()
     }
+}
+
+/// The result of an exact-input quote in native 256-bit amounts, see
+/// [`SwapQuoter::quote_exact_in_u256`].
+#[derive(Debug, Clone)]
+pub struct QuoteU256 {
+    pub amount_out: U256,
+    pub gas: U256,
+    pub new_state: Option<Arc<dyn SwapQuoter>>,
 }
 
 /// Represents a numeric range with lower and upper bounds.
@@ -881,6 +891,41 @@ pub trait SwapQuoter: fmt::Debug + Send + Sync + 'static {
     /// Returns an error if a quote cannot be produced for the given parameters (e.g. the
     /// pair is not quotable, required inputs are missing, or the quote is undefined).
     fn quote(&self, params: QuoteParams) -> SimulationResult<Quote>;
+
+    /// Quotes selling `amount_in` of `token_in` for `token_out`, with 256-bit amounts in and out.
+    ///
+    /// Answers like [`quote`](Self::quote) with a fixed-input [`QuoteParams`] whose context is
+    /// the default, and builds the post-swap state only when `with_state`. A quoter whose maths
+    /// runs on 256-bit integers overrides this to skip the [`BigUint`] conversions on both sides.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`quote`](Self::quote), and [`SimulationError::InvalidInput`] when the default
+    /// implementation gets an amount out that does not fit 256 bits.
+    fn quote_exact_in_u256(
+        &self,
+        token_in: &TokenAddress,
+        token_out: &TokenAddress,
+        amount_in: U256,
+        with_state: bool,
+    ) -> SimulationResult<QuoteU256> {
+        let amount_in = BigUint::from_bytes_be(&amount_in.to_be_bytes::<32>());
+        let params = QuoteParams::fixed_in(token_in, token_out, amount_in)?;
+        let quote = self.quote(if with_state { params.with_new_state() } else { params })?;
+        let to_u256 = |value: &BigUint| {
+            let bytes = value.to_bytes_be();
+            (bytes.len() <= 32)
+                .then(|| U256::from_be_slice(&bytes))
+                .ok_or_else(|| {
+                    SimulationError::InvalidInput("quote does not fit 256 bits".to_string(), None)
+                })
+        };
+        Ok(QuoteU256 {
+            amount_out: to_u256(quote.amount_out())?,
+            gas: to_u256(quote.gas())?,
+            new_state: quote.new_state(),
+        })
+    }
 
     /// Returns the valid execution limits for a prospective quote
     ///

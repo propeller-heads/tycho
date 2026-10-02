@@ -325,7 +325,7 @@ impl ProtocolSim for UniswapV3State {
         token_b: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let (amount_out, gas, new_state) =
-            self.quote_exact_in(&amount_in, &token_a.address, &token_b.address, true)?;
+            self.quote_exact_in_biguint(&amount_in, &token_a.address, &token_b.address, true)?;
         let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
         Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
@@ -617,19 +617,16 @@ impl NativeQuote for UniswapV3State {
 
     fn quote_exact_in(
         &self,
-        amount_in: &BigUint,
+        amount_in: U256,
         token_in: &Bytes,
         token_out: &Bytes,
         with_state: bool,
-    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+    ) -> SimulationResult<(U256, U256, Option<Self>)> {
         let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Positive,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
+        let amount_specified = I256::checked_from_sign_and_abs(Sign::Positive, amount_in)
+            .ok_or_else(|| {
+                SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+            })?;
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
@@ -637,13 +634,11 @@ impl NativeQuote for UniswapV3State {
         let new_state =
             with_state.then(|| self.after_swap(result.sqrt_price, result.tick, result.liquidity));
         Ok((
-            u256_to_biguint(
-                result
-                    .amount_calculated
-                    .abs()
-                    .into_raw(),
-            ),
-            u256_to_biguint(result.gas_used),
+            result
+                .amount_calculated
+                .abs()
+                .into_raw(),
+            result.gas_used,
             new_state,
         ))
     }

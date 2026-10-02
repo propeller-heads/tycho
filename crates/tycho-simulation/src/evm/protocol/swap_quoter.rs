@@ -6,6 +6,7 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
+use alloy::primitives::U256;
 use num_bigint::BigUint;
 use tycho_common::{
     models::{protocol::ProtocolComponent, token::Token},
@@ -19,6 +20,8 @@ use tycho_common::{
     },
     Bytes,
 };
+
+use crate::evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint};
 
 /// The component a [`SwapQuoter`] describes its pool with.
 pub type QuoterComponent = ProtocolComponent<Arc<Token>>;
@@ -125,11 +128,28 @@ pub(crate) trait NativeQuote: ProtocolSim + Clone {
     /// state the swap leaves, built only when `with_state`.
     fn quote_exact_in(
         &self,
+        amount_in: U256,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(U256, U256, Option<Self>)>;
+
+    /// [`quote_exact_in`](Self::quote_exact_in) for a [`BigUint`] amount, with [`BigUint`] results.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `amount_in` exceeds 256 bits.
+    fn quote_exact_in_biguint(
+        &self,
         amount_in: &BigUint,
         token_in: &Bytes,
         token_out: &Bytes,
         with_state: bool,
-    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)>;
+    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+        let (amount_out, gas, new_state) =
+            self.quote_exact_in(biguint_to_u256(amount_in), token_in, token_out, with_state)?;
+        Ok((u256_to_biguint(amount_out), u256_to_biguint(gas), new_state))
+    }
 }
 
 /// Implements [`SwapQuoter`] for a [`NativeQuote`] state. A macro rather than a generic impl,
@@ -181,7 +201,7 @@ macro_rules! impl_native_swap_quoter {
                 tycho_common::simulation::swap::Quote,
             > {
                 let (amount_out, gas, new_state) =
-                    $crate::evm::protocol::swap_quoter::NativeQuote::quote_exact_in(
+                    $crate::evm::protocol::swap_quoter::NativeQuote::quote_exact_in_biguint(
                         self,
                         $crate::evm::protocol::swap_quoter::exact_input(&params)?,
                         params.token_in(),
@@ -196,6 +216,29 @@ macro_rules! impl_native_swap_quoter {
                             as std::sync::Arc<dyn tycho_common::simulation::swap::SwapQuoter>
                     }),
                 ))
+            }
+
+            fn quote_exact_in_u256(
+                &self,
+                token_in: &tycho_common::simulation::swap::TokenAddress,
+                token_out: &tycho_common::simulation::swap::TokenAddress,
+                amount_in: alloy::primitives::U256,
+                with_state: bool,
+            ) -> tycho_common::simulation::swap::SimulationResult<
+                tycho_common::simulation::swap::QuoteU256,
+            > {
+                let (amount_out, gas, new_state) =
+                    $crate::evm::protocol::swap_quoter::NativeQuote::quote_exact_in(
+                        self, amount_in, token_in, token_out, with_state,
+                    )?;
+                Ok(tycho_common::simulation::swap::QuoteU256 {
+                    amount_out,
+                    gas,
+                    new_state: new_state.map(|state| {
+                        std::sync::Arc::new(state)
+                            as std::sync::Arc<dyn tycho_common::simulation::swap::SwapQuoter>
+                    }),
+                })
             }
 
             fn swap_limits(
@@ -499,6 +542,25 @@ pub(crate) mod tests {
                         assert_eq!(without_state.amount_out(), &expected.amount);
                         assert_eq!(without_state.gas(), &expected.gas);
                         assert!(without_state.new_state().is_none());
+
+                        let native = quoter
+                            .quote_exact_in_u256(
+                                &token_in.address,
+                                &token_out.address,
+                                biguint_to_u256(amount),
+                                true,
+                            )
+                            .unwrap();
+                        assert_eq!(u256_to_biguint(native.amount_out), expected.amount);
+                        assert_eq!(u256_to_biguint(native.gas), expected.gas);
+                        #[allow(deprecated)]
+                        let native_state = native
+                            .new_state
+                            .unwrap()
+                            .to_protocol_sim();
+                        assert!(expected
+                            .new_state
+                            .eq(native_state.as_ref()));
 
                         let with_state = with_state.unwrap();
                         assert_eq!(with_state.amount_out(), &expected.amount);
