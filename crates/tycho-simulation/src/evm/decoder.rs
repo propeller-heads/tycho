@@ -63,6 +63,9 @@ struct DecoderState {
     // again TODO: handle more gracefully inside tycho-client. We could fetch the snapshot and
     // try to decode it again.
     failed_components: HashSet<String>,
+    // The failed components whose stored state was kept. A component that fails on its snapshot
+    // never stores one, so this stays small while `failed_components` can hold thousands.
+    failed_components_with_state: HashSet<String>,
     // The block number of the last confirmed block decoded via `decode()`.
     current_block_number: u64,
 }
@@ -174,17 +177,24 @@ where
         for state in updated_states.values_mut() {
             state.apply_block(execution_block);
         }
-        for (id, state) in stored_states.iter_mut() {
-            if failed_components.contains(id) ||
-                removed_components.contains_key(id) ||
-                updated_states.contains_key(id)
-            {
-                continue;
+        // A message touches few components, so setting the skipped ones aside costs a few hashes
+        // where testing every stored id against three sets costs thousands.
+        let mut set_aside = Vec::new();
+        for id in failed_components
+            .iter()
+            .chain(removed_components.keys())
+            .chain(updated_states.keys())
+        {
+            if let Some(entry) = stored_states.remove_entry(id) {
+                set_aside.push(entry);
             }
+        }
+        for (id, state) in stored_states.iter_mut() {
             if state.apply_block(execution_block) {
                 updated_states.insert(id.clone(), state.clone_box());
             }
         }
+        stored_states.extend(set_aside);
     }
 
     /// Registers `provider` as the live override source for `protocol_system`.
@@ -1009,6 +1019,13 @@ where
         let mut state_guard = self.state.write().await;
 
         // Update failed components with any new ones
+        for id in &msg_failed_components {
+            if state_guard.states.contains_key(id) {
+                state_guard
+                    .failed_components_with_state
+                    .insert(id.clone());
+            }
+        }
         state_guard
             .failed_components
             .extend(msg_failed_components);
@@ -1033,7 +1050,7 @@ where
             Self::refresh_execution_block(
                 &mut updated_states,
                 &mut decoder_state.states,
-                &decoder_state.failed_components,
+                &decoder_state.failed_components_with_state,
                 &removed_pairs,
                 &execution_block,
             );
