@@ -14,6 +14,7 @@ use tycho_common::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
         },
+        swap::SimulationResult,
     },
     Bytes,
 };
@@ -22,6 +23,7 @@ use super::fee_tier::{fee_serde, FeeTier};
 use crate::evm::protocol::{
     clmm::clmm_swap_to_price,
     safe_math::{safe_add_u256, safe_sub_u256},
+    swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
     u256_num::u256_to_biguint,
     utils::{
         add_fee_markup,
@@ -71,6 +73,8 @@ pub struct UniswapV3State {
     /// new one, and any other code that changes those fields must too.
     #[serde(skip)]
     step_cache: SwapStepCache,
+    #[serde(skip)]
+    component: AttachedComponent,
 }
 
 impl UniswapV3State {
@@ -102,7 +106,14 @@ impl UniswapV3State {
             tick,
             ticks: Arc::new(tick_list),
             step_cache: SwapStepCache::default(),
+            component: AttachedComponent::default(),
         })
+    }
+
+    /// This state with `component` attached, so it quotes through [`SwapQuoter`].
+    pub(crate) fn with_component(mut self, component: AttachedComponent) -> Self {
+        self.component = component;
+        self
     }
 
     /// A clone of this state at the price, tick and liquidity a swap ended at, with an empty step
@@ -304,7 +315,7 @@ impl ProtocolSim for UniswapV3State {
         } else {
             1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
         };
-        Ok(add_fee_markup(price, self.fee()))
+        Ok(add_fee_markup(price, ProtocolSim::fee(self)))
     }
 
     fn get_amount_out(
@@ -313,30 +324,10 @@ impl ProtocolSim for UniswapV3State {
         token_a: &Token,
         token_b: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_a < token_b;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Positive,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
-
-        let result = self.swap(zero_for_one, amount_specified, None)?;
-
-        trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "V3 SWAP");
-        let new_state = self.after_swap(result.sqrt_price, result.tick, result.liquidity);
-
-        Ok(GetAmountOutResult::new(
-            u256_to_biguint(
-                result
-                    .amount_calculated
-                    .abs()
-                    .into_raw(),
-            ),
-            u256_to_biguint(result.gas_used),
-            Box::new(new_state),
-        ))
+        let (amount_out, gas, new_state) =
+            self.quote_exact_in(&amount_in, &token_a.address, &token_b.address, true)?;
+        let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
+        Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
 
     fn get_limits(
@@ -593,6 +584,12 @@ impl ProtocolSim for UniswapV3State {
         self
     }
 
+    fn as_swap_quoter(&self) -> Option<&dyn tycho_common::simulation::swap::SwapQuoter> {
+        self.component
+            .is_attached()
+            .then_some(self as &dyn tycho_common::simulation::swap::SwapQuoter)
+    }
+
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         if let Some(other_state) = other
             .as_any()
@@ -608,6 +605,51 @@ impl ProtocolSim for UniswapV3State {
         }
     }
 }
+
+impl NativeQuote for UniswapV3State {
+    fn attached_component(&self) -> &AttachedComponent {
+        &self.component
+    }
+
+    fn swap_fee(&self, _zero_for_one: bool) -> f64 {
+        ProtocolSim::fee(self)
+    }
+
+    fn quote_exact_in(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+        let zero_for_one = token_in < token_out;
+        let amount_specified = I256::checked_from_sign_and_abs(
+            Sign::Positive,
+            U256::from_be_slice(&amount_in.to_bytes_be()),
+        )
+        .ok_or_else(|| {
+            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+        })?;
+
+        let result = self.swap(zero_for_one, amount_specified, None)?;
+
+        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V3 SWAP");
+        let new_state =
+            with_state.then(|| self.after_swap(result.sqrt_price, result.tick, result.liquidity));
+        Ok((
+            u256_to_biguint(
+                result
+                    .amount_calculated
+                    .abs()
+                    .into_raw(),
+            ),
+            u256_to_biguint(result.gas_used),
+            new_state,
+        ))
+    }
+}
+
+impl_native_swap_quoter!(UniswapV3State);
 
 #[cfg(test)]
 mod tests {

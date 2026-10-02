@@ -8,6 +8,7 @@ use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, 
 use super::state::UniswapV4State;
 use crate::{
     evm::protocol::{
+        swap_quoter::AttachedComponent,
         uniswap_v4::{
             hooks::{
                 hook_handler_creator::{instantiate_hook_handler, HookCreationParams},
@@ -174,6 +175,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 );
                 InvalidSnapshotError::ValueError(err.to_string())
             })?;
+        state.set_component(AttachedComponent::from_snapshot(&snapshot.component, all_tokens));
 
         // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
         // about whether the pool has a hook: the zero address is what "no hook" looks like on the

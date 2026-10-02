@@ -20,6 +20,7 @@ pub mod ring_swap_v2;
 pub mod rocketpool;
 pub mod safe_math;
 pub mod sky;
+pub mod swap_quoter;
 pub mod u256_num;
 pub mod uniswap_v2;
 pub mod uniswap_v3;

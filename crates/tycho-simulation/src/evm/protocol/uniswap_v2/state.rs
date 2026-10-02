@@ -13,6 +13,7 @@ use tycho_common::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
         },
+        swap::SimulationResult,
     },
     Bytes,
 };
@@ -23,6 +24,7 @@ use crate::evm::protocol::{
         cpmm_swap_to_price, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
+    swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
     u256_num::{biguint_to_u256, u256_to_biguint},
     utils::add_fee_markup,
 };
@@ -36,6 +38,8 @@ const FEE_NUMERATOR: U256 = U256::from_limbs([9970, 0, 0, 0]);
 pub struct UniswapV2State {
     pub reserve0: U256,
     pub reserve1: U256,
+    #[serde(skip)]
+    component: AttachedComponent,
 }
 
 impl UniswapV2State {
@@ -46,7 +50,13 @@ impl UniswapV2State {
     /// * `reserve0` - Reserve of token 0.
     /// * `reserve1` - Reserve of token 1.
     pub fn new(reserve0: U256, reserve1: U256) -> Self {
-        UniswapV2State { reserve0, reserve1 }
+        UniswapV2State { reserve0, reserve1, component: AttachedComponent::default() }
+    }
+
+    /// This state with `component` attached, so it quotes through [`SwapQuoter`].
+    pub(crate) fn with_component(mut self, component: AttachedComponent) -> Self {
+        self.component = component;
+        self
     }
 }
 
@@ -58,7 +68,7 @@ impl ProtocolSim for UniswapV2State {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let price = cpmm_spot_price(base, quote, self.reserve0, self.reserve1)?;
-        Ok(add_fee_markup(price, self.fee()))
+        Ok(add_fee_markup(price, ProtocolSim::fee(self)))
     }
 
     fn get_amount_out(
@@ -67,26 +77,10 @@ impl ProtocolSim for UniswapV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
-        let zero2one = token_in.address < token_out.address;
-        let (reserve_in, reserve_out) =
-            if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
-        let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
-        let amount_out = cpmm_get_amount_out(amount_in, reserve_in, reserve_out, fee)?;
-        let mut new_state = self.clone();
-        let (reserve0_mut, reserve1_mut) = (&mut new_state.reserve0, &mut new_state.reserve1);
-        if zero2one {
-            *reserve0_mut = safe_add_u256(self.reserve0, amount_in)?;
-            *reserve1_mut = safe_sub_u256(self.reserve1, amount_out)?;
-        } else {
-            *reserve0_mut = safe_sub_u256(self.reserve0, amount_out)?;
-            *reserve1_mut = safe_add_u256(self.reserve1, amount_in)?;
-        };
-        Ok(GetAmountOutResult::new(
-            u256_to_biguint(amount_out),
-            BigUint::from(SWAP_BASE_GAS),
-            Box::new(new_state),
-        ))
+        let (amount_out, gas, new_state) =
+            self.quote_exact_in(&amount_in, &token_in.address, &token_out.address, true)?;
+        let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
+        Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
 
     fn get_limits(
@@ -157,18 +151,65 @@ impl ProtocolSim for UniswapV2State {
         self
     }
 
+    fn as_swap_quoter(&self) -> Option<&dyn tycho_common::simulation::swap::SwapQuoter> {
+        self.component
+            .is_attached()
+            .then_some(self as &dyn tycho_common::simulation::swap::SwapQuoter)
+    }
+
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         if let Some(other_state) = other.as_any().downcast_ref::<Self>() {
             let (self_reserve0, self_reserve1) = (self.reserve0, self.reserve1);
             let (other_reserve0, other_reserve1) = (other_state.reserve0, other_state.reserve1);
             self_reserve0 == other_reserve0 &&
                 self_reserve1 == other_reserve1 &&
-                self.fee() == other_state.fee()
+                ProtocolSim::fee(self) == ProtocolSim::fee(other_state)
         } else {
             false
         }
     }
 }
+
+impl NativeQuote for UniswapV2State {
+    fn attached_component(&self) -> &AttachedComponent {
+        &self.component
+    }
+
+    fn swap_fee(&self, _zero_for_one: bool) -> f64 {
+        ProtocolSim::fee(self)
+    }
+
+    fn quote_exact_in(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+        let amount_in = biguint_to_u256(amount_in);
+        let zero2one = token_in < token_out;
+        let (reserve_in, reserve_out) =
+            if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
+        let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
+        let amount_out = cpmm_get_amount_out(amount_in, reserve_in, reserve_out, fee)?;
+        let new_state = if with_state {
+            let mut new_state = self.clone();
+            if zero2one {
+                new_state.reserve0 = safe_add_u256(self.reserve0, amount_in)?;
+                new_state.reserve1 = safe_sub_u256(self.reserve1, amount_out)?;
+            } else {
+                new_state.reserve0 = safe_sub_u256(self.reserve0, amount_out)?;
+                new_state.reserve1 = safe_add_u256(self.reserve1, amount_in)?;
+            }
+            Some(new_state)
+        } else {
+            None
+        };
+        Ok((u256_to_biguint(amount_out), BigUint::from(SWAP_BASE_GAS), new_state))
+    }
+}
+
+impl_native_swap_quoter!(UniswapV2State);
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,7 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     evm::protocol::{
         cpmm::protocol::cpmm_try_from_with_header, pancakeswap_v2::state::PancakeswapV2State,
+        swap_quoter::AttachedComponent,
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -22,11 +23,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapV2State {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
+        let component = AttachedComponent::from_snapshot(&snapshot.component, all_tokens);
         let (reserve0, reserve1) = cpmm_try_from_with_header(snapshot)?;
-        Ok(Self::new(reserve0, reserve1))
+        Ok(Self::new(reserve0, reserve1).with_component(component))
     }
 }
 

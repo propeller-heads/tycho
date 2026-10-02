@@ -6,7 +6,10 @@ use tycho_common::{models::token::Token, Bytes};
 
 use super::{enums::FeeAmount, fee_tier::FeeTier, state::UniswapV3State};
 use crate::{
-    evm::protocol::utils::uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
+    evm::protocol::{
+        swap_quoter::AttachedComponent,
+        utils::uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
+    },
     protocol::{
         errors::InvalidSnapshotError,
         models::{DecoderContext, TryFromWithBlock},
@@ -23,7 +26,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
         snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        _all_tokens: &HashMap<Bytes, Token>,
+        all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
         let liq = snapshot
@@ -118,7 +121,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
 
         ticks.sort_by_key(|tick| tick.index);
 
+        let component = AttachedComponent::from_snapshot(&snapshot.component, all_tokens);
         UniswapV3State::new(liquidity, sqrt_price, fee, tick, ticks)
+            .map(|state| state.with_component(component))
             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }

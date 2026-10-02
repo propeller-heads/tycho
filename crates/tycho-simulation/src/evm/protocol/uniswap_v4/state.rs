@@ -14,6 +14,7 @@ use tycho_common::{
             Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
         },
+        swap::SimulationResult,
     },
     Bytes,
 };
@@ -24,6 +25,7 @@ use crate::{
         protocol::{
             clmm::clmm_swap_to_price,
             safe_math::{safe_add_u256, safe_sub_u256},
+            swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
             u256_num::{u256_to_biguint, u256_to_f64},
             uniswap_v4::hooks::{
                 hook_handler::HookHandler,
@@ -100,6 +102,7 @@ pub struct UniswapV4State {
     /// state's price, tick, liquidity, fees and ticks: `delta_transition` and `after_swap` start a
     /// new one, and any other code that changes those fields must too.
     step_cache: SwapStepCache,
+    component: AttachedComponent,
 }
 
 impl_non_serializable_protocol!(UniswapV4State, "not supported due vm state deps");
@@ -192,7 +195,13 @@ impl UniswapV4State {
             hook: None,
             pending_overrides: None,
             step_cache: SwapStepCache::default(),
+            component: AttachedComponent::default(),
         })
+    }
+
+    /// Attaches `component`, so a hookless state quotes through [`SwapQuoter`].
+    pub(crate) fn set_component(&mut self, component: AttachedComponent) {
+        self.component = component;
     }
 
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
@@ -639,175 +648,10 @@ impl ProtocolSim for UniswapV4State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Negative,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
-
-        let mut amount_to_swap = amount_specified;
-        let mut lp_fee_override: Option<u32> = None;
-        let mut before_swap_gas = 0u64;
-        let mut after_swap_gas = 0u64;
-        let mut before_swap_delta = BeforeSwapDelta(I256::ZERO);
-        let mut storage_overwrites = None;
-
-        let token_in_address = Address::from_slice(&token_in.address);
-        let token_out_address = Address::from_slice(&token_out.address);
-
-        let state_context = StateContext {
-            currency_0: if zero_for_one { token_in_address } else { token_out_address },
-            currency_1: if zero_for_one { token_out_address } else { token_in_address },
-            fees: self.fees.clone(),
-            tick_spacing: self.tick_spacing,
-        };
-
-        let swap_params = SwapParams {
-            zero_for_one,
-            amount_specified: amount_to_swap,
-            sqrt_price_limit: self.sqrt_price,
-        };
-
-        // Check if hook is set and has before_swap permissions
-        if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::BeforeSwap) {
-                let before_swap_params = BeforeSwapParameters {
-                    context: state_context.clone(),
-                    sender: *EXTERNAL_ACCOUNT,
-                    swap_params: swap_params.clone(),
-                    hook_data: Bytes::new(),
-                };
-
-                let before_swap_result = hook
-                    .before_swap(before_swap_params, None, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "BeforeSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
-
-                before_swap_gas = before_swap_result.gas_estimate;
-                before_swap_delta = before_swap_result.result.amount_delta;
-                storage_overwrites = Some(before_swap_result.result.overwrites);
-
-                // Convert amountDelta to amountToSwap as per Uniswap V4 spec
-                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/Hooks.sol#L270
-                if before_swap_delta.as_i256() != I256::ZERO {
-                    amount_to_swap += I256::from(before_swap_delta.get_specified_delta());
-                    if amount_to_swap > I256::ZERO {
-                        return Err(SimulationError::FatalError(
-                            "Hook delta exceeds swap amount".into(),
-                        ));
-                    }
-                }
-
-                // Set LP fee override if provided by hook
-                // The fee returned by beforeSwap may have the override flag (bit 22) set,
-                // which needs to be removed before using the fee value.
-                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/LPFeeLibrary.sol
-                let hook_fee = before_swap_result
-                    .result
-                    .fee
-                    .to::<u32>();
-                if hook_fee != 0 {
-                    // Remove the override flag (bit 22) as per LPFeeLibrary.sol
-                    let cleaned_fee = lp_fee::remove_override_flag(hook_fee);
-
-                    // Validate the fee doesn't exceed MAX_LP_FEE (1,000,000 pips = 100%)
-                    if !lp_fee::is_valid(cleaned_fee) {
-                        return Err(SimulationError::FatalError(format!(
-                            "LP fee override {} exceeds maximum {} pips",
-                            cleaned_fee,
-                            lp_fee::MAX_LP_FEE
-                        )));
-                    }
-
-                    lp_fee_override = Some(cleaned_fee);
-                }
-            }
-        }
-
-        // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
-
-        // Create BalanceDelta from swap result using the proper constructor
-        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
-
-        // Get deltas (change in the specified/given and unspecified/computed token balances after
-        // calling before swap)
-        let hook_delta_specified = before_swap_delta.get_specified_delta();
-        let mut hook_delta_unspecified = before_swap_delta.get_unspecified_delta();
-
-        if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::AfterSwap) {
-                let after_swap_params = AfterSwapParameters {
-                    context: state_context,
-                    sender: *EXTERNAL_ACCOUNT,
-                    swap_params,
-                    delta: swap_delta,
-                    hook_data: Bytes::new(),
-                };
-
-                let after_swap_result = hook
-                    .after_swap(after_swap_params, storage_overwrites, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "AfterSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
-                after_swap_gas = after_swap_result.gas_estimate;
-                // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
-                // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
-                // permission the PoolManager discards the return value, so the hook still costs
-                // gas but cannot move the swapper's balance.
-                if has_permission(hook.address(), HookOptions::AfterSwapReturnsDelta) {
-                    hook_delta_unspecified += after_swap_result.result;
-                }
-            }
-        }
-
-        // Replicates the behaviour of the Hooks library wrapper of the afterSwap method:
-        // https://github.com/Uniswap/v4-core/blob/59d3ecf53afa9264a16bba0e38f4c5d2231f80bc/src/libraries/Hooks.sol
-        if (hook_delta_specified != I128::ZERO) || (hook_delta_unspecified != I128::ZERO) {
-            let hook_delta = if (amount_specified < I256::ZERO) == zero_for_one {
-                BalanceDelta::new(hook_delta_specified, hook_delta_unspecified)
-            } else {
-                BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
-            };
-            // This is a BalanceDelta subtraction
-            swap_delta = swap_delta - hook_delta
-        }
-
-        let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
-            swap_delta.amount1()
-        } else {
-            swap_delta.amount0()
-        };
-
-        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
-        let new_state = self.after_swap(result.sqrt_price, result.tick, result.liquidity);
-
-        // Add hook gas costs to baseline swap cost.
-        // before_swap_gas / after_swap_gas capture the hook contract's internal
-        // logic (from VM simulation). PM_PER_HOOK_CALL_OVERHEAD accounts for the
-        // PoolManager's Hooks.sol dispatch wrapper that is not captured by either
-        // the native swap constants or the VM simulation.
-        let mut hook_overhead = before_swap_gas + after_swap_gas;
-        if before_swap_gas > 0 {
-            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
-        }
-        if after_swap_gas > 0 {
-            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
-        }
-        let total_gas_used = result.gas_used + U256::from(hook_overhead);
-        Ok(GetAmountOutResult::new(
-            u256_to_biguint(U256::from(amount_out.abs())),
-            u256_to_biguint(total_gas_used),
-            Box::new(new_state),
-        ))
+        let (amount_out, gas, new_state) =
+            self.quote_exact_in(&amount_in, &token_in.address, &token_out.address, true)?;
+        let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
+        Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
 
     fn get_limits(
@@ -1114,6 +958,11 @@ impl ProtocolSim for UniswapV4State {
         self
     }
 
+    fn as_swap_quoter(&self) -> Option<&dyn tycho_common::simulation::swap::SwapQuoter> {
+        (self.hook.is_none() && self.component.is_attached())
+            .then_some(self as &dyn tycho_common::simulation::swap::SwapQuoter)
+    }
+
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         if let Some(other_state) = other
             .as_any()
@@ -1129,6 +978,201 @@ impl ProtocolSim for UniswapV4State {
         }
     }
 }
+
+/// Answers for hookless pools only: [`ProtocolSim::as_swap_quoter`] hands out no state with a
+/// hook.
+impl NativeQuote for UniswapV4State {
+    fn attached_component(&self) -> &AttachedComponent {
+        &self.component
+    }
+
+    fn swap_fee(&self, zero_for_one: bool) -> f64 {
+        self.fees
+            .calculate_swap_fees_pips(zero_for_one, None) as f64 /
+            1_000_000.0
+    }
+
+    fn quote_exact_in(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+        let zero_for_one = token_in < token_out;
+        let amount_specified = I256::checked_from_sign_and_abs(
+            Sign::Negative,
+            U256::from_be_slice(&amount_in.to_bytes_be()),
+        )
+        .ok_or_else(|| {
+            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+        })?;
+
+        let mut amount_to_swap = amount_specified;
+        let mut lp_fee_override: Option<u32> = None;
+        let mut before_swap_gas = 0u64;
+        let mut after_swap_gas = 0u64;
+        let mut before_swap_delta = BeforeSwapDelta(I256::ZERO);
+        let mut storage_overwrites = None;
+
+        let token_in_address = Address::from_slice(token_in);
+        let token_out_address = Address::from_slice(token_out);
+
+        let state_context = StateContext {
+            currency_0: if zero_for_one { token_in_address } else { token_out_address },
+            currency_1: if zero_for_one { token_out_address } else { token_in_address },
+            fees: self.fees.clone(),
+            tick_spacing: self.tick_spacing,
+        };
+
+        let swap_params = SwapParams {
+            zero_for_one,
+            amount_specified: amount_to_swap,
+            sqrt_price_limit: self.sqrt_price,
+        };
+
+        // Check if hook is set and has before_swap permissions
+        if let Some(ref hook) = self.hook {
+            if has_permission(hook.address(), HookOptions::BeforeSwap) {
+                let before_swap_params = BeforeSwapParameters {
+                    context: state_context.clone(),
+                    sender: *EXTERNAL_ACCOUNT,
+                    swap_params: swap_params.clone(),
+                    hook_data: Bytes::new(),
+                };
+
+                let before_swap_result = hook
+                    .before_swap(before_swap_params, None, None)
+                    .map_err(|e| {
+                        SimulationError::FatalError(format!(
+                            "BeforeSwap hook simulation failed: {e:?}"
+                        ))
+                    })?;
+
+                before_swap_gas = before_swap_result.gas_estimate;
+                before_swap_delta = before_swap_result.result.amount_delta;
+                storage_overwrites = Some(before_swap_result.result.overwrites);
+
+                // Convert amountDelta to amountToSwap as per Uniswap V4 spec
+                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/Hooks.sol#L270
+                if before_swap_delta.as_i256() != I256::ZERO {
+                    amount_to_swap += I256::from(before_swap_delta.get_specified_delta());
+                    if amount_to_swap > I256::ZERO {
+                        return Err(SimulationError::FatalError(
+                            "Hook delta exceeds swap amount".into(),
+                        ));
+                    }
+                }
+
+                // Set LP fee override if provided by hook
+                // The fee returned by beforeSwap may have the override flag (bit 22) set,
+                // which needs to be removed before using the fee value.
+                // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/LPFeeLibrary.sol
+                let hook_fee = before_swap_result
+                    .result
+                    .fee
+                    .to::<u32>();
+                if hook_fee != 0 {
+                    // Remove the override flag (bit 22) as per LPFeeLibrary.sol
+                    let cleaned_fee = lp_fee::remove_override_flag(hook_fee);
+
+                    // Validate the fee doesn't exceed MAX_LP_FEE (1,000,000 pips = 100%)
+                    if !lp_fee::is_valid(cleaned_fee) {
+                        return Err(SimulationError::FatalError(format!(
+                            "LP fee override {} exceeds maximum {} pips",
+                            cleaned_fee,
+                            lp_fee::MAX_LP_FEE
+                        )));
+                    }
+
+                    lp_fee_override = Some(cleaned_fee);
+                }
+            }
+        }
+
+        // Perform the swap with potential hook modifications
+        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
+
+        // Create BalanceDelta from swap result using the proper constructor
+        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
+
+        // Get deltas (change in the specified/given and unspecified/computed token balances after
+        // calling before swap)
+        let hook_delta_specified = before_swap_delta.get_specified_delta();
+        let mut hook_delta_unspecified = before_swap_delta.get_unspecified_delta();
+
+        if let Some(ref hook) = self.hook {
+            if has_permission(hook.address(), HookOptions::AfterSwap) {
+                let after_swap_params = AfterSwapParameters {
+                    context: state_context,
+                    sender: *EXTERNAL_ACCOUNT,
+                    swap_params,
+                    delta: swap_delta,
+                    hook_data: Bytes::new(),
+                };
+
+                let after_swap_result = hook
+                    .after_swap(after_swap_params, storage_overwrites, None)
+                    .map_err(|e| {
+                        SimulationError::FatalError(format!(
+                            "AfterSwap hook simulation failed: {e:?}"
+                        ))
+                    })?;
+                after_swap_gas = after_swap_result.gas_estimate;
+                // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
+                // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
+                // permission the PoolManager discards the return value, so the hook still costs
+                // gas but cannot move the swapper's balance.
+                if has_permission(hook.address(), HookOptions::AfterSwapReturnsDelta) {
+                    hook_delta_unspecified += after_swap_result.result;
+                }
+            }
+        }
+
+        // Replicates the behaviour of the Hooks library wrapper of the afterSwap method:
+        // https://github.com/Uniswap/v4-core/blob/59d3ecf53afa9264a16bba0e38f4c5d2231f80bc/src/libraries/Hooks.sol
+        if (hook_delta_specified != I128::ZERO) || (hook_delta_unspecified != I128::ZERO) {
+            let hook_delta = if (amount_specified < I256::ZERO) == zero_for_one {
+                BalanceDelta::new(hook_delta_specified, hook_delta_unspecified)
+            } else {
+                BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
+            };
+            // This is a BalanceDelta subtraction
+            swap_delta = swap_delta - hook_delta
+        }
+
+        let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
+            swap_delta.amount1()
+        } else {
+            swap_delta.amount0()
+        };
+
+        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
+        let new_state =
+            with_state.then(|| self.after_swap(result.sqrt_price, result.tick, result.liquidity));
+
+        // Add hook gas costs to baseline swap cost.
+        // before_swap_gas / after_swap_gas capture the hook contract's internal
+        // logic (from VM simulation). PM_PER_HOOK_CALL_OVERHEAD accounts for the
+        // PoolManager's Hooks.sol dispatch wrapper that is not captured by either
+        // the native swap constants or the VM simulation.
+        let mut hook_overhead = before_swap_gas + after_swap_gas;
+        if before_swap_gas > 0 {
+            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
+        }
+        if after_swap_gas > 0 {
+            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
+        }
+        let total_gas_used = result.gas_used + U256::from(hook_overhead);
+        Ok((
+            u256_to_biguint(U256::from(amount_out.abs())),
+            u256_to_biguint(total_gas_used),
+            new_state,
+        ))
+    }
+}
+
+impl_native_swap_quoter!(UniswapV4State);
 
 #[cfg(test)]
 mod tests {
