@@ -50,13 +50,49 @@ pub fn get_amount_out(
     let y_new = _get_y(x0, xy, reserve_out)?;
     let y_diff = safe_sub_u256(reserve_out, y_new)?;
     let decimals_out_scale = U256::from(10u128.pow(decimals_out as u32));
-    let amount_out = safe_div_u256(safe_mul_u256(y_diff, decimals_out_scale)?, E18)?;
+    let amount_out = div_by_e18(safe_mul_u256(y_diff, decimals_out_scale)?);
 
     Ok(amount_out)
 }
 
 /// 1e18, the fixed-point scale of the Solidly invariant.
 const E18: U256 = U256::from_limbs([1_000_000_000_000_000_000u64, 0, 0, 0]);
+
+/// `1e18 = 2^18 * 5^18`; the reciprocal divides by `5^18` after shifting out `2^18`.
+const E18_POWER_OF_TWO_BITS: usize = 18;
+
+/// 238 bits of shifted numerator plus `ceil(log2(5^18)) = 42`.
+const RECIPROCAL_SHIFT_BITS: usize = 280;
+
+/// `floor(2^280 / 5^18) + 1`, little-endian limbs.
+const E18_RECIPROCAL: [u64; 4] =
+    [0x387c_8656_062b_9dfd, 0xcfe7_996b_f9a2_324a, 0xae83_9d7f_9917_3121, 0x0000_49c9_7747_490e];
+
+/// `numerator / 1e18`, exact for every `U256`, by a multiply with a constant reciprocal.
+///
+/// With `u = numerator >> 18 < 2^238`, `D = 5^18` and `M = (2^280 + e) / D` where
+/// `e = 225699704949`: `floor(u * M / 2^280) = floor(u / D)` whenever `u * e < 2^280`. The
+/// largest `u * e` needs 276 bits, so the quotient needs no correction step.
+#[inline(always)]
+fn div_by_e18(numerator: U256) -> U256 {
+    let scaled = (numerator >> E18_POWER_OF_TWO_BITS).into_limbs();
+
+    let mut product = [0u64; 8];
+    for i in 0..4 {
+        let mut carry = 0u64;
+        for j in 0..4 {
+            let column = (scaled[i] as u128) * (E18_RECIPROCAL[j] as u128) +
+                product[i + j] as u128 +
+                carry as u128;
+            product[i + j] = column as u64;
+            carry = (column >> 64) as u64;
+        }
+        product[i + 4] = carry;
+    }
+
+    U256::from_limbs([product[4], product[5], product[6], product[7]]) >>
+        (RECIPROCAL_SHIFT_BITS - 256)
+}
 
 /// The terms of `_f` and `_d` that depend only on `x0`, which `_get_y` keeps fixed.
 struct Invariants {
@@ -70,8 +106,8 @@ struct Invariants {
 
 impl Invariants {
     fn new(x0: U256) -> Result<Self, SimulationError> {
-        let x0_squared = safe_div_u256(safe_mul_u256(x0, x0)?, E18)?;
-        let x0_cubed = safe_div_u256(safe_mul_u256(x0_squared, x0)?, E18)?;
+        let x0_squared = div_by_e18(safe_mul_u256(x0, x0)?);
+        let x0_cubed = div_by_e18(safe_mul_u256(x0_squared, x0)?);
         let three_x0 = safe_mul_u256(U256::from(3), x0)?;
         Ok(Self { x0_squared, x0_cubed, three_x0 })
     }
@@ -79,19 +115,19 @@ impl Invariants {
 
 /// `f(x0, y) = x0*y * (x0^2 + y^2)`, all in 1e18 fixed point.
 fn _f_with(x0: U256, y: U256, inv: &Invariants, y_squared: U256) -> Result<U256, SimulationError> {
-    let a = safe_div_u256(safe_mul_u256(x0, y)?, E18)?;
+    let a = div_by_e18(safe_mul_u256(x0, y)?);
     let b = safe_add_u256(inv.x0_squared, y_squared)?;
-    safe_div_u256(safe_mul_u256(a, b)?, E18)
+    Ok(div_by_e18(safe_mul_u256(a, b)?))
 }
 
 /// `d(x0, y) = 3*x0*y^2 + x0^3`, the derivative of `_f` with respect to `y`.
 fn _d_with(inv: &Invariants, y_squared: U256) -> Result<U256, SimulationError> {
-    let term1 = safe_div_u256(safe_mul_u256(inv.three_x0, y_squared)?, E18)?;
+    let term1 = div_by_e18(safe_mul_u256(inv.three_x0, y_squared)?);
     safe_add_u256(term1, inv.x0_cubed)
 }
 
 fn y_squared_of(y: U256) -> Result<U256, SimulationError> {
-    safe_div_u256(safe_mul_u256(y, y)?, E18)
+    Ok(div_by_e18(safe_mul_u256(y, y)?))
 }
 
 fn _k(x: U256, y: U256, decimals0: u8, decimals1: u8) -> Result<U256, SimulationError> {
@@ -100,12 +136,9 @@ fn _k(x: U256, y: U256, decimals0: u8, decimals1: u8) -> Result<U256, Simulation
 
     let x = safe_div_u256(safe_mul_u256(x, E18)?, decimals0_scale)?;
     let y = safe_div_u256(safe_mul_u256(y, E18)?, decimals1_scale)?;
-    let a = safe_div_u256(safe_mul_u256(x, y)?, E18)?;
-    let b = safe_add_u256(
-        safe_div_u256(safe_mul_u256(x, x)?, E18)?,
-        safe_div_u256(safe_mul_u256(y, y)?, E18)?,
-    )?;
-    safe_div_u256(safe_mul_u256(a, b)?, E18)
+    let a = div_by_e18(safe_mul_u256(x, y)?);
+    let b = safe_add_u256(div_by_e18(safe_mul_u256(x, x)?), div_by_e18(safe_mul_u256(y, y)?))?;
+    Ok(div_by_e18(safe_mul_u256(a, b)?))
 }
 
 fn _get_y(x0: U256, xy: U256, mut y: U256) -> Result<U256, SimulationError> {
@@ -195,7 +228,7 @@ pub fn get_limits(
     let x0 = safe_add_u256(reserve_in_normalized, amount_in_normalized)?;
     let y_new = _get_y(x0, xy, reserve_out_normalized)?;
     let amount_out_normalized = safe_sub_u256(reserve_out_normalized, y_new)?;
-    let amount_out = safe_div_u256(safe_mul_u256(amount_out_normalized, decimals_out_scale)?, E18)?;
+    let amount_out = div_by_e18(safe_mul_u256(amount_out_normalized, decimals_out_scale)?);
 
     Ok((u256_to_biguint(amount_in_estimate), u256_to_biguint(amount_out)))
 }
@@ -289,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn differential_matches_unfused_arithmetic() {
+    fn test_differential_matches_unfused_arithmetic() {
         let reserve_pairs = [
             ("2642455102346776307825", "3320301880379841502303", 18u8, 18u8),
             ("1000000000000000000000000", "1000000000000", 18, 6),
@@ -345,6 +378,108 @@ mod tests {
         }
 
         assert!(compared >= 80, "differential sweep covered only {compared} cases");
+    }
+
+    #[test]
+    fn test_div_by_e18_matches_true_division() {
+        const D: u64 = 3_814_697_265_625;
+        let five_pow_18 = U256::from(D);
+        let one = U256::from(1u64);
+        let mut cases: Vec<U256> = Vec::new();
+
+        let max_quotient = U256::MAX / E18;
+        cases.extend([
+            U256::ZERO,
+            one,
+            E18 - one,
+            E18,
+            E18 + one,
+            U256::MAX,
+            U256::MAX - one,
+            max_quotient - one,
+            max_quotient,
+            max_quotient + one,
+            max_quotient * E18,
+            max_quotient * E18 - one,
+            max_quotient * E18 + one,
+        ]);
+
+        // Powers of two cover the product's carry boundaries and both ends of the shifted domain.
+        for bit in 0..256usize {
+            let power = one << bit;
+            for offset in 0..=2u64 {
+                cases.push(power.saturating_sub(U256::from(offset)));
+                cases.push(power.saturating_add(U256::from(offset)));
+            }
+        }
+
+        let structured_before_residues = cases.len();
+
+        // The proof has least slack at residue `D - 1`.
+        let power_of_two_18 = one << E18_POWER_OF_TWO_BITS;
+        let quotient_ceiling = (U256::MAX >> E18_POWER_OF_TWO_BITS) / five_pow_18;
+        let quotients = [
+            U256::ZERO,
+            one,
+            U256::from(2u64),
+            five_pow_18,
+            one << 60usize,
+            one << 100usize,
+            one << 180usize,
+            quotient_ceiling - U256::from(2u64),
+            quotient_ceiling - one,
+            quotient_ceiling,
+        ];
+        let residues = [U256::ZERO, one, five_pow_18 - one, five_pow_18 >> 1usize];
+        let low_bits = [U256::ZERO, one, power_of_two_18 - one];
+        for quotient in quotients {
+            for residue in residues {
+                let Some(shifted) = quotient
+                    .checked_mul(five_pow_18)
+                    .and_then(|product| product.checked_add(residue))
+                else {
+                    continue;
+                };
+                for low in low_bits {
+                    if let Some(n) = shifted
+                        .checked_mul(power_of_two_18)
+                        .and_then(|scaled| scaled.checked_add(low))
+                    {
+                        cases.push(n);
+                    }
+                }
+            }
+        }
+        let structured = cases.len();
+
+        let mut seed = 0x5011_D175_7AB1_E18Eu64;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for _ in 0..200_000 {
+            let limbs = [next(), next(), next(), next()];
+            let width = (next() % 256) as usize + 1;
+            cases.push(U256::from_limbs(limbs) >> (256 - width));
+        }
+
+        for n in &cases {
+            assert_eq!(
+                div_by_e18(*n),
+                safe_div_u256(*n, E18).unwrap(),
+                "reciprocal divide disagreed with true division on {n}"
+            );
+        }
+
+        assert!(
+            structured - structured_before_residues >= 100,
+            "residue sweep covered only {} cases",
+            structured - structured_before_residues
+        );
+        assert!(cases.len() >= 201_500, "differential covered only {} cases", cases.len());
     }
 
     #[test]
