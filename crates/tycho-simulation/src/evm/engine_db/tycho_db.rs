@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use alloy::primitives::{Address, Bytes as AlloyBytes, B256, U256};
@@ -17,8 +17,17 @@ use tycho_client::feed::BlockHeader;
 use crate::evm::{
     account_storage::{AccountStorage, StateUpdate},
     engine_db::engine_db_interface::EngineDatabaseInterface,
+    protocol::vm::constants::ERC20_PROXY_BYTECODE,
     tycho_models::{AccountUpdate, ChangeType},
 };
+
+/// The token proxy the decoder deploys at every token address of every snapshot, analyzed and
+/// hashed once.
+static ERC20_PROXY_CODE: LazyLock<(Bytecode, B256)> = LazyLock::new(|| {
+    let code = Bytecode::new_raw(AlloyBytes::from_static(ERC20_PROXY_BYTECODE));
+    let code_hash = code.hash_slow();
+    (code, code_hash)
+});
 
 #[derive(Error, Debug)]
 pub enum TychoClientError {
@@ -122,15 +131,17 @@ impl PreCachedDB {
                     debug!(%update.address, "Creating account");
 
                     // We expect the code to be present.
-                    let code = Bytecode::new_raw(AlloyBytes::from(
-                        update.code.clone().ok_or_else(|| {
-                            error!(%update.address, "MissingCode");
-                            PreCachedDBError::BadUpdate(
-                                "MissingCode".into(),
-                                Box::new(update.clone()),
-                            )
-                        })?,
-                    ));
+                    let raw_code = update.code.as_ref().ok_or_else(|| {
+                        error!(%update.address, "MissingCode");
+                        PreCachedDBError::BadUpdate("MissingCode".into(), Box::new(update.clone()))
+                    })?;
+                    let (code, code_hash) = if raw_code.as_slice() == ERC20_PROXY_BYTECODE {
+                        ERC20_PROXY_CODE.clone()
+                    } else {
+                        let code = Bytecode::new_raw(AlloyBytes::from(raw_code.clone()));
+                        let code_hash = code.hash_slow();
+                        (code, code_hash)
+                    };
                     // If the balance is not present, we set it to zero.
                     let balance = update.balance.unwrap_or(U256::ZERO);
 
@@ -138,7 +149,7 @@ impl PreCachedDB {
                     // would keep stale non-zero values for slots that are zero on-chain.
                     write_guard.accounts.overwrite_account(
                         update.address,
-                        AccountInfo::new(balance, 0, code.hash_slow(), code),
+                        AccountInfo::new(balance, 0, code_hash, code),
                         Some(update.slots.clone()),
                         true, /* Flag all accounts in TychoDB mocked to sign that we cannot
                                * call an RPC provider for an update */
