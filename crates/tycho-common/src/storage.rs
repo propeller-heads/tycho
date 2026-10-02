@@ -793,32 +793,28 @@ pub trait Gateway:
 {
 }
 
-/// When a value was written: a logical timestamp, the writing block's wall-clock timestamp then
-/// its number.
+/// When a value was written: the timestamp of the writing block.
 ///
-/// `block_ts` is the unit of the database's `valid_from`. `block_number` orders blocks that share
-/// a timestamp — consecutive blocks do on fast chains — the way the transaction index does in the
-/// database. A block header supplies both; a snapshot row takes both from the block of its
-/// `modify_tx`.
+/// This is the unit of the database's `valid_from`, so the cache orders writes the way the
+/// database versions them. Block timestamps are unique per chain: the extractor adds a
+/// microsecond to a block that shares its second with the previous block. A block header supplies
+/// the timestamp; a snapshot row takes it from its `valid_from`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WriteTimestamp {
-    block_ts: NaiveDateTime,
-    block_number: u64,
-}
+pub struct WriteTimestamp(NaiveDateTime);
 
 impl WriteTimestamp {
-    pub fn new(block_ts: NaiveDateTime, block_number: u64) -> Self {
-        Self { block_ts, block_number }
+    pub fn new(block_ts: NaiveDateTime) -> Self {
+        Self(block_ts)
     }
 
-    pub fn block_number(&self) -> u64 {
-        self.block_number
+    pub fn block_ts(&self) -> NaiveDateTime {
+        self.0
     }
 }
 
 impl From<&Block> for WriteTimestamp {
     fn from(block: &Block) -> Self {
-        Self::new(block.ts, block.number)
+        Self::new(block.ts)
     }
 }
 
@@ -851,16 +847,15 @@ impl AccountWriteTimestamps {
     }
 }
 
-/// One account's live state and the write timestamp of every value: the block of the row's
-/// `modify_tx`.
+/// One account's live state and the write timestamp of every value: the row's `valid_from`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountSnapshot {
     pub account: Account,
     pub written_at: AccountWriteTimestamps,
 }
 
-/// One component's live state, timestamped with the newest write among its rows or, for a component
-/// without rows, the block of its `creation_tx`.
+/// One component's live state, timestamped with the newest `valid_from` among its rows or, for a
+/// component without rows, its `created_at`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentSnapshot {
     pub system: ProtocolSystem,

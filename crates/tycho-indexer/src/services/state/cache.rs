@@ -3,8 +3,8 @@
 //! Two entity families are cached:
 //!
 //! - **Accounts** (contract state), keyed by address. Several extractors can write the same
-//!   account, so every cached value carries a [`WriteTimestamp`]: the writing block's wall-clock
-//!   timestamp and its number. A newer write always wins.
+//!   account, so every cached value carries a [`WriteTimestamp`]: the writing block's timestamp. A
+//!   newer write always wins.
 //! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
 //!   one extractor writes each protocol system, in order, so one timestamp per entry is enough.
 //!
@@ -284,7 +284,7 @@ impl CachedAccount {
         if conflicts > 0 {
             warn!(
                 address = %self.address,
-                block = at.block_number(),
+                block_ts = %at.block_ts(),
                 values = conflicts,
                 "Skipped writes from the applied block carry different values"
             );
@@ -397,8 +397,8 @@ impl CachedComponentState {
         if at <= self.updated_at {
             warn!(
                 component = %self.component_id,
-                block = at.block_number(),
-                entry = self.updated_at.block_number(),
+                block_ts = %at.block_ts(),
+                entry_ts = %self.updated_at.block_ts(),
                 "Component change from a block already applied skipped"
             );
             return;
@@ -700,7 +700,6 @@ mod test {
     use std::str::FromStr;
 
     use async_trait::async_trait;
-    use chrono::NaiveDateTime;
     use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
@@ -711,10 +710,6 @@ mod test {
     };
 
     const EXTRACTOR: &str = "ex";
-
-    fn ts(n: u64) -> NaiveDateTime {
-        testing::block(n).ts
-    }
 
     fn at(n: u64) -> WriteTimestamp {
         WriteTimestamp::from(&testing::block(n))
@@ -830,7 +825,7 @@ mod test {
             HashMap::new(),
             ChangeType::Creation,
             Bytes::default(),
-            ts(1),
+            testing::block(1).ts,
         )
     }
 
@@ -897,16 +892,6 @@ mod test {
 
         assert_eq!(slot, Timestamped::new(1, at(5)), "the cached value stays");
         assert_eq!(outcome, WriteOutcome::Conflict, "two writers disagree on block 5");
-    }
-
-    #[test]
-    fn write_keeps_the_higher_block_at_an_equal_timestamp() {
-        let mut slot = Timestamped::new(1u64, at(5));
-        let lower_block = WriteTimestamp::new(ts(5), 4);
-
-        slot.write(2, lower_block);
-
-        assert_eq!(slot.value(), &1);
     }
 
     #[test]
@@ -1524,7 +1509,7 @@ mod test {
     }
 
     #[test]
-    fn a_lower_block_at_an_equal_timestamp_does_not_overwrite() {
+    fn a_write_at_an_applied_timestamp_does_not_overwrite() {
         let cache = EntityCache::new();
         let address = addr(1);
         cache
@@ -1546,7 +1531,7 @@ mod test {
                 .unwrap()
                 .slots,
             fixtures::slots([(1, 15)]),
-            "block 5 wins over block 4 at the same timestamp"
+            "an equal timestamp counts as the block already applied"
         );
     }
 
@@ -1653,7 +1638,7 @@ mod test {
     }
 
     #[test]
-    fn from_snapshot_timestamps_entries_with_the_row_block() {
+    fn from_snapshot_timestamps_entries_with_the_row_timestamp() {
         let snapshot = StateSnapshot { accounts: vec![], components: vec![component_snapshot(5)] };
         let cache = EntityCache::from_snapshot(snapshot);
         let x =
@@ -1664,11 +1649,12 @@ mod test {
             .unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(1u64)), "block 5 is the row's own block");
 
-        let mut same_second =
-            with_state_delta(aggregated_changes(EXTRACTOR, 6, 6, Some(6)), "c1", 8);
-        same_second.block.ts = testing::block(5).ts;
-        cache.fold(&same_second).unwrap();
-        assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
+        // The extractor never gives two blocks the same timestamp, so an equal timestamp is the
+        // same block.
+        let mut same_ts = with_state_delta(aggregated_changes(EXTRACTOR, 6, 6, Some(6)), "c1", 8);
+        same_ts.block.ts = testing::block(5).ts;
+        cache.fold(&same_ts).unwrap();
+        assert_eq!(x(&cache), Some(Bytes::from(1u64)), "an equal timestamp is block 5 again");
     }
 
     /// Answers every `state_snapshot` call with the same result.

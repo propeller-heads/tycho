@@ -331,8 +331,8 @@ impl StateService {
                 if let Some(entry) = entry.filter(|entry| entry.updated_at() > version) {
                     debug!(
                         component = %id,
-                        entry = entry.updated_at().block_number(),
-                        version = version.block_number(),
+                        entry_ts = %entry.updated_at().block_ts(),
+                        version_ts = %version.block_ts(),
                         "Cached component is newer than the requested version"
                     );
                     return Err(StateServiceError::Fallback(FallbackReason::EntryNewer));
