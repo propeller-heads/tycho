@@ -657,6 +657,10 @@ pub struct PricePoint {
 }
 
 impl PricePoint {
+    pub fn new(amount_in: BigUint, amount_out: BigUint, price: f64) -> Self {
+        Self { amount_in, amount_out, price }
+    }
+
     pub fn amount_in(&self) -> &BigUint {
         &self.amount_in
     }
