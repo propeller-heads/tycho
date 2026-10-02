@@ -23,13 +23,13 @@ use dotenv::dotenv;
 use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
-use num_traits::{Pow, ToPrimitive, Zero};
-use rand::prelude::IndexedRandom;
+use num_traits::{ToPrimitive, Zero};
+use rand::prelude::{IndexedRandom, SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
-use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     utils::bytes_to_address, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX,
@@ -38,8 +38,8 @@ use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
     rfq::protocols::{
-        hashflow::{client::HashflowClient, state::HashflowState},
-        liquorice::{client::LiquoriceClient, state::LiquoriceState},
+        component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
+        hashflow::state::HashflowState,
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
@@ -264,6 +264,54 @@ const TOKEN_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60)
 /// and gas estimates. Capping the input to a realistic value (~10k USD at recent ETH prices) keeps
 /// simulation and the dashboard gas estimates representative.
 const MAX_INPUT_VALUE_ETH: f64 = 5.0;
+
+/// Swap directions simulated per RFQ component. One RFQ component covers a whole chain, and each
+/// direction costs one firm quote and one transaction simulation.
+const MAX_RFQ_SWAP_DIRECTIONS: usize = 10;
+
+/// The directions an RFQ component quotes, as token pairs.
+fn rfq_swap_directions(attribute: &Bytes, tokens: &[Token]) -> Result<Vec<(Token, Token)>, String> {
+    let tokens: HashMap<&Bytes, &Token> = tokens
+        .iter()
+        .map(|token| (&token.address, token))
+        .collect();
+    let mut directions = Vec::new();
+    for (token_in, token_out) in decode_swap_directions(attribute)? {
+        let (Some(token_in), Some(token_out)) = (tokens.get(&token_in), tokens.get(&token_out))
+        else {
+            return Err(format!(
+                "Swap direction {token_in} -> {token_out} names a token the component does not carry"
+            ));
+        };
+        directions.push(((*token_in).clone(), (*token_out).clone()));
+    }
+    Ok(directions)
+}
+
+/// A random sample of at most [`MAX_RFQ_SWAP_DIRECTIONS`] directions.
+fn sample_rfq_swap_directions(mut directions: Vec<(Token, Token)>) -> Vec<(Token, Token)> {
+    directions.shuffle(&mut rand::rng());
+    directions.truncate(MAX_RFQ_SWAP_DIRECTIONS);
+    directions
+}
+
+/// The smallest input a Hashflow market maker on the pair accepts, in atomic units. A maker
+/// declines an amount below its first level.
+fn hashflow_floor(state: &dyn ProtocolSim, token_in: &Token, token_out: &Token) -> Option<BigUint> {
+    let state = state
+        .as_any()
+        .downcast_ref::<HashflowState>()?;
+    let mut floor: Option<f64> = None;
+    for book in state
+        .books
+        .pair_books(&token_in.address, &token_out.address)
+    {
+        let Some(first_level) = book.levels.first() else { continue };
+        floor = Some(floor.map_or(first_level.quantity, |floor| floor.min(first_level.quantity)));
+    }
+    let floor = floor? * 10f64.powi(token_in.decimals as i32);
+    Some(BigUint::from(floor.ceil() as u128))
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -1593,43 +1641,20 @@ async fn process_state(
         error!("Component has less than 2 tokens, skipping...");
         return HashMap::new();
     }
-    let mut min_amount = BigUint::ZERO;
-    // Get all the possible swap directions
-    let swap_directions = match component.protocol_system.as_str() {
-        HashflowClient::PROTOCOL_SYSTEM => {
-            // Hashflow only supports swaps between the requested base and quote tokens
-            // WARN: we read from state because the component.tokens original order
-            // is modified here: src/protocol/models.rs: ProtocolComponent::from_with_tokens
-            let state = match state
-                .as_any()
-                .downcast_ref::<HashflowState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to HashflowState");
-                    return HashMap::new();
-                }
-            };
-            // The smallest amount acceptable for hashflow is the amount of the first level, random
-            // small amounts are not accepted. The amount in will be capped to this value
-            let min_amount_in = BigUint::from(state.levels.levels[0].quantity.ceil() as u128);
-            min_amount = min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals);
-            vec![(state.base_token, state.quote_token)]
-        }
-        LiquoriceClient::PROTOCOL_SYSTEM => {
-            let state = match state
-                .as_any()
-                .downcast_ref::<LiquoriceState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to LiquoriceState");
-                    return HashMap::new();
-                }
-            };
-            vec![(state.base_token, state.quote_token)]
-        }
-        _ => component
+    // An RFQ venue component names every token the venue quotes; its swap directions attribute
+    // says which of them are paired.
+    let swap_directions = match component
+        .static_attributes
+        .get(SWAP_DIRECTIONS_ATTRIBUTE)
+    {
+        Some(attribute) => match rfq_swap_directions(attribute, &component.tokens) {
+            Ok(directions) => sample_rfq_swap_directions(directions),
+            Err(e) => {
+                error!("Invalid swap directions attribute, skipping: {e}");
+                return HashMap::new();
+            }
+        },
+        None => component
             .tokens
             .iter()
             .permutations(2)
@@ -1702,7 +1727,9 @@ async fn process_state(
             debug!("Calculated amount_in is zero, skipping...");
             continue;
         }
-        amount_in = amount_in.max(min_amount.clone());
+        if let Some(floor) = hashflow_floor(state.as_ref(), token_in, token_out) {
+            amount_in = amount_in.max(floor);
+        }
 
         // Safety bound for tokens missing from the price snapshot, whose limit is left uncapped:
         // avoids the "amount exceeds 96 bits" error seen on Uniswap V3/V4 with very high limits.

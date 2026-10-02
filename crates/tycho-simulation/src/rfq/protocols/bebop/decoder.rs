@@ -11,8 +11,11 @@ use crate::{
     },
     rfq::{
         constants::{get_bebop_auth, get_bebop_origins},
-        models::TimestampHeader,
-        protocols::bebop::client_builder::BebopClientBuilder,
+        models::{QuoteRule, TimestampHeader},
+        protocols::{
+            bebop::client_builder::BebopClientBuilder,
+            component::{decode_venue, DecodedVenue},
+        },
     },
 };
 
@@ -21,67 +24,18 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
 
     async fn try_from_with_header(
         snapshot: ComponentWithState,
-        timestamp_header: TimestampHeader,
+        _timestamp_header: TimestampHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let state_attrs = snapshot.state.attributes;
-
-        if snapshot.component.tokens.len() != 2 {
+        let DecodedVenue { books, tokens, quote_rule } =
+            decode_venue::<BebopPriceData>(&snapshot, all_tokens)?;
+        if quote_rule.is_some_and(|rule| rule != QuoteRule::OncePerVenue) {
             return Err(InvalidSnapshotError::ValueError(
-                "Component must have 2 tokens (base and quote)".to_string(),
+                "Bebop names no market maker; its quote rule is once_per_venue".into(),
             ));
         }
-
-        let base_token_address = &snapshot.component.tokens[0];
-        let quote_token_address = &snapshot.component.tokens[1];
-
-        let base_token = all_tokens
-            .get(base_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Base token not found: {base_token_address}"
-                ))
-            })?
-            .clone();
-
-        let quote_token = all_tokens
-            .get(quote_token_address)
-            .ok_or_else(|| {
-                InvalidSnapshotError::ValueError(format!(
-                    "Quote token not found: {quote_token_address}"
-                ))
-            })?
-            .clone();
-
-        let empty_array_bytes: Bytes = "[]".as_bytes().to_vec().into();
-        let bids_json = state_attrs
-            .get("bids")
-            .unwrap_or(&empty_array_bytes);
-        let asks_json = state_attrs
-            .get("asks")
-            .unwrap_or(&empty_array_bytes);
-
-        // Parse bids and asks from JSON
-        let bids: Vec<(f32, f32)> = serde_json::from_slice(bids_json)
-            .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid bids JSON: {e}")))?;
-        let asks: Vec<(f32, f32)> = serde_json::from_slice(asks_json)
-            .map_err(|e| InvalidSnapshotError::ValueError(format!("Invalid asks JSON: {e}")))?;
-
-        let price_data = BebopPriceData {
-            base: base_token.address.to_vec(),
-            quote: quote_token.address.to_vec(),
-            last_update_ts: timestamp_header.timestamp,
-            bids: bids
-                .iter()
-                .flat_map(|(price, size)| [*price, *size])
-                .collect(),
-            asks: asks
-                .iter()
-                .flat_map(|(price, size)| [*price, *size])
-                .collect(),
-        };
 
         let auth = get_bebop_auth().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Bebop authentication: {e}"))
@@ -89,22 +43,23 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
         let origins = get_bebop_origins().map_err(|e| {
             InvalidSnapshotError::ValueError(format!("Failed to get Bebop origins: {e}"))
         })?;
-
-        let mut client_builder = BebopClientBuilder::new(snapshot.component.chain, auth.key);
+        let mut builder = BebopClientBuilder::new(snapshot.component.chain, auth.key)
+            .tokens(tokens.keys().cloned().collect());
         if let Some(origin_address) = origins.address {
-            client_builder = client_builder.origin_address(origin_address);
+            builder = builder.origin_address(origin_address);
         }
         if let Some(origin_target) = origins.target {
-            client_builder = client_builder.origin_target(origin_target);
+            builder = builder.origin_target(origin_target);
         }
         if let Some(origin_source) = origins.source {
-            client_builder = client_builder.origin_source(origin_source);
+            builder = builder.origin_source(origin_source);
         }
-        let client = client_builder.build().map_err(|e| {
-            InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
+        let client = builder.build().map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("Couldn't create BebopClient: {e}"))
         })?;
 
-        Ok(BebopState { base_token, quote_token, price_data, client })
+        BebopState::new(books, tokens, client)
+            .map_err(|e| InvalidSnapshotError::ValueError(e.to_string()))
     }
 }
 
@@ -112,174 +67,132 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
 mod tests {
     use std::env;
 
-    use tycho_common::models::{
-        protocol::{ProtocolComponent, ProtocolComponentState},
-        Chain, ChangeType,
+    use super::*;
+    use crate::rfq::protocols::{
+        component::BOOKS_ATTRIBUTE,
+        test_utils::{usdc, venue_snapshot, wbtc, weth},
     };
 
-    use super::*;
-
-    fn wbtc() -> Token {
-        Token::new(
-            &hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599")
-                .unwrap()
-                .into(),
-            "WBTC",
-            8,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn usdc() -> Token {
-        Token::new(
-            &hex::decode("a0b86991c6218a76c1d19d4a2e9eb0ce3606eb48")
-                .unwrap()
-                .into(),
-            "USDC",
-            6,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn create_test_snapshot() -> (ComponentWithState, HashMap<Bytes, Token>) {
-        let wbtc_token = wbtc();
-        let usdc_token = usdc();
-
-        let mut tokens = HashMap::new();
-        tokens.insert(wbtc_token.address.clone(), wbtc_token.clone());
-        tokens.insert(usdc_token.address.clone(), usdc_token.clone());
-
-        let mut state_attributes = HashMap::new();
-        state_attributes.insert(
-            "bids".to_string(),
-            "[[65000.0, 1.5], [64950.0, 2.0], [64900.0, 0.5]]"
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-        state_attributes.insert(
-            "asks".to_string(),
-            "[[65100.0, 1.0], [65150.0, 2.5], [65200.0, 1.5]]"
-                .as_bytes()
-                .to_vec()
-                .into(),
-        );
-
-        let snapshot = ComponentWithState {
-            state: ProtocolComponentState {
-                attributes: state_attributes,
-                component_id: "bebop_wbtc_usdc".to_string(),
-                balances: HashMap::new(),
-            },
-            component: ProtocolComponent {
-                id: "bebop_wbtc_usdc".to_string(),
-                protocol_system: "bebop".to_string(),
-                protocol_type_name: "bebop".to_string(),
-                chain: Chain::Ethereum,
-                tokens: vec![wbtc_token.address.clone(), usdc_token.address.clone()],
-                contract_addresses: Vec::new(),
-                static_attributes: HashMap::new(),
-                change: ChangeType::Creation,
-                creation_tx: Bytes::default(),
-                created_at: chrono::NaiveDateTime::default(),
-            },
-            component_tvl: None,
-            entrypoints: Vec::new(),
-        };
-
-        (snapshot, tokens)
-    }
-
-    #[tokio::test]
-    async fn test_try_from_with_header() {
+    fn snapshot() -> (ComponentWithState, HashMap<Bytes, Token>) {
         env::set_var("BEBOP_KEY", "test_key");
+        let books = vec![
+            BebopPriceData {
+                base: wbtc().address.to_vec(),
+                quote: usdc().address.to_vec(),
+                last_update_ts: 1703097600,
+                bids: vec![65000.0, 1.5, 64950.0, 2.0, 64900.0, 0.5],
+                asks: vec![65100.0, 1.0, 65150.0, 2.5, 65200.0, 1.5],
+            },
+            BebopPriceData {
+                base: weth().address.to_vec(),
+                quote: usdc().address.to_vec(),
+                last_update_ts: 1703097600,
+                bids: vec![3000.0, 2.0],
+                asks: vec![3100.0, 1.5],
+            },
+        ];
+        venue_snapshot("rfq:bebop", &[wbtc(), usdc(), weth()], &books)
+    }
 
-        let (snapshot, tokens) = create_test_snapshot();
-
-        let result = BebopState::try_from_with_header(
+    async fn decode(
+        snapshot: ComponentWithState,
+        tokens: &HashMap<Bytes, Token>,
+    ) -> Result<BebopState, InvalidSnapshotError> {
+        BebopState::try_from_with_header(
             snapshot,
             TimestampHeader { timestamp: 1703097600u64 },
             &HashMap::new(),
-            &tokens,
+            tokens,
             &DecoderContext::new(),
         )
         .await
-        .expect("create state from snapshot");
-
-        assert_eq!(result.base_token.symbol, "WBTC");
-        assert_eq!(result.quote_token.symbol, "USDC");
-        assert_eq!(result.price_data.last_update_ts, 1703097600);
-        assert_eq!(result.price_data.get_bids().len(), 3);
-        assert_eq!(result.price_data.get_asks().len(), 3);
-        assert_eq!(result.price_data.get_bids()[0], (65000.0, 1.5));
-        assert_eq!(result.price_data.get_asks()[0], (65100.0, 1.0));
     }
 
     #[tokio::test]
-    async fn test_try_from_missing_token() {
-        env::set_var("BEBOP_KEY", "test_key");
+    async fn test_decodes_books() {
+        let (snapshot, tokens) = snapshot();
+        let state = decode(snapshot, &tokens).await.unwrap();
 
-        // Test missing second token (only one token in array)
-        let (mut snapshot, tokens) = create_test_snapshot();
-        snapshot.component.tokens.pop(); // Remove the second token
-        let result = BebopState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-        assert!(result.is_err());
+        assert_eq!(state.tokens.len(), 3);
+        assert!(!state.used);
+        assert_eq!(state.books.len(), 2);
+        assert_eq!(state.books[0].base, wbtc().address.to_vec());
+        assert_eq!(state.books[0].get_bids()[0], (65000.0, 1.5));
+        assert_eq!(state.books[0].get_asks()[0], (65100.0, 1.0));
+        assert_eq!(state.books[1].base, weth().address.to_vec());
     }
 
     #[tokio::test]
-    async fn test_try_from_missing_bids() {
-        env::set_var("BEBOP_KEY", "test_key");
-
-        // Should decode an empty array of bids
-        let (mut snapshot, tokens) = create_test_snapshot();
-        snapshot.state.attributes.remove("bids");
-        let result = BebopState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await
-        .expect("create state from snapshot");
-        assert_eq!(result.price_data.bids.len(), 0);
+    async fn test_once_per_venue_attribute() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"once_per_venue".into());
+        assert!(decode(snapshot, &tokens).await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_try_from_invalid_json() {
-        env::set_var("BEBOP_KEY", "test_key");
-
-        let (mut snapshot, tokens) = create_test_snapshot();
-
-        // Test invalid bids JSON
-        snapshot.state.attributes.insert(
-            "bids".to_string(),
-            "invalid json"
-                .as_bytes()
-                .to_vec()
-                .into(),
+    async fn test_once_per_maker_attribute() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"once_per_maker".into());
+        let result = decode(snapshot, &tokens).await;
+        assert!(
+            matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(msg) if msg.contains("names no market maker"))
         );
-        let result = BebopState::try_from_with_header(
-            snapshot,
-            TimestampHeader::default(),
-            &HashMap::new(),
-            &tokens,
-            &DecoderContext::new(),
-        )
-        .await;
-        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unknown_quote_rule_attribute() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot
+            .component
+            .static_attributes
+            .insert(QuoteRule::ATTRIBUTE.to_string(), b"twice".into());
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_missing_books() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot
+            .state
+            .attributes
+            .remove(BOOKS_ATTRIBUTE);
+        let state = decode(snapshot, &tokens).await.unwrap();
+        assert!(state.books.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_missing_token() {
+        let (snapshot, mut tokens) = snapshot();
+        tokens.remove(&weth().address);
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_book_names_token_the_component_lacks() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot.component.tokens.pop();
+        let result = decode(snapshot, &tokens).await;
+        assert!(
+            matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(msg) if msg.contains("does not carry"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_books_json() {
+        let (mut snapshot, tokens) = snapshot();
+        snapshot
+            .state
+            .attributes
+            .insert(BOOKS_ATTRIBUTE.to_string(), b"invalid json".into());
+        let result = decode(snapshot, &tokens).await;
+        assert!(matches!(result.unwrap_err(), InvalidSnapshotError::ValueError(_)));
     }
 }

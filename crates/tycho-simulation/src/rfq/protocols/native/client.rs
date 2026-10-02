@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
     sync::LazyLock,
     time::SystemTime,
@@ -24,16 +24,17 @@ use crate::{
     rfq::{
         client::RFQClient,
         errors::RFQError,
-        models::TimestampHeader,
+        models::{QuoteRule, TimestampHeader},
         protocols::{
+            component,
             native::models::{
                 FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeSupportedChain,
             },
             utils::bytes_to_address,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
+    tycho_common::models::protocol::ProtocolComponent,
 };
 
 static NATIVE_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
@@ -122,6 +123,7 @@ impl NativeClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         api_key: String,
@@ -183,37 +185,85 @@ impl NativeClient {
             .map(|(candidate, _)| candidate)
     }
 
-    fn create_component_with_state(
+    pub fn component_id(&self) -> String {
+        component::component_id(Self::PROTOCOL_SYSTEM, self.chain)
+    }
+
+    /// The venue component for one poll: every grouped book whose tokens the client requested
+    /// and whose TVL clears the threshold. `None` when no book clears it. A book's bids serve its
+    /// base token in, its asks its quote token in.
+    fn venue_component(
         &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        book: NativePriceData,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "native_relay_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![],
-            static_attributes: Default::default(),
-            change: Default::default(),
-            creation_tx: Default::default(),
-            created_at: Default::default(),
-        };
-
-        let mut attributes = HashMap::new();
-
-        let book_json = serde_json::to_string(&book).unwrap_or_default();
-        attributes.insert("book".to_string(), book_json.as_bytes().to_vec().into());
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
+        grouped_books: &HashMap<String, NativePriceData>,
+    ) -> Result<Option<ComponentWithState>, RFQError> {
+        let mut books = Vec::new();
+        let mut tvl = 0.0;
+        for (pair_id, book) in grouped_books {
+            if !self.tokens.contains(&book.base_address) ||
+                !self
+                    .tokens
+                    .contains(&book.quote_address)
+            {
+                continue;
+            }
+            if book.bids.is_empty() && book.asks.is_empty() {
+                continue;
+            }
+            let quote_price_data = if self
+                .quote_tokens
+                .contains(&book.quote_address)
+            {
+                None
+            } else {
+                self.select_tvl_conversion_book(&book.quote_address, grouped_books)
+            };
+            if !self
+                .quote_tokens
+                .contains(&book.quote_address) &&
+                quote_price_data.is_none()
+            {
+                continue;
+            }
+            let Some(book_tvl) = book.calculate_tvl(quote_price_data) else {
+                warn!("Skipping Native Relay market {pair_id} because its TVL is unavailable or non-finite");
+                continue;
+            };
+            if book_tvl < self.tvl {
+                info!(
+                    "Filtering out Native Relay market {} due to low TVL: {:.2} < {:.2}",
+                    pair_id, book_tvl, self.tvl
+                );
+                continue;
+            }
+            tvl += book_tvl;
+            books.push(book.clone());
         }
+        if books.is_empty() {
+            return Ok(None);
+        }
+        books.sort_by(|a, b| {
+            (&a.base_address, &a.quote_address).cmp(&(&b.base_address, &b.quote_address))
+        });
+
+        let mut swap_directions = BTreeSet::new();
+        for book in &books {
+            if !book.bids.is_empty() {
+                swap_directions.insert((book.base_address.clone(), book.quote_address.clone()));
+            }
+            if !book.asks.is_empty() {
+                swap_directions.insert((book.quote_address.clone(), book.base_address.clone()));
+            }
+        }
+        let component = component::venue_component(
+            Self::PROTOCOL_SYSTEM,
+            "native_relay_pool",
+            self.chain,
+            &swap_directions,
+            &books,
+            tvl,
+            QuoteRule::OncePerVenue,
+        )?;
+        Ok(Some(component))
     }
 
     async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, RFQError> {
@@ -664,7 +714,7 @@ impl RFQClient for NativeClient {
         let client = self.clone();
 
         Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
+            let mut current_component: Option<ProtocolComponent> = None;
             let mut ticker = interval(client.poll_time);
 
             loop {
@@ -681,82 +731,14 @@ impl RFQClient for NativeClient {
                     }
                 };
 
-                let mut new_components = HashMap::new();
-
-                for (component_id, book) in &books {
-                    // Keep unrequested books available for TVL conversion, but only emit requested
-                    // markets as components.
-                    if !client.tokens.contains(&book.base_address) ||
-                        !client.tokens.contains(&book.quote_address)
-                    {
+                let component = match client.venue_component(&books) {
+                    Ok(component) => component,
+                    Err(e) => {
+                        error!("Failed to build the Native Relay component: {}", e);
                         continue;
                     }
-
-                    let quote_price_data = if client.quote_tokens.contains(&book.quote_address) {
-                        None
-                    } else {
-                        // TVL thresholds are applied in approved quote-token units. If Native
-                        // quotes this market against another token, normalize through the most
-                        // liquid available approved quote-token market before filtering.
-                        client.select_tvl_conversion_book(&book.quote_address, &books)
-                    };
-
-                    if !client.quote_tokens.contains(&book.quote_address) &&
-                        quote_price_data.is_none()
-                    {
-                        continue;
-                    }
-
-                    let Some(incoming_tvl) = book.calculate_tvl(quote_price_data) else {
-                        warn!("Skipping Native Relay market {component_id} because its TVL is unavailable or non-finite");
-                        continue;
-                    };
-
-                    if incoming_tvl < client.tvl {
-                        info!("Filtering out Native Relay market {} due to low TVL: {:.2} < {:.2}", component_id, incoming_tvl, client.tvl);
-                        continue;
-                    }
-
-                    let tokens = vec![book.base_address.clone(), book.quote_address.clone()];
-                    let component_with_state = client.create_component_with_state(
-                        component_id.clone(),
-                        tokens,
-                        book.clone(),
-                        incoming_tvl,
-                    );
-                    new_components.insert(component_id.clone(), component_with_state);
-                }
-
-                // Emit removals for markets that disappeared from the Relay orderbook or no longer
-                // pass token/TVL filtering.
-                let removed_components: HashMap<String, ProtocolComponent> = current_components
-                    .iter()
-                    .filter(|&(id, _)| !new_components.contains_key(id))
-                    .map(|(k, v)| (k.clone(), v.component.clone()))
-                    .collect();
-
-                current_components = new_components.clone();
-
-                let snapshot = Snapshot {
-                    states: new_components,
-                    vm_storage: HashMap::new(),
                 };
-
-                // Native is off-chain and timestamped, not block-based. Downstream decoders use
-                // this wall-clock header to build a normal Tycho state update.
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let msg = StateSyncMessage::<TimestampHeader> {
-                    header: TimestampHeader { timestamp },
-                    snapshots: snapshot,
-                    deltas: None,
-                    removed_components,
-                };
-
-                yield Ok(("native".to_string(), msg));
+                yield Ok(("native".to_string(), component::venue_message(&mut current_component, component)));
             }
         })
     }
@@ -847,7 +829,10 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::native::client_builder::NativeClientBuilder;
+    use crate::rfq::protocols::{
+        component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
+        native::client_builder::NativeClientBuilder,
+    };
 
     fn successful_quote_json(amount_in: &str) -> serde_json::Value {
         let calldata = format!("0x7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
@@ -1116,34 +1101,34 @@ mod tests {
             },
         ]);
 
-        let (component_id, book) = books
-            .into_iter()
-            .next()
-            .expect("one grouped book");
-        let component = client.create_component_with_state(
-            component_id.clone(),
-            vec![book.base_address.clone(), book.quote_address.clone()],
-            book.clone(),
-            book.calculate_tvl(None)
-                .expect("TVL should be finite"),
-        );
+        let component = client
+            .venue_component(&books)
+            .unwrap()
+            .expect("the book clears the threshold");
 
-        assert_eq!(component.component.id, component_id);
+        assert_eq!(component.component.id, client.component_id());
         assert_eq!(component.component.protocol_system, NativeClient::PROTOCOL_SYSTEM);
         assert_eq!(component.component.protocol_type_name, "native_relay_pool");
-        assert_eq!(component.component.tokens, vec![weth, usdt]);
-        assert_eq!(component.state.component_id, component_id);
-
-        let encoded_book = component
-            .state
-            .attributes
-            .get("book")
-            .expect("book attribute");
-        let decoded_book: NativePriceData = serde_json::from_slice(encoded_book).unwrap();
-        assert_eq!(decoded_book.bids.len(), 1);
-        assert_eq!(decoded_book.asks.len(), 1);
-        assert_eq!(decoded_book.bids[0].quantity, 0.0001);
-        assert_eq!(decoded_book.bids[0].price, 3213.12345);
+        let mut expected_tokens = vec![weth.clone(), usdt.clone()];
+        expected_tokens.sort();
+        assert_eq!(component.component.tokens, expected_tokens);
+        assert_eq!(component.state.component_id, client.component_id());
+        assert_eq!(
+            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].len(),
+            80,
+            "bids and asks"
+        );
+        assert_eq!(
+            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
+            b"once_per_venue"
+        );
+        let decoded_books: Vec<NativePriceData> =
+            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
+        assert_eq!(decoded_books.len(), 1);
+        assert_eq!(decoded_books[0].bids.len(), 1);
+        assert_eq!(decoded_books[0].asks.len(), 1);
+        assert_eq!(decoded_books[0].bids[0].quantity, 0.0001);
+        assert_eq!(decoded_books[0].bids[0].price, 3213.12345);
     }
 
     #[test]
