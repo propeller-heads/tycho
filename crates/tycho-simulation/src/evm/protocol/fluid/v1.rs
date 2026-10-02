@@ -14,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use alloy::primitives::U256;
+use alloy::primitives::{U256, U512};
 use num_bigint::{BigUint, ToBigUint};
 use num_traits::Euclid;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, Price, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -34,9 +37,11 @@ use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
         fluid::{v1::constant::RESERVES_RESOLVER, vm},
+        safe_math::sqrt_u512,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
+    query_pool_swap::price_to_f64_with_decimals,
 };
 
 mod constant {
@@ -183,6 +188,106 @@ impl FluidV1 {
         } else {
             address
         }
+    }
+
+    /// Returns the input amount, fee included, that moves both sub-pools' marginal prices to
+    /// `target`, treating each as a constant-product AMM over its imaginary reserves. Returns
+    /// `None` on overflow or a zero target.
+    fn closed_form_amount_in(
+        &self,
+        target: &Price,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Option<BigUint> {
+        let (col, debt) = (&self.collateral_reserves, &self.debt_reserves);
+        let sub_pools = if token_in.address == self.token0.address {
+            [
+                (col.token0_imaginary_reserves, col.token1_imaginary_reserves),
+                (debt.token0_imaginary_reserves, debt.token1_imaginary_reserves),
+            ]
+        } else {
+            [
+                (col.token1_imaginary_reserves, col.token0_imaginary_reserves),
+                (debt.token1_imaginary_reserves, debt.token0_imaginary_reserves),
+            ]
+        };
+        let ten_pow = |exponent: i64| U512::from(10u64).pow(U512::from(exponent.unsigned_abs()));
+        let fee_den = U512::from(constant::SIX_DECIMALS);
+        let fee_num = U512::from(constant::SIX_DECIMALS - self.fee);
+
+        // `spot_price` reports the reserve ratio divided by `1 - fee`.
+        let mut ratio_num =
+            U512::try_from_be_slice(&target.numerator.to_bytes_be())?.checked_mul(fee_num)?;
+        let mut ratio_den =
+            U512::try_from_be_slice(&target.denominator.to_bytes_be())?.checked_mul(fee_den)?;
+        // Imaginary reserves hold both tokens at 12 decimals.
+        let decimals_shift = token_in.decimals as i64 - token_out.decimals as i64;
+        if decimals_shift >= 0 {
+            ratio_num = ratio_num.checked_mul(ten_pow(decimals_shift))?;
+        } else {
+            ratio_den = ratio_den.checked_mul(ten_pow(decimals_shift))?;
+        }
+
+        let mut amount_adjusted = U512::ZERO;
+        for (reserve_in, reserve_out) in sub_pools {
+            let reserve_in = U512::from(reserve_in);
+            // The marginal price is k / reserve_in^2, so the new reserve_in is sqrt(k / price).
+            let k = reserve_in.checked_mul(U512::from(reserve_out))?;
+            let new_reserve_in = sqrt_u512(
+                k.checked_mul(ratio_den)?
+                    .checked_div(ratio_num)?,
+            );
+            amount_adjusted =
+                amount_adjusted.checked_add(new_reserve_in.saturating_sub(reserve_in))?;
+        }
+
+        let dex_shift = token_in.decimals as i64 - constant::DEX_AMOUNT_DECIMALS;
+        let amount_after_fee = if dex_shift >= 0 {
+            amount_adjusted.checked_mul(ten_pow(dex_shift))?
+        } else {
+            amount_adjusted / ten_pow(dex_shift)
+        };
+        let amount_in = amount_after_fee.checked_mul(fee_den)? / fee_num;
+        Some(u256_to_biguint(U256::checked_from_limbs_slice(amount_in.as_limbs())?))
+    }
+
+    /// Returns the swap that moves the spot price down into `[target, target * (1 + tolerance)]`.
+    /// A target equal to the spot price gives a zero swap. A target above it is `InvalidInput`.
+    fn swap_to_target_price(
+        &self,
+        params: &QueryPoolSwapParams,
+        target: &Price,
+        tolerance: f64,
+    ) -> Result<PoolSwap, SimulationError> {
+        let (token_in, token_out) = (params.token_in(), params.token_out());
+        let spot = self.spot_price(token_in, token_out)?;
+        let target_f64 = price_to_f64_with_decimals(target, token_in.decimals, token_out.decimals)?;
+        if target_f64 > spot {
+            return Err(SimulationError::InvalidInput(
+                format!("Target price {target_f64} is above spot price {spot}"),
+                None,
+            ));
+        }
+        if target_f64 == spot {
+            return Ok(PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None));
+        }
+
+        // The numerical search reports pool limit errors, and it corrects the closed form when
+        // the sub-pools start at different prices.
+        if let Some(amount_in) = self.closed_form_amount_in(target, token_in, token_out) {
+            if let Ok(result) = self.get_amount_out(amount_in.clone(), token_in, token_out) {
+                let new_spot = result
+                    .new_state
+                    .spot_price(token_in, token_out)?;
+                // Allow f64 rounding noise on both sides of the band.
+                let lowest = target_f64 * (1.0 - 1e-12);
+                let highest = target_f64 * (1.0 + tolerance) * (1.0 + 1e-12);
+                if (lowest..=highest).contains(&new_spot) {
+                    return Ok(PoolSwap::new(amount_in, result.amount, result.new_state, None));
+                }
+            }
+        }
+        crate::evm::query_pool_swap::query_pool_swap(self, params)
     }
 }
 
@@ -450,11 +555,15 @@ impl ProtocolSim for FluidV1 {
         }
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
+                self.swap_to_target_price(params, target, *tolerance)
+            }
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+        }
     }
 }
 
@@ -1266,9 +1375,11 @@ mod test {
     use alloy::primitives::I256;
     use anyhow::bail;
     use num_traits::Num;
+    use rstest::rstest;
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::evm::query_pool_swap::test_helpers::{target_price_params, to_price};
 
     fn setup_fluid_pool(center_price: U256) -> (Token, Token, FluidV1) {
         let wsteth = Token::new(
@@ -1719,6 +1830,105 @@ mod test {
 
             assert_eq!(res.amount, exp_out);
         }
+    }
+
+    fn setup_pool_with_decimals(center_price: U256, decimals: u32) -> (Token, Token, FluidV1) {
+        let (mut token0, mut token1, pool) = setup_fluid_pool(center_price);
+        token0.decimals = decimals;
+        token1.decimals = decimals;
+        let pool = FluidV1::new(
+            &pool.pool_address,
+            &token0,
+            &token1,
+            pool.collateral_reserves.clone(),
+            pool.debt_reserves.clone(),
+            limits_wide(),
+            pool.center_price,
+            pool.fee,
+            pool.sync_time,
+        );
+        (token0, token1, pool)
+    }
+
+    // Real reserves cap the move at a few bps. The tolerance is below the move, so a wrong
+    // amount leaves the band. One2zero needs a different center price to stay within limits.
+    #[rstest]
+    #[case::zero2one(true, U256::ONE, 18, 0.9998)]
+    #[case::one2zero(false, U256::from(12u64) * U256::from(10u64).pow(U256::from(26u64)), 18, 0.99995)]
+    #[case::six_decimals(true, U256::ONE, 6, 0.9998)]
+    fn test_swap_to_price_lands_in_band(
+        #[case] zero2one: bool,
+        #[case] center_price: U256,
+        #[case] decimals: u32,
+        #[case] multiplier: f64,
+    ) {
+        let (token0, token1, pool) = setup_pool_with_decimals(center_price, decimals);
+        let (token_in, token_out) = if zero2one { (token0, token1) } else { (token1, token0) };
+        let target = pool
+            .spot_price(&token_in, &token_out)
+            .unwrap() *
+            multiplier;
+        let params = target_price_params(
+            &token_in,
+            &token_out,
+            to_price(target, &token_in, &token_out),
+            1e-5,
+        );
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.price_points().is_none(), "expected the closed form");
+        let new_spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        assert!(
+            new_spot >= target * (1.0 - 1e-12) && new_spot <= target * (1.0 + 1e-5),
+            "{new_spot}"
+        );
+    }
+
+    #[test]
+    fn test_swap_to_price_target_above_spot() {
+        let (wsteth, eth, pool) = setup_fluid_pool(U256::ONE);
+        let spot = pool.spot_price(&wsteth, &eth).unwrap();
+        let params =
+            target_price_params(&wsteth, &eth, to_price(spot * 1.01, &wsteth, &eth), 0.001);
+
+        let result = pool.query_pool_swap(&params);
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    #[test]
+    fn test_swap_to_price_target_equal_to_spot() {
+        let (wsteth, eth, pool) = setup_fluid_pool(U256::ONE);
+        let spot = pool.spot_price(&wsteth, &eth).unwrap();
+        // spot is in [1, 2), so spot * 2^52 is an exact integer.
+        let scale = 1u128 << 52;
+        let target = Price::new(BigUint::from((spot * scale as f64) as u128), BigUint::from(scale));
+        let params = target_price_params(&wsteth, &eth, target, 0.001);
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert_eq!(swap.amount_in(), &BigUint::ZERO);
+        assert!(swap.new_state().eq(&pool));
+    }
+
+    #[test]
+    fn test_swap_to_price_outside_band_uses_numerical_search() {
+        // With 6 decimals the closed-form input rounds down, so the new spot price misses a zero
+        // tolerance band.
+        let (token0, token1, pool) = setup_pool_with_decimals(U256::ONE, 6);
+        let spot = pool
+            .spot_price(&token0, &token1)
+            .unwrap();
+        let params =
+            target_price_params(&token0, &token1, to_price(spot * 0.9998, &token0, &token1), 0.0);
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.price_points().is_some(), "expected the numerical search");
     }
 
     #[test]

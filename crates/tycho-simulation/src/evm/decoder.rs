@@ -1407,7 +1407,8 @@ impl ProtocolSim for MockProtocolSim {
     }
 
     fn typetag_name(&self) -> &'static str {
-        unreachable!()
+        // typetag reads the tag before Serialize, so a panic here would hide Serialize's error.
+        "MockProtocolSim"
     }
 
     fn typetag_deserialize(&self) {
