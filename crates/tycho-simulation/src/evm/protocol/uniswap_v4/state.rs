@@ -225,6 +225,7 @@ impl UniswapV4State {
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
+        needs_final_tick: bool,
     ) -> Result<SwapResults, SimulationError> {
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
@@ -380,7 +381,13 @@ impl UniswapV4State {
                 }
                 state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                // Without a next iteration, only the returned tick and the step cache read it.
+                let tick_is_read = needs_final_tick ||
+                    state.amount_remaining != I256::ZERO ||
+                    state.sqrt_price == price_limit;
+                if tick_is_read {
+                    state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                }
             }
             let reached_target = state.sqrt_price == sqrt_ratio_target;
             recorder = recorder
@@ -931,7 +938,13 @@ impl ProtocolSim for UniswapV4State {
                     fee_pips,
                     Sign::Negative, // V4 uses negative for exact input
                     |zero_for_one, amount_specified, sqrt_price_limit| {
-                        self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
+                        self.swap(
+                            zero_for_one,
+                            amount_specified,
+                            Some(sqrt_price_limit),
+                            None,
+                            true,
+                        )
                     },
                 )?;
 
@@ -1088,7 +1101,7 @@ impl NativeQuote for UniswapV4State {
         }
 
         // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
+        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, with_state)?;
 
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
@@ -2934,7 +2947,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(100_000_000_000_000_000u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, true)
             .expect("swap should stay within the current liquidity range");
         let expected_tick =
             get_tick_at_sqrt_ratio(result.sqrt_price).expect("new sqrt price should map to a tick");
@@ -2952,7 +2965,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, true)
             .expect("swap should consume the input as fee without moving price");
 
         assert_eq!(result.sqrt_price, pool.sqrt_price);
@@ -3342,19 +3355,19 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1000u64)); // V4 uses negative for exact input
 
         // zero_for_one: price_limit equal to sqrt_price is invalid (must be strictly less)
-        let result = pool.swap(true, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(true, amount, Some(pool.sqrt_price), None, true);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // zero_for_one: price_limit at MIN_SQRT_RATIO is invalid (must be strictly greater)
-        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None);
+        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None, true);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit equal to sqrt_price is invalid (must be strictly greater)
-        let result = pool.swap(false, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(false, amount, Some(pool.sqrt_price), None, true);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit at MAX_SQRT_RATIO is invalid (must be strictly less)
-        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None);
+        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None, true);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
@@ -3382,7 +3395,7 @@ mod tests {
 
         let amount = -I256::from_raw(U256::from(1000u64));
         // Default price limit for zero_for_one is MIN_SQRT_RATIO + 1 == sqrt_price, so invalid
-        let result = pool.swap(true, amount, None, None);
+        let result = pool.swap(true, amount, None, None, true);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 }
@@ -3456,6 +3469,54 @@ mod step_cache_tests {
                         .min_inputs(sell < buy)
                         .len();
                     assert!(steps > 2, "only {steps} steps cached");
+                }
+            }
+        }
+    }
+
+    /// A quote that skips the post-swap state, as amount and gas or as its error.
+    fn stateless_outcome(
+        pool: &UniswapV4State,
+        amount: &BigUint,
+        sell: &Token,
+        buy: &Token,
+    ) -> String {
+        match pool.quote_exact_in_biguint(amount, &sell.address, &buy.address, false) {
+            Ok((out, gas, state)) => {
+                assert!(state.is_none());
+                format!("{out} {gas}")
+            }
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    #[test]
+    fn test_quotes_without_state_match_quotes_with_state() {
+        let (wbtc, weth) = wbtc_weth();
+        for (sell, buy, smallest) in [(&wbtc, &weth, 1_000u64), (&weth, &wbtc, 1_000_000_000)] {
+            for order in amount_orders(&test_amounts(smallest)) {
+                // Stateless quotes feed the step cache that the quotes with state then read.
+                let shared = test_pool();
+                for amount in &order {
+                    let fresh = outcome(&test_pool(), amount, sell, buy);
+                    let expected_prefix: String = fresh
+                        .split(' ')
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let stateless = stateless_outcome(&shared, amount, sell, buy);
+                    assert!(
+                        fresh.starts_with("error") && stateless.starts_with("error") ||
+                            stateless == expected_prefix,
+                        "selling {amount} {}: {stateless} vs {fresh}",
+                        sell.symbol
+                    );
+                    assert_eq!(
+                        outcome(&shared, amount, sell, buy),
+                        fresh,
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
                 }
             }
         }

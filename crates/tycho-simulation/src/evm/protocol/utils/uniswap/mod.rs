@@ -39,6 +39,7 @@ pub(crate) struct SwapResults {
     pub(crate) amount_remaining: I256,
     pub(crate) sqrt_price: U256,
     pub(crate) liquidity: u128,
+    /// Stale when the swap ended between ticks and `needs_final_tick` was false.
     pub(crate) tick: i32,
     pub(crate) gas_used: U256,
 }
