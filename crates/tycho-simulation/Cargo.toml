@@ -131,6 +131,7 @@ evm = [
     "dep:tokio-tungstenite",
 ]
 rfq = [
+    "dep:alloy-primitives",
     "dep:reqwest",
     "dep:async-trait",
     "dep:tokio-tungstenite",
