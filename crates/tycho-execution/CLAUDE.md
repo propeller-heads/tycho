@@ -173,20 +173,18 @@ Each concrete router has its own executor, and each executor holds one router ad
 | Router | Executor | Primary quote | Executor swap data |
 |---|---|---|---|
 | `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
-| `MetricFallbackRouter` | `MetricFallbackExecutor` | Metric's `MetricOmmSwapQuoter.quoteLiveExactInSingle` (`metricQuoter` immutable), or a simulated swap without one | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+| `MetricFallbackRouter` | `MetricFallbackExecutor` | Simulated swap through `simulatePrimary` | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
 | `BebopFallbackRouter` | `BebopFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
 | `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
 
 A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
 quoted, and the fallback runs only when the primary fails.
 
-`MetricFallbackRouter` quotes through Metric's `MetricOmmSwapQuoter`, a lens that runs the pool's swap up to its
-callback and reverts with the amounts. A quoter revert (a stale oracle, say) quotes zero. Base uses Metric's previous-version quoter
-`0xaB6C48D981B943F62A23bb4EB2db125182E6753c`, which quotes the v1 pools inside a transaction. Metric's v1 quoter
-`0x803Dd787ef9734c34696877ca6F20194fBcBFbF8` reverts there: the v1 oracle reverts for a price read from the v1
-quoter, and returns a price only in an `eth_call` from `address(0)`. A chain without a quoter deploys `metricQuoter` as
-`address(0)`: `simulatePrimary` then runs the pool's swap and reverts with the amount the receiver got, and a pool
-revert quotes zero. This costs the callback payment and the output transfer more than the quoter. The router pays the pool's `metricOmmSwapCallback` through the
+`MetricFallbackRouter` quotes the pool by simulation: `simulatePrimary` runs the pool's swap and reverts with the
+amount the receiver got. A pool revert (a stale oracle, say) quotes zero. Metric's quoters do not fit: the v1
+`MetricOmmSwapQuoter` reverts inside a transaction, because the v1 oracle returns a price only to a pool in a swap or
+to an `eth_call` from `address(0)`. The previous-version quoter still quotes the v1 pools, but Metric lists it as
+retired. The router pays the pool's `metricOmmSwapCallback` through the
 catch-all `fallback`, which sends the full `amountIn` to the pool the swap called, as the Dispatcher does for
 `MetricExecutor`.
 
@@ -296,8 +294,7 @@ Constraints:
 - `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`
   or `bebop`) through the CREATE2 factory, reading `poolManager` and `fluidLiquidity` from the chain's `uniswap_v4`
   and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
-  `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Metric adds the chain's quoter
-  from `METRIC_SWAP_QUOTERS`, or the zero address without one; Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
+  `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
   the `rfq:hashflow` router.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
   to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
@@ -466,7 +463,7 @@ same `FallbackSwapData` `user_data`:
   from `fallback_router` under `fallback:rfq:hashflow`, and wraps the 345-byte quote in the tokens and the fallback.
 
 None of these routers is deployed, so no chain lists these entries yet. The gas estimator charges a
-Metric leg its pool gas twice (the quoter or the simulation runs the pool's swap), and a Bebop or Hashflow leg the router's approval
+Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop or Hashflow leg the router's approval
 and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`

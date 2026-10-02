@@ -18,10 +18,21 @@ import {
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
 import {
-    IMetricOmmSwapQuoter,
     MetricFallbackRouter,
     MetricFallbackRouter__InvalidDataLength
 } from "../../src/fallback/MetricFallbackRouter.sol";
+
+/// @notice Metric's v1 periphery lens; see
+/// https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/smart-contracts-reference/get-quote
+interface IMetricOmmSwapQuoterV1 {
+    function quoteLiveExactInSingle(
+        address pool,
+        address sender,
+        bool zeroForOne,
+        uint128 amountIn,
+        uint128 priceLimitX64
+    ) external returns (uint256 amountIn_, uint256 amountOut);
+}
 
 interface IMetricOmmSwapCallback {
     function metricOmmSwapCallback(
@@ -31,12 +42,10 @@ interface IMetricOmmSwapCallback {
     ) external;
 }
 
-/// @notice Quotes `quoteOut` and fills `swapOut`, so a test can make the two disagree. Reverts
-/// unless the callback paid exactly `amountIn`.
+/// @notice Fills `swapOut`. Reverts unless the callback paid exactly `amountIn`.
 contract MockMetricOmmPool {
     IERC20 public immutable tokenIn;
     IERC20 public immutable tokenOut;
-    uint256 public quoteOut;
     uint256 public swapOut;
     bool public broken;
 
@@ -45,8 +54,7 @@ contract MockMetricOmmPool {
         tokenOut = IERC20(tokenOut_);
     }
 
-    function set(uint256 quoteOut_, uint256 swapOut_, bool broken_) external {
-        quoteOut = quoteOut_;
+    function set(uint256 swapOut_, bool broken_) external {
         swapOut = swapOut_;
         broken = broken_;
     }
@@ -73,20 +81,6 @@ contract MockMetricOmmPool {
     }
 }
 
-/// @notice Reverts for a pool quoting zero, as the real quoter does for a pool that cannot fill.
-contract MockMetricOmmSwapQuoter is IMetricOmmSwapQuoter {
-    function quoteLiveExactInSingle(
-        address pool,
-        bool, /* zeroForOne */
-        uint128 amountIn,
-        uint128 /* priceLimitX64 */
-    ) external view returns (uint256, uint256) {
-        uint256 quoteOut = MockMetricOmmPool(pool).quoteOut();
-        require(quoteOut > 0, "MockMetricOmmSwapQuoter: no quote");
-        return (amountIn, quoteOut);
-    }
-}
-
 contract MetricFallbackRouterTest is FallbackRouterAssertions {
     uint256 constant FORK_BLOCK = 22_689_128;
     uint256 constant USDC_IN = 10_000e6;
@@ -102,8 +96,7 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         router = new MetricFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
-            new MockMetricOmmSwapQuoter()
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
         executor = new MetricFallbackExecutor(address(router));
         pool = new MockMetricOmmPool(USDC_ADDR, WETH_ADDR);
@@ -111,8 +104,9 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         deal(USDC_ADDR, address(router), USDC_IN);
     }
 
+    /// The pool is paid once: the simulated swap rolls back.
     function testMetricFillsWhenItQuotesHigher() public {
-        pool.set(4 ether, 4 ether, false);
+        pool.set(4 ether, false);
 
         vm.recordLogs();
         _swap(bytes(hex"01"));
@@ -124,7 +118,7 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
     }
 
     function testFallsBackWhenMetricQuotesLower() public {
-        pool.set(3 ether, 3 ether, false);
+        pool.set(3 ether, false);
 
         _expectFallbackSwap(
             TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
@@ -137,9 +131,9 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
-    /// The pool is not paid, since its swap is never attempted.
-    function testFallsBackWhenQuoterReverts() public {
-        pool.set(0, 4 ether, false);
+    /// A pool that reverts in the simulated swap quotes zero.
+    function testFallsBackWhenMetricReverts() public {
+        pool.set(4 ether, true);
 
         _expectFallbackSwap(
             TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
@@ -151,21 +145,12 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
-    function testFallsBackWhenMetricRevertsAfterWinningQuote() public {
-        pool.set(4 ether, 4 ether, true);
-
-        _expectFallbackSwap(TychoFallbackRouter.FallbackReason.PrimaryFailed);
-        _swap(bytes(hex"01"));
-
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
-        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
-    }
-
     function testFallsBackWhenMetricPaysNothing() public {
-        pool.set(4 ether, 0, false);
+        pool.set(0, false);
 
-        _expectFallbackSwap(TychoFallbackRouter.FallbackReason.PrimaryFailed);
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
         _swap(bytes(hex"01"));
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
@@ -188,58 +173,13 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
         _swap(bytes(hex"0100"));
     }
 
-    /// The pool's quote is zero, so only the simulated swap can price it. The pool is paid
-    /// once: the simulation rolls back.
-    function testSimulatedQuoteFillsWhenMetricQuotesHigher() public {
-        _deployWithoutQuoter();
-        pool.set(0, 4 ether, false);
-
-        vm.recordLogs();
-        _swap(bytes(hex"01"));
-
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), 4 ether);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), USDC_IN);
-        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
-        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
-    }
-
-    function testSimulatedQuoteFallsBackWhenMetricQuotesLower() public {
-        _deployWithoutQuoter();
-        pool.set(0, 3 ether, false);
-
-        _expectFallbackSwap(
-            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
-        );
-        _swap(bytes(hex"01"));
-
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
-        assertEq(IERC20(WETH_ADDR).balanceOf(address(pool)), 100 ether);
-        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
-    }
-
-    /// A pool that reverts in the simulation quotes zero.
-    function testSimulatedQuoteFallsBackWhenMetricReverts() public {
-        _deployWithoutQuoter();
-        pool.set(0, 4 ether, true);
-
-        _expectFallbackSwap(
-            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
-        );
-        _swap(bytes(hex"01"));
-
-        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), V3_WETH_OUT);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(pool)), 0);
-        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
-    }
-
     function testSimulatePrimaryRejectsExternalCaller() public {
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
         router.simulatePrimary(_swapStruct(), address(pool), hex"01");
     }
 
     function testExecutorSwap() public {
-        pool.set(4 ether, 4 ether, false);
+        pool.set(4 ether, false);
 
         executor.swap(USDC_IN, _executorData(), BOB);
 
@@ -278,16 +218,6 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
             )
         );
         executor.getTransferData(data);
-    }
-
-    function _deployWithoutQuoter() internal {
-        router = new MetricFallbackRouter(
-            IPoolManager(POOL_MANAGER),
-            FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
-            IMetricOmmSwapQuoter(address(0))
-        );
-        deal(USDC_ADDR, address(router), USDC_IN);
     }
 
     function _swap(bytes memory metricData) internal {
@@ -335,9 +265,9 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
 /// @notice Runs the router against a live Metric v1 pool, with the chain's Uniswap V3 pool as
 /// fallback. Swaps 1 WETH for USDC; WETH is the pool's token0 on both chains.
 abstract contract MetricFallbackRouterForkTest is FallbackRouterAssertions {
-    /// Metric's previous-version quoter. It quotes the v1 pools on Ethereum and Base.
-    IMetricOmmSwapQuoter constant METRIC_QUOTER =
-        IMetricOmmSwapQuoter(0xaB6C48D981B943F62A23bb4EB2db125182E6753c);
+    /// Metric's v1 quoter. It returns a quote only to an `eth_call` from `address(0)`.
+    IMetricOmmSwapQuoterV1 constant METRIC_QUOTER =
+        IMetricOmmSwapQuoterV1(0x803Dd787ef9734c34696877ca6F20194fBcBFbF8);
     uint256 constant WETH_IN = 1 ether;
     bytes constant ZERO_FOR_ONE = hex"01";
 
@@ -423,9 +353,11 @@ abstract contract MetricFallbackRouterForkTest is FallbackRouterAssertions {
         return router.quoteFallback(_swapStruct(), fallbackSwap);
     }
 
+    /// Metric's own quote, read as an off-chain `eth_call` reads it.
     function _metricQuote() internal returns (uint256 amountOut) {
+        vm.prank(address(0), address(0));
         (, amountOut) = METRIC_QUOTER.quoteLiveExactInSingle(
-            _metricPool(), true, uint128(WETH_IN), 0
+            _metricPool(), address(router), true, uint128(WETH_IN), 0
         );
     }
 
@@ -438,7 +370,6 @@ abstract contract MetricFallbackRouterForkTest is FallbackRouterAssertions {
     }
 }
 
-/// Ethereum has no quoter in `METRIC_SWAP_QUOTERS`, so the router quotes Metric by simulation.
 contract MetricFallbackRouterEthereumTest is MetricFallbackRouterForkTest {
     /// The feed was stale in the blocks around this one.
     uint256 constant FORK_BLOCK = 26_105_909;
@@ -450,8 +381,7 @@ contract MetricFallbackRouterEthereumTest is MetricFallbackRouterForkTest {
         router = new MetricFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
-            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER),
-            IMetricOmmSwapQuoter(address(0))
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
     }
 
@@ -491,8 +421,7 @@ contract MetricFallbackRouterBaseTest is
         router = new MetricFallbackRouter(
             IPoolManager(BASE_POOL_MANAGER),
             address(0),
-            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER),
-            METRIC_QUOTER
+            IUniswapV3StaticQuoter(BASE_STATIC_QUOTER)
         );
     }
 

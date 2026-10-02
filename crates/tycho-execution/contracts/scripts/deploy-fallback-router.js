@@ -13,8 +13,6 @@ const {deployCreate2} = require("./utils");
 // `SUPPORTED_PROTOCOLS` in the Rust encoder must agree with what this deploys;
 // its tests check that against executor_deployments.json.
 //
-// MetricFallbackRouter also takes Metric's swap quoter, from METRIC_SWAP_QUOTERS. A
-// missing one is deployed as address(0): the Metric pool is quoted by simulation.
 // BebopFallbackRouter also takes the Bebop settlement and router, from the chain's
 // `rfq:bebop` entry. HashflowFallbackRouter also takes the Hashflow router, from the
 // chain's `rfq:hashflow` entry.
@@ -28,15 +26,6 @@ const {deployCreate2} = require("./utils");
 const executorDeployments = require("../../config/executor_deployments.json");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-
-// Metric's MetricOmmSwapQuoter, per chain. This is Metric's previous-version
-// quoter: it quotes the v1 pools inside a transaction. The v1 quoter
-// (0x803Dd787ef9734c34696877ca6F20194fBcBFbF8) works only in an eth_call from
-// address(0), so the router cannot use it:
-// https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/smart-contracts-reference/get-quote
-const METRIC_SWAP_QUOTERS = {
-    base: "0xaB6C48D981B943F62A23bb4EB2db125182E6753c",
-};
 
 const ROUTERS = {
     propamm: "PropAMMFallbackRouter",
@@ -77,9 +66,6 @@ async function main() {
         );
     }
     const args = [poolManager, fluidLiquidity, staticQuoter];
-    if (kind === "metric") {
-        args.push(METRIC_SWAP_QUOTERS[base] ?? ZERO_ADDRESS);
-    }
     if (kind === "bebop") {
         const bebopArgs = deployments["rfq:bebop"]?.args;
         if (!bebopArgs) {
@@ -115,11 +101,6 @@ async function main() {
         )}`
     );
 
-    if (kind === "metric") {
-        console.log(
-            `- metricQuoter: ${describe(args[3], "Metric quoted by simulation")}`
-        );
-    }
     if (kind === "bebop") {
         console.log(`- bebopSettlement: ${args[3]}`);
         console.log(`- bebopRouter: ${args[4]}`);
