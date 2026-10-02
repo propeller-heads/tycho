@@ -17,6 +17,7 @@ use tycho_common::{
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        swap::SimulationResult,
     },
     Bytes,
 };
@@ -32,6 +33,7 @@ use crate::evm::protocol::{
             boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
         },
     },
+    swap_quoter::{impl_native_swap_quoter, AttachedComponent, NativeQuote},
     u256_num::u256_to_f64,
 };
 
@@ -45,7 +47,7 @@ const SIGNED_EXCLUSIVE_SWAP_GAS: u64 = 62_373;
 
 #[enum_delegate::implement(EkuboPool)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EkuboV3State {
+pub enum EkuboV3PoolState {
     Concentrated(ConcentratedPool),
     FullRange(FullRangePool),
     Stableswap(StableswapPool),
@@ -54,6 +56,23 @@ pub enum EkuboV3State {
     MevCapture(MevCapturePool),
     BoostedFees(BoostedFeesPool),
     Ve33(Ve33Pool),
+}
+
+/// An Ekubo V3 pool and, once the decoder attached it, the pool's component.
+///
+/// The component is the same for every pool variant, so it lives here instead of in each of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EkuboV3State {
+    pub(super) pool: EkuboV3PoolState,
+    #[serde(skip)]
+    component: AttachedComponent,
+}
+
+impl From<EkuboV3PoolState> for EkuboV3State {
+    fn from(pool: EkuboV3PoolState) -> Self {
+        Self { pool, component: AttachedComponent::default() }
+    }
 }
 
 fn sqrt_price_q128_to_f64(
@@ -67,11 +86,21 @@ fn sqrt_price_q128_to_f64(
 }
 
 impl EkuboV3State {
+    /// This state with `component` attached, so it quotes through [`SwapQuoter`].
+    pub(crate) fn with_component(mut self, component: AttachedComponent) -> Self {
+        self.component = component;
+        self
+    }
+
+    fn wrap(&self, pool: EkuboV3PoolState) -> Self {
+        Self { pool, component: self.component.clone() }
+    }
+
     /// Zero unless the extension forces the swap through `Core.forward`.
     ///
     /// The pool key carries no chain, so a SignedExclusiveSwap address from any deployment counts.
     fn forward_overhead_gas(&self) -> u64 {
-        let extension = self.key().config.extension;
+        let extension = self.pool.key().config.extension;
         if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS
             .iter()
             .any(|(_, deployment)| *deployment == extension)
@@ -86,15 +115,15 @@ impl EkuboV3State {
 #[typetag::serde]
 impl ProtocolSim for EkuboV3State {
     fn fee(&self) -> f64 {
-        let fee = match self {
-            Self::Ve33(pool) => pool.swap_fee(),
-            _ => self.key().config.fee,
+        let fee = match &self.pool {
+            EkuboV3PoolState::Ve33(pool) => pool.swap_fee(),
+            pool => pool.key().config.fee,
         };
         fee as f64 / (2f64.powi(64))
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let sqrt_ratio = self.sqrt_ratio();
+        let sqrt_ratio = self.pool.sqrt_ratio();
         let (base_decimals, quote_decimals) = (base.decimals as usize, quote.decimals as usize);
 
         if base < quote {
@@ -109,39 +138,12 @@ impl ProtocolSim for EkuboV3State {
         &self,
         amount_in: BigUint,
         token_in: &Token,
-        _token_out: &Token,
+        token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let token_amount = EvmTokenAmount {
-            token: Address::try_from(&token_in.address[..]).map_err(|err| {
-                SimulationError::InvalidInput(format!("token_in invalid: {err}"), None)
-            })?,
-            amount: amount_in.try_into().map_err(|_| {
-                SimulationError::InvalidInput("amount in must fit into a i128".to_string(), None)
-            })?,
-        };
-
-        let quote = self.quote(token_amount)?;
-
-        if quote.calculated_amount > i128::MAX as u128 {
-            return Err(SimulationError::RecoverableError(
-                "calculated amount exceeds i128::MAX".to_string(),
-            ));
-        }
-
-        let res = GetAmountOutResult {
-            amount: BigUint::from(quote.calculated_amount),
-            gas: BigUint::from(quote.gas) + BigUint::from(self.forward_overhead_gas()),
-            new_state: Box::new(quote.new_state),
-        };
-
-        if quote.consumed_amount != token_amount.amount {
-            return Err(SimulationError::InvalidInput(
-                format!("pool does not have enough liquidity to support complete swap. input amount: {input_amount}, consumed amount: {consumed_amount}", input_amount = token_amount.amount, consumed_amount = quote.consumed_amount),
-                Some(res),
-            ));
-        }
-
-        Ok(res)
+        let (amount_out, gas, new_state) =
+            self.quote_exact_in(&amount_in, &token_in.address, &token_out.address, true)?;
+        let new_state = new_state.expect("quote_exact_in builds the state it is asked for");
+        Ok(GetAmountOutResult::new(amount_out, gas, Box::new(new_state)))
     }
 
     fn delta_transition(
@@ -154,19 +156,28 @@ impl ProtocolSim for EkuboV3State {
             .updated_attributes
             .get("liquidity")
         {
-            self.set_liquidity(liquidity.clone().into());
+            self.pool
+                .set_liquidity(liquidity.clone().into());
         }
 
         if let Some(sqrt_price) = delta
             .updated_attributes
             .get("sqrt_ratio")
         {
-            self.set_sqrt_ratio(U256::try_from_be_slice(sqrt_price).ok_or_else(|| {
-                TransitionError::DecodeError("failed to parse updated pool price".to_string())
-            })?);
+            self.pool
+                .set_sqrt_ratio(U256::try_from_be_slice(sqrt_price).ok_or_else(|| {
+                    TransitionError::DecodeError("failed to parse updated pool price".to_string())
+                })?);
         }
 
-        self.finish_transition(delta.updated_attributes, delta.deleted_attributes)
+        self.pool
+            .finish_transition(delta.updated_attributes, delta.deleted_attributes)
+    }
+
+    fn as_swap_quoter(&self) -> Option<&dyn tycho_common::simulation::swap::SwapQuoter> {
+        self.component
+            .is_attached()
+            .then_some(self as &dyn tycho_common::simulation::swap::SwapQuoter)
     }
 
     fn query_pool_swap(
@@ -200,8 +211,9 @@ impl ProtocolSim for EkuboV3State {
         sell_token: Bytes,
         _buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let consumed_amount =
-            self.get_limit(Address::try_from(&sell_token[..]).map_err(|err| {
+        let consumed_amount = self
+            .pool
+            .get_limit(Address::try_from(&sell_token[..]).map_err(|err| {
                 SimulationError::InvalidInput(format!("sell_token invalid: {err}"), None)
             })?)?;
 
@@ -217,13 +229,75 @@ impl ProtocolSim for EkuboV3State {
     }
 }
 
+impl NativeQuote for EkuboV3State {
+    fn attached_component(&self) -> &AttachedComponent {
+        &self.component
+    }
+
+    fn swap_fee(&self, _zero_for_one: bool) -> f64 {
+        ProtocolSim::fee(self)
+    }
+
+    fn quote_exact_in(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        _token_out: &Bytes,
+        with_state: bool,
+    ) -> SimulationResult<(BigUint, BigUint, Option<Self>)> {
+        let token_amount = EvmTokenAmount {
+            token: Address::try_from(&token_in[..]).map_err(|err| {
+                SimulationError::InvalidInput(format!("token_in invalid: {err}"), None)
+            })?,
+            amount: amount_in
+                .clone()
+                .try_into()
+                .map_err(|_| {
+                    SimulationError::InvalidInput(
+                        "amount in must fit into a i128".to_string(),
+                        None,
+                    )
+                })?,
+        };
+
+        let quote = self.pool.quote(token_amount)?;
+
+        if quote.calculated_amount > i128::MAX as u128 {
+            return Err(SimulationError::RecoverableError(
+                "calculated amount exceeds i128::MAX".to_string(),
+            ));
+        }
+
+        let amount_out = BigUint::from(quote.calculated_amount);
+        let gas = BigUint::from(quote.gas) + BigUint::from(self.forward_overhead_gas());
+        let new_state = self.wrap(quote.new_state);
+
+        if quote.consumed_amount != token_amount.amount {
+            let partial =
+                GetAmountOutResult { amount: amount_out, gas, new_state: Box::new(new_state) };
+            return Err(SimulationError::InvalidInput(
+                format!("pool does not have enough liquidity to support complete swap. input amount: {input_amount}, consumed amount: {consumed_amount}", input_amount = token_amount.amount, consumed_amount = quote.consumed_amount),
+                Some(partial),
+            ));
+        }
+
+        Ok((amount_out, gas, with_state.then_some(new_state)))
+    }
+}
+
+impl_native_swap_quoter!(EkuboV3State);
+
 #[cfg(test)]
 mod tests {
     use rstest::*;
     use rstest_reuse::apply;
+    use tycho_common::simulation::swap::QuoteParams;
 
     use super::*;
-    use crate::evm::protocol::ekubo_v3::test_cases::*;
+    use crate::evm::protocol::{
+        ekubo_v3::test_cases::*,
+        swap_quoter::tests::{self, assert_delta_transition_matches, assert_quoter_matches},
+    };
 
     /// Both pools price identically, so the gas gap is exactly the forward overhead.
     #[rstest]
@@ -232,15 +306,13 @@ mod tests {
         let (token0, token1) = (signed.token0(), signed.token1());
         let (amount_in, _) = signed.swap_token0.clone();
 
-        let signed_gas = signed
-            .state_after_transition
+        let signed_gas = EkuboV3State::from(signed.state_after_transition.clone())
             .get_amount_out(amount_in.clone(), &token0, &token1)
             .expect("signed pool quotes")
             .gas;
 
         let plain = concentrated();
-        let plain_gas = plain
-            .state_after_transition
+        let plain_gas = EkuboV3State::from(plain.state_after_transition.clone())
             .get_amount_out(amount_in, &plain.token0(), &plain.token1())
             .expect("plain pool quotes")
             .gas;
@@ -257,8 +329,7 @@ mod tests {
     fn test_other_pools_carry_no_forward_overhead() {
         for case in [concentrated(), full_range(), mev_capture()] {
             assert_eq!(
-                case.state_after_transition
-                    .forward_overhead_gas(),
+                EkuboV3State::from(case.state_after_transition).forward_overhead_gas(),
                 0,
                 "only a signed-exclusive pool is surcharged"
             );
@@ -267,7 +338,7 @@ mod tests {
 
     #[apply(all_cases)]
     fn test_delta_transition(case: TestCase) {
-        let mut state = case.state_before_transition;
+        let mut state = EkuboV3State::from(case.state_before_transition);
 
         state
             .delta_transition(
@@ -280,7 +351,7 @@ mod tests {
             )
             .expect("executing transition");
 
-        assert_eq!(state, case.state_after_transition);
+        assert_eq!(state, EkuboV3State::from(case.state_after_transition));
     }
 
     #[apply(all_cases)]
@@ -288,8 +359,7 @@ mod tests {
         let (token0, token1) = (case.token0(), case.token1());
         let (amount_in, expected_out) = case.swap_token0;
 
-        let res = case
-            .state_after_transition
+        let res = EkuboV3State::from(case.state_after_transition)
             .get_amount_out(amount_in, &token0, &token1)
             .expect("computing quote");
 
@@ -301,7 +371,7 @@ mod tests {
         use std::ops::Deref;
 
         let (token0, token1) = (case.token0(), case.token1());
-        let state = case.state_after_transition;
+        let state = EkuboV3State::from(case.state_after_transition);
 
         let max_amount_in = state
             .get_limits(token0.address.deref().into(), token1.address.deref().into())
@@ -313,5 +383,66 @@ mod tests {
         state
             .get_amount_out(max_amount_in, &token0, &token1)
             .expect("quoting with limit");
+    }
+
+    #[apply(all_cases)]
+    fn test_swap_quoter_matches_protocol_sim(case: TestCase) {
+        let (token0, token1) = (case.token0(), case.token1());
+        let component = tests::component(&token0, &token1);
+        let limit = case.expected_limit_token0.clone();
+        let amounts = [
+            BigUint::from(1u8),
+            case.swap_token0.0.clone(),
+            limit.clone(),
+            limit * 2u8 + 1u8,
+            BigUint::from(10u128.pow(30)),
+        ];
+        let state = EkuboV3State::from(case.state_after_transition).with_component(component);
+
+        assert_quoter_matches(&state, &token0, &token1, &amounts);
+        let fee = state
+            .as_swap_quoter()
+            .expect("component is attached")
+            .fee(QuoteParams::fixed_in(&token0.address, &token1.address, BigUint::ZERO).unwrap())
+            .unwrap();
+        assert_eq!(fee.fee(), ProtocolSim::fee(&state));
+    }
+
+    #[apply(all_cases)]
+    fn test_swap_quoter_delta_transition_matches_protocol_sim(case: TestCase) {
+        let (token0, token1) = (case.token0(), case.token1());
+        let state = EkuboV3State::from(case.state_before_transition)
+            .with_component(tests::component(&token0, &token1));
+        let delta = ProtocolStateDelta {
+            updated_attributes: case.transition_attributes,
+            ..Default::default()
+        };
+
+        assert_delta_transition_matches(&state, delta);
+    }
+
+    #[test]
+    fn test_swap_quoter_partial_fill_is_reported_like_protocol_sim() {
+        let case = concentrated();
+        let (token0, token1) = (case.token0(), case.token1());
+        let state = EkuboV3State::from(case.state_after_transition)
+            .with_component(tests::component(&token0, &token1));
+        let amount = case.expected_limit_token0 * 2u8 + 1u8;
+
+        let quoter = state
+            .as_swap_quoter()
+            .expect("component is attached");
+        let Err(error) = quoter.quote(
+            QuoteParams::fixed_in(&token0.address, &token1.address, amount.clone())
+                .expect("valid params"),
+        ) else {
+            panic!("amount exceeds the pool limit");
+        };
+
+        assert!(matches!(error, SimulationError::InvalidInput(_, Some(_))));
+        let Err(expected) = state.get_amount_out(amount, &token0, &token1) else {
+            panic!("amount exceeds the pool limit");
+        };
+        assert_eq!(error.to_string(), expected.to_string());
     }
 }

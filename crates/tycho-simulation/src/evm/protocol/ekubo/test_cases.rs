@@ -22,7 +22,7 @@ use tycho_common::{
 
 use super::{
     pool::{base::BasePool, EkuboPool},
-    state::EkuboState,
+    state::EkuboPoolState,
 };
 use crate::evm::protocol::ekubo::pool::{
     full_range::FullRangePool, mev_resist::MevResistPool, oracle::OraclePool, twamm::TwammPool,
@@ -31,8 +31,8 @@ use crate::evm::protocol::ekubo::pool::{
 pub struct TestCase {
     pub component: ProtocolComponent,
 
-    pub state_before_transition: EkuboState,
-    pub state_after_transition: EkuboState,
+    pub state_before_transition: EkuboPoolState,
+    pub state_after_transition: EkuboPoolState,
 
     pub required_attributes: HashSet<String>,
     pub transition_attributes: HashMap<String, Bytes>,
@@ -110,10 +110,10 @@ pub fn base() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboState::Base(
+        state_before_transition: EkuboPoolState::Base(
             BasePool::new(POOL_KEY, vec![], SQRT_RATIO_BETWEEN, 0, TICK_INDEX_BETWEEN).unwrap(),
         ),
-        state_after_transition: EkuboState::Base(
+        state_after_transition: EkuboPoolState::Base(
             BasePool::new(
                 POOL_KEY,
                 vec![LOWER_TICK, UPPER_TICK],
@@ -196,14 +196,14 @@ pub fn full_range() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboState::FullRange(
+        state_before_transition: EkuboPoolState::FullRange(
             FullRangePool::new(
                 POOL_KEY,
                 FullRangePoolState { sqrt_ratio: MIN_SQRT_RATIO, liquidity: LIQUIDITY },
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboState::FullRange(
+        state_after_transition: EkuboPoolState::FullRange(
             FullRangePool::new(
                 POOL_KEY,
                 FullRangePoolState { sqrt_ratio: SQRT_RATIO, liquidity: LIQUIDITY },
@@ -259,7 +259,7 @@ pub fn oracle() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboState::Oracle(
+        state_before_transition: EkuboPoolState::Oracle(
             OraclePool::new(
                 &POOL_KEY,
                 OraclePoolState {
@@ -272,7 +272,7 @@ pub fn oracle() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboState::Oracle(
+        state_after_transition: EkuboPoolState::Oracle(
             OraclePool::new(
                 &POOL_KEY,
                 OraclePoolState {
@@ -346,7 +346,7 @@ pub fn twamm() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboState::Twamm(
+        state_before_transition: EkuboPoolState::Twamm(
             TwammPool::new(
                 &POOL_KEY,
                 TwammPoolState {
@@ -373,7 +373,7 @@ pub fn twamm() -> TestCase {
             )
             .unwrap(),
         ),
-        state_after_transition: EkuboState::Twamm(
+        state_after_transition: EkuboPoolState::Twamm(
             TwammPool::new(
                 &POOL_KEY,
                 TwammPoolState {
@@ -528,11 +528,11 @@ pub fn mev_resist() -> TestCase {
                     .into(),
             ),
         ]),
-        state_before_transition: EkuboState::MevResist(
+        state_before_transition: EkuboPoolState::MevResist(
             MevResistPool::new(POOL_KEY, vec![], SQRT_RATIO_BETWEEN, 0, TICK_INDEX_BETWEEN)
                 .unwrap(),
         ),
-        state_after_transition: EkuboState::MevResist(
+        state_after_transition: EkuboPoolState::MevResist(
             MevResistPool::new(
                 POOL_KEY,
                 vec![LOWER_TICK, UPPER_TICK],

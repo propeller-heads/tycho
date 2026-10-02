@@ -336,7 +336,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::str::FromStr;
 
     use alloy::primitives::U256;
@@ -361,7 +361,7 @@ mod tests {
         protocol::models::{DecoderContext, TryFromWithBlock},
     };
 
-    fn token(address: &str, decimals: u32) -> Token {
+    pub(crate) fn token(address: &str, decimals: u32) -> Token {
         Token::new(
             &Bytes::from_str(address).unwrap(),
             "T",
@@ -380,7 +380,7 @@ mod tests {
         )
     }
 
-    fn component(token_0: &Token, token_1: &Token) -> AttachedComponent {
+    pub(crate) fn component(token_0: &Token, token_1: &Token) -> AttachedComponent {
         let component = ProtocolComponent {
             id: "pool".to_string(),
             tokens: vec![token_0.address.clone(), token_1.address.clone()],
@@ -447,70 +447,115 @@ mod tests {
     fn quoter_answers_match_protocol_sim() {
         let (token_0, token_1) = tokens();
         for state in states(&token_0, &token_1) {
-            let quoter = state
-                .as_swap_quoter()
-                .expect("a state with a component quotes");
-            assert_eq!(quoter.component().id, "pool");
-            for (token_in, token_out) in [(&token_0, &token_1), (&token_1, &token_0)] {
-                let price = quoter
-                    .marginal_price(MarginalPriceParams::new(&token_in.address, &token_out.address))
-                    .unwrap();
-                assert_eq!(
-                    price.price(),
-                    state
-                        .spot_price(token_in, token_out)
+            assert_quoter_matches(state.as_ref(), &token_0, &token_1, &amounts());
+        }
+    }
+
+    /// Asserts every [`SwapQuoter`] answer of `state` equals its [`ProtocolSim`] counterpart in
+    /// both directions, including the errors and the post-swap states.
+    pub(crate) fn assert_quoter_matches(
+        state: &dyn ProtocolSim,
+        token_0: &Token,
+        token_1: &Token,
+        amounts: &[BigUint],
+    ) {
+        let quoter = state
+            .as_swap_quoter()
+            .expect("a state with a component quotes");
+        assert_eq!(quoter.component().id, "pool");
+        for (token_in, token_out) in [(token_0, token_1), (token_1, token_0)] {
+            let price = quoter
+                .marginal_price(MarginalPriceParams::new(&token_in.address, &token_out.address))
+                .unwrap();
+            assert_eq!(
+                price.price(),
+                state
+                    .spot_price(token_in, token_out)
+                    .unwrap()
+            );
+
+            let limits = quoter
+                .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
+                .unwrap();
+            let (max_in, max_out) = state
+                .get_limits(token_in.address.clone(), token_out.address.clone())
+                .unwrap();
+            assert_eq!(
+                (limits.range_in().upper(), limits.range_out().upper()),
+                (&max_in, &max_out)
+            );
+
+            for amount in amounts {
+                let expected = state.get_amount_out(amount.clone(), token_in, token_out);
+                let params = || {
+                    QuoteParams::fixed_in(&token_in.address, &token_out.address, amount.clone())
                         .unwrap()
-                );
+                };
+                let without_state = quoter.quote(params());
+                let with_state = quoter.quote(params().with_new_state());
+                match expected {
+                    Ok(expected) => {
+                        let without_state = without_state.unwrap();
+                        assert_eq!(without_state.amount_out(), &expected.amount);
+                        assert_eq!(without_state.gas(), &expected.gas);
+                        assert!(without_state.new_state().is_none());
 
-                let limits = quoter
-                    .swap_limits(LimitsParams::new(&token_in.address, &token_out.address))
-                    .unwrap();
-                let (max_in, max_out) = state
-                    .get_limits(token_in.address.clone(), token_out.address.clone())
-                    .unwrap();
-                assert_eq!(
-                    (limits.range_in().upper(), limits.range_out().upper()),
-                    (&max_in, &max_out)
-                );
-
-                for amount in amounts() {
-                    let expected = state.get_amount_out(amount.clone(), token_in, token_out);
-                    let params = || {
-                        QuoteParams::fixed_in(&token_in.address, &token_out.address, amount.clone())
+                        let with_state = with_state.unwrap();
+                        assert_eq!(with_state.amount_out(), &expected.amount);
+                        #[allow(deprecated)]
+                        let new_state = with_state
+                            .new_state()
                             .unwrap()
-                    };
-                    let without_state = quoter.quote(params());
-                    let with_state = quoter.quote(params().with_new_state());
-                    match expected {
-                        Ok(expected) => {
-                            let without_state = without_state.unwrap();
-                            assert_eq!(without_state.amount_out(), &expected.amount);
-                            assert_eq!(without_state.gas(), &expected.gas);
-                            assert!(without_state.new_state().is_none());
-
-                            let with_state = with_state.unwrap();
-                            assert_eq!(with_state.amount_out(), &expected.amount);
-                            #[allow(deprecated)]
-                            let new_state = with_state
-                                .new_state()
-                                .unwrap()
-                                .to_protocol_sim();
-                            assert!(expected
-                                .new_state
-                                .eq(new_state.as_ref()));
-                            assert!(new_state.as_swap_quoter().is_some());
-                        }
-                        Err(expected) => {
-                            assert_eq!(
-                                without_state.err().unwrap().to_string(),
-                                expected.to_string()
-                            );
-                            assert_eq!(with_state.err().unwrap().to_string(), expected.to_string());
+                            .to_protocol_sim();
+                        assert!(expected
+                            .new_state
+                            .eq(new_state.as_ref()));
+                        assert!(new_state.as_swap_quoter().is_some());
+                    }
+                    Err(expected) => {
+                        for actual in [without_state, with_state] {
+                            let actual = actual.err().unwrap();
+                            assert_eq!(actual.to_string(), expected.to_string());
+                            if let (
+                                SimulationError::InvalidInput(_, Some(actual_partial)),
+                                SimulationError::InvalidInput(_, Some(expected_partial)),
+                            ) = (&actual, &expected)
+                            {
+                                assert_eq!(actual_partial.amount, expected_partial.amount);
+                                assert_eq!(actual_partial.gas, expected_partial.gas);
+                                assert!(actual_partial
+                                    .new_state
+                                    .eq(expected_partial.new_state.as_ref()));
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Asserts a delta applied through [`SwapQuoter`] leaves the state [`ProtocolSim`] leaves.
+    pub(crate) fn assert_delta_transition_matches(
+        state: &dyn ProtocolSim,
+        delta: tycho_common::dto::ProtocolStateDelta,
+    ) {
+        let (tokens, balances) = (HashMap::new(), Default::default());
+        let mut expected = state.clone_box();
+        expected
+            .delta_transition(delta.clone(), &tokens, &balances)
+            .unwrap();
+        let mut actual = state
+            .as_swap_quoter()
+            .unwrap()
+            .clone_box();
+        actual
+            .delta_transition(tycho_common::simulation::swap::TransitionParams::new(
+                delta, &tokens, &balances,
+            ))
+            .unwrap();
+        #[allow(deprecated)]
+        let actual = actual.to_protocol_sim();
+        assert!(expected.eq(actual.as_ref()));
     }
 
     #[test]

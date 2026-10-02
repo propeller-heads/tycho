@@ -16,7 +16,9 @@ use super::{
     concentrated::ConcentratedPool, full_range::FullRangePool, stableswap::StableswapPool,
     EkuboPool, EkuboPoolQuote,
 };
-use crate::{evm::protocol::ekubo_v3::state::EkuboV3State, protocol::errors::InvalidSnapshotError};
+use crate::{
+    evm::protocol::ekubo_v3::state::EkuboV3PoolState, protocol::errors::InvalidSnapshotError,
+};
 
 const GAS_COST_OF_FEE_ACCUMULATION: u64 = 20_000;
 
@@ -29,11 +31,11 @@ pub enum Ve33UnderlyingPool {
 }
 
 impl Ve33UnderlyingPool {
-    fn from_state(state: EkuboV3State) -> Result<Self, SimulationError> {
+    fn from_state(state: EkuboV3PoolState) -> Result<Self, SimulationError> {
         match state {
-            EkuboV3State::Concentrated(pool) => Ok(Self::Concentrated(pool)),
-            EkuboV3State::FullRange(pool) => Ok(Self::FullRange(pool)),
-            EkuboV3State::Stableswap(pool) => Ok(Self::Stableswap(pool)),
+            EkuboV3PoolState::Concentrated(pool) => Ok(Self::Concentrated(pool)),
+            EkuboV3PoolState::FullRange(pool) => Ok(Self::FullRange(pool)),
+            EkuboV3PoolState::Stableswap(pool) => Ok(Self::Stableswap(pool)),
             _ => Err(SimulationError::FatalError(
                 "Ve33 underlying quote returned an unexpected pool type".to_string(),
             )),
