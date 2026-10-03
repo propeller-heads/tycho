@@ -159,11 +159,11 @@
     },
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
-      "args": ["0x0000000000000000000000000000000000000000"]
+      "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
     },
     "fallback:rfq:bebop": {
       "contract": "BebopFallbackExecutor",
-      "args": ["0x0000000000000000000000000000000000000000"]
+      "args": ["0x4bB02166188132103fc608402B8993c0c0857708"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
