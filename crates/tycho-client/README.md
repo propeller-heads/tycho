@@ -123,6 +123,15 @@ stopped tracking them.
 
 You can request individual pools, or use a minimum TVL threshold to filter the components. If you choose minimum TVL tracking, tycho-client will automatically add snapshots for any components that exceed the TVL threshold, e.g. because more liquidity was provided. It will also notify you and remove any components that fall below the TVL threshold. Note that the TVL values are estimates intended solely for filtering the most relevant components.
 
+With state tracking enabled, components whose `paused` state attribute has reason `0x01`
+(Substreams) are excluded. DCI reasons `0x02` (tracing) and `0x03` (metadata), and unknown
+reasons, neither trigger removal nor clear an already observed Substreams pause. A pause removes a tracked component via `removed_components`
+and cancels pending snapshots. An explicit zero value or deletion of `paused` makes the
+component eligible for a fresh snapshot request. It is admitted only after checking the
+configured filters, including the TVL returned with that snapshot. Omitting `paused`
+from a sparse delta leaves its status unchanged, while a missing or zero-valued attribute
+in a full snapshot means the component is not paused.
+
 ##### To track a single pool:
 
 ```bash
@@ -179,12 +188,12 @@ This struct, as the name states, serves to synchronize the state of any consumer
 
 The attributes of this struct include the header (block information), snapshots, deltas and removed components. 
 
- - *Snapshots* are provided for any components that have NOT been observed yet by the client. A snapshot contains the entire state at the header.
+ - *Snapshots* are provided for newly tracked components, including components that resume tracking after removal. A snapshot contains the entire state at the header.
  - *Deltas* contain state updates, observed after or at the snapshot. Any components
 mentioned in the snapshots and in deltas within the same StateSynchronization message,
 must have the deltas applied to their snapshot to arrive at a correct state for the
 current header.
-- *Removed components* is a map of components that should be removed by consumers. Any components mentioned here will not appear in any further messages/updates.
+- *Removed components* is a map of components that should be removed by consumers. These components stop receiving updates until they qualify for tracking again, at which point they return with a fresh snapshot.
 
 [Link to structs](https://github.com/propeller-heads/tycho-indexer/blob/main/tycho-client/src/feed/synchronizer.rs#L80)
 
@@ -318,7 +327,8 @@ let tokens = client
 For use cases that do not require snapshots or state updates, we provide a light mode.
 In this mode tycho will not emit any snapshots or state updates, it will only emit
 newly created component, associated tokens, tvl changes, balance changes and removed
-components. This mode can be turned on via the `--no-state` flag.
+components. This mode can be turned on via the `--no-state` flag. Pause filtering is
+unavailable in this mode because it requires component state.
 
 # Hosted Endpoints
 
