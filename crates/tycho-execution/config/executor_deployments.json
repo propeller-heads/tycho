@@ -291,6 +291,10 @@
       "contract": "MetricExecutor",
       "args": []
     },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x6f37069B1dcd2e33595F1fF711559CfdDe5338E5"]
+    },
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]

@@ -101,6 +101,7 @@
     "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
     "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
-    "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
+    "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D",
+    "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C"
   }
 }
