@@ -1,0 +1,32 @@
+substreams_yaml_path: ./base-pancakeswap-infinity-bin.yaml
+protocol_system: "pancakeswap_infinity_bin"
+protocol_type_names:
+  - "pancakeswap_infinity_bin_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted. This also keeps
+# the suite off debug_storageRangeAt, which not every archive RPC serves.
+initialized_accounts:
+tests:
+  # Hookless static-fee pool, minted into in the creation transaction, so bin reserves are non-zero
+  # from the first block and simulation can quote immediately. The Mint also exercises the branch
+  # in map_bin_changes where a missing storage slot is a hard error rather than a skip.
+  #
+  # No Swap in this window: the pool's first swap is roughly a million blocks out, so the
+  # active-id update path is covered by unit tests rather than here.
+  - name: test_usdc_usdt_pool
+    start_block: 32979792
+    stop_block: 32980292
+    expected_components:
+      - id: "0x34e19068fd32b59dc649757324d827675a736f2be33ec2bef4647bf876c0f6e7"
+        tokens:
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+          - "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2" # USDT
+        static_attributes:
+          key_lp_fee: "0x07"
+          bin_step: "0x000a"
+        creation_tx: "0x3839d52a9c8e8b22f6eead472c2aacd889635079b3bf55fc9461f3dda441c6a6"
+        skip_simulation: false
+        skip_execution: false

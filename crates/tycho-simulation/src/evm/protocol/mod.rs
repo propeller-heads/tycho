@@ -14,6 +14,7 @@ pub mod fluid;
 pub mod lido_v4;
 pub mod lunarbase;
 pub mod native_wrapper;
+pub mod pancakeswap_infinity_bin;
 pub mod pancakeswap_v2;
 pub mod ramses_v3;
 pub mod ring_swap_v2;

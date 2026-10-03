@@ -1,0 +1,115 @@
+specVersion: v0.1.0
+package:
+  name: "bsc_pancakeswap_infinity_bin"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-pancakeswap-infinity-bin"
+
+protobuf:
+  files:
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - pancakeswap_infinity_bin.proto
+  importPaths:
+    - ../../../proto
+    - ./proto
+  excludePaths:
+    - sf/substreams
+    - sf/firehose
+    - google
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_pancakeswap_infinity_bin.wasm
+
+# Module graph. Smaller than the CL package: no tick/liquidity/sqrt-price stores, but one extra
+# map that reads per-bin reserves out of BinPoolManager storage diffs.
+# initialBlock 47214336 is the first BNB block where BinPoolManager
+# 0xC697d2898e0D09264376196696c51D7aBbbAA4a9 has code (binary search on eth_getCode, 2026-09-24).
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 47214336
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 47214336
+    updatePolicy: set_if_not_exists
+    valueType: proto:pancakeswap.infinity.bin.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_events
+    kind: map
+    initialBlock: 47214336
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:pancakeswap.infinity.bin.Events
+
+  - name: store_active_id
+    kind: store
+    initialBlock: 47214336
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  # Needs the raw Block for storage diffs, and store_active_id in `get` mode (not deltas) so it
+  # can ask for the value as of a specific log ordinal.
+  - name: map_bin_changes
+    kind: map
+    initialBlock: 47214336
+    inputs:
+      # Needs the manager address to filter storage writes, same as map_pools_created.
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_events
+      - store: store_active_id
+    output:
+      type: proto:pancakeswap.infinity.bin.BinDeltas
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: 47214336
+    inputs:
+      - map: map_bin_changes
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: 47214336
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 47214336
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      # Absolute reserves, so unlike the CL package's ticks there is no accumulator store to read
+      # back: the bin deltas carry old and new directly.
+      - map: map_bin_changes
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  # BinPoolManager on BNB (same address on Base), without 0x prefix like the v4 manifests.
+  map_pools_created: "C697d2898e0D09264376196696c51D7aBbbAA4a9"
+  map_bin_changes: "C697d2898e0D09264376196696c51D7aBbbAA4a9"
