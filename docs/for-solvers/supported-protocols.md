@@ -17,6 +17,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>sushiswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>robinswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>ramses_v3</code></td><td>Native (<code>RamsesV3State</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>pancakeswap_infinity_cl</code></td><td>Native (<code>UniswapV4State</code>)</td><td>3 μs (0.003 ms)</td><td>Base, BSC</td><td>PancakeSwap Infinity concentrated-liquidity pools. Tycho indexes only pools with a static LP fee and no swap hook.</td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum, Robinhood</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
@@ -91,6 +92,7 @@ fn register_exchanges(
                 .exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aerodrome_slipstreams", tvl_filter.clone(), None)
                 .exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
@@ -106,6 +108,7 @@ fn register_exchanges(
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
             builder = builder

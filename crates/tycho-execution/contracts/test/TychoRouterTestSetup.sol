@@ -31,6 +31,10 @@ import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
 import {LidoV4Executor} from "../src/executors/LidoV4Executor.sol";
+import {
+    PancakeswapInfinityExecutor,
+    IPancakeswapInfinityVault
+} from "../src/executors/PancakeswapInfinityExecutor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
@@ -128,6 +132,7 @@ contract TychoRouterTestSetup is
     ERC4626Executor public erc4626Executor;
     NativeWrapExecutor public nativeWrapExecutor;
     LidoV4Executor public lidoV4Executor;
+    PancakeswapInfinityExecutor public pancakeswapInfinityExecutor;
     EkuboV3Executor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
@@ -301,9 +306,18 @@ contract TychoRouterTestSetup is
         // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
         // Native always deploy, so appending it shifts no address before it.
         lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
+        // PancakeSwap Infinity (Base and BNB share these addresses). The constructor only
+        // stores immutables, so it deploys on every fork.
+        pancakeswapInfinityExecutor = new PancakeswapInfinityExecutor(
+            IPancakeswapInfinityVault(
+                0x238a358808379702088667322f80aC48bAd5e6c4
+            ),
+            0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b,
+            0xC697d2898e0D09264376196696c51D7aBbbAA4a9
+        );
 
         address[] memory executors = new address[](
-            28 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            29 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -333,7 +347,8 @@ contract TychoRouterTestSetup is
         executors[25] = address(propAMMExecutor);
         executors[26] = address(fallbackExecutor);
         executors[27] = address(lidoV4Executor);
-        uint256 nextExecutorIndex = 28;
+        executors[28] = address(pancakeswapInfinityExecutor);
+        uint256 nextExecutorIndex = 29;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;

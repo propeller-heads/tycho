@@ -145,6 +145,14 @@
       "contract": "FallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
     },
+    "pancakeswap_infinity_cl": {
+      "contract": "PancakeswapInfinityExecutor",
+      "args": [
+        "0x238a358808379702088667322f80aC48bAd5e6c4",
+        "0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b",
+        "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
+      ]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
@@ -229,6 +237,14 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
+    },
+    "pancakeswap_infinity_cl": {
+      "contract": "PancakeswapInfinityExecutor",
+      "args": [
+        "0x238a358808379702088667322f80aC48bAd5e6c4",
+        "0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b",
+        "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
+      ]
     }
   },
   "plasma": {

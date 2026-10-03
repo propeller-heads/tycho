@@ -90,6 +90,7 @@ fn register_exchanges(
                     tvl_filter.clone(),
                     None,
                 )
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
         Chain::Bsc => {
             builder = builder
@@ -98,6 +99,7 @@ fn register_exchanges(
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
