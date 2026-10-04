@@ -2,8 +2,8 @@
 //! them.
 //!
 //! A swap takes the same steps from the same start whatever the amount, and only its last step
-//! depends on how much input is left. A step that reaches its target takes the same `amount_in`,
-//! fee and `amount_out` for every input large enough to reach it. So each such step is cached
+//! depends on how much input is left. A step that reaches its target takes the same input, fee
+//! and `amount_out` for every input large enough to reach it. So each such step is cached
 //! once, as a [`CachedStep`], and a later quote starts from the furthest cached step its input
 //! reaches. From there the swap loop runs as it always does, so the last step, the price limit and
 //! every error come from the same code as a swap with no cache.
@@ -18,7 +18,6 @@ use std::{
 use alloy::primitives::{I256, U256};
 
 use super::{StepComputation, SwapState, FEE_PIPS_DENOMINATOR};
-use crate::evm::protocol::utils::solidity_math::mul_div_rounding_up;
 
 /// Steps cached for one swap direction. A swap that goes past the last cached step runs its
 /// remaining steps without caching them, so one direction of one pool state holds at most about
@@ -153,7 +152,7 @@ impl SwapStepCache {
             .partition_point(|cached| cached.min_input <= input) -
             1;
         let last = cache.steps[index].clone();
-        Some(StepRecorder { cache: cache_lock, input, fee_pips, index, last })
+        Some(StepRecorder { cache: cache_lock, input, index, last })
     }
 }
 
@@ -161,7 +160,6 @@ impl SwapStepCache {
 pub(crate) struct StepRecorder<'a> {
     cache: &'a Mutex<DirectionCache>,
     input: U256,
-    fee_pips: u32,
     index: usize,
     last: CachedStep,
 }
@@ -181,9 +179,10 @@ impl StepRecorder<'_> {
     /// all the way to its target. Returns `None` once a step depends on the input or the cache is
     /// full, since no later step can then be cached.
     ///
-    /// A step reaches its target when the input left after fees covers `amount_in`, that is when
+    /// A step reaches its target when the input left after fees covers its input, that is when
     /// `left * (1e6 - fee) / 1e6 >= amount_in`. So the smallest input that reaches it is the input
-    /// spent before it plus `ceil(amount_in * 1e6 / (1e6 - fee))`.
+    /// spent before it plus `ceil(amount_in * 1e6 / (1e6 - fee))`, which equals the step's
+    /// `amount_in_with_fee` since its fee is `ceil(amount_in * fee / (1e6 - fee))`.
     pub(crate) fn after_step(
         mut self,
         state: &SwapState,
@@ -194,24 +193,18 @@ impl StepRecorder<'_> {
         if !reached_target {
             return None;
         }
-        let needed = mul_div_rounding_up(
-            step.amount_in,
-            U256::from(FEE_PIPS_DENOMINATOR),
-            U256::from(FEE_PIPS_DENOMINATOR - self.fee_pips),
-        )
-        .ok()?;
         // A swap stops when no input is left, so a step runs only with at least one unit left.
-        let threshold = self
-            .last
-            .amount_in
-            .checked_add(needed.max(U256::from(1u64)))?;
+        let threshold = self.last.amount_in.checked_add(
+            step.amount_in_with_fee
+                .max(U256::from(1u64)),
+        )?;
         if self.input < threshold {
             return None;
         }
-        let amount_in = step
+        let amount_in = self
+            .last
             .amount_in
-            .checked_add(step.fee_amount)
-            .and_then(|spent| self.last.amount_in.checked_add(spent))?;
+            .checked_add(step.amount_in_with_fee)?;
         let amount_out = self
             .last
             .amount_out
@@ -347,22 +340,21 @@ mod tests {
         }
     }
 
-    fn step(amount_in: u64, fee_amount: u64) -> StepComputation {
+    fn step(amount_in_with_fee: u64, amount_out: u64) -> StepComputation {
         StepComputation {
             sqrt_price_start: U256::ZERO,
             tick_next: 0,
             sqrt_price_next: U256::ZERO,
-            amount_in: U256::from(amount_in),
-            amount_out: U256::from(2 * amount_in),
-            fee_amount: U256::from(fee_amount),
+            amount_in_with_fee: U256::from(amount_in_with_fee),
+            amount_out: U256::from(amount_out),
         }
     }
 
-    /// Caches one step of 997 in with a fee of 3, which needs an input of exactly 1,000 at 0.3%.
+    /// Caches one step that spends 1,000 with its fee, so it needs an input of exactly 1,000.
     fn cache_one_step(cache: &SwapStepCache, input: u64) -> Option<StepRecorder<'_>> {
         cache
             .begin(true, origin(), U256::from(input), FEE_PIPS)?
-            .after_step(&state_at(900, 9), &step(997, 3), true, U256::from(150u64))
+            .after_step(&state_at(900, 9), &step(1_000, 1_994), true, U256::from(150u64))
     }
 
     #[test]
@@ -451,7 +443,7 @@ mod tests {
             .unwrap();
 
         let recorder =
-            recorder.after_step(&state_at(900, 9), &step(997, 3), false, U256::from(150u64));
+            recorder.after_step(&state_at(900, 9), &step(1_000, 1_994), false, U256::from(150u64));
 
         assert!(recorder.is_none());
         assert_eq!(cache.min_inputs(true), [U256::ZERO]);
@@ -480,12 +472,12 @@ mod tests {
             .unwrap();
         for _ in 1..MAX_CACHED_STEPS {
             recorder = recorder
-                .after_step(&state_at(900, 9), &step(997, 3), true, U256::from(150u64))
+                .after_step(&state_at(900, 9), &step(1_000, 1_994), true, U256::from(150u64))
                 .unwrap();
         }
 
         let recorder =
-            recorder.after_step(&state_at(900, 9), &step(997, 3), true, U256::from(150u64));
+            recorder.after_step(&state_at(900, 9), &step(1_000, 1_994), true, U256::from(150u64));
 
         assert!(recorder.is_none());
         assert_eq!(cache.min_inputs(true).len(), MAX_CACHED_STEPS);

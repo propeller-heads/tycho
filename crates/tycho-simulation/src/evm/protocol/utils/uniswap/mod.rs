@@ -26,9 +26,8 @@ pub(crate) struct StepComputation {
     pub(crate) sqrt_price_start: U256,
     pub(crate) tick_next: i32,
     pub(crate) sqrt_price_next: U256,
-    pub(crate) amount_in: U256,
+    pub(crate) amount_in_with_fee: U256,
     pub(crate) amount_out: U256,
-    pub(crate) fee_amount: U256,
 }
 
 #[derive(Debug, Default)]

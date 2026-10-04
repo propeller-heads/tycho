@@ -195,7 +195,7 @@ impl VelodromeSlipstreamsState {
                 price_limit,
                 zero_for_one,
             );
-            let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
+            let (sqrt_price, amount_in_with_fee, amount_out) = swap_math::compute_swap_step(
                 state.sqrt_price,
                 sqrt_ratio_target,
                 state.liquidity,
@@ -208,26 +208,21 @@ impl VelodromeSlipstreamsState {
                 sqrt_price_start,
                 tick_next: next_tick,
                 sqrt_price_next,
-                amount_in,
+                amount_in_with_fee,
                 amount_out,
-                fee_amount,
             };
             if exact_input {
-                state.amount_remaining -= I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_remaining -=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
                 state.amount_calculated -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
             } else {
                 state.amount_remaining +=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_calculated +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
