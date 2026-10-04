@@ -17,7 +17,7 @@ use std::{
 
 use alloy::primitives::{I256, U256};
 
-use super::{StepComputation, SwapState, FEE_PIPS_DENOMINATOR};
+use super::{pool_tick::PoolTick, StepComputation, SwapState, FEE_PIPS_DENOMINATOR};
 
 /// Steps cached for one swap direction. A swap that goes past the last cached step runs its
 /// remaining steps without caching them, so one direction of one pool state holds at most about
@@ -66,7 +66,7 @@ impl CachedStep {
         };
         state.amount_calculated = -I256::from_raw(self.amount_out);
         state.sqrt_price = self.sqrt_price;
-        state.tick = self.tick;
+        state.tick = PoolTick::from(self.tick);
         state.liquidity = self.liquidity;
         self.gas
     }
@@ -214,7 +214,7 @@ impl StepRecorder<'_> {
             amount_in,
             amount_out,
             sqrt_price: state.sqrt_price,
-            tick: state.tick,
+            tick: state.tick.value(),
             liquidity: state.liquidity,
             gas,
         };
@@ -335,7 +335,7 @@ mod tests {
             amount_remaining: I256::ZERO,
             amount_calculated: I256::ZERO,
             sqrt_price: U256::from(sqrt_price),
-            tick,
+            tick: PoolTick::from(tick),
             liquidity: 5_000,
         }
     }

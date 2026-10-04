@@ -27,13 +27,14 @@ use crate::{
             },
             uniswap::{
                 i24_be_bytes_to_i32, liquidity_math,
+                pool_tick::PoolTick,
                 sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
                 swap_math,
                 swap_step_cache::{CachedStep, SwapStepCache},
                 tick_list::{TickInfo, TickList, TickListErrorKind},
                 tick_math::{
-                    get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO,
-                    MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
+                    get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
+                    MIN_TICK,
                 },
                 StepComputation, SwapResults, SwapState,
             },
@@ -222,7 +223,7 @@ impl AerodromeSlipstreamsState {
             amount_remaining: amount_specified,
             amount_calculated: I256::from_raw(U256::from(0u64)),
             sqrt_price: self.sqrt_price,
-            tick: self.tick,
+            tick: self.tick.into(),
             liquidity: self.liquidity,
         };
         let resolved_fee = self.get_fee()?;
@@ -250,7 +251,7 @@ impl AerodromeSlipstreamsState {
         {
             let (mut next_tick, next_tick_info) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
                 Ok((tick, info)) => (tick, info),
                 Err(tick_err) => match tick_err.kind {
@@ -260,11 +261,11 @@ impl AerodromeSlipstreamsState {
                         // Best effort in an error path: a failed write only degrades the fee of
                         // a chained simulation on this partial result, and must not mask the
                         // more informative TicksExceeded error below.
-                        if let Err(record_err) = new_state.record_observation(state.tick) {
+                        if let Err(record_err) = new_state.record_observation(state.tick.value()) {
                             trace!(%record_err, "skipping observation write on partial result");
                         }
                         new_state.liquidity = state.liquidity;
-                        new_state.tick = state.tick;
+                        new_state.tick = state.tick.value();
                         new_state.sqrt_price = state.sqrt_price;
                         return Err(SimulationError::InvalidInput(
                             "Ticks exceeded".into(),
@@ -328,9 +329,10 @@ impl AerodromeSlipstreamsState {
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
                     gas_used = safe_add_u256(gas_used, U256::from(TICK_CROSSING_GAS_COST))?;
                 }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
+                state.tick =
+                    PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                state.tick = PoolTick::at_sqrt_price(state.sqrt_price)?;
             }
             gas_used = safe_add_u256(gas_used, U256::from(LOOP_GAS_COST))?;
             if n_loops == 0 {
@@ -417,9 +419,9 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "SLIPSTREAMS SWAP");
         let mut new_state = self.clone();
         new_state.step_cache = SwapStepCache::default();
-        new_state.record_observation(result.tick)?;
+        new_state.record_observation(result.tick.value())?;
         new_state.liquidity = result.liquidity;
-        new_state.tick = result.tick;
+        new_state.tick = result.tick.value();
         new_state.sqrt_price = result.sqrt_price;
 
         Ok(GetAmountOutResult::new(
@@ -1133,7 +1135,7 @@ mod tests {
         assert_ne!(result.sqrt_price, pool.sqrt_price);
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
         assert_ne!(expected_tick, pool.tick);
-        assert_eq!(result.tick, expected_tick);
+        assert_eq!(result.tick.value(), expected_tick);
     }
 
     #[test]
@@ -1148,7 +1150,7 @@ mod tests {
 
         assert_eq!(result.sqrt_price, pool.sqrt_price);
         assert_eq!(get_tick_at_sqrt_ratio(result.sqrt_price).unwrap(), 0);
-        assert_eq!(result.tick, pool.tick);
+        assert_eq!(result.tick.value(), pool.tick);
     }
 
     #[test]
