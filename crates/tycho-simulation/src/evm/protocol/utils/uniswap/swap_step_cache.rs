@@ -351,7 +351,6 @@ mod tests {
         StepComputation {
             sqrt_price_start: U256::ZERO,
             tick_next: 0,
-            initialized: false,
             sqrt_price_next: U256::ZERO,
             amount_in: U256::from(amount_in),
             amount_out: U256::from(2 * amount_in),

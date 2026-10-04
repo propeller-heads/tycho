@@ -161,11 +161,11 @@ impl VelodromeSlipstreamsState {
         while state.amount_remaining != I256::from_raw(U256::from(0u64)) &&
             state.sqrt_price != price_limit
         {
-            let (mut next_tick, initialized_sqrt_price) = match self
+            let (mut next_tick, next_tick_info) = match self
                 .ticks
                 .next_initialized_tick_within_one_word(state.tick, zero_for_one)
             {
-                Ok((tick, sqrt_price)) => (tick, sqrt_price),
+                Ok((tick, info)) => (tick, info),
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
                         let new_state =
@@ -186,9 +186,8 @@ impl VelodromeSlipstreamsState {
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
             let sqrt_price_start = state.sqrt_price;
-            let initialized = initialized_sqrt_price.is_some();
-            let sqrt_price_next = match initialized_sqrt_price {
-                Some(sqrt_price) => sqrt_price,
+            let sqrt_price_next = match next_tick_info {
+                Some(info) => info.sqrt_price,
                 None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
             let sqrt_ratio_target = VelodromeSlipstreamsState::get_sqrt_ratio_target(
@@ -208,7 +207,6 @@ impl VelodromeSlipstreamsState {
             let step = StepComputation {
                 sqrt_price_start,
                 tick_next: next_tick,
-                initialized,
                 sqrt_price_next,
                 amount_in,
                 amount_out,
@@ -232,12 +230,8 @@ impl VelodromeSlipstreamsState {
                 .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
-                if step.initialized {
-                    let liquidity_raw = self
-                        .ticks
-                        .get_tick(step.tick_next)
-                        .unwrap()
-                        .net_liquidity;
+                if let Some(info) = next_tick_info {
+                    let liquidity_raw = info.net_liquidity;
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
@@ -348,16 +342,15 @@ impl ProtocolSim for VelodromeSlipstreamsState {
 
         // Iterate through all ticks in the direction of the swap
         // Continues until there is no more liquidity in the pool or no more ticks to process
-        while let Ok((tick, initialized_sqrt_price)) = self
+        while let Ok((tick, next_tick_info)) = self
             .ticks
             .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
-            let initialized = initialized_sqrt_price.is_some();
             // Clamp the tick value to ensure it's within valid range
             let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
 
-            let sqrt_price_next = match initialized_sqrt_price {
-                Some(sqrt_price) => sqrt_price,
+            let sqrt_price_next = match next_tick_info {
+                Some(info) => info.sqrt_price,
                 None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
 
@@ -401,12 +394,8 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             // liquidity when crossing it
             // For zero_for_one, liquidity is removed when crossing a tick
             // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
+            if let Some(info) = next_tick_info {
+                let liquidity_raw = info.net_liquidity;
                 let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                 current_liquidity =
                     liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta)?;

@@ -55,6 +55,7 @@ pub(crate) struct TickListError {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum TickListErrorKind {
+    #[cfg(test)]
     NotFound,
     BelowSmallest,
     AtOrAboveLargest,
@@ -183,6 +184,7 @@ impl TickList {
         tick >= maximum || tick >= MAX_TICK
     }
 
+    #[cfg(test)]
     pub(crate) fn get_tick(&self, index: i32) -> Result<&TickInfo, TickListError> {
         match self
             .ticks
@@ -245,12 +247,12 @@ impl TickList {
     }
 
     /// The next tick a swap step moves to, within the word of `tick`: the next initialized tick
-    /// with its stored sqrt price, or the word boundary with `None`. `lte` searches downwards.
+    /// with its stored info, or the word boundary with `None`. `lte` searches downwards.
     pub(crate) fn next_initialized_tick_within_one_word(
         &self,
         tick: i32,
         lte: bool,
-    ) -> Result<(i32, Option<U256>), TickListError> {
+    ) -> Result<(i32, Option<&TickInfo>), TickListError> {
         let spacing = self.tick_spacing as i32;
         let compressed = div_floor(tick, spacing);
 
@@ -269,7 +271,7 @@ impl TickList {
 
             let next = self.next_initialized_tick(tick, lte)?;
             let next_tick_idx = cmp::max(next.index, min_in_word);
-            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next.sqrt_price)))
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next)))
         } else {
             let word_pos = (compressed + 1) >> 8;
             let max_in_word = (((word_pos + 1) << 8) - 1) * spacing;
@@ -285,7 +287,7 @@ impl TickList {
             }
             let next = self.next_initialized_tick(tick, lte)?;
             let next_tick_idx = cmp::min(max_in_word, next.index);
-            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next.sqrt_price)))
+            Ok((next_tick_idx, (next_tick_idx == next.index).then_some(next)))
         }
     }
 }
@@ -310,7 +312,7 @@ mod tests {
     fn next_tick(tick_list: &TickList, tick: i32, lte: bool) -> Result<(i32, bool), TickListError> {
         tick_list
             .next_initialized_tick_within_one_word(tick, lte)
-            .map(|(next, sqrt_price)| (next, sqrt_price.is_some()))
+            .map(|(next, info)| (next, info.is_some()))
     }
 
     #[test]
