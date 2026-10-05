@@ -33,7 +33,7 @@ contract OverchargingFeeCalculator is IFeeCalculator {
             FeeRecipient({recipient: feeInput.client, feeAmount: 1});
     }
 
-    function mustOutputThroughRouter(uint32, address)
+    function mustOutputThroughRouter(uint32, address, address, address)
         external
         pure
         returns (bool)
