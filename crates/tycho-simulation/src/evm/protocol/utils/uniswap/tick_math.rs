@@ -205,13 +205,20 @@ fn square_u128(x: u128) -> (u128, u128) {
     (high_half * high_half + (cross >> 63) + u128::from(carry), low)
 }
 
-pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
+/// Returns the range error of `get_tick_at_sqrt_ratio` when `sqrt_price < MIN_SQRT_RATIO` or
+/// `sqrt_price >= MAX_SQRT_RATIO`.
+pub(crate) fn check_sqrt_price_in_range(sqrt_price: U256) -> Result<(), SimulationError> {
     if sqrt_price < MIN_SQRT_RATIO || sqrt_price >= MAX_SQRT_RATIO {
         return Err(SimulationError::FatalError(format!(
             "sqrt_price {} is outside valid range [{}, {})",
             sqrt_price, MIN_SQRT_RATIO, MAX_SQRT_RATIO
         )));
     }
+    Ok(())
+}
+
+pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
+    check_sqrt_price_in_range(sqrt_price)?;
     let ratio_x128 = sqrt_price << 32;
     let msb = most_significant_bit(ratio_x128)?;
     let mut r: u128 =

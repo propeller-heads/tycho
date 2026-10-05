@@ -27,12 +27,12 @@ use crate::evm::protocol::{
         add_fee_markup,
         uniswap::{
             i24_be_bytes_to_i32, liquidity_math,
+            pool_tick::PoolTick,
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
             swap_math::{self, SwapStepResult},
             tick_list::{TickInfo, TickList, TickListErrorKind},
             tick_math::{
-                get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                MIN_SQRT_RATIO, MIN_TICK,
+                get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK,
             },
             StepComputation, SwapResults, SwapState,
         },
@@ -61,7 +61,7 @@ pub struct UniswapV3State {
     sqrt_price: U256,
     #[serde(with = "fee_serde")]
     fee: u32,
-    tick: i32,
+    tick: PoolTick,
     ticks: TickList,
 }
 
@@ -87,7 +87,13 @@ impl UniswapV3State {
     ) -> Result<Self, SimulationError> {
         let fee = fee.into();
         let tick_list = TickList::from(fee.tick_spacing(), ticks)?;
-        Ok(UniswapV3State { liquidity, sqrt_price, fee: fee.fee(), tick, ticks: tick_list })
+        Ok(UniswapV3State {
+            liquidity,
+            sqrt_price,
+            fee: fee.fee(),
+            tick: tick.into(),
+            ticks: tick_list,
+        })
     }
 
     fn swap(
@@ -122,7 +128,7 @@ impl UniswapV3State {
             amount_remaining: amount_specified,
             amount_calculated: I256::from_raw(U256::from(0u64)),
             sqrt_price: self.sqrt_price,
-            tick: self.tick,
+            tick: self.tick.value().into(),
             liquidity: self.liquidity,
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
@@ -132,7 +138,7 @@ impl UniswapV3State {
         {
             let (mut next_tick, next_tick_info) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
                 Ok((tick, info)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_WORD))?;
@@ -142,7 +148,7 @@ impl UniswapV3State {
                     TickListErrorKind::TicksExeeded => {
                         let mut new_state = self.clone();
                         new_state.liquidity = state.liquidity;
-                        new_state.tick = state.tick;
+                        new_state.tick = state.tick.clone();
                         new_state.sqrt_price = state.sqrt_price;
                         return Err(SimulationError::InvalidInput(
                             "Ticks exceeded".into(),
@@ -209,9 +215,10 @@ impl UniswapV3State {
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_INITIALIZED_TICK_CROSS))?;
                 }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
+                state.tick =
+                    PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                state.tick = PoolTick::at_sqrt_price(state.sqrt_price)?;
             }
         }
         Ok(SwapResults {
@@ -305,7 +312,7 @@ impl ProtocolSim for UniswapV3State {
         }
 
         let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
+        let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_amount_in = U256::from(0u64);
@@ -449,7 +456,7 @@ impl ProtocolSim for UniswapV3State {
             } else {
                 tick.clone()
             };
-            self.tick = i24_be_bytes_to_i32(&ticks_4_bytes);
+            self.tick = i24_be_bytes_to_i32(&ticks_4_bytes).into();
         }
 
         // apply tick changes
@@ -576,7 +583,8 @@ mod tests {
         evm::protocol::{
             uniswap_v3::enums::FeeAmount,
             utils::uniswap::{
-                sqrt_price_math::get_sqrt_price_q96, tick_math::get_sqrt_ratio_at_tick,
+                sqrt_price_math::get_sqrt_price_q96,
+                tick_math::{get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio},
             },
         },
         protocol::models::{DecoderContext, TryFromWithBlock},
@@ -890,7 +898,7 @@ mod tests {
 
         assert_eq!(pool.liquidity, 2000);
         assert_eq!(pool.sqrt_price, U256::from(1001));
-        assert_eq!(pool.tick, 120);
+        assert_eq!(pool.tick.value(), 120);
         assert_eq!(
             pool.ticks
                 .get_tick(-255760)
@@ -1004,14 +1012,14 @@ mod tests {
 
         assert_ne!(result.sqrt_price, pool.sqrt_price);
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
-        assert_ne!(expected_tick, pool.tick);
-        assert_eq!(result.tick, expected_tick);
+        assert_ne!(expected_tick, pool.tick.value());
+        assert_eq!(result.tick.value(), expected_tick);
     }
 
     #[test]
     fn test_swap_keeps_boundary_tick_when_price_does_not_move() {
         let mut pool = create_tick_boundary_test_pool();
-        pool.tick = -1;
+        pool.tick = PoolTick::from(-1);
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1u64)).unwrap();
 
         let result = pool
