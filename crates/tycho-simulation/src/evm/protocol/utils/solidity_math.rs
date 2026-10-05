@@ -28,6 +28,19 @@ pub(crate) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationE
     truncate_to_u256(result)
 }
 
+/// `ceil(a * b / 2^96)`: [`mul_div_rounding_up`] with `Q96` as the denominator, where a shift
+/// does the division.
+pub(crate) fn mul_div_q96_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
+    let product: U512 = a.widening_mul(b);
+    let limbs = product.as_limbs();
+    let has_remainder = limbs[0] != 0 || limbs[1] & u64::from(u32::MAX) != 0;
+    let mut result = product >> 96;
+    if has_remainder {
+        result += U512::from(1u64);
+    }
+    truncate_to_u256(result)
+}
+
 /// The value as a U256, when its upper 256 bits are zero.
 fn to_u256_if_fits(value: &U512) -> Option<U256> {
     let limbs = value.as_limbs();
@@ -112,6 +125,32 @@ mod tests {
         let result = mul_div_rounding_up(a, b, denom);
 
         assert!(matches!(result, Err(SimulationError::FatalError(_))));
+    }
+
+    #[test]
+    fn test_mul_div_q96_rounding_up_matches_mul_div_rounding_up() {
+        let q96 = U256::from(1u64) << 96;
+        let values = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(23u64),
+            q96 - U256::from(1u64),
+            q96,
+            q96 + U256::from(1u64),
+            U256::from(u128::MAX),
+            (U256::from(1u64) << 160) - U256::from(1u64),
+            U256::from(1u64) << 200,
+            U256::MAX,
+        ];
+        for a in values {
+            for b in values {
+                assert_eq!(
+                    format!("{:?}", mul_div_q96_rounding_up(a, b)),
+                    format!("{:?}", mul_div_rounding_up(a, b, q96)),
+                    "a = {a}, b = {b}"
+                );
+            }
+        }
     }
 
     #[test]
