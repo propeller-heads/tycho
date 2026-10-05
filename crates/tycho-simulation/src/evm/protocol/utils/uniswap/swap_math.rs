@@ -277,4 +277,32 @@ mod tests {
             );
         }
     }
+
+    /// The swap step cache relies on a step's input with fee being the smallest input that takes
+    /// the step to its target.
+    #[test]
+    fn test_amount_in_with_fee_is_smallest_input_reaching_target() {
+        let price = U256::from_str("1917240610156820439288675683655550").unwrap();
+        let liquidity = 23130341825817804069u128;
+        let targets = [
+            U256::from_str("1908498483466244238266951834509291").unwrap(),
+            U256::from_str("1919023616462402511535565081385034").unwrap(),
+        ];
+
+        for target in targets {
+            for fee in [100, 500, 3_000, 10_000, 999_999] {
+                let needed = compute_swap_step(price, target, liquidity, I256::exp10(30), fee)
+                    .unwrap()
+                    .amount_in_with_fee;
+                let at_needed = I256::from_raw(needed);
+                let below_needed = I256::from_raw(needed - U256::from(1u64));
+
+                let reached = compute_swap_step(price, target, liquidity, at_needed, fee).unwrap();
+                let short = compute_swap_step(price, target, liquidity, below_needed, fee).unwrap();
+
+                assert_eq!((reached.sqrt_price, reached.amount_in_with_fee), (target, needed));
+                assert_ne!(short.sqrt_price, target);
+            }
+        }
+    }
 }
