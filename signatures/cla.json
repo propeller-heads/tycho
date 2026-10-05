@@ -47,6 +47,14 @@
       "created_at": "2026-10-05T02:12:58Z",
       "repoId": 677301333,
       "pullRequestNo": 1535
+    },
+    {
+      "name": "carloszanella",
+      "id": 50626515,
+      "comment_id": 5990428594,
+      "created_at": "2026-10-05T07:57:42Z",
+      "repoId": 677301333,
+      "pullRequestNo": 1524
     }
   ]
 }
