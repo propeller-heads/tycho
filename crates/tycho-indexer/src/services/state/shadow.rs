@@ -17,7 +17,7 @@ use std::{
 use metrics::{counter, gauge, histogram};
 use serde::Serialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 use tycho_common::{dto, storage::StorageError, Bytes};
 
 use super::service::{StateService, StateServiceError};
@@ -182,8 +182,8 @@ impl Outcome {
 #[derive(Debug)]
 pub(crate) struct Comparison {
     outcome: Outcome,
-    /// For a mismatch, where the answers differ, as `path: db=… cache=…`; at most
-    /// [`MAX_LOGGED_DIFFS`]. Empty otherwise.
+    /// For a mismatch or a known mismatch, where the answers differ, as `path: db=… cache=…`; at
+    /// most [`MAX_LOGGED_DIFFS`]. Empty otherwise.
     diffs: Vec<String>,
 }
 
@@ -215,13 +215,15 @@ pub(crate) fn compare_contract_state(
     if db == cache {
         return Comparison::without_diffs(Outcome::Match);
     }
-    if explained_by_unsaved_changes(&db, &cache, unsaved_elsewhere) {
-        return Comparison::without_diffs(Outcome::KnownMismatch);
-    }
     let mut diffs = Vec::new();
     walk("pagination", &to_value(&db.pagination), &to_value(&cache.pagination), &mut diffs);
     locate(&db.accounts, &cache.accounts, |account| account.address.to_string(), &mut diffs);
-    Comparison::mismatch(diffs)
+    let outcome = if explained_by_unsaved_changes(&db, &cache, unsaved_elsewhere) {
+        Outcome::KnownMismatch
+    } else {
+        Outcome::Mismatch
+    };
+    Comparison { outcome, diffs }
 }
 
 /// Whether every difference between two normalized answers is an account both answers hold and
@@ -457,8 +459,8 @@ pub(crate) fn register_metrics(sample_rate: f64) {
     gauge!("entity_cache_shadow_sample_rate").set(sample_rate);
 }
 
-/// Records one comparison: its outcome, the time the cache path and the comparison took, and a
-/// warning with the differences for a mismatch.
+/// Records one comparison: its outcome, the time the cache path and the comparison took, and a log
+/// line with the differences: a warning for a mismatch, a debug line for a known mismatch.
 fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Duration) {
     let endpoint = request.endpoint.label();
     counter!(
@@ -469,15 +471,29 @@ fn record(request: &SampledRequest<'_>, comparison: &Comparison, elapsed: Durati
     .increment(1);
     histogram!("entity_cache_shadow_duration_seconds", "endpoint" => endpoint)
         .record(elapsed.as_secs_f64());
-    if comparison.outcome == Outcome::Mismatch {
-        warn!(
+    match comparison.outcome {
+        Outcome::Mismatch => warn!(
             endpoint,
             protocol_system = request.protocol_system,
             version = ?request.version,
             id_count = request.id_count,
             diffs = %comparison.diffs.join("; "),
             "Entity cache shadow mismatch"
-        );
+        ),
+        Outcome::KnownMismatch => debug!(
+            endpoint,
+            protocol_system = request.protocol_system,
+            version = ?request.version,
+            id_count = request.id_count,
+            diffs = %comparison.diffs.join("; "),
+            "Entity cache shadow known mismatch"
+        ),
+        Outcome::Match |
+        Outcome::KnownError |
+        Outcome::DbFailed |
+        Outcome::Discarded |
+        Outcome::Fallback |
+        Outcome::CachePanicked => {}
     }
 }
 
@@ -737,7 +753,7 @@ mod test {
             });
 
         assert_eq!(comparison.outcome, expected);
-        assert_eq!(comparison.diffs.is_empty(), expected == Outcome::KnownMismatch);
+        assert!(!comparison.diffs.is_empty());
     }
 
     #[rstest]
