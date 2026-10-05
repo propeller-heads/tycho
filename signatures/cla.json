@@ -71,6 +71,14 @@
       "created_at": "2026-10-05T09:24:30Z",
       "repoId": 677301333,
       "pullRequestNo": 1522
+    },
+    {
+      "name": "die-herdplatte",
+      "id": 173669014,
+      "comment_id": 5993584589,
+      "created_at": "2026-10-05T11:32:33Z",
+      "repoId": 677301333,
+      "pullRequestNo": 1440
     }
   ]
 }
