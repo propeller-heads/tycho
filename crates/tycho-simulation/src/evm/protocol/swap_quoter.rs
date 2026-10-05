@@ -290,15 +290,6 @@ macro_rules! impl_native_swap_quoter {
             ) -> Box<dyn tycho_common::simulation::protocol_sim::ProtocolSim> {
                 Box::new(self.clone())
             }
-
-            fn into_protocol_sim(
-                self: std::sync::Arc<Self>,
-            ) -> Box<dyn tycho_common::simulation::protocol_sim::ProtocolSim> {
-                match std::sync::Arc::try_unwrap(self) {
-                    Ok(state) => Box::new(state),
-                    Err(shared) => Box::new(shared.as_ref().clone()),
-                }
-            }
         }
     };
 }
@@ -574,16 +565,10 @@ pub(crate) mod tests {
                         let with_state = with_state.unwrap();
                         assert_eq!(with_state.amount_out(), &expected.amount);
                         #[allow(deprecated)]
-                        let copied = with_state
+                        let new_state = with_state
                             .new_state()
                             .unwrap()
-                            .into_protocol_sim();
-                        assert!(expected.new_state.eq(copied.as_ref()));
-                        #[allow(deprecated)]
-                        let new_state = with_state
-                            .into_new_state()
-                            .unwrap()
-                            .into_protocol_sim();
+                            .to_protocol_sim();
                         assert!(expected
                             .new_state
                             .eq(new_state.as_ref()));
