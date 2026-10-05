@@ -1,3 +1,5 @@
+use super::store_deltas::tick_store_key;
+
 use std::str::FromStr;
 
 use substreams::store::StoreAddBigInt;
@@ -38,14 +40,6 @@ pub fn store_ticks_liquidity(ticks_deltas: TickDeltas, store: StoreAddBigInt) {
             BigInt::from_signed_bytes_be(&delta.liquidity_net_delta),
         );
     });
-}
-
-/// Builds the `store_ticks_liquidity` key that holds a tick's net liquidity.
-///
-/// The writer and any consumer joining the resulting store deltas back onto tick deltas must
-/// derive the key identically, so both go through this function.
-pub(crate) fn tick_store_key(pool_address: &[u8], tick_index: i32) -> String {
-    format!("pool:{}:tick:{}", hex::encode(pool_address), tick_index)
 }
 
 fn event_to_ticks_deltas(event: PoolEvent) -> Vec<TickDelta> {
@@ -95,17 +89,5 @@ fn event_to_ticks_deltas(event: PoolEvent) -> Vec<TickDelta> {
             },
         ],
         _ => vec![],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::tick_store_key;
-
-    #[test]
-    fn tick_store_key_uses_unprefixed_hex() {
-        // Pinned because the key is a contract between store_ticks_liquidity and the consumer
-        // that joins its deltas back onto tick deltas. Note the address carries no `0x` prefix.
-        assert_eq!(tick_store_key(&[0x0a, 0x0b], -100), "pool:0a0b:tick:-100");
     }
 }

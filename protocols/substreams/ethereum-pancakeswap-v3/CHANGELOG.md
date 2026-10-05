@@ -2,10 +2,9 @@
 
 ## v0.1.3
 
-- Fix tick net-liquidity attribute pairing: join net-liquidity store deltas to tick deltas by
-  store key and ordinal instead of by position. Both ticks of one Mint or Burn carry that event's
-  log ordinal and `store_ticks_liquidity` orders its writes with an unstable sort on the ordinal,
-  so the previous positional zip could swap the value and `ChangeType` between the lower and upper
-  tick of a single event. The store key is now built in one place, `tick_store_key`, which both
-  the writer and the consumer call.
+- Join tick and pool-liquidity store deltas by store key and ordinal instead of position.
+  Writers and consumers share store-key helpers, preserving the unprefixed V3 address format.
+- Aggregate tick writes per transaction before building attribute updates. Preserve Creation
+  across subsequent updates, omit ticks created then deleted in the same transaction, and
+  classify deletion then recreation of an existing tick as Update.
 - Remove a redundant reference in a `format!` argument, which current Clippy rejects.

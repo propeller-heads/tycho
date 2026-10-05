@@ -59,3 +59,5 @@ impl From<Transaction> for tycho_substreams::prelude::Transaction {
         Self { hash: value.hash, from: value.from, to: value.to, index: value.index }
     }
 }
+
+mod store_deltas;
