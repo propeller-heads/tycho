@@ -1,4 +1,4 @@
-use alloy::primitives::{I256, U256};
+use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::protocol::safe_math::safe_div_u256;
@@ -199,39 +199,65 @@ pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, Simulation
         r = if f == 1 { high } else { (high << 1) | (low >> 127) };
     }
     // The integer part occupies bits 64 and up, the fraction bits 50..=63, so they never overlap.
-    let log_2 = I256::try_from(((msb as i128 - 128) << 64) | fraction as i128)
-        .expect("an i128 always fits in an I256");
+    let log_2 = ((msb as i128 - 128) << 64) | fraction as i128;
 
-    let log_sqrt10001 =
-        log_2 * I256::from_raw(U256::from_limbs([11745905768312294533u64, 13863u64, 0, 0]));
-
-    let tmp1 =
-        I256::from_raw(U256::from_limbs([6552757943157144234u64, 184476617836266586u64, 0, 0]));
-
-    let tick_low: I256 = (log_sqrt10001 - tmp1).asr(128);
-    let tick_high: I256 = (log_sqrt10001 +
-        I256::from_raw(U256::from_limbs([
-            4998474450511881007u64,
-            15793544031827761793u64,
-            0,
-            0,
-        ])))
-    .asr(128);
+    // |log_2| < 2^70 and the factor is below 2^78, so the product fits the two 128-bit halves and
+    // the ticks below are the high halves, as Uniswap's arithmetic shift by 128 takes them.
+    let log_sqrt10001 = mul_i128_by_u128(log_2, LOG_SQRT10001_FACTOR);
+    let tick_low = high_half_minus(log_sqrt10001, TICK_LOW_OFFSET) as i32;
+    let tick_high = high_half_plus(log_sqrt10001, TICK_HIGH_OFFSET) as i32;
 
     if tick_low == tick_high {
-        Ok(tick_low.as_i32())
-    } else if get_sqrt_ratio_at_tick(tick_high.as_i32())? <= sqrt_price {
-        Ok(tick_high.as_i32())
+        Ok(tick_low)
+    } else if get_sqrt_ratio_at_tick(tick_high)? <= sqrt_price {
+        Ok(tick_high)
     } else {
-        Ok(tick_low.as_i32())
+        Ok(tick_low)
     }
+}
+
+const LOG_SQRT10001_FACTOR: u128 = (13863u128 << 64) | 11745905768312294533u128;
+const TICK_LOW_OFFSET: u128 = (184476617836266586u128 << 64) | 6552757943157144234u128;
+const TICK_HIGH_OFFSET: u128 = (15793544031827761793u128 << 64) | 4998474450511881007u128;
+
+/// `x * y` as a 256-bit two's-complement number: its signed high half and its low half.
+fn mul_i128_by_u128(x: i128, y: u128) -> (i128, u128) {
+    let (high, low) = widening_mul_u128(x.unsigned_abs(), y);
+    if x >= 0 {
+        return (high as i128, low);
+    }
+    let (negated_low, borrow) = 0u128.overflowing_sub(low);
+    ((!high).wrapping_add(u128::from(!borrow)) as i128, negated_low)
+}
+
+/// `a * b` as its high and low 128 bits.
+fn widening_mul_u128(a: u128, b: u128) -> (u128, u128) {
+    let mask = u128::from(u64::MAX);
+    let (a_high, a_low, b_high, b_low) = (a >> 64, a & mask, b >> 64, b & mask);
+    let low_low = a_low * b_low;
+    let low_high = a_low * b_high;
+    let high_low = a_high * b_low;
+    let middle = (low_low >> 64) + (low_high & mask) + (high_low & mask);
+    let low = (low_low & mask) | (middle << 64);
+    let high = a_high * b_high + (low_high >> 64) + (high_low >> 64) + (middle >> 64);
+    (high, low)
+}
+
+fn high_half_plus((high, low): (i128, u128), addend: u128) -> i128 {
+    let (_, carry) = low.overflowing_add(addend);
+    high + i128::from(carry)
+}
+
+fn high_half_minus((high, low): (i128, u128), subtrahend: u128) -> i128 {
+    let (_, borrow) = low.overflowing_sub(subtrahend);
+    high - i128::from(borrow)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{ops::BitOr, str::FromStr};
 
-    use alloy::primitives::Sign;
+    use alloy::primitives::{Sign, I256};
 
     use super::*;
 
