@@ -27,11 +27,11 @@ for any protocol indexed by Tycho.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
-    Unichain, and Pons V2 is the native handler for Robinhood. The Uniswap v3 and v4 states and the
-    v3 forks (`ramses_v3/`, `aerodrome_slipstreams/`) cache the swap steps they already took
-    (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code that changes a state's price,
-    tick, liquidity, fee or ticks must start an empty step cache, and changes ticks only through
-    `Arc::make_mut`
+    Unichain, and Pons V2 is the native handler for Robinhood. The Uniswap v3 and v4 states and
+    the v3 forks (`ramses_v3/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`) cache the swap
+    steps they already took (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code
+    that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
+    and changes ticks only through `Arc::make_mut`
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
