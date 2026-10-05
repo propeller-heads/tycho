@@ -1,19 +1,25 @@
 use alloy::primitives::{I256, U256};
+use pool_tick::PoolTick;
 use tycho_common::Bytes;
 
 pub(crate) mod liquidity_math;
 pub(crate) mod lp_fee;
+pub(crate) mod pool_tick;
 pub(crate) mod sqrt_price_math;
 pub(crate) mod swap_math;
+pub(crate) mod swap_step_cache;
 pub mod tick_list;
 pub(crate) mod tick_math;
+
+/// Uniswap fees are in pips: hundredths of a basis point, so 1,000,000 pips is the whole amount.
+pub(crate) const FEE_PIPS_DENOMINATOR: u32 = 1_000_000;
 
 #[derive(Debug)]
 pub(crate) struct SwapState {
     pub(crate) amount_remaining: I256,
     pub(crate) amount_calculated: I256,
     pub(crate) sqrt_price: U256,
-    pub(crate) tick: i32,
+    pub(crate) tick: PoolTick,
     pub(crate) liquidity: u128,
 }
 
@@ -21,11 +27,9 @@ pub(crate) struct SwapState {
 pub(crate) struct StepComputation {
     pub(crate) sqrt_price_start: U256,
     pub(crate) tick_next: i32,
-    pub(crate) initialized: bool,
     pub(crate) sqrt_price_next: U256,
-    pub(crate) amount_in: U256,
+    pub(crate) amount_in_with_fee: U256,
     pub(crate) amount_out: U256,
-    pub(crate) fee_amount: U256,
 }
 
 #[derive(Debug, Default)]
@@ -35,7 +39,7 @@ pub(crate) struct SwapResults {
     pub(crate) amount_remaining: I256,
     pub(crate) sqrt_price: U256,
     pub(crate) liquidity: u128,
-    pub(crate) tick: i32,
+    pub(crate) tick: PoolTick,
     pub(crate) gas_used: U256,
 }
 

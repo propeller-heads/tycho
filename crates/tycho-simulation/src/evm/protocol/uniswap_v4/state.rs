@@ -37,14 +37,16 @@ use crate::{
                 uniswap::{
                     i24_be_bytes_to_i32, liquidity_math,
                     lp_fee::{self, is_dynamic},
+                    pool_tick::PoolTick,
                     sqrt_price_math::{
                         get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64,
                     },
                     swap_math,
+                    swap_step_cache::{CachedStep, SwapStepCache},
                     tick_list::{TickInfo, TickList, TickListErrorKind},
                     tick_math::{
-                        get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                        MIN_SQRT_RATIO, MIN_TICK,
+                        get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
+                        MIN_TICK,
                     },
                     StepComputation, SwapResults, SwapState,
                 },
@@ -86,13 +88,19 @@ pub struct UniswapV4State {
     liquidity: u128,
     sqrt_price: U256,
     fees: UniswapV4Fees,
-    tick: i32,
-    ticks: TickList,
+    tick: PoolTick,
+    /// Shared by clones of this state and the states its swaps return, so a quote does not copy
+    /// the list. A change goes through `Arc::make_mut`, which copies the list while it is shared.
+    ticks: Arc<TickList>,
     tick_spacing: i32,
     pub hook: Option<Box<dyn HookHandler>>,
     /// Storage and block environment a pending quote runs the hook under. `None` on confirmed
     /// state; set only on the clones `apply_deltas_ephemeral` hands out.
     pending_overrides: Option<Arc<PendingOverrides>>,
+    /// Swap steps already taken from this state, shared by its clones. Correct only for this
+    /// state's price, tick, liquidity, fees and ticks: `delta_transition` and `after_swap` start a
+    /// new one, and any other code that changes those fields must too.
+    step_cache: SwapStepCache,
 }
 
 impl_non_serializable_protocol!(UniswapV4State, "not supported due vm state deps");
@@ -179,16 +187,28 @@ impl UniswapV4State {
             liquidity,
             sqrt_price,
             fees,
-            tick,
-            ticks: tick_list,
+            tick: tick.into(),
+            ticks: Arc::new(tick_list),
             tick_spacing,
             hook: None,
             pending_overrides: None,
+            step_cache: SwapStepCache::default(),
         })
     }
 
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
         self.pending_overrides.as_deref()
+    }
+
+    /// A clone of this state at the price, tick and liquidity a swap ended at, with an empty step
+    /// cache.
+    fn after_swap(&self, sqrt_price: U256, tick: PoolTick, liquidity: u128) -> Self {
+        let mut state = self.clone();
+        state.sqrt_price = sqrt_price;
+        state.tick = tick;
+        state.liquidity = liquidity;
+        state.step_cache = SwapStepCache::default();
+        state
     }
 
     fn swap(
@@ -205,7 +225,7 @@ impl UniswapV4State {
                 amount_remaining: I256::ZERO,
                 sqrt_price: self.sqrt_price,
                 liquidity: self.liquidity,
-                tick: self.tick,
+                tick: self.tick.clone(),
                 gas_used: U256::from(3_000), // baseline gas cost for no-op swap
             });
         }
@@ -236,26 +256,44 @@ impl UniswapV4State {
             amount_remaining: amount_specified,
             amount_calculated: I256::ZERO,
             sqrt_price: self.sqrt_price,
-            tick: self.tick,
+            tick: self.tick.value().into(),
             liquidity: self.liquidity,
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
 
+        // A hook's fee override holds for one swap only, so those swaps neither use nor add to the
+        // step cache.
+        let mut recorder = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none()
+        {
+            let origin =
+                CachedStep::origin(self.sqrt_price, state.tick.value(), self.liquidity, gas_used);
+            let fee_pips = self
+                .fees
+                .calculate_swap_fees_pips(zero_for_one, None);
+            self.step_cache
+                .begin(zero_for_one, origin, amount_specified.unsigned_abs(), fee_pips)
+        } else {
+            None
+        };
+        if let Some(recorder) = &recorder {
+            gas_used = recorder
+                .start()
+                .resume(&mut state, amount_specified);
+        }
+
         while state.amount_remaining != I256::ZERO && state.sqrt_price != price_limit {
-            let (mut next_tick, initialized) = match self
+            let (mut next_tick, next_tick_info) = match self
                 .ticks
-                .next_initialized_tick_within_one_word(state.tick, zero_for_one)
+                .next_initialized_tick_within_one_word(state.tick.value(), zero_for_one)
             {
-                Ok((tick, init)) => {
+                Ok((tick, info)) => {
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_BITMAP_LOOKUP))?;
-                    (tick, init)
+                    (tick, info)
                 }
                 Err(tick_err) => match tick_err.kind {
                     TickListErrorKind::TicksExeeded => {
-                        let mut new_state = self.clone();
-                        new_state.liquidity = state.liquidity;
-                        new_state.tick = state.tick;
-                        new_state.sqrt_price = state.sqrt_price;
+                        let new_state =
+                            self.after_swap(state.sqrt_price, state.tick.clone(), state.liquidity);
                         return Err(SimulationError::InvalidInput(
                             "Ticks exceeded".into(),
                             Some(GetAmountOutResult::new(
@@ -271,15 +309,20 @@ impl UniswapV4State {
 
             next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
 
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = match next_tick_info {
+                Some(info) => info.sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
             let fee_pips = self
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, lp_fee_override);
 
             let sqrt_price_start = state.sqrt_price;
-            let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
+            let sqrt_ratio_target =
+                UniswapV4State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one);
+            let (sqrt_price, amount_in_with_fee, amount_out) = swap_math::compute_swap_step(
                 state.sqrt_price,
-                UniswapV4State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
+                sqrt_ratio_target,
                 state.liquidity,
                 // The core univ4 swap logic assumes that if the amount is > 0 it's exact in, and
                 // if it's < 0 it's exact out. The compute_swap_step assumes the
@@ -292,45 +335,39 @@ impl UniswapV4State {
             let step = StepComputation {
                 sqrt_price_start,
                 tick_next: next_tick,
-                initialized,
                 sqrt_price_next,
-                amount_in,
+                amount_in_with_fee,
                 amount_out,
-                fee_amount,
             };
             if exact_input {
-                state.amount_remaining += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_remaining +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
                 state.amount_calculated -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
             } else {
                 state.amount_remaining -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_calculated +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
-                if step.initialized {
-                    let liquidity_raw = self
-                        .ticks
-                        .get_tick(step.tick_next)
-                        .unwrap()
-                        .net_liquidity;
+                if let Some(info) = next_tick_info {
+                    let liquidity_raw = info.net_liquidity;
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
                         liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
                     gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_TICK))?;
                 }
-                state.tick = if zero_for_one { step.tick_next - 1 } else { step.tick_next };
+                state.tick =
+                    PoolTick::from(if zero_for_one { step.tick_next - 1 } else { step.tick_next });
             } else if state.sqrt_price != step.sqrt_price_start {
-                state.tick = get_tick_at_sqrt_ratio(state.sqrt_price)?;
+                state.tick = PoolTick::at_sqrt_price(state.sqrt_price)?;
             }
+            let reached_target = state.sqrt_price == sqrt_ratio_target;
+            recorder = recorder
+                .and_then(|recorder| recorder.after_step(&state, &step, reached_target, gas_used));
         }
 
         Ok(SwapResults {
@@ -743,10 +780,7 @@ impl ProtocolSim for UniswapV4State {
         };
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
-        let mut new_state = self.clone();
-        new_state.liquidity = result.liquidity;
-        new_state.tick = result.tick;
-        new_state.sqrt_price = result.sqrt_price;
+        let new_state = self.after_swap(result.sqrt_price, result.tick, result.liquidity);
 
         // Add hook gas costs to baseline swap cost.
         // before_swap_gas / after_swap_gas capture the hook contract's internal
@@ -805,7 +839,7 @@ impl ProtocolSim for UniswapV4State {
         }
 
         let zero_for_one = token_in < token_out;
-        let mut current_tick = self.tick;
+        let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_amount_in = U256::ZERO;
@@ -814,7 +848,7 @@ impl ProtocolSim for UniswapV4State {
 
         // Iterate through ticks in the direction of the swap
         // Stops when: no more liquidity, no more ticks, or gas limit would be exceeded
-        while let Ok((tick, initialized)) = self
+        while let Ok((tick, next_tick_info)) = self
             .ticks
             .next_initialized_tick_within_one_word(current_tick, zero_for_one)
         {
@@ -827,8 +861,10 @@ impl ProtocolSim for UniswapV4State {
             // Clamp the tick value to ensure it's within valid range
             let next_tick = tick.clamp(MIN_TICK, MAX_TICK);
 
-            // Calculate the sqrt price at the next tick boundary
-            let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_price_next = match next_tick_info {
+                Some(info) => info.sqrt_price,
+                None => get_sqrt_ratio_at_tick_cached(next_tick)?,
+            };
 
             // Calculate the amount of tokens swapped when moving from current_sqrt_price to
             // sqrt_price_next. Direction determines which token is being swapped in vs out
@@ -870,12 +906,8 @@ impl ProtocolSim for UniswapV4State {
             // liquidity when crossing it
             // For zero_for_one, liquidity is removed when crossing a tick
             // For one_for_zero, liquidity is added when crossing a tick
-            if initialized {
-                let liquidity_raw = self
-                    .ticks
-                    .get_tick(next_tick)
-                    .unwrap()
-                    .net_liquidity;
+            if let Some(info) = next_tick_info {
+                let liquidity_raw = info.net_liquidity;
                 let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
 
                 // Check if applying this liquidity delta would cause underflow
@@ -919,6 +951,8 @@ impl ProtocolSim for UniswapV4State {
         tokens: &HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
+        // Swap steps taken from the old state do not hold for the new one.
+        self.step_cache = SwapStepCache::default();
         if let Some(mut hook) = self.hook.clone() {
             match hook.delta_transition(delta.clone(), tokens, balances) {
                 Ok(()) => self.set_hook_handler(hook),
@@ -945,7 +979,7 @@ impl ProtocolSim for UniswapV4State {
             self.sqrt_price = U256::from_be_slice(sqrt_price);
         }
         if let Some(tick) = delta.updated_attributes.get("tick") {
-            self.tick = i24_be_bytes_to_i32(tick);
+            self.tick = i24_be_bytes_to_i32(tick).into();
         }
         if let Some(lp_fee) = delta.updated_attributes.get("fee") {
             self.fees.lp_fee = u32::from(lp_fee.clone());
@@ -968,7 +1002,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -983,7 +1017,7 @@ impl ProtocolSim for UniswapV4State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -1044,10 +1078,11 @@ impl ProtocolSim for UniswapV4State {
                     },
                 )?;
 
-                let mut new_state = self.clone();
-                new_state.liquidity = swap_result.liquidity;
-                new_state.tick = swap_result.tick;
-                new_state.sqrt_price = swap_result.sqrt_price;
+                let new_state = self.after_swap(
+                    swap_result.sqrt_price,
+                    swap_result.tick,
+                    swap_result.liquidity,
+                );
 
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
@@ -1109,7 +1144,11 @@ mod tests {
                     models::{AfterSwapDelta, AmountRanges, BeforeSwapOutput, WithGasEstimate},
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
                 },
-                utils::uniswap::{lp_fee, sqrt_price_math::get_sqrt_price_q96},
+                utils::uniswap::{
+                    lp_fee,
+                    sqrt_price_math::get_sqrt_price_q96,
+                    tick_math::{get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio},
+                },
             },
         },
         protocol::models::{DecoderContext, TryFromWithBlock},
@@ -1214,7 +1253,7 @@ mod tests {
 
         assert_eq!(pool.liquidity, 2000);
         assert_eq!(pool.sqrt_price, U256::from(1001));
-        assert_eq!(pool.tick, 120);
+        assert_eq!(pool.tick.value(), 120);
         assert_eq!(pool.fees.zero_for_one, 50);
         assert_eq!(pool.fees.one_for_zero, 75);
         assert_eq!(pool.fees.lp_fee, 100);
@@ -2854,14 +2893,14 @@ mod tests {
 
         assert_ne!(result.sqrt_price, pool.sqrt_price);
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
-        assert_ne!(expected_tick, pool.tick);
-        assert_eq!(result.tick, expected_tick);
+        assert_ne!(expected_tick, pool.tick.value());
+        assert_eq!(result.tick.value(), expected_tick);
     }
 
     #[test]
     fn test_swap_keeps_boundary_tick_when_price_does_not_move() {
         let mut pool = create_tick_boundary_v4_test_pool();
-        pool.tick = -1;
+        pool.tick = PoolTick::from(-1);
         let amount = -I256::from_raw(U256::from(1u64));
 
         let result = pool
@@ -3297,5 +3336,142 @@ mod tests {
         // Default price limit for zero_for_one is MIN_SQRT_RATIO + 1 == sqrt_price, so invalid
         let result = pool.swap(true, amount, None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+}
+
+#[cfg(test)]
+mod step_cache_tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        str::FromStr,
+    };
+
+    use tycho_common::{dto::ProtocolStateDelta, hex_bytes::Bytes};
+
+    use super::*;
+    use crate::evm::protocol::utils::uniswap::swap_step_cache::test_fixtures::{
+        amount_orders, test_amounts, test_ticks, wbtc_weth, LIQUIDITY, SQRT_PRICE, TICK,
+    };
+
+    fn test_pool_with_fees(fees: UniswapV4Fees) -> UniswapV4State {
+        UniswapV4State::new(
+            LIQUIDITY,
+            U256::from_str(SQRT_PRICE).unwrap(),
+            fees,
+            TICK,
+            10,
+            test_ticks(),
+        )
+        .unwrap()
+    }
+
+    fn test_pool() -> UniswapV4State {
+        test_pool_with_fees(UniswapV4Fees::new(0, 0, 500))
+    }
+
+    /// A quote's amount, gas and new state, or its error, as text.
+    fn outcome(pool: &UniswapV4State, amount: &BigUint, sell: &Token, buy: &Token) -> String {
+        match pool.get_amount_out(amount.clone(), sell, buy) {
+            Ok(result) => {
+                let state = result
+                    .new_state
+                    .as_any()
+                    .downcast_ref::<UniswapV4State>()
+                    .unwrap();
+                format!(
+                    "{} {} {} {} {}",
+                    result.amount,
+                    result.gas,
+                    state.sqrt_price,
+                    state.tick.value(),
+                    state.liquidity
+                )
+            }
+            Err(error) => format!("error {error}"),
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_in_any_order() {
+        let (wbtc, weth) = wbtc_weth();
+        // No protocol fee, then a protocol fee that differs by direction.
+        for fees in [UniswapV4Fees::new(0, 0, 500), UniswapV4Fees::new(100, 90, 3000)] {
+            for (sell, buy, smallest) in [(&wbtc, &weth, 1_000u64), (&weth, &wbtc, 1_000_000_000)] {
+                for order in amount_orders(&test_amounts(smallest)) {
+                    let shared = test_pool_with_fees(fees.clone());
+                    for amount in &order {
+                        assert_eq!(
+                            outcome(&shared, amount, sell, buy),
+                            outcome(&test_pool_with_fees(fees.clone()), amount, sell, buy),
+                            "selling {amount} {} with {fees:?}",
+                            sell.symbol
+                        );
+                    }
+                    let steps = shared
+                        .step_cache
+                        .min_inputs(sell < buy)
+                        .len();
+                    assert!(steps > 2, "only {steps} steps cached");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_quotes_match_a_fresh_state_at_each_cached_step() {
+        let (wbtc, weth) = wbtc_weth();
+        // Amounts that run past the last tick, so the cache covers the whole tick list. Selling
+        // WETH needs a far larger amount to leave its first tick.
+        for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
+            let cached = test_pool();
+            let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
+            let boundaries = cached.step_cache.min_inputs(sell < buy);
+            assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());
+            for boundary in boundaries.into_iter().skip(1) {
+                for amount in [boundary - U256::from(1u64), boundary, boundary + U256::from(1u64)] {
+                    let amount = u256_to_biguint(amount);
+                    assert_eq!(
+                        outcome(&cached, &amount, sell, buy),
+                        outcome(&test_pool(), &amount, sell, buy),
+                        "selling {amount} {}",
+                        sell.symbol
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_step_cache_restarts_after_delta_transition() {
+        let (wbtc, weth) = wbtc_weth();
+        let large = BigUint::from(3_000_000_000u64);
+        // Only a crossed tick's liquidity changes, so the price, tick and liquidity the cache
+        // starts from stay the same.
+        let delta = || ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/255820/net_liquidity".to_string(),
+                Bytes::from(
+                    1_000_000_000_000_000i128
+                        .to_be_bytes()
+                        .to_vec(),
+                ),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        let mut cached = test_pool();
+        cached
+            .get_amount_out(large.clone(), &wbtc, &weth)
+            .unwrap();
+        let mut fresh = test_pool();
+
+        cached
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+        fresh
+            .delta_transition(delta(), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(outcome(&cached, &large, &wbtc, &weth), outcome(&fresh, &large, &wbtc, &weth));
     }
 }
