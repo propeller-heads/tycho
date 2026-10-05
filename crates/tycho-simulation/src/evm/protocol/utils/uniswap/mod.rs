@@ -8,6 +8,9 @@ pub(crate) mod swap_math;
 pub mod tick_list;
 pub(crate) mod tick_math;
 
+/// Uniswap fees are in pips. One pip is a hundredth of a basis point, so 1,000,000 pips is 100%.
+pub(crate) const FEE_PIPS_DENOMINATOR: u32 = 1_000_000;
+
 #[derive(Debug)]
 pub(crate) struct SwapState {
     pub(crate) amount_remaining: I256,
@@ -22,9 +25,8 @@ pub(crate) struct StepComputation {
     pub(crate) sqrt_price_start: U256,
     pub(crate) tick_next: i32,
     pub(crate) sqrt_price_next: U256,
-    pub(crate) amount_in: U256,
+    pub(crate) amount_in_with_fee: U256,
     pub(crate) amount_out: U256,
-    pub(crate) fee_amount: U256,
 }
 
 #[derive(Debug, Default)]

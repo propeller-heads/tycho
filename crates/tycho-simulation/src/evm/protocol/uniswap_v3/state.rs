@@ -28,7 +28,7 @@ use crate::evm::protocol::{
         uniswap::{
             i24_be_bytes_to_i32, liquidity_math,
             sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-            swap_math,
+            swap_math::{self, SwapStepResult},
             tick_list::{TickInfo, TickList, TickListErrorKind},
             tick_math::{
                 get_sqrt_ratio_at_tick_cached, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
@@ -164,42 +164,42 @@ impl UniswapV3State {
                 Some(info) => info.sqrt_price,
                 None => get_sqrt_ratio_at_tick_cached(next_tick)?,
             };
-            let (sqrt_price, amount_in, amount_out, fee_amount) = swap_math::compute_swap_step(
-                state.sqrt_price,
-                UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
-                state.liquidity,
-                state.amount_remaining,
-                self.fee,
-            )?;
+            let SwapStepResult { sqrt_price, amount_in_with_fee, amount_out } =
+                swap_math::compute_swap_step(
+                    state.sqrt_price,
+                    UniswapV3State::get_sqrt_ratio_target(
+                        sqrt_price_next,
+                        price_limit,
+                        zero_for_one,
+                    ),
+                    state.liquidity,
+                    state.amount_remaining,
+                    self.fee,
+                )?;
             state.sqrt_price = sqrt_price;
 
             let step = StepComputation {
                 sqrt_price_start,
                 tick_next: next_tick,
                 sqrt_price_next,
-                amount_in,
+                amount_in_with_fee,
                 amount_out,
-                fee_amount,
             };
 
             gas_used = safe_add_u256(gas_used, U256::from(GAS_PER_SWAP_MATH_STEP))?;
 
             if exact_input {
-                state.amount_remaining -= I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_remaining -=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
                 state.amount_calculated -=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
             } else {
                 state.amount_remaining +=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_out).unwrap();
-                state.amount_calculated += I256::checked_from_sign_and_abs(
-                    Sign::Positive,
-                    safe_add_u256(step.amount_in, step.fee_amount)?,
-                )
-                .unwrap();
+                state.amount_calculated +=
+                    I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
+                        .unwrap();
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
