@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use alloy::primitives::{I256, U256};
 use tycho_common::simulation::errors::SimulationError;
 
@@ -12,6 +14,37 @@ pub(crate) const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739u64, 0, 0, 0
 // MAX_SQRT_RATIO: 1461446703485210103287273052203988822378723970342
 pub(crate) const MAX_SQRT_RATIO: U256 =
     U256::from_limbs([6743328256752651558u64, 17280870778742802505u64, 4294805859u64, 0]);
+
+/// Slots in each thread's cache of [`get_sqrt_ratio_at_tick_cached`]. Must be a power of two.
+const SQRT_RATIO_CACHE_SLOTS: usize = 1024;
+
+/// 2^32 divided by the golden ratio. Multiplying by it spreads nearby ticks over the slots
+/// (Fibonacci hashing).
+const FIBONACCI_HASH_MULTIPLIER: u32 = 0x9E37_79B1;
+
+thread_local! {
+    /// Tick and sqrt ratio, in a slot picked by the tick.
+    static SQRT_RATIO_CACHE: RefCell<Vec<Option<(i32, U256)>>> =
+        RefCell::new(vec![None; SQRT_RATIO_CACHE_SLOTS]);
+}
+
+/// [`get_sqrt_ratio_at_tick`], with the results kept in a cache for each thread.
+///
+/// Each slot holds one tick. A different tick that maps to the same slot replaces it.
+pub(crate) fn get_sqrt_ratio_at_tick_cached(tick: i32) -> Result<U256, SimulationError> {
+    let shift = u32::BITS - SQRT_RATIO_CACHE_SLOTS.trailing_zeros();
+    let slot = ((tick as u32).wrapping_mul(FIBONACCI_HASH_MULTIPLIER) >> shift) as usize;
+    let cached = SQRT_RATIO_CACHE.with_borrow(|cache| match cache[slot] {
+        Some((cached_tick, ratio)) if cached_tick == tick => Some(ratio),
+        _ => None,
+    });
+    if let Some(ratio) = cached {
+        return Ok(ratio);
+    }
+    let ratio = get_sqrt_ratio_at_tick(tick)?;
+    SQRT_RATIO_CACHE.with_borrow_mut(|cache| cache[slot] = Some((tick, ratio)));
+    Ok(ratio)
+}
 
 /// `(ratio * factor) >> 128` for the tick-ratio ladder.
 ///
@@ -306,6 +339,31 @@ mod tests {
     #[test]
     fn test_get_sqrt_ratio_at_tick_i32_min() {
         assert!(get_sqrt_ratio_at_tick(i32::MIN).is_err());
+    }
+
+    #[test]
+    fn test_get_sqrt_ratio_at_tick_cached_matches_uncached() {
+        // Each test tick three times, so slots fill, collide and get replaced.
+        let ticks: Vec<i32> = (-3000..3000)
+            .step_by(7)
+            .chain([MIN_TICK, MAX_TICK, 0])
+            .collect();
+        for _ in 0..3 {
+            for &tick in &ticks {
+                assert_eq!(
+                    get_sqrt_ratio_at_tick_cached(tick).unwrap(),
+                    get_sqrt_ratio_at_tick(tick).unwrap(),
+                    "tick {tick}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_sqrt_ratio_at_tick_cached_out_of_range() {
+        for tick in [MIN_TICK - 1, MAX_TICK + 1] {
+            assert!(get_sqrt_ratio_at_tick_cached(tick).is_err(), "tick {tick}");
+        }
     }
 
     struct TestCase {
