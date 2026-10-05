@@ -44,6 +44,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
     // Positive slippage configuration
     bool private _positiveSlippageEnabled;
+    // Router's share of the surplus in fee units (MAX_BPS = the full surplus)
+    uint32 private _positiveSlippageShareBps;
 
     // Clients whose swaps keep the surplus above expectedAmountOut even
     // while positive slippage capture is enabled
@@ -70,6 +72,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         address indexed oldReceiver, address indexed newReceiver
     );
     event PositiveSlippageToggled(bool enabled);
+    event PositiveSlippageShareUpdated(uint32 oldShareBps, uint32 newShareBps);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
     event ClientPositiveSlippageShareUpdated(
         address indexed client, uint32 oldShareBps, uint32 newShareBps
@@ -83,6 +86,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      the sender, and fees credited to it can never be withdrawn.
      *      Positive slippage capture starts enabled, since that is how every
      *      deployment is operated; `setPositiveSlippageEnabled` turns it off.
+     *      The router's share of the surplus starts at 100%.
      */
     constructor(address routerFeeSetter, address routerFeeReceiver) {
         if (routerFeeReceiver == address(0)) {
@@ -90,11 +94,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
         _routerFeeReceiver = routerFeeReceiver;
         _positiveSlippageEnabled = true;
+        _positiveSlippageShareBps = MAX_BPS;
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
         emit RouterFeeReceiverUpdated(address(0), routerFeeReceiver);
         emit PositiveSlippageToggled(true);
+        emit PositiveSlippageShareUpdated(0, MAX_BPS);
     }
 
     /**
@@ -103,12 +109,12 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *
      *      Deduction order:
      *      1. When positive slippage capture is enabled and the client is not
-     *         exempt, the surplus (actualAmountOut - expectedAmountOut) is
-     *         taken first. The client gets its share of the surplus and
-     *         the router keeps the rest.
+     *         exempt, the router captures its share of the surplus
+     *         (actualAmountOut - expectedAmountOut) first. The client gets
+     *         its share of the captured amount and the router keeps the
+     *         rest. The uncaptured surplus stays in the swap output.
      *      2. Fees (client fee + router fees) are then calculated on
-     *         the amount *after* surplus extraction (expectedAmountOut when
-     *         surplus was taken, actualAmountOut otherwise).
+     *         the amount *after* surplus extraction.
      *
      *      Router fee parameters are retrieved from contract storage based on the client address.
      *      Client fee parameters are passed as function arguments.
@@ -130,9 +136,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             : positiveSlippage * _clientPositiveSlippageShareBps[resolvedClient]
                 / MAX_BPS;
 
-        // Fee base = actual output minus any extracted surplus.
-        // When surplus is taken: feeBase = expectedAmountOut.
-        // When no surplus (disabled or actual <= expected): it is zero.
+        // Fee base = actual output minus the captured surplus.
         uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
         (uint256 routerFee, uint256 clientFee) =
@@ -167,7 +171,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // route funds through the router when positive slippage is enabled —
         // unless this client's surplus is never captured anyway.
         if (
-            _positiveSlippageEnabled && !_positiveSlippageExempt[resolvedClient]
+            _positiveSlippageEnabled && _positiveSlippageShareBps > 0
+                && !_positiveSlippageExempt[resolvedClient]
         ) {
             return true;
         }
@@ -241,9 +246,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     }
 
     /**
-     * @dev Calculates the positive slippage surplus that the router captures
-     * @return positiveSlippage The surplus (zero if disabled, the client is
-     *         exempt, or there is no surplus)
+     * @dev Calculates the captured share of the positive slippage surplus
+     * @return positiveSlippage The captured share of the surplus (zero if
+     *         disabled, the client is exempt, or there is no surplus)
      */
     function _calculatePositiveSlippage(
         uint256 actualAmountOut,
@@ -257,7 +262,8 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
             return 0;
         }
 
-        positiveSlippage = actualAmountOut - expectedAmountOut;
+        positiveSlippage = (actualAmountOut - expectedAmountOut)
+            * _positiveSlippageShareBps / MAX_BPS;
     }
 
     /**
@@ -481,6 +487,29 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      */
     function getPositiveSlippageEnabled() external view returns (bool) {
         return _positiveSlippageEnabled;
+    }
+
+    /**
+     * @dev Sets the router's share of the positive slippage surplus. The
+     *      rest of the surplus stays in the swap output.
+     * @param shareBps Share in fee units (100_000_000 = the full surplus)
+     */
+    function setPositiveSlippageShare(uint32 shareBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (shareBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        uint32 oldShareBps = _positiveSlippageShareBps;
+        _positiveSlippageShareBps = shareBps;
+        emit PositiveSlippageShareUpdated(oldShareBps, shareBps);
+    }
+
+    /**
+     * @dev Returns the router's share of the positive slippage surplus in fee
+     *      units
+     */
+    function getPositiveSlippageShare() external view returns (uint32) {
+        return _positiveSlippageShareBps;
     }
 
     /**
