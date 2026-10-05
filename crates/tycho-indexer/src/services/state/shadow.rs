@@ -195,9 +195,8 @@ impl Comparison {
 pub(crate) fn compare_contract_state(
     db: &Result<dto::StateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::StateRequestResponse>,
-    held_elsewhere: impl Fn(&Bytes) -> bool,
 ) -> Comparison {
-    let (db, mut cache) = match pair(db, cache, held_elsewhere) {
+    let (db, mut cache) = match pair(db, cache) {
         Ok(answers) => answers,
         Err(comparison) => return comparison,
     };
@@ -220,8 +219,7 @@ pub(crate) fn compare_protocol_state(
     db: &Result<dto::ProtocolStateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::ProtocolStateRequestResponse>,
 ) -> Comparison {
-    // No protocol-state error names an address.
-    let (db, mut cache) = match pair(db, cache, |_| false) {
+    let (db, mut cache) = match pair(db, cache) {
         Ok(answers) => answers,
         Err(comparison) => return comparison,
     };
@@ -267,11 +265,7 @@ fn normalize_states(states: &mut Vec<dto::ResponseProtocolState>, include_balanc
 
 /// Returns both answers when both sides answered. Otherwise returns the comparison of the
 /// failure.
-fn pair<R>(
-    db: &Result<R, RpcError>,
-    cache: CacheAnswer<R>,
-    held_elsewhere: impl Fn(&Bytes) -> bool,
-) -> Result<(&R, R), Comparison> {
+fn pair<R>(db: &Result<R, RpcError>, cache: CacheAnswer<R>) -> Result<(&R, R), Comparison> {
     let err = match (db, cache) {
         (_, CacheAnswer::Fallback) => return Err(Comparison::without_diffs(Outcome::Fallback)),
         (_, CacheAnswer::Panicked) => return Err(Comparison::without_diffs(Outcome::CachePanicked)),
@@ -285,7 +279,7 @@ fn pair<R>(
         (_, CacheAnswer::Failed(err)) => err,
     };
     let db_err = db.as_ref().err();
-    if known_error(db_err, &err, held_elsewhere) {
+    if known_error(db_err, &err) {
         return Err(Comparison::without_diffs(Outcome::KnownError));
     }
     // Compare the error a client would get in `serve`.
@@ -306,17 +300,9 @@ fn db_failed(db: &RpcError) -> bool {
 }
 
 /// Whether the cache-path error `cache` is a known difference. `db` is the database-path error,
-/// `None` when the database path answered. `held_elsewhere` says whether another extractor's
-/// window holds an address.
-fn known_error(
-    db: Option<&RpcError>,
-    cache: &StateServiceError,
-    held_elsewhere: impl Fn(&Bytes) -> bool,
-) -> bool {
+/// `None` when the database path answered.
+fn known_error(db: Option<&RpcError>, cache: &StateServiceError) -> bool {
     match (db, cache) {
-        // The service builds an uncached address only from the window of the requested system;
-        // the database path scans every window.
-        (None, StateServiceError::ContractNotFound(address)) => held_elsewhere(address),
         // Neither path finds the account: the database path answers 500, the service 404.
         // TODO: answer a missing account with one status on both paths, then remove this case.
         (
@@ -575,11 +561,7 @@ mod test {
         db: Vec<dto::ResponseAccount>,
         cache: Vec<dto::ResponseAccount>,
     ) -> Comparison {
-        compare_contract_state(
-            &Ok(contracts(db, 2)),
-            CacheAnswer::Answered(contracts(cache, 2)),
-            |_| false,
-        )
+        compare_contract_state(&Ok(contracts(db, 2)), CacheAnswer::Answered(contracts(cache, 2)))
     }
 
     #[test]
@@ -625,7 +607,6 @@ mod test {
         let comparison = compare_contract_state(
             &Ok(contracts(vec![account(1)], 1)),
             CacheAnswer::Answered(contracts(vec![account(1)], 2)),
-            |_| false,
         );
 
         assert_eq!(comparison.diffs, vec!["pagination.total: db=1 cache=2"]);
@@ -678,6 +659,11 @@ mod test {
         CacheAnswer::Failed(StateServiceError::InvalidVersion("bad".to_string())),
         Outcome::Mismatch
     )]
+    #[case::account_only_the_database_path_finds(
+        Ok(contracts(vec![account(1)], 1)),
+        CacheAnswer::Failed(StateServiceError::ContractNotFound(address(1))),
+        Outcome::Mismatch
+    )]
     #[case::same_error_on_both(
         Err(RpcError::Parse("bad".to_string())),
         CacheAnswer::Failed(StateServiceError::InvalidVersion("bad".to_string())),
@@ -726,23 +712,7 @@ mod test {
         #[case] cache: CacheAnswer<dto::StateRequestResponse>,
         #[case] expected: Outcome,
     ) {
-        let comparison = compare_contract_state(&db, cache, |_| false);
-
-        assert_eq!(comparison.outcome, expected);
-    }
-
-    #[rstest]
-    #[case::held_by_another_window(true, Outcome::KnownError)]
-    #[case::held_nowhere(false, Outcome::Mismatch)]
-    fn an_account_only_the_database_path_finds(
-        #[case] held_elsewhere: bool,
-        #[case] expected: Outcome,
-    ) {
-        let comparison = compare_contract_state(
-            &Ok(contracts(vec![account(1)], 1)),
-            CacheAnswer::Failed(StateServiceError::ContractNotFound(address(1))),
-            |_| held_elsewhere,
-        );
+        let comparison = compare_contract_state(&db, cache);
 
         assert_eq!(comparison.outcome, expected);
     }
@@ -752,7 +722,6 @@ mod test {
         let comparison = compare_contract_state(
             &Ok(contracts(vec![account(1)], 1)),
             CacheAnswer::Failed(StateServiceError::InvalidVersion("boom".to_string())),
-            |_| false,
         );
 
         assert_eq!(comparison.diffs, vec!["error: db=ok cache=Failed to parse JSON: boom"]);
@@ -960,7 +929,7 @@ mod test {
                     let _guard = window.lock().unwrap();
                     panic!("cache path bug");
                 },
-                |_, db, cache| compare_contract_state(db, cache, |_| false),
+                |_, db, cache| compare_contract_state(db, cache),
             )
             .await;
 

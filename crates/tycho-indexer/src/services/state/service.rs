@@ -196,27 +196,6 @@ impl StateService {
         StraddleToken { window_generation, folds: self.cache.folds() }
     }
 
-    /// Whether a window other than the one of `protocol_system` holds a delta for `address`: an
-    /// account that another extractor created and did not fold yet. A poisoned window counts as
-    /// not holding it.
-    pub(crate) fn other_window_holds(&self, protocol_system: &str, address: &Bytes) -> bool {
-        self.windows
-            .iter()
-            .filter(|(system, _)| system.as_str() != protocol_system)
-            .filter_map(|(_, window)| window.lock().ok())
-            .any(|window| {
-                window
-                    .blocks(None, None)
-                    .is_ok_and(|mut blocks| {
-                        blocks.any(|block| {
-                            block
-                                .account_deltas
-                                .contains_key(address)
-                        })
-                    })
-            })
-    }
-
     /// Serves `/contract_state` from the cache.
     ///
     /// Paginates `contract_ids` the way the database path does (slice, then page) and reports
@@ -538,7 +517,7 @@ mod test {
     use super::*;
     use crate::{
         extractor::models::fixtures,
-        services::state::window::{new_windows, FoldSink, WindowConfig},
+        services::state::window::{FoldSink, WindowConfig},
         testing,
     };
 
@@ -618,24 +597,6 @@ mod test {
         .join();
 
         assert_ne!(harness.service.straddle_token(SYSTEM), before);
-    }
-
-    #[test]
-    fn other_window_holds_an_account_only_another_extractor_changed() {
-        let windows = new_windows([SYSTEM, "other"], WindowConfig::default());
-        windows["other"]
-            .lock()
-            .unwrap()
-            .insert(&Arc::new(with_account(
-                testing::aggregated_changes("other", 1, 0, None),
-                account_delta(&addr(1), 1, ChangeType::Creation),
-            )))
-            .unwrap();
-        let service = StateService::new(windows, Arc::new(EntityCache::new()));
-
-        assert!(service.other_window_holds(SYSTEM, &addr(1)));
-        assert!(!service.other_window_holds("other", &addr(1)));
-        assert!(!service.other_window_holds(SYSTEM, &addr(2)));
     }
 
     /// Block `n`, finalized and committed.

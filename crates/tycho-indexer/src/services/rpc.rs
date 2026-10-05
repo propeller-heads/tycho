@@ -320,11 +320,7 @@ where
                     sampled,
                     self.get_contract_state_inner(request.clone()),
                     |service| service.contract_state(&request),
-                    |service, db, cache| {
-                        shadow::compare_contract_state(db, cache, |address| {
-                            service.other_window_holds(&request.protocol_system, address)
-                        })
-                    },
+                    |_, db, cache| shadow::compare_contract_state(db, cache),
                 )
                 .await;
         }
