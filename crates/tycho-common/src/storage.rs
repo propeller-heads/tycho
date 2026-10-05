@@ -12,8 +12,8 @@ use crate::{
     dto,
     models::{
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -605,6 +605,22 @@ pub trait EntryPointGateway {
         &self,
         entry_points: &HashSet<EntryPointId>,
     ) -> Result<HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>, StorageError>;
+
+    /// Retrieves the traced entry points of a set of components from the database.
+    ///
+    /// # Arguments
+    /// * `filter` - The EntryPointFilter to apply to the query.
+    /// * `pagination_params` - The pagination parameters to apply to the query, if None, all
+    ///   results are returned.
+    ///
+    /// # Returns
+    /// A map of component ids to the entry points with the tracing params linked to the
+    /// component, and their tracing results. Params without a tracing result are not included.
+    async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError>;
 }
 
 /// Manage contracts and their state in storage.

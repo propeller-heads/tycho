@@ -1002,40 +1002,9 @@ where
             component_ids: paginated_component_ids,
         };
 
-        let entry_points_tracing_params_data = self
-            .db_gateway
-            .get_entry_points_tracing_params(filter, Some(&pagination_params))
-            .await
-            .map_err(|err| {
-                error!(error = %err, "Error while getting entry points with tracing params.");
-                err
-            })?;
-
-        trace!(
-            entry_points_tracing_params = ?entry_points_tracing_params_data,
-            "Retrieved entry points with tracing params from database."
-        );
-
-        // Flatten the ID lists, throwing away component ids, to avoid making duplicate db calls
-        // when getting traced entry points.
-        let entry_point_ids: HashSet<EntryPointId> = entry_points_tracing_params_data
-            .entity
-            .values()
-            .flat_map(|entry_points_with_tracing_params| {
-                entry_points_with_tracing_params
-                    .iter()
-                    .map(|entry_point| {
-                        entry_point
-                            .entry_point
-                            .external_id
-                            .clone()
-                    })
-            })
-            .collect();
-
         let traced_entry_points = self
             .db_gateway
-            .get_traced_entry_points(&entry_point_ids)
+            .get_traced_entry_points_by_component(filter, Some(&pagination_params))
             .await
             .map_err(|err| {
                 error!(error = %err, "Error while getting traced entry points.");
@@ -1047,45 +1016,26 @@ where
             "Retrieved traced entry points from database."
         );
 
-        let mut traced_entry_points_by_component = HashMap::new();
-
-        for (component_id, entry_points_set) in entry_points_tracing_params_data.entity {
-            let mut pairs = Vec::with_capacity(entry_points_set.len());
-
-            for entry_point_with_params in entry_points_set {
-                let entry_point_id = entry_point_with_params
-                    .entry_point
-                    .external_id
-                    .as_str();
-                let tracing_param = &entry_point_with_params.params;
-
-                if let Some(results_for_entry_point) = traced_entry_points.get(entry_point_id) {
-                    if let Some(result_for_param) = results_for_entry_point.get(tracing_param) {
-                        pairs.push((
-                            entry_point_with_params.into(),
-                            result_for_param.clone().into(),
-                        ));
-                    } else {
-                        warn!(
-                            %entry_point_id,
-                            %tracing_param,
-                            "No tracing results found for entry point with params."
-                        );
-                    }
-                } else {
-                    warn!(?entry_point_id, "No tracing results found for entry point.");
-                }
-            }
-
-            traced_entry_points_by_component.insert(component_id, pairs);
-        }
+        let traced_entry_points_by_component = traced_entry_points
+            .entity
+            .into_iter()
+            .map(|(component_id, pairs)| {
+                let pairs = pairs
+                    .into_iter()
+                    .map(|(entry_point_with_params, result)| {
+                        (entry_point_with_params.into(), result.into())
+                    })
+                    .collect();
+                (component_id, pairs)
+            })
+            .collect();
 
         Ok(dto::TracedEntryPointRequestResponse {
             traced_entry_points: traced_entry_points_by_component,
             pagination: PaginationResponse::new(
                 request.pagination.page,
                 request.pagination.page_size,
-                entry_points_tracing_params_data
+                traced_entry_points
                     .total
                     .unwrap_or_default(),
             ),
@@ -1617,7 +1567,6 @@ mod tests {
     use tycho_common::{
         dto, keccak256,
         models::{
-            blockchain,
             blockchain::{
                 AddressStorageLocation, EntryPoint, EntryPointWithTracingParams, RPCTracerParams,
                 TracingParams, TracingResult,
@@ -2650,28 +2599,20 @@ mod tests {
         // Gateway responses
         // At this point, the component ids have already been paginated, so they are not
         // queried from the gateway unless they are on page 1
-        let params_to_trace_result = HashMap::from([
-            (tracing_params_a.clone(), trace_result_a.clone()),
-            (tracing_params_b.clone(), trace_result_b.clone()),
-        ]);
-        let expected_entry_points_with_params = HashMap::from([(
+        let gateway_traced_entry_points = HashMap::from([(
             component_id_a.clone(),
-            HashSet::from([entry_point_with_params_a.clone(), entry_point_with_params_b.clone()]),
+            vec![
+                (entry_point_with_params_a.clone(), trace_result_a.clone()),
+                (entry_point_with_params_b.clone(), trace_result_b.clone()),
+            ],
         )]);
-
-        let expected_trace_results =
-            HashMap::from([(entry_point_id_a.clone(), params_to_trace_result)]);
 
         let mut gw = MockGateway::new();
 
-        let mock_get_entry_points_response =
-            Ok(WithTotal { entity: expected_entry_points_with_params.clone(), total: Some(2) });
-        gw.expect_get_entry_points_tracing_params()
-            .return_once(|_, _| Box::pin(async move { mock_get_entry_points_response }));
-
-        let mock_traced_entry_points_response = Ok(expected_trace_results.clone());
-        gw.expect_get_traced_entry_points()
-            .return_once(|_| Box::pin(async move { mock_traced_entry_points_response }));
+        let mock_traced_entry_points_response =
+            Ok(WithTotal { entity: gateway_traced_entry_points, total: Some(2) });
+        gw.expect_get_traced_entry_points_by_component()
+            .return_once(|_, _| Box::pin(async move { mock_traced_entry_points_response }));
 
         let req_handler = RpcHandler::new(
             gw,
@@ -2807,119 +2748,6 @@ mod tests {
             2
         );
     }
-    #[test]
-    async fn test_get_traced_entry_points_missing_result() {
-        // We attempt to fetch results for one component, where one tracing params  does not have a
-        // matching result. This param should not be included in the final response.
-
-        let component_id_a = "component_a".to_string();
-
-        let entry_point_id_a = "entrypoint_a".to_string();
-        let entry_point_a = EntryPoint {
-            external_id: entry_point_id_a.clone(),
-            target: Bytes::from("0x0000000000000000000000000000000000000001"),
-            signature: "sig()".to_string(),
-        };
-        let tracing_params_a = TracingParams::RPCTracer(RPCTracerParams {
-            caller: Some(Bytes::from("0x000000000000000000000000000000000000000a")),
-            calldata: Bytes::from("0x000000000000000000000000000000000000000b"),
-            state_overrides: None,
-            prune_addresses: None,
-        });
-        let tracing_params_b = TracingParams::RPCTracer(RPCTracerParams {
-            caller: Some(Bytes::from("0x000000000000000000000000000000000000000b")),
-            calldata: Bytes::from("0x000000000000000000000000000000000000000c"),
-            state_overrides: None,
-            prune_addresses: None,
-        });
-        let entry_point_with_params_a = EntryPointWithTracingParams {
-            entry_point: entry_point_a.clone(),
-            params: tracing_params_a.clone(),
-        };
-        let entry_point_with_params_b = EntryPointWithTracingParams {
-            entry_point: entry_point_a.clone(),
-            params: tracing_params_b.clone(),
-        };
-        let trace_result_a = TracingResult {
-            retriggers: HashSet::from([(
-                Bytes::from("0x00000000000000000000000000000000000000aa"),
-                blockchain::AddressStorageLocation::new(
-                    Bytes::from("0x0000000000000000000000000000000000000aaa"),
-                    0,
-                ),
-            )]),
-            accessed_slots: HashMap::from([(
-                Bytes::from("0x0000000000000000000000000000000000aaaa"),
-                HashSet::from([Bytes::from("0x0000000000000000000000000000000000aaaa")]),
-            )]),
-        };
-
-        // Gateway responses
-        // At this point, the component ids have already been paginated, so they are not
-        // queried from the gateway unless they are on page 1
-        let params_to_trace_result =
-            HashMap::from([(tracing_params_a.clone(), trace_result_a.clone())]);
-        let expected_entry_points_with_params = HashMap::from([(
-            component_id_a.clone(),
-            HashSet::from([entry_point_with_params_a.clone(), entry_point_with_params_b.clone()]),
-        )]);
-
-        let expected_trace_results =
-            HashMap::from([(entry_point_id_a.clone(), params_to_trace_result)]);
-
-        let mut gw = MockGateway::new();
-
-        let mock_get_entry_points_response =
-            Ok(WithTotal { entity: expected_entry_points_with_params.clone(), total: Some(2) });
-        gw.expect_get_entry_points_tracing_params()
-            .return_once(|_, _| Box::pin(async move { mock_get_entry_points_response }));
-
-        let mock_traced_entry_points_response = Ok(expected_trace_results.clone());
-        gw.expect_get_traced_entry_points()
-            .return_once(|_| Box::pin(async move { mock_traced_entry_points_response }));
-
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
-
-        let request = dto::TracedEntryPointRequestBody {
-            chain: dto::Chain::Ethereum,
-            protocol_system: "uniswap_v2".to_string(),
-            component_ids: Some(vec![component_id_a.clone()]),
-            pagination: dto::PaginationParams { page: 0, page_size: 1 },
-        };
-
-        let mut traced_entry_points = req_handler
-            .get_traced_entry_points(&request)
-            .await
-            .unwrap()
-            .as_ref()
-            .clone();
-
-        let expected_rpc_result = HashMap::from([(
-            component_id_a.clone(),
-            vec![(
-                dto::EntryPointWithTracingParams::from(entry_point_with_params_a.clone()),
-                dto::TracingResult::from(trace_result_a.clone()),
-            )],
-        )]);
-
-        assert_eq!(
-            traced_entry_points
-                .traced_entry_points
-                .get_mut(&component_id_a)
-                .unwrap(),
-            expected_rpc_result
-                .get(&component_id_a)
-                .unwrap(),
-        );
-    }
-
     #[test]
     async fn test_msg() {
         // Define the contract address and endpoint
