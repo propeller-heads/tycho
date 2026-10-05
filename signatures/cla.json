@@ -87,6 +87,14 @@
       "created_at": "2026-10-05T13:11:33Z",
       "repoId": 677301333,
       "pullRequestNo": 1445
+    },
+    {
+      "name": "brunoguerios",
+      "id": 6452493,
+      "comment_id": 5999772810,
+      "created_at": "2026-10-05T17:37:13Z",
+      "repoId": 677301333,
+      "pullRequestNo": 1520
     }
   ]
 }
