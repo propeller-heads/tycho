@@ -55,7 +55,7 @@ pub(crate) fn get_amount0_delta(
     if round_up {
         div_rounding_up(mul_div_rounding_up(numerator1, numerator2, sqrt_ratio_b)?, sqrt_ratio_a)
     } else {
-        safe_div_u256(mul_div_rounding_up(numerator1, numerator2, sqrt_ratio_b)?, sqrt_ratio_a)
+        safe_div_u256(mul_div(numerator1, numerator2, sqrt_ratio_b)?, sqrt_ratio_a)
     }
 }
 
@@ -322,6 +322,41 @@ mod tests {
     ) {
         let res = get_amount0_delta(a, b, liquidity, round_up).unwrap();
         assert_eq!(res, exp);
+    }
+
+    #[test]
+    fn test_get_amount0_delta_matches_v4_core_rounding() {
+        let sqrt_ratio_a = u256("10000000000");
+        let sqrt_ratio_b = u256("10000000001");
+        let liquidity = 79228162514348525941343550741u128;
+        let rounded_down = u256("62771017347656406784604995046984784712");
+        let rounded_up = u256("62771017347656406784604995046984784713");
+
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_a, sqrt_ratio_b, liquidity, false).unwrap(),
+            rounded_down
+        );
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_a, sqrt_ratio_b, liquidity, true).unwrap(),
+            rounded_up
+        );
+        assert!(rounded_down < rounded_up);
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_b, sqrt_ratio_a, liquidity, false).unwrap(),
+            rounded_down
+        );
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_b, sqrt_ratio_a, liquidity, true).unwrap(),
+            rounded_up
+        );
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_a, sqrt_ratio_a, liquidity, false).unwrap(),
+            U256::ZERO
+        );
+        assert_eq!(
+            get_amount0_delta(sqrt_ratio_a, sqrt_ratio_a, liquidity, true).unwrap(),
+            U256::ZERO
+        );
     }
 
     #[rstest]
