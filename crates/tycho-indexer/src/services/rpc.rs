@@ -320,7 +320,15 @@ where
                     sampled,
                     self.get_contract_state_inner(request.clone()),
                     |service| service.contract_state(&request),
-                    |_, db, cache| shadow::compare_contract_state(db, cache),
+                    |service, db, cache| {
+                        shadow::compare_contract_state(db, cache, |address| {
+                            service.unsaved_elsewhere(
+                                &request.protocol_system,
+                                &request.version,
+                                address,
+                            )
+                        })
+                    },
                 )
                 .await;
         }
@@ -2311,6 +2319,74 @@ mod tests {
         assert_eq!(
             moved_comparisons(&snapshotter),
             vec![("contract_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
+    /// Block 1 of `uniswap_v2` creates the account and block 2 of `other` changes its slot. The
+    /// database path does not apply block 2, so the answers differ. Whether `other` saved block 2
+    /// decides the outcome.
+    #[rstest]
+    #[case::unsaved(None, "known_mismatch")]
+    #[case::saved(Some(2), "mismatch")]
+    #[tokio::test]
+    async fn test_shadow_classifies_another_extractors_account_change(
+        #[case] other_committed: Option<u64>,
+        #[case] expected: &str,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let creation = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let update = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 9)]),
+            None,
+            None,
+            ChangeType::Update,
+        );
+        let mut own_1 = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        own_1
+            .account_deltas
+            .insert(address.clone(), creation.clone());
+        // Block 2 of `uniswap_v2` moves the version up to block 2, so block 2 of `other` is at
+        // or below it.
+        let own_2 = testing::aggregated_changes("uniswap_v2", 2, 0, None);
+        let mut other_2 = testing::aggregated_changes("other", 2, 2, other_committed);
+        other_2
+            .account_deltas
+            .insert(address.clone(), update);
+        let windows = new_windows(["uniswap_v2", "other"], WindowConfig::default());
+        for (system, block) in [("uniswap_v2", own_1), ("uniswap_v2", own_2), ("other", other_2)] {
+            windows[system]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let handler = shadow_handler(
+            gateway_returning(creation.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), expected.to_string(), 1)]
         );
     }
 

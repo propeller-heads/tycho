@@ -188,6 +188,9 @@ In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the d
 client's answer), then `StateService`, and `services/state/shadow.rs` compares the two.
 It erases the known differences from both answers and requires the rest to be equal. On a
 mismatch it logs one warning with up to 20 diffs (`entity.field.key: db=… cache=…`).
+A `/contract_state` comparison where every differing account has an unsaved change in another
+extractor's window, at or below the version, counts as `known_mismatch` and logs no warning: the
+cache path applies that change, the database path does not.
 A comparison is discarded when it straddles a change: the window generation or the cache fold
 count moved during it.
 `--entity-cache-shadow-sample-rate` (default 0.0) sets the share. Metrics:

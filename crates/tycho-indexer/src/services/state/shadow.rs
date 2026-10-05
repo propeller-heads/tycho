@@ -136,6 +136,10 @@ enum Outcome {
     Match,
     /// The cache path failed in a known way; see [`known_error`].
     KnownError,
+    /// Both paths answered, and every account that differs has an unsaved change in another
+    /// extractor's window at or below the version. The cache path applies such a change; the
+    /// database path does not apply it to an account the database holds.
+    KnownMismatch,
     /// The answers differ.
     Mismatch,
     /// The database path failed for a reason that says nothing about the data: a lost connection
@@ -149,9 +153,10 @@ enum Outcome {
 }
 
 impl Outcome {
-    const ALL: [Outcome; 7] = [
+    const ALL: [Outcome; 8] = [
         Outcome::Match,
         Outcome::KnownError,
+        Outcome::KnownMismatch,
         Outcome::Mismatch,
         Outcome::DbFailed,
         Outcome::Discarded,
@@ -163,6 +168,7 @@ impl Outcome {
         match self {
             Outcome::Match => "match",
             Outcome::KnownError => "known_error",
+            Outcome::KnownMismatch => "known_mismatch",
             Outcome::Mismatch => "mismatch",
             Outcome::DbFailed => "db_failed",
             Outcome::Discarded => "discarded",
@@ -191,10 +197,12 @@ impl Comparison {
     }
 }
 
-/// Compares the two answers of a sampled `/contract_state` request.
+/// Compares the two answers of a sampled `/contract_state` request. `unsaved_elsewhere` says
+/// whether another extractor has an unsaved change to an address at or below the version.
 pub(crate) fn compare_contract_state(
     db: &Result<dto::StateRequestResponse, RpcError>,
     cache: CacheAnswer<dto::StateRequestResponse>,
+    unsaved_elsewhere: impl Fn(&Bytes) -> bool,
 ) -> Comparison {
     let (db, mut cache) = match pair(db, cache) {
         Ok(answers) => answers,
@@ -207,10 +215,31 @@ pub(crate) fn compare_contract_state(
     if db == cache {
         return Comparison::without_diffs(Outcome::Match);
     }
+    if explained_by_unsaved_changes(&db, &cache, unsaved_elsewhere) {
+        return Comparison::without_diffs(Outcome::KnownMismatch);
+    }
     let mut diffs = Vec::new();
     walk("pagination", &to_value(&db.pagination), &to_value(&cache.pagination), &mut diffs);
     locate(&db.accounts, &cache.accounts, |account| account.address.to_string(), &mut diffs);
     Comparison::mismatch(diffs)
+}
+
+/// Whether every difference between two normalized answers is an account both answers hold and
+/// `unsaved_elsewhere` accepts. The accounts of both answers are ordered by address.
+fn explained_by_unsaved_changes(
+    db: &dto::StateRequestResponse,
+    cache: &dto::StateRequestResponse,
+    unsaved_elsewhere: impl Fn(&Bytes) -> bool,
+) -> bool {
+    if db.pagination != cache.pagination || db.accounts.len() != cache.accounts.len() {
+        return false;
+    }
+    db.accounts
+        .iter()
+        .zip(&cache.accounts)
+        .all(|(db, cache)| {
+            db.address == cache.address && (db == cache || unsaved_elsewhere(&db.address))
+        })
 }
 
 /// Compares the two answers of a sampled `/protocol_state` request.
@@ -561,7 +590,11 @@ mod test {
         db: Vec<dto::ResponseAccount>,
         cache: Vec<dto::ResponseAccount>,
     ) -> Comparison {
-        compare_contract_state(&Ok(contracts(db, 2)), CacheAnswer::Answered(contracts(cache, 2)))
+        compare_contract_state(
+            &Ok(contracts(db, 2)),
+            CacheAnswer::Answered(contracts(cache, 2)),
+            |_| false,
+        )
     }
 
     #[test]
@@ -607,6 +640,7 @@ mod test {
         let comparison = compare_contract_state(
             &Ok(contracts(vec![account(1)], 1)),
             CacheAnswer::Answered(contracts(vec![account(1)], 2)),
+            |_| false,
         );
 
         assert_eq!(comparison.diffs, vec!["pagination.total: db=1 cache=2"]);
@@ -651,6 +685,59 @@ mod test {
         let comparison = compare_contracts(vec![db], vec![account(1)]);
 
         assert_eq!(comparison.outcome, Outcome::Match);
+    }
+
+    /// `account(n)` with slot 1 set to 99.
+    fn changed(n: u64) -> dto::ResponseAccount {
+        let mut account = account(n);
+        account
+            .slots
+            .insert(Bytes::from(1u64), Bytes::from(99u64));
+        account
+    }
+
+    /// The database path answers `db` and the cache path `cache`. `unsaved` lists the accounts
+    /// that another extractor changed in an unsaved block.
+    #[rstest]
+    #[case::every_differing_account_has_an_unsaved_change(
+        contracts(vec![account(1), account(2)], 2),
+        contracts(vec![changed(1), account(2)], 2),
+        vec![1],
+        Outcome::KnownMismatch
+    )]
+    #[case::one_differing_account_has_no_unsaved_change(
+        contracts(vec![account(1), account(2)], 2),
+        contracts(vec![changed(1), changed(2)], 2),
+        vec![1],
+        Outcome::Mismatch
+    )]
+    #[case::an_account_on_one_side_only(
+        contracts(vec![account(1), account(2)], 2),
+        contracts(vec![account(1)], 2),
+        vec![1, 2],
+        Outcome::Mismatch
+    )]
+    #[case::pagination_differs(
+        contracts(vec![account(1)], 1),
+        contracts(vec![changed(1)], 2),
+        vec![1],
+        Outcome::Mismatch
+    )]
+    fn unsaved_changes_explain_only_differing_accounts(
+        #[case] db: dto::StateRequestResponse,
+        #[case] cache: dto::StateRequestResponse,
+        #[case] unsaved: Vec<u64>,
+        #[case] expected: Outcome,
+    ) {
+        let comparison =
+            compare_contract_state(&Ok(db), CacheAnswer::Answered(cache), |candidate| {
+                unsaved
+                    .iter()
+                    .any(|&n| *candidate == address(n))
+            });
+
+        assert_eq!(comparison.outcome, expected);
+        assert_eq!(comparison.diffs.is_empty(), expected == Outcome::KnownMismatch);
     }
 
     #[rstest]
@@ -712,7 +799,7 @@ mod test {
         #[case] cache: CacheAnswer<dto::StateRequestResponse>,
         #[case] expected: Outcome,
     ) {
-        let comparison = compare_contract_state(&db, cache);
+        let comparison = compare_contract_state(&db, cache, |_| false);
 
         assert_eq!(comparison.outcome, expected);
     }
@@ -722,6 +809,7 @@ mod test {
         let comparison = compare_contract_state(
             &Ok(contracts(vec![account(1)], 1)),
             CacheAnswer::Failed(StateServiceError::InvalidVersion("boom".to_string())),
+            |_| false,
         );
 
         assert_eq!(comparison.diffs, vec!["error: db=ok cache=Failed to parse JSON: boom"]);
@@ -929,7 +1017,7 @@ mod test {
                     let _guard = window.lock().unwrap();
                     panic!("cache path bug");
                 },
-                |_, db, cache| compare_contract_state(db, cache),
+                |_, db, cache| compare_contract_state(db, cache, |_| false),
             )
             .await;
 
