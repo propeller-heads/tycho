@@ -285,6 +285,10 @@ pub enum ParamKey {
         start: u8,
         end: u8,
     },
+    /// Token fee configured for `token`.
+    TokenFeeBps {
+        token: Address,
+    },
 }
 
 impl std::fmt::Display for ParamKey {
@@ -302,6 +306,7 @@ impl std::fmt::Display for ParamKey {
             Self::CallbackCalldata { swap_index, start, end } => {
                 write!(f, "callback_calldata[{swap_index}][{start}:{end}]")
             }
+            Self::TokenFeeBps { token } => write!(f, "token_fee_bps[{token:?}]"),
         }
     }
 }

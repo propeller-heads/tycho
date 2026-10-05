@@ -724,7 +724,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
         // Stack pressure in this function prevents keeping finalReceiver in scope
         // outside the block, so we cache the interception decision as a bool instead.
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut;
         {
@@ -779,7 +781,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
         address client = clientFeeParams.clientFeeReceiver;
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut;
         {
@@ -839,7 +843,9 @@ contract TychoRouterV3 is AccessControl, Dispatcher, EIP712 {
 
         address client = clientFeeParams.clientFeeReceiver;
         bool intercepting = IFeeCalculator(_feeCalculator)
-            .mustOutputThroughRouter(clientFeeParams.clientFeeBps, client);
+            .mustOutputThroughRouter(
+                clientFeeParams.clientFeeBps, client, tokenIn, tokenOut
+            );
 
         uint256 actualAmountOut = _sequentialSwap(
             amountIn, swaps, intercepting ? address(this) : receiver
