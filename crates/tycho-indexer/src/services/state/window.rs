@@ -608,6 +608,10 @@ mod test {
         message
     }
 
+    fn at(number: u64) -> WriteTimestamp {
+        WriteTimestamp::from(&testing::block(number))
+    }
+
     fn revert_msg(number: u64) -> BlockAggregatedChanges {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
     }
@@ -733,17 +737,17 @@ mod test {
         let components = component_changes(&w.blocks_upto(5).unwrap(), &["c1", "absent"]);
         let accounts = account_changes(&w.blocks_upto(5).unwrap(), std::slice::from_ref(&address));
 
-        let component_blocks: Vec<u64> = components["c1"]
+        let component_blocks: Vec<WriteTimestamp> = components["c1"]
             .iter()
-            .map(|c| c.at.block_number())
+            .map(|c| c.at)
             .collect();
-        assert_eq!(component_blocks, vec![2, 4]);
+        assert_eq!(component_blocks, vec![at(2), at(4)]);
         assert!(!components.contains_key("absent"));
-        let account_blocks: Vec<u64> = accounts[&address]
+        let account_blocks: Vec<WriteTimestamp> = accounts[&address]
             .iter()
-            .map(|c| c.at.block_number())
+            .map(|c| c.at)
             .collect();
-        assert_eq!(account_blocks, vec![3, 5]);
+        assert_eq!(account_blocks, vec![at(3), at(5)]);
         assert!(components["c1"]
             .iter()
             .all(|c| c.delta.is_some() && c.balances.is_none()));
@@ -763,11 +767,23 @@ mod test {
         let changes = component_changes(&w.blocks_upto(42).unwrap(), &["c1"]);
         let blocks = changes["c1"]
             .iter()
-            .map(|change| change.at.block_number())
+            .map(|change| {
+                change
+                    .delta
+                    .as_ref()
+                    .unwrap()
+                    .updated_attributes["x"]
+                    .clone()
+            })
             .collect::<Vec<_>>();
         let latest = w.tip().unwrap();
 
-        assert_eq!(blocks, vec![40, 41, 42]);
+        assert_eq!(
+            blocks,
+            [40u64, 41, 42]
+                .map(Bytes::from)
+                .to_vec()
+        );
         assert_eq!(latest.number, 42);
         assert_eq!(latest.chain, Chain::Arc);
         assert_eq!(
@@ -844,11 +860,11 @@ mod test {
 
         let changes = component_changes(&w.blocks_upto(2).unwrap(), &["c1"]);
 
-        let blocks: Vec<u64> = changes["c1"]
+        let blocks: Vec<WriteTimestamp> = changes["c1"]
             .iter()
-            .map(|c| c.at.block_number())
+            .map(|c| c.at)
             .collect();
-        assert_eq!(blocks, vec![5]);
+        assert_eq!(blocks, vec![at(5)]);
     }
 
     #[test]
