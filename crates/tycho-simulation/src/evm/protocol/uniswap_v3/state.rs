@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use alloy::primitives::{Sign, I256, U256};
 use num_bigint::BigUint;
@@ -62,7 +62,10 @@ pub struct UniswapV3State {
     #[serde(with = "fee_serde")]
     fee: u32,
     tick: PoolTick,
-    ticks: TickList,
+    /// The tick list, shared by this state, its clones and the states its swaps return, so a quote
+    /// does not copy it. Change it only through `Arc::make_mut`, which copies the list while
+    /// another state shares it.
+    ticks: Arc<TickList>,
 }
 
 impl UniswapV3State {
@@ -92,7 +95,7 @@ impl UniswapV3State {
             sqrt_price,
             fee: fee.fee(),
             tick: tick.into(),
-            ticks: tick_list,
+            ticks: Arc::new(tick_list),
         })
     }
 
@@ -464,7 +467,7 @@ impl ProtocolSim for UniswapV3State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -479,7 +482,7 @@ impl ProtocolSim for UniswapV3State {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                self.ticks
+                Arc::make_mut(&mut self.ticks)
                     .set_tick_liquidity(
                         parts[1]
                             .parse::<i32>()
@@ -860,6 +863,48 @@ mod tests {
             }
             _ => panic!("Test failed: was expecting a SimulationError::InsufficientData"),
         }
+    }
+
+    #[test]
+    fn test_delta_transition_leaves_clones_ticks_unchanged() {
+        let original = UniswapV3State::new(
+            1000,
+            U256::from_str("1000").unwrap(),
+            FeeAmount::Low,
+            100,
+            vec![TickInfo::new(255760, 10000).unwrap(), TickInfo::new(255900, -10000).unwrap()],
+        )
+        .unwrap();
+        let mut updated = original.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([(
+                "ticks/255760/net_liquidity".to_string(),
+                Bytes::from(20000_u64.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        updated
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .ticks
+                .get_tick(255760)
+                .unwrap()
+                .net_liquidity,
+            20000
+        );
+        assert_eq!(
+            original
+                .ticks
+                .get_tick(255760)
+                .unwrap()
+                .net_liquidity,
+            10000
+        );
     }
 
     #[test]
