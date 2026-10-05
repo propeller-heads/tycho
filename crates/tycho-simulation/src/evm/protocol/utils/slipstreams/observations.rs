@@ -1,5 +1,7 @@
+use std::{fmt, sync::Arc};
+
 use alloy::primitives::U256;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::protocol::safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256};
@@ -59,21 +61,59 @@ impl Observation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The pool's oracle ring.
+///
+/// Clones share the ring. A swap writes at most one observation per block, so that write is kept
+/// as a patch over the shared ring; any other change copies the ring first.
+#[derive(Clone)]
 pub(crate) struct Observations {
-    observations: Vec<Observation>,
+    shared: Arc<Vec<Observation>>,
+    patch: Option<(usize, Observation)>,
 }
 
 impl Observations {
     pub fn new(observations: Vec<Observation>) -> Self {
-        Self { observations }
+        Self { shared: Arc::new(observations), patch: None }
+    }
+
+    fn len(&self) -> usize {
+        self.shared.len()
+    }
+
+    fn get(&self, idx: usize) -> Observation {
+        match self.patch {
+            Some((patched, observation)) if patched == idx => observation,
+            _ => self.shared[idx],
+        }
+    }
+
+    fn ring_mut(&mut self) -> &mut Vec<Observation> {
+        let ring = Arc::make_mut(&mut self.shared);
+        if let Some((idx, observation)) = self.patch.take() {
+            ring[idx] = observation;
+        }
+        ring
+    }
+
+    fn set(&mut self, idx: usize, observation: Observation) {
+        match self.patch {
+            None => self.patch = Some((idx, observation)),
+            Some((patched, _)) if patched == idx => self.patch = Some((idx, observation)),
+            Some(_) => self.ring_mut()[idx] = observation,
+        }
+    }
+
+    fn to_vec(&self) -> Vec<Observation> {
+        (0..self.len())
+            .map(|idx| self.get(idx))
+            .collect()
     }
 
     fn observation_index_err(&self, idx: usize, index: u16, cardinality: u16) -> SimulationError {
         SimulationError::FatalError(format!(
             "Observation index {} out of bounds (len={}), index={} cardinality={}",
             idx,
-            self.observations.len(),
+            self.len(),
             index,
             cardinality
         ))
@@ -81,35 +121,34 @@ impl Observations {
 
     pub fn upsert_observation(&mut self, index: i32, bytes: &[u8]) -> Result<(), SimulationError> {
         let idx = index as usize;
+        let len = self.len();
         if bytes.is_empty() {
-            return if idx < self.observations.len() {
-                self.observations.remove(idx);
+            return if idx < len {
+                self.ring_mut().remove(idx);
                 Ok(())
             } else {
                 Err(SimulationError::FatalError(format!(
                     "Cannot delete: index {} out of bounds (len={})",
-                    index,
-                    self.observations.len()
+                    index, len
                 )))
             };
         }
         let mut obs = Observation::from_attribute(index, bytes)?;
         obs.index = index;
-        if idx < self.observations.len() {
-            self.observations[idx] = obs;
+        let ring = self.ring_mut();
+        if idx < ring.len() {
+            ring[idx] = obs;
             return Ok(());
         }
-        if idx >= self.observations.capacity() {
-            self.observations
-                .reserve(idx - self.observations.len() + 1);
+        if idx >= ring.capacity() {
+            ring.reserve(idx - ring.len() + 1);
         }
 
-        while self.observations.len() < idx {
-            self.observations
-                .push(Observation::default());
+        while ring.len() < idx {
+            ring.push(Observation::default());
         }
 
-        self.observations.push(obs);
+        ring.push(obs);
         Ok(())
     }
 
@@ -131,10 +170,10 @@ impl Observations {
             return Err(SimulationError::FatalError("Cardinality must be > 0".to_string()));
         }
         let idx = index as usize;
-        if idx >= self.observations.len() {
+        if idx >= self.len() {
             return Err(self.observation_index_err(idx, index, cardinality));
         }
-        let last = self.observations[idx];
+        let last = self.get(idx);
         if last.block_timestamp == timestamp {
             return Ok(index);
         }
@@ -144,21 +183,23 @@ impl Observations {
         observation.index = next_index as i32;
 
         let next_idx = next_index as usize;
-        while self.observations.len() <= next_idx {
-            self.observations
-                .push(Observation::default());
+        if next_idx < self.len() {
+            self.set(next_idx, observation);
+        } else {
+            let ring = self.ring_mut();
+            ring.resize(next_idx, Observation::default());
+            ring.push(observation);
         }
-        self.observations[next_idx] = observation;
         Ok(next_index)
     }
 
     pub fn timestamp_at(&self, index: u16, cardinality: u16) -> Result<u32, SimulationError> {
         let idx = index as usize;
-        if idx >= self.observations.len() {
+        if idx >= self.len() {
             return Err(self.observation_index_err(idx, index, cardinality));
         }
 
-        Ok(self.observations[idx].block_timestamp)
+        Ok(self.get(idx).block_timestamp)
     }
 
     pub fn observe(
@@ -193,7 +234,7 @@ impl Observations {
         index: u16,
         cardinality: u16,
     ) -> Result<(Observation, Observation), SimulationError> {
-        if self.observations.is_empty() {
+        if self.len() == 0 {
             return Err(SimulationError::FatalError("No observations available".to_string()));
         }
         let mut l = (index as usize + 1) % cardinality as usize;
@@ -202,10 +243,10 @@ impl Observations {
         loop {
             let i = (l + r) / 2;
             let before_idx = i % cardinality as usize;
-            if before_idx >= self.observations.len() {
+            if before_idx >= self.len() {
                 return Err(self.observation_index_err(before_idx, index, cardinality));
             }
-            let before_or_at = self.observations[before_idx];
+            let before_or_at = self.get(before_idx);
 
             if !before_or_at.initialized {
                 l = i + 1;
@@ -213,10 +254,10 @@ impl Observations {
             }
 
             let after_idx = (i + 1) % cardinality as usize;
-            if after_idx >= self.observations.len() {
+            if after_idx >= self.len() {
                 return Err(self.observation_index_err(after_idx, index, cardinality));
             }
-            let at_or_after = self.observations[after_idx];
+            let at_or_after = self.get(after_idx);
             let target_at_or_after = lte(time, before_or_at.block_timestamp, target);
             if target_at_or_after && lte(time, target, at_or_after.block_timestamp) {
                 return Ok((before_or_at, at_or_after));
@@ -247,10 +288,10 @@ impl Observations {
         cardinality: u16,
     ) -> Result<(Observation, Observation), SimulationError> {
         let idx = index as usize;
-        if idx >= self.observations.len() {
+        if idx >= self.len() {
             return Err(self.observation_index_err(idx, index, cardinality));
         }
-        let mut before_or_at = self.observations[idx];
+        let mut before_or_at = self.get(idx);
 
         if lte(time, before_or_at.block_timestamp, target) {
             if before_or_at.block_timestamp == target {
@@ -260,15 +301,15 @@ impl Observations {
         }
 
         let next_idx = (index as usize + 1) % cardinality as usize;
-        if next_idx >= self.observations.len() {
+        if next_idx >= self.len() {
             return Err(self.observation_index_err(next_idx, index, cardinality));
         }
-        before_or_at = self.observations[next_idx];
+        before_or_at = self.get(next_idx);
         if !before_or_at.initialized {
-            if self.observations.is_empty() {
+            if self.len() == 0 {
                 return Err(SimulationError::FatalError("No observations available".to_string()));
             }
-            before_or_at = self.observations[0];
+            before_or_at = self.get(0);
         }
 
         if !lte(time, before_or_at.block_timestamp, target) {
@@ -291,10 +332,10 @@ impl Observations {
     ) -> Result<(i64, U256), SimulationError> {
         if seconds_ago == 0 {
             let idx = index as usize;
-            if idx >= self.observations.len() {
+            if idx >= self.len() {
                 return Err(self.observation_index_err(idx, index, cardinality));
             }
-            let mut last = self.observations[idx];
+            let mut last = self.get(idx);
             if last.block_timestamp != time {
                 last = transform(&last, time, tick, liquidity)?;
             }
@@ -337,6 +378,39 @@ impl Observations {
 
             Ok((tick_cumulative, seconds_per_liquidity_cumulative_x128))
         }
+    }
+}
+
+impl PartialEq for Observations {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && (0..self.len()).all(|idx| self.get(idx) == other.get(idx))
+    }
+}
+
+impl Eq for Observations {}
+
+impl fmt::Debug for Observations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Observations")
+            .field("observations", &self.to_vec())
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ObservationsWire {
+    observations: Vec<Observation>,
+}
+
+impl Serialize for Observations {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ObservationsWire { observations: self.to_vec() }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Observations {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ObservationsWire::deserialize(deserializer).map(|wire| Self::new(wire.observations))
     }
 }
 
@@ -419,7 +493,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 0);
-        assert_eq!(observations.observations.len(), 1);
+        assert_eq!(observations.len(), 1);
     }
 
     #[test]
@@ -431,7 +505,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 1);
-        let written = observations.observations[1];
+        let written = observations.get(1);
         assert_eq!(written.block_timestamp, 1_010);
         // 100 + pre-swap tick 50 * 10 seconds
         assert_eq!(written.tick_cumulative, 600);
@@ -451,7 +525,7 @@ mod tests {
             .expect("write should succeed");
 
         assert_eq!(index, 0);
-        assert_eq!(observations.observations[0].block_timestamp, 1_000);
+        assert_eq!(observations.get(0).block_timestamp, 1_000);
     }
 
     #[test]
@@ -579,20 +653,20 @@ mod tests {
         obs_vec
             .upsert_observation(0, &bytes)
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 1);
+        assert_eq!(obs_vec.len(), 1);
 
         // Update existing
         let bytes2 = encode_observation_bytes(200, 50, U256::from(9999), true);
         obs_vec
             .upsert_observation(0, &bytes2)
             .unwrap();
-        assert_eq!(obs_vec.observations[0].block_timestamp, 200);
+        assert_eq!(obs_vec.get(0).block_timestamp, 200);
 
         // Delete existing
         obs_vec
             .upsert_observation(0, &[])
             .unwrap();
-        assert_eq!(obs_vec.observations.len(), 0);
+        assert_eq!(obs_vec.len(), 0);
     }
 
     #[test]
