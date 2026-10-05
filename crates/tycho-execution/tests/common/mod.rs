@@ -10,7 +10,7 @@ use alloy::{
 use tycho_common::{models::Chain, Bytes};
 use tycho_execution::encoding::{
     evm::{
-        encoder_builders::TychoRouterEncoderBuilder,
+        encoder_builders::{ClientFeeForwarderEncoderBuilder, TychoRouterEncoderBuilder},
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     },
     tycho_encoder::TychoEncoder,
@@ -18,6 +18,11 @@ use tycho_execution::encoding::{
 
 pub fn router_address() -> Bytes {
     Bytes::from_str("0x6bc529DC7B81A031828dDCE2BC419d01FF268C66").unwrap()
+}
+
+/// Address of the `ClientFeeForwarder` deployed by `ClientFeeForwarder.t.sol`.
+pub fn client_fee_forwarder_address() -> Bytes {
+    Bytes::from_str("0x8227724C33C1748A42d1C1cD06e21AB8Deb6eB0A").unwrap()
 }
 
 pub fn bob_address() -> Bytes {
@@ -87,6 +92,20 @@ pub fn get_tycho_router_encoder(chain: Chain) -> Box<dyn TychoEncoder> {
         .chain(chain)
         .swap_encoder_registry(swap_encoder_registry)
         .router_address(router_address())
+        .build()
+        .expect("Failed to build encoder")
+}
+
+pub fn get_client_fee_forwarder_encoder(chain: Chain) -> Box<dyn TychoEncoder> {
+    let executors_addresses = fs::read_to_string("config/test_executor_addresses.json").unwrap();
+    let swap_encoder_registry = SwapEncoderRegistry::new(chain)
+        .add_default_encoders(Some(executors_addresses))
+        .unwrap();
+    ClientFeeForwarderEncoderBuilder::new()
+        .chain(chain)
+        .swap_encoder_registry(swap_encoder_registry)
+        .router_address(router_address())
+        .forwarder_address(client_fee_forwarder_address())
         .build()
         .expect("Failed to build encoder")
 }
