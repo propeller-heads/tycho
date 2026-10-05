@@ -96,9 +96,8 @@ impl BebopBookSource {
 
     /// Builds the complete book for one pricing update: every pair between requested tokens
     /// whose TVL (normalized into an approved quote token) clears the threshold. Each pair the
-    /// update carries becomes its own component in the orientation it was published in, so a pair
-    /// Bebop streams in both orientations yields two. Fails when any pair carries an invalid
-    /// price level.
+    /// update carries becomes its own component, in the orientation it was published in. Fails
+    /// when any pair carries an invalid price level.
     fn build_books(&self, update: BebopPricingUpdate) -> Result<HashMap<String, Book>, FeedError> {
         let pairs = update
             .pairs
