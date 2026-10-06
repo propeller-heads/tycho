@@ -213,6 +213,35 @@ contract HashflowExecutorECR20Test is Constants, TestUtils, HashflowUtils {
         assertEq(balanceAfter - balanceBefore, quote.quoteTokenAmount);
     }
 
+    function testSwapTwoPercentUnderQuoteFillsProRata() public {
+        _assertUnderQuoteFillsProRata(98);
+    }
+
+    function testSwapHalfOfQuoteFillsProRata() public {
+        _assertUnderQuoteFillsProRata(50);
+    }
+
+    /// @dev The maker signed the quote for `baseTokenAmount`. Sending `percent` of it must
+    /// settle against the real Hashflow router and pay `percent` of `quoteTokenAmount`.
+    function _assertUnderQuoteFillsProRata(uint256 percent) internal {
+        IHashflowRouter.RFQTQuote memory quote = rfqtQuote();
+        uint256 amountIn = quote.baseTokenAmount * percent / 100;
+
+        deal(WETH_ADDR, address(executor), amountIn);
+        vm.prank(address(executor));
+        IERC20(quote.baseToken).approve(HASHFLOW_ROUTER, amountIn);
+        uint256 balanceBefore = USDC.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        executor.swap(amountIn, encodeRfqtQuote(quote), address(executor));
+
+        assertEq(
+            USDC.balanceOf(ALICE) - balanceBefore,
+            quote.quoteTokenAmount * percent / 100
+        );
+        assertEq(WETH.balanceOf(address(executor)), 0, "weth left in executor");
+    }
+
     function rfqtQuote()
         internal
         view

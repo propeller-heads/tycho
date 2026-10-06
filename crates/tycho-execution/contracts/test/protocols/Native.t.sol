@@ -448,6 +448,27 @@ contract NativeExecutorForkTest is Test, Constants {
         );
     }
 
+    function test_RecordedQuoteThirtyPercentUnderDeliveryFillsProRata() public {
+        uint256 actualAmountIn = SIGNED_AMOUNT_IN * 70 / 100;
+
+        assertEq(
+            _executeRecordedQuote(actualAmountIn),
+            _scaledMinimumOutput(actualAmountIn)
+        );
+    }
+
+    function test_RecordedQuoteRevertsAtHalfUnderDelivery() public {
+        uint256 actualAmountIn = SIGNED_AMOUNT_IN / 2;
+
+        _fundAndApprove(actualAmountIn);
+        vm.warp(QUOTE_TIMESTAMP);
+
+        vm.expectRevert(bytes4(keccak256("AmountDeviationExceeds()")));
+        nativeExecutor.swap(
+            actualAmountIn, _recordedQuoteData(_recordedQuotePayload()), ALICE
+        );
+    }
+
     function test_RecordedQuoteOverDeliveryAgainstRealNativeRouter() public {
         uint256 actualAmountIn = SIGNED_AMOUNT_IN + 1;
 
