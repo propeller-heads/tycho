@@ -2101,6 +2101,13 @@ mod tests {
     ) {
         let service =
             Arc::new(StateService::new(uniswap_v2_windows(), Arc::new(EntityCache::new())));
+        let state_service = match mode {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(()) => {
+                EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate)))
+            }
+            EntityCacheSetup::Serve(()) => EntityCacheSetup::Serve(service),
+        };
         let handler = RpcHandler::new(
             MockGateway::new(),
             None,
@@ -2109,10 +2116,7 @@ mod tests {
             vec![],
             vec![],
         )
-        .with_state_service(
-            mode.map(|()| service)
-                .map_shadow(|service| Shadow::new(service, Sampler::new(rate))),
-        );
+        .with_state_service(state_service);
 
         let request = shadow_request("uniswap_v2", Some(vec![Bytes::from(1u64).lpad(20, 0)]));
 

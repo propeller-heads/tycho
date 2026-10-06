@@ -81,15 +81,6 @@ impl<T> EntityCacheSetup<T> {
             EntityCacheSetup::Serve(cache) => EntityCacheSetup::Serve(f(cache)),
         }
     }
-
-    /// Replaces the value `Shadow` holds, keeping the mode and the value of `Serve`.
-    pub fn map_shadow<S>(self, f: impl FnOnce(T) -> S) -> EntityCacheSetup<T, S> {
-        match self {
-            EntityCacheSetup::Off => EntityCacheSetup::Off,
-            EntityCacheSetup::Shadow(value) => EntityCacheSetup::Shadow(f(value)),
-            EntityCacheSetup::Serve(value) => EntityCacheSetup::Serve(value),
-        }
-    }
 }
 
 /// Why the cache handed a request to the database path.

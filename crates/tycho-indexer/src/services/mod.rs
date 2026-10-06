@@ -247,10 +247,19 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
-        let state_service = self
-            .entity_cache
-            .clone()
-            .map(|cache| Arc::new(StateService::new(windows, cache)));
+        let state_service = match self.entity_cache.clone() {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(cache) => {
+                let service = Arc::new(StateService::new(windows, cache));
+                EntityCacheSetup::Shadow(Shadow::new(
+                    service,
+                    Sampler::new(self.shadow_sample_rate),
+                ))
+            }
+            EntityCacheSetup::Serve(cache) => {
+                EntityCacheSetup::Serve(Arc::new(StateService::new(windows, cache)))
+            }
+        };
         if matches!(state_service, EntityCacheSetup::Shadow(_)) {
             shadow::register_metrics(self.shadow_sample_rate);
             info!(
@@ -278,24 +287,21 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-        state_service: EntityCacheSetup<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
-        let rpc_data =
-            web::Data::new(
-                rpc::RpcHandler::new(
-                    self.db_gateway,
-                    pending_deltas,
-                    tracer,
-                    self.plans_config,
-                    self.dci_protocols,
-                    self.protocol_systems,
-                )
-                .with_state_service(state_service.map_shadow(|service| {
-                    Shadow::new(service, Sampler::new(self.shadow_sample_rate))
-                })),
-            );
+        let rpc_data = web::Data::new(
+            rpc::RpcHandler::new(
+                self.db_gateway,
+                pending_deltas,
+                tracer,
+                self.plans_config,
+                self.dci_protocols,
+                self.protocol_systems,
+            )
+            .with_state_service(state_service),
+        );
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()
