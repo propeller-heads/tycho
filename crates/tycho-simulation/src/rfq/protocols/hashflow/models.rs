@@ -9,11 +9,41 @@ use tycho_common::{
 
 use crate::{book::levels::Levels, rfq::errors::RFQError, serde_helpers::evm_address};
 
+/// A Hashflow response body, told apart by its `status`: the endpoint's payload on success, the
+/// API's error on failure. Failures arrive with an HTTP error status or, when a maker declines a
+/// quote, inside an HTTP 200.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum HashflowResponse<T> {
+    Success(T),
+    Fail { error: HashflowError },
+}
+
+impl<T> HashflowResponse<T> {
+    pub fn into_result(self) -> Result<T, HashflowError> {
+        match self {
+            HashflowResponse::Success(payload) => Ok(payload),
+            HashflowResponse::Fail { error } => Err(error),
+        }
+    }
+}
+
+/// The error every Hashflow endpoint reports, e.g. `{"code":42,"message":"Invalid chainId: 1"}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message} (code {code})")]
+pub struct HashflowError {
+    pub code: u32,
+    pub message: String,
+}
+
+impl HashflowError {
+    /// No maker quotes the request: the targeted maker declined it, or is unknown to the API.
+    pub const NO_MAKER_SUPPORTS_REQUEST: u32 = 82;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowPriceLevelsResponse {
-    pub status: String, // "success" or "fail"
-    pub levels: Option<HashMap<String, Vec<HashflowMarketMakerLevels>>>,
-    pub error: Option<String>,
+    pub levels: HashMap<String, Vec<HashflowMarketMakerLevels>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,13 +138,24 @@ pub struct HashflowRFQ {
     pub quote_token_amount: Option<String>,
     pub trader: String,
     pub effective_trader: Option<String>,
+    /// The makers the RFQ goes to; a quote from any other is only possible as the API's
+    /// fallback, which `options` disables.
+    pub market_makers: Vec<String>,
+    pub options: HashflowRFQOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashflowRFQOptions {
+    /// Without it, the API answers a failed maker with the next best one. That maker's liquidity
+    /// is a component of its own, which the same route may already be filling, so its quote could
+    /// draw on the same depth twice, at a price the requesting state did not simulate.
+    pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HashflowQuoteResponse {
-    pub status: String,
-    pub error: Option<String>,
     rfq_id: String,
     internal_rfq_ids: Option<Vec<String>>,
     pub quotes: Option<Vec<HashflowQuote>>,

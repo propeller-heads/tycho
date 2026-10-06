@@ -208,10 +208,25 @@ mod tests {
             sender: router.clone(),
             receiver: router.clone(),
         };
-        let quote = feed
-            .source
-            .client
-            .request_binding_quote(&params)
+        let client = &feed.source.client;
+        let market_makers = client
+            .fetch_market_makers()
+            .await
+            .unwrap();
+        let market_maker = client
+            .fetch_price_levels(&market_makers)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|(name, levels)| {
+                levels
+                    .iter()
+                    .any(|level| level.pair.base_token == weth && level.pair.quote_token == wbtc)
+                    .then_some(name)
+            })
+            .expect("no market maker quotes WETH/WBTC");
+        let quote = client
+            .request_binding_quote(&params, market_maker)
             .await
             .unwrap();
 
