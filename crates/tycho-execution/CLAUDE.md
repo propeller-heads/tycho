@@ -433,6 +433,8 @@ swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, defaul
   that point; without the API key the thread never starts and Angstrom swaps fail to encode with a `FatalError`.
 - `encode_swap` reads the cache. A window older than `ANGSTROM_ATTESTATION_MAX_AGE` triggers one inline fetch on a
   scoped thread, so encoding degrades to the old behavior instead of failing. Fetch failures are `RecoverableError`.
+  `ANGSTROM_FETCH_WHILE_ENCODING=false` (read with the other variables, default `true`) skips that fetch and returns a
+  `RecoverableError` instead, for consumers that would rather encode another route than wait on the API.
 - On chain, `UniswapV4Executor._selectAttestation` picks the 93-byte entry (8-byte block number + 85-byte attestation)
   matching `block.number` and returns empty bytes when none match. Entries for blocks that already passed only cost
   calldata; a window that covers no upcoming block falls back to Angstrom's protocol-driven empty-batch unlock.

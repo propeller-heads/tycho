@@ -40,6 +40,8 @@ type WindowFetcher = Box<dyn Fn() -> Result<AttestationResponse, EncodingError> 
 pub(crate) struct AttestationCache {
     fetcher: Result<WindowFetcher, String>,
     window: RwLock<Option<CachedWindow>>,
+    /// Whether `hook_data` fetches a window itself when the cached one is missing or stale.
+    fetch_while_encoding: bool,
 }
 
 impl AttestationCache {
@@ -50,8 +52,12 @@ impl AttestationCache {
     /// already finds a warm cache.
     pub(crate) fn global() -> &'static Arc<Self> {
         CACHE.get_or_init(|| {
-            let fetcher = ApiConfig::from_env().map(ApiConfig::into_fetcher);
-            let cache = Arc::new(Self { fetcher, window: RwLock::new(None) });
+            let config = ApiConfig::from_env();
+            let fetch_while_encoding = config
+                .as_ref()
+                .map_or(true, |config| config.fetch_while_encoding);
+            let fetcher = config.map(ApiConfig::into_fetcher);
+            let cache = Arc::new(Self { fetcher, window: RwLock::new(None), fetch_while_encoding });
             Arc::clone(&cache).spawn_refresher();
             cache
         })
@@ -62,9 +68,11 @@ impl AttestationCache {
     /// Costs no network access while the background refresh is healthy. A window older than
     /// `ANGSTROM_ATTESTATION_MAX_AGE`, or a cache that has never been filled, falls back to a
     /// single blocking fetch so that encoding still succeeds at the cost of one API round trip.
+    /// With `ANGSTROM_FETCH_WHILE_ENCODING=false` it fails instead, so a caller that can encode
+    /// another route does not wait on the Angstrom API.
     ///
-    /// Returns an error if the fallback fetch fails, or if it is needed while the Angstrom API
-    /// is unconfigured.
+    /// Returns an error if the fallback fetch fails, if it is needed while the Angstrom API is
+    /// unconfigured, or if fetching while encoding is turned off.
     pub(crate) fn hook_data(&self) -> Result<Vec<u8>, EncodingError> {
         let cached = self
             .window
@@ -79,6 +87,14 @@ impl AttestationCache {
 
         if let Err(reason) = &self.fetcher {
             return Err(EncodingError::FatalError(reason.clone()));
+        }
+
+        if !self.fetch_while_encoding {
+            return Err(EncodingError::RecoverableError(
+                "Angstrom attestation cache is cold or stale and ANGSTROM_FETCH_WHILE_ENCODING is \
+                 false"
+                    .to_string(),
+            ));
         }
 
         warn!("Angstrom attestation cache is cold or stale, fetching while encoding");
@@ -143,6 +159,7 @@ struct ApiConfig {
     url: String,
     key: String,
     blocks_in_future: u64,
+    fetch_while_encoding: bool,
 }
 
 impl ApiConfig {
@@ -150,7 +167,8 @@ impl ApiConfig {
     ///
     /// Returns the reason Angstrom swaps cannot be encoded when `ANGSTROM_API_KEY` is unset,
     /// which is how consumers that do not route over Angstrom opt out, or when
-    /// `ANGSTROM_BLOCKS_IN_FUTURE` is set to something that is not a block count.
+    /// `ANGSTROM_BLOCKS_IN_FUTURE` is set to something that is not a block count, or
+    /// `ANGSTROM_FETCH_WHILE_ENCODING` to something that is not `true` or `false`.
     fn from_env() -> Result<Self, String> {
         let key = env::var("ANGSTROM_API_KEY").map_err(|_| {
             "ANGSTROM_API_KEY environment variable is required for Angstrom swaps".to_string()
@@ -169,8 +187,14 @@ impl ApiConfig {
             })?,
             Err(_) => ANGSTROM_DEFAULT_BLOCKS_IN_FUTURE,
         };
+        let fetch_while_encoding = match env::var("ANGSTROM_FETCH_WHILE_ENCODING") {
+            Ok(flag) => flag.parse().map_err(|e| {
+                format!("ANGSTROM_FETCH_WHILE_ENCODING is set to '{flag}', not true or false: {e}")
+            })?,
+            Err(_) => true,
+        };
 
-        Ok(Self { client, url, key, blocks_in_future })
+        Ok(Self { client, url, key, blocks_in_future, fetch_while_encoding })
     }
 
     /// Moves the client behind the cache's fetch, keeping its connection pool warm across
@@ -324,7 +348,11 @@ mod tests {
 
     /// A cache serving `fetcher` instead of the Angstrom API.
     fn cache_with(fetcher: WindowFetcher, window: Option<CachedWindow>) -> AttestationCache {
-        AttestationCache { fetcher: Ok(fetcher), window: RwLock::new(window) }
+        AttestationCache {
+            fetcher: Ok(fetcher),
+            window: RwLock::new(window),
+            fetch_while_encoding: true,
+        }
     }
 
     /// A fetch answering `attestation_response()` from memory, alongside its call count.
@@ -342,7 +370,11 @@ mod tests {
 
     /// A cache belonging to a consumer that never configured the Angstrom API.
     fn unconfigured_cache() -> AttestationCache {
-        AttestationCache { fetcher: Err("no API key".to_string()), window: RwLock::new(None) }
+        AttestationCache {
+            fetcher: Err("no API key".to_string()),
+            window: RwLock::new(None),
+            fetch_while_encoding: true,
+        }
     }
 
     /// A fetch standing in for an Angstrom API that cannot be reached.
@@ -391,6 +423,17 @@ mod tests {
 
         assert_eq!(cache.hook_data().unwrap(), fetched_window());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_stale_window_without_fetch_while_encoding() {
+        let (fetch, calls) = counted_fetch();
+        let cache = AttestationCache { fetch_while_encoding: false, ..cache_with(fetch, stale()) };
+
+        let err = cache.hook_data().unwrap_err();
+
+        assert!(matches!(err, EncodingError::RecoverableError(_)), "unexpected error: {err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
