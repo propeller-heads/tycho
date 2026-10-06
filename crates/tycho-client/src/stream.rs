@@ -109,7 +109,6 @@ pub struct TychoStreamBuilder {
     auth_key: Option<String>,
     no_tls: bool,
     include_tvl: bool,
-    include_zero_slots: bool,
     compression: bool,
     partial_blocks: bool,
     max_messages: Option<usize>,
@@ -143,7 +142,6 @@ impl TychoStreamBuilder {
             auth_key: None,
             no_tls: true,
             include_tvl: false,
-            include_zero_slots: true,
             compression: true,
             partial_blocks: false,
             max_messages: None,
@@ -277,15 +275,6 @@ impl TychoStreamBuilder {
     /// If set to true, this will increase start-up time due to additional requests.
     pub fn include_tvl(mut self, include_tvl: bool) -> Self {
         self.include_tvl = include_tvl;
-        self
-    }
-
-    /// Configures whether snapshots include contract storage slots whose value is zero.
-    ///
-    /// A slot missing from an account reads as zero, so leaving them out gives the same state in
-    /// smaller snapshots. Defaults to `true`. Servers older than this option reject `false`.
-    pub fn include_zero_slots(mut self, include_zero_slots: bool) -> Self {
-        self.include_zero_slots = include_zero_slots;
         self
     }
 
@@ -470,8 +459,7 @@ impl TychoStreamBuilder {
                     self.block_time + self.timeout,
                 )
                 .with_dci(uses_dci)
-                .with_partial_blocks(self.partial_blocks)
-                .with_include_zero_slots(self.include_zero_slots),
+                .with_partial_blocks(self.partial_blocks),
             };
             block_sync = block_sync.register_synchronizer(id, sync);
         }

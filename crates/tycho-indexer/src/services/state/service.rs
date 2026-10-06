@@ -277,8 +277,7 @@ impl StateService {
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts
-                .push(dto::ResponseAccount::from(entry.into_account(request.include_zero_slots)));
+            accounts.push(dto::ResponseAccount::from(entry.into_served_account()));
         }
 
         Ok(dto::StateRequestResponse::new(
@@ -668,7 +667,6 @@ mod test {
             version,
             chain: dto::Chain::Ethereum,
             pagination: dto::PaginationParams::new(0, 100),
-            include_zero_slots: true,
         }
     }
 
@@ -733,13 +731,8 @@ mod test {
     }
 
     /// Slot 2 is zero in the cached entry; block 5, still in the window, deletes slot 3.
-    #[rstest]
-    #[case::with_zero_slots(true, &[1, 2, 3])]
-    #[case::without_zero_slots(false, &[1])]
-    fn contract_state_returns_zero_slots_only_when_asked(
-        #[case] include_zero_slots: bool,
-        #[case] expected: &[u64],
-    ) {
+    #[test]
+    fn contract_state_leaves_out_zero_slots() {
         let harness = Harness::new(2);
         harness.push(with_account(
             msg(1),
@@ -766,27 +759,13 @@ mod test {
                 ChangeType::Update,
             ),
         ));
-        let request = contract_request(vec![addr(1)], at_block(5))
-            .with_include_zero_slots(include_zero_slots);
 
         let response = harness
             .service
-            .contract_state(&request)
+            .contract_state(&contract_request(vec![addr(1)], at_block(5)))
             .unwrap();
 
-        let mut slots: Vec<Bytes> = response.accounts[0]
-            .slots
-            .keys()
-            .cloned()
-            .collect();
-        slots.sort();
-        assert_eq!(
-            slots,
-            expected
-                .iter()
-                .map(|n| word(*n))
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(response.accounts[0].slots, HashMap::from([(word(1), word(1))]));
     }
 
     #[test]

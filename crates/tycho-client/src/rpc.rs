@@ -156,7 +156,6 @@ pub struct ContractStateParams {
     version: VersionParam,
     page: i64,
     page_size: i64,
-    include_zero_slots: bool,
 }
 
 impl ContractStateParams {
@@ -168,16 +167,7 @@ impl ContractStateParams {
             version: VersionParam::default(),
             page: 0,
             page_size: StateRequestBody::MAX_PAGE_SIZE_COMPRESSED,
-            include_zero_slots: true,
         }
-    }
-
-    /// Sets whether the response includes storage slots whose value is zero. A slot missing from
-    /// an account reads as zero, so leaving them out gives the same account state in a smaller
-    /// response. Defaults to `true`. Servers older than this option reject `false`.
-    pub fn with_include_zero_slots(mut self, include_zero_slots: bool) -> Self {
-        self.include_zero_slots = include_zero_slots;
-        self
     }
 
     pub fn with_contract_ids(mut self, ids: Vec<Bytes>) -> Self {
@@ -621,7 +611,6 @@ pub struct ContractStatePaginatedParams {
     version: VersionParam,
     chunk_size: Option<usize>,
     concurrency: usize,
-    include_zero_slots: bool,
 }
 
 impl ContractStatePaginatedParams {
@@ -633,16 +622,7 @@ impl ContractStatePaginatedParams {
             version: VersionParam::default(),
             chunk_size: None,
             concurrency,
-            include_zero_slots: true,
         }
-    }
-
-    /// Sets whether the response includes storage slots whose value is zero. A slot missing from
-    /// an account reads as zero, so leaving them out gives the same account state in a smaller
-    /// response. Defaults to `true`. Servers older than this option reject `false`.
-    pub fn with_include_zero_slots(mut self, include_zero_slots: bool) -> Self {
-        self.include_zero_slots = include_zero_slots;
-        self
     }
 
     pub fn with_contract_ids(mut self, ids: Vec<Bytes>) -> Self {
@@ -688,8 +668,6 @@ pub struct SnapshotParameters<'a> {
     pub include_balances: bool,
     /// Whether to fetch TVL data
     pub include_tvl: bool,
-    /// Whether contract storage includes slots whose value is zero
-    pub include_zero_slots: bool,
 }
 
 impl<'a> SnapshotParameters<'a> {
@@ -709,16 +687,7 @@ impl<'a> SnapshotParameters<'a> {
             block_number,
             include_balances: true,
             include_tvl: true,
-            include_zero_slots: true,
         }
-    }
-
-    /// Sets whether the response includes storage slots whose value is zero. A slot missing from
-    /// an account reads as zero, so leaving them out gives the same account state in a smaller
-    /// response. Defaults to `true`. Servers older than this option reject `false`.
-    pub fn include_zero_slots(mut self, include_zero_slots: bool) -> Self {
-        self.include_zero_slots = include_zero_slots;
-        self
     }
 
     /// Set whether to include balance information (default: true)
@@ -835,8 +804,7 @@ pub trait RPCClient: Send + Sync {
                 ContractStateParams::new(params.chain, params.protocol_system.as_str())
                     .with_contract_ids(chunk.to_vec())
                     .with_version(params.version.clone())
-                    .with_pagination(0, chunk_size as i64)
-                    .with_include_zero_slots(params.include_zero_slots);
+                    .with_pagination(0, chunk_size as i64);
             tasks.push(async move {
                 let _permit = sem
                     .acquire()
@@ -1538,7 +1506,6 @@ impl RPCClient for HttpRPCClient {
             chain: params.chain.into(),
             version: params.version,
             pagination: PaginationParams { page: params.page, page_size: params.page_size },
-            include_zero_slots: params.include_zero_slots,
         };
 
         let uri = format!(
@@ -1955,8 +1922,7 @@ impl RPCClient for HttpRPCClient {
                 concurrency,
             )
             .with_contract_ids(request.contract_ids.to_vec())
-            .with_version(version.clone())
-            .with_include_zero_slots(request.include_zero_slots);
+            .with_version(version.clone());
             if let Some(cs) = chunk_size {
                 cp_params = cp_params.with_chunk_size(cs);
             }
@@ -2150,90 +2116,6 @@ mod tests {
             hex::decode("5c06b7c5b3d910fd33bc2229846f9ddaf91d584d9b196e16636901ac3a77077e")
                 .unwrap()
         );
-    }
-
-    /// Returns whether a contract state request body sets `include_zero_slots`, and to what.
-    fn sent_include_zero_slots(request: &mockito::Request) -> Option<bool> {
-        let body: serde_json::Value =
-            serde_json::from_slice(request.body().expect("request body")).expect("JSON body");
-        body.get("include_zero_slots")
-            .map(|value| value.as_bool().expect("boolean"))
-    }
-
-    #[rstest]
-    #[case::not_set(None, None)]
-    #[case::included(Some(true), None)]
-    #[case::excluded(Some(false), Some(false))]
-    #[tokio::test]
-    async fn test_get_contract_state_sends_include_zero_slots_only_when_false(
-        #[case] include_zero_slots: Option<bool>,
-        #[case] sent: Option<bool>,
-    ) {
-        let mut server = Server::new_async().await;
-        let mock = server
-            .mock("POST", "/v1/contract_state")
-            .match_request(move |request| sent_include_zero_slots(request) == sent)
-            .with_body(GET_CONTRACT_STATE_RESP)
-            .expect(1)
-            .create_async()
-            .await;
-        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
-            .expect("create client");
-        let mut params = ContractStateParams::new(Chain::Ethereum, "");
-        if let Some(include) = include_zero_slots {
-            params = params.with_include_zero_slots(include);
-        }
-
-        client
-            .get_contract_state(params)
-            .await
-            .expect("get state");
-
-        mock.assert();
-    }
-
-    #[tokio::test]
-    async fn test_get_snapshots_passes_include_zero_slots_to_contract_state() {
-        let mut server = Server::new_async().await;
-        let protocol_states_mock = server
-            .mock("POST", "/v1/protocol_state")
-            .with_body(r#"{"states": [], "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
-            .create_async()
-            .await;
-        let contract_state_mock = server
-            .mock("POST", "/v1/contract_state")
-            .match_request(|request| sent_include_zero_slots(request) == Some(false))
-            .with_body(GET_CONTRACT_STATE_RESP)
-            .expect(1)
-            .create_async()
-            .await;
-        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
-            .expect("create client");
-        let component = tycho_common::models::protocol::ProtocolComponent {
-            id: "component1".to_string(),
-            protocol_system: "test_protocol".to_string(),
-            ..Default::default()
-        };
-        let components = HashMap::from([("component1".to_string(), component)]);
-        let contract_ids =
-            vec![Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap()];
-        let request = SnapshotParameters::new(
-            Chain::Ethereum,
-            "test_protocol",
-            &components,
-            &contract_ids,
-            1,
-        )
-        .include_tvl(false)
-        .include_zero_slots(false);
-
-        client
-            .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
-            .await
-            .expect("get snapshots");
-
-        protocol_states_mock.assert();
-        contract_state_mock.assert();
     }
 
     #[tokio::test]
