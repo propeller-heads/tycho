@@ -24,6 +24,11 @@ name = "tycho-encode"
 path = "src/bin/tycho-encode.rs"
 required-features = ["evm"]
 
+[[bin]]
+name = "aqua0-uniswapx-encode"
+path = "src/bin/aqua0-uniswapx-encode.rs"
+required-features = ["evm"]
+
 [dependencies]
 chrono     = { workspace = true }
 clap       = { workspace = true, features = ["derive"] }
