@@ -1,0 +1,28 @@
+# information about the author helps us reach out in case of issues.
+author:
+  name: Jonathan Chow
+  email: jonathan.chow@flowdesk.co
+
+# Protocol Constants
+constants:
+  # The expected average gas cost of a swap
+  protocol_gas: 130000
+  # Minimum capabilities we can expect, individual pools may extend these
+  # No ConstantPrice: the lane is a VWAP spread ladder, so larger sizes cross into wider bands.
+  # No PriceFunction: for the same reason the adapter cannot report a marginal price, so `price`
+  # reverts `NotImplemented` and simulation derives it numerically. Keep in step with
+  # `TempestAdapter.getCapabilities`.
+  capabilities:
+    - SellSide
+    - BuySide
+
+# The file containing the adapter contract
+contract: TempestAdapter.sol
+
+# Deployment instances used to generate chain specific bytecode.
+instances:
+  - chain:
+      name: mainnet
+      id: 1
+    arguments:
+      - "0x00000003f1ec2379e79F58E12EC6C4F51Ee92149"

@@ -1,0 +1,99 @@
+[
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "token0", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "token1", "type": "address" },
+      { "indexed": false, "internalType": "bool", "name": "registered", "type": "bool" }
+    ],
+    "name": "PairRegistered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "oldVault", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "newVault", "type": "address" }
+    ],
+    "name": "VaultUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "Upgraded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "oldOracle", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "newOracle", "type": "address" }
+    ],
+    "name": "OracleUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": false, "internalType": "address", "name": "account", "type": "address" }
+    ],
+    "name": "Paused",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": false, "internalType": "address", "name": "account", "type": "address" }
+    ],
+    "name": "Unpaused",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "address", "name": "sender", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "tokenIn", "type": "address" },
+      { "indexed": true, "internalType": "address", "name": "tokenOut", "type": "address" },
+      { "indexed": false, "internalType": "uint256", "name": "amountIn", "type": "uint256" },
+      { "indexed": false, "internalType": "uint256", "name": "amountOut", "type": "uint256" },
+      { "indexed": false, "internalType": "address", "name": "recipient", "type": "address" }
+    ],
+    "name": "Swapped",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "tokenIn", "type": "address" },
+      { "internalType": "address", "name": "tokenOut", "type": "address" }
+    ],
+    "name": "laneFor",
+    "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "vault",
+    "outputs": [{ "internalType": "address", "name": "", "type": "address" }],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "tokenIn", "type": "address" },
+      { "internalType": "address", "name": "tokenOut", "type": "address" }
+    ],
+    "name": "isActive",
+    "outputs": [{ "internalType": "bool", "name": "active", "type": "bool" }],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

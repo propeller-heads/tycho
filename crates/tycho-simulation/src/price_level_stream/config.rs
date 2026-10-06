@@ -60,7 +60,14 @@ impl PriceLevelStreamConfig {
 pub const DEFAULT_AUTO_DETECTED_GAS_COST: u64 = 335_000;
 
 /// The pAMMs known to be served by the Titan price level stream (as of 2026-09-11): FermiSwap,
-/// Kipseli, Metric, Bebop, TaurusFi, and Tempest.
+/// Kipseli, Metric, Bebop and TaurusFi.
+///
+/// Tempest is deliberately absent. Its router is indexed as its own protocol system, `vm:tempest`,
+/// and the two entries would be the same address backed by the same vault -- unlike FermiSwap,
+/// whose streamed router is a separate deployment from the one its substreams package indexes. A
+/// solver consuming both would count that inventory twice, and a route split across the pair
+/// reverts at settlement on the venue's vault-cover check after each component priced the size as
+/// available.
 ///
 /// Registered on a builder via
 /// [`with_known_pamms`](super::stream::PriceLevelStreamBuilder::with_known_pamms), so their
@@ -94,9 +101,6 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
         ("bebop", "0xb09aaa8933626d7e4c48d65dad2d77021cfbca9a", 140_000u64),
         // The TaurusFi router, per Titan's venue docs. Measured ~105k (2026-08-18).
         ("taurusfi", "0x217d58931a8549ca539426aa8152e33dafc3d95a", 110_000u64),
-        // The Tempest router (unverified), per Titan's venue docs. Measured ~120k-155k
-        // (2026-09-11).
-        ("tempest", "0x00000003f1ec2379e79f58e12ec6c4f51ee92149", 160_000u64),
     ];
     pamms
         .into_iter()
