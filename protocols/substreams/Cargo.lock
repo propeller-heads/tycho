@@ -415,7 +415,7 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tycho-substreams 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
