@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 #[cfg(feature = "evm")]
 use alloy::primitives::{Address, U256};
@@ -145,6 +145,10 @@ pub struct Solution {
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
     user_transfer_type: UserTransferType,
+    /// When encoding stops waiting on a network call, such as an RFQ signed-quote request, and
+    /// fails with a `RecoverableError`. `None` lets each call run to its own timeout.
+    #[serde(skip)]
+    encoding_deadline: Option<Instant>,
 }
 
 impl Solution {
@@ -169,6 +173,7 @@ impl Solution {
             min_amount_out,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
+            encoding_deadline: None,
         }
     }
     pub fn sender(&self) -> &Bytes {
@@ -206,6 +211,10 @@ impl Solution {
         &self.user_transfer_type
     }
 
+    pub fn encoding_deadline(&self) -> Option<Instant> {
+        self.encoding_deadline
+    }
+
     pub fn with_swaps(mut self, swaps: Vec<Swap>) -> Self {
         self.swaps = swaps;
         self
@@ -213,6 +222,13 @@ impl Solution {
 
     pub fn with_user_transfer_type(mut self, user_transfer_type: UserTransferType) -> Self {
         self.user_transfer_type = user_transfer_type;
+        self
+    }
+
+    /// Sets the instant at which encoding stops waiting on network calls; see
+    /// [`EncodingContext::encoding_deadline`].
+    pub fn with_encoding_deadline(mut self, encoding_deadline: Instant) -> Self {
+        self.encoding_deadline = Some(encoding_deadline);
         self
     }
 }
@@ -494,11 +510,15 @@ impl PartialEq for PermitDetails {
 ///   solution does not require router address.
 /// * `group_token_in`: Token to be used as the input for the group swap.
 /// * `group_token_out`: Token to be used as the output for the group swap.
+/// * `encoding_deadline`: When a swap encoder stops waiting on a network call (an RFQ signed quote,
+///   an Angstrom attestation fetch) and fails with a `RecoverableError`. `None` lets each call run
+///   to its own timeout.
 #[derive(Clone, Debug)]
 pub struct EncodingContext {
     pub router_address: Option<Bytes>,
     pub group_token_in: Bytes,
     pub group_token_out: Bytes,
+    pub encoding_deadline: Option<Instant>,
 }
 
 #[derive(PartialEq)]

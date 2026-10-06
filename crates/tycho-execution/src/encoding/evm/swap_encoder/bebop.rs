@@ -11,7 +11,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
         biguint_to_u256, bytes_to_address, create_encoding_runtime, on_blocking_thread,
-        record_signed_quote_deviation, SafeRuntime,
+        record_signed_quote_deviation, until_encoding_deadline, SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -98,11 +98,12 @@ impl SwapEncoder for BebopSwapEncoder {
                 receiver: router_address,
             };
             let signed_quote = on_blocking_thread(|| {
-                self.runtime_handle.block_on(async {
-                    indicatively_priced_state
-                        .request_signed_quote(params)
-                        .await
-                })
+                self.runtime_handle
+                    .block_on(until_encoding_deadline(encoding_context.encoding_deadline, async {
+                        indicatively_priced_state
+                            .request_signed_quote(params)
+                            .await
+                    }))
             })??;
             record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
             let bebop_calldata = signed_quote
@@ -249,6 +250,7 @@ mod tests {
         .with_protocol_state(Arc::new(bebop_state));
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),

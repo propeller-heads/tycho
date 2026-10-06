@@ -174,6 +174,8 @@ When working with RFQs, two fields are **required** in Swap:
 
 This mechanism also makes RFQs composable with other on-chain swaps. That enables hybrid routing strategies, such as a path like **Uniswap → RFQ → Curve**, seamlessly combining RFQ-based and traditional on-chain routes.
 
+To bound how long encoding waits for a signed quote, set `Solution::with_encoding_deadline`: a quote that has not arrived by then is cancelled and encoding fails with a `RecoverableError`.
+
 {% hint style="warning" %}
 After encoding, quotes are valid for only 1–3 seconds. Execution must follow immediately, otherwise the transaction will revert.
 {% endhint %}

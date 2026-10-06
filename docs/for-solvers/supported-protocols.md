@@ -167,10 +167,10 @@ Angstrom locks its pools at the start of every block. A swap that trades against
 
 If `ANGSTROM_API_KEY` is not set, `ProtocolStreamBuilder` excludes Angstrom pools from `uniswap_v4_hooks` by default (unless you pass your own filter function), since routes over these pools would fail at encoding without attestations.
 
-**Attestations are prefetched**, so encoding an Angstrom swap makes no API call. A background thread refreshes the attestation window twice per block and encoding reads the result from a process-wide cache. The thread starts when you build a `SwapEncoderRegistry` for Ethereum with `ANGSTROM_API_KEY` set, and it reads all four environment variables once, at that point.
+**Attestations are prefetched**, so encoding an Angstrom swap makes no API call. A background thread refreshes the attestation window twice per block and encoding reads the result from a process-wide cache. The thread starts when you build a `SwapEncoderRegistry` for Ethereum with `ANGSTROM_API_KEY` set, and it reads all three environment variables once, at that point.
 
 Two consequences for your setup:
 
 * **Build the encoder once at startup and reuse it.** Encoding still works if you build a new encoder per quote, but the first Angstrom swap it encodes waits for the first fetch to finish.
 * **Watch your logs for `Angstrom attestation cache is cold or stale`.** When the cached window is more than one block old, encoding fetches a fresh one inline and logs that warning. Encoding then pays the API round trip, so a steady stream of these means the background refresh is failing — the refresh logs its own error alongside them.
-* **Set `ANGSTROM_FETCH_WHILE_ENCODING=false` if you can fall back to another route.** Encoding then fails with a `RecoverableError` instead of fetching inline, so a stale cache never adds the API round trip (up to 3 seconds) to a quote.
+* **Set an encoding deadline if you can fall back to another route.** With `Solution::with_encoding_deadline`, the inline fetch stops at the deadline and encoding fails with a `RecoverableError`, instead of waiting up to 3 seconds for the API.

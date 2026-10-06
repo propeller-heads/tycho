@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 
 use alloy::primitives::{aliases::U24, U8};
 use tycho_common::Bytes;
@@ -29,6 +29,7 @@ fn encode_swap_group(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swap: &SwapGroup,
     router_address: &Bytes,
+    encoding_deadline: Option<Instant>,
 ) -> Result<EncodedSwapGroup, EncodingError> {
     let protocol = &grouped_swap.protocol_system;
     let swap_encoder = swap_encoder_registry
@@ -41,6 +42,7 @@ fn encode_swap_group(
         router_address: Some(router_address.clone()),
         group_token_in: grouped_swap.token_in.clone(),
         group_token_out: grouped_swap.token_out.clone(),
+        encoding_deadline,
     };
 
     let mut grouped_protocol_data: Vec<Vec<u8>> = vec![];
@@ -78,6 +80,7 @@ fn encode_swap_groups(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swaps: &[SwapGroup],
     router_address: &Bytes,
+    encoding_deadline: Option<Instant>,
 ) -> Result<Vec<EncodedSwapGroup>, EncodingError> {
     let any_group_blocks = grouped_swaps.iter().any(|group| {
         swap_encoder_registry
@@ -91,12 +94,13 @@ fn encode_swap_groups(
                 swap_encoder_registry,
                 grouped_swap,
                 router_address,
+                encoding_deadline,
             )?);
         }
         return Ok(encoded_groups);
     }
     map_on_threads(grouped_swaps, |grouped_swap| {
-        encode_swap_group(swap_encoder_registry, grouped_swap, router_address)
+        encode_swap_group(swap_encoder_registry, grouped_swap, router_address, encoding_deadline)
     })
 }
 
@@ -178,8 +182,12 @@ impl SingleSwapStrategyEncoder {
             ));
         }
 
-        let encoded_group =
-            encode_swap_group(&self.swap_encoder_registry, grouped_swap, &self.router_address)?;
+        let encoded_group = encode_swap_group(
+            &self.swap_encoder_registry,
+            grouped_swap,
+            &self.router_address,
+            solution.encoding_deadline(),
+        )?;
         let swap_data =
             self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -257,8 +265,12 @@ impl SequentialSwapStrategyEncoder {
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
-        let encoded_groups =
-            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        let encoded_groups = encode_swap_groups(
+            &self.swap_encoder_registry,
+            &grouped_swaps,
+            &self.router_address,
+            solution.encoding_deadline(),
+        )?;
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
@@ -388,8 +400,12 @@ impl SplitSwapStrategyEncoder {
             ));
         }
 
-        let encoded_groups =
-            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        let encoded_groups = encode_swap_groups(
+            &self.swap_encoder_registry,
+            &grouped_swaps,
+            &self.router_address,
+            solution.encoding_deadline(),
+        )?;
 
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {

@@ -201,6 +201,7 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
@@ -260,6 +261,7 @@ mod tests {
         .with_user_data(user_data);
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
@@ -419,6 +421,7 @@ mod tests {
         .with_user_data(Bytes::from(user_data_bytes));
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             group_token_in: usdc.clone(),
             group_token_out: usdt.clone(),
             router_address: Some(Bytes::default()),
@@ -442,6 +445,7 @@ mod tests {
         let encoder = EkuboV3SwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             group_token_in: group_token_in.clone(),
             group_token_out: group_token_out.clone(),
             router_address: Some(Bytes::default()),

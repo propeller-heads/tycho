@@ -1,11 +1,13 @@
 use std::{
     env,
     fs::OpenOptions,
+    future::Future,
     io::{BufRead, BufReader, Write},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 
 use alloy::{
@@ -161,6 +163,27 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         message
     } else {
         "non-string panic payload"
+    }
+}
+
+/// Awaits `request` until `encoding_deadline`, failing with a `RecoverableError` once it passes.
+///
+/// Dropping the request at the deadline cancels it, so no network call outlives the encode.
+pub(crate) async fn until_encoding_deadline<T, E>(
+    encoding_deadline: Option<Instant>,
+    request: impl Future<Output = Result<T, E>>,
+) -> Result<T, EncodingError>
+where
+    EncodingError: From<E>,
+{
+    let Some(encoding_deadline) = encoding_deadline else {
+        return Ok(request.await?);
+    };
+    match tokio::time::timeout_at(encoding_deadline.into(), request).await {
+        Ok(response) => Ok(response?),
+        Err(_) => Err(EncodingError::RecoverableError(
+            "the encoding deadline passed before the request returned".to_string(),
+        )),
     }
 }
 
@@ -408,6 +431,29 @@ pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_until_encoding_deadline_cancels_a_pending_request() {
+        let request = std::future::pending::<Result<(), EncodingError>>();
+
+        let err = until_encoding_deadline(Some(Instant::now()), request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, EncodingError::RecoverableError(_)), "unexpected error: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_until_encoding_deadline_without_a_deadline() {
+        let request = async { Ok::<_, EncodingError>(7) };
+
+        assert_eq!(
+            until_encoding_deadline(None, request)
+                .await
+                .unwrap(),
+            7
+        );
+    }
 
     #[test]
     fn test_deviation_bps() {

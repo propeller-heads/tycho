@@ -103,7 +103,9 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         let hook_data = match angstrom {
             // Angstrom pools are locked at the start of every block, so they need an unlock
             // attestation as their hook data.
-            Some(angstrom) => angstrom.attestations.hook_data()?,
+            Some(angstrom) => angstrom
+                .attestations
+                .hook_data(encoding_context.encoding_deadline)?,
             None => v4_user_data.hook_data.to_vec(),
         };
 
@@ -285,6 +287,7 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             // Same as the executor address
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
             group_token_in: token_in.clone(),
@@ -355,6 +358,7 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: group_token_in.clone(),
             // Token out is the same as the group token out
@@ -399,6 +403,7 @@ mod tests {
 
         // The context is the same for both swaps, since the group token in and out are the same
         let context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(router_address.clone()),
             group_token_in: usde_address.clone(),
             group_token_out: wbtc_address.clone(),
@@ -530,6 +535,7 @@ mod tests {
 
             // Context for the grouped swap
             let context = EncodingContext {
+                encoding_deadline: None,
                 router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
                 group_token_in: usdc_address.clone(),
                 group_token_out: usdt_address.clone(),

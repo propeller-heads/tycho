@@ -11,7 +11,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
         bytes_to_address, create_encoding_runtime, on_blocking_thread,
-        record_signed_quote_deviation, SafeRuntime,
+        record_signed_quote_deviation, until_encoding_deadline, SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -81,16 +81,19 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         };
 
         let signed_quote = on_blocking_thread(|| {
-            self.runtime_handle.block_on(async {
-                protocol_state
-                    .as_indicatively_priced()
-                    .map_err(|e| {
-                        EncodingError::FatalError(format!("State is not indicatively priced {e}"))
-                    })?
-                    .request_signed_quote(params)
-                    .await
-                    .map_err(|e| EncodingError::FatalError(e.to_string()))
-            })
+            self.runtime_handle
+                .block_on(until_encoding_deadline(encoding_context.encoding_deadline, async {
+                    protocol_state
+                        .as_indicatively_priced()
+                        .map_err(|e| {
+                            EncodingError::FatalError(format!(
+                                "State is not indicatively priced {e}"
+                            ))
+                        })?
+                        .request_signed_quote(params)
+                        .await
+                        .map_err(|e| EncodingError::FatalError(e.to_string()))
+                }))
         })??;
         record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
 
@@ -241,6 +244,7 @@ mod tests {
         .with_protocol_state(Arc::new(liquorice_state));
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),

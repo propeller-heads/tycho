@@ -71,6 +71,7 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
@@ -109,6 +110,7 @@ mod tests {
             BigUint::ZERO,
         );
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),

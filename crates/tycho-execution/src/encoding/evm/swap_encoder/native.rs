@@ -16,7 +16,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
         bytes_to_address, create_encoding_runtime, on_blocking_thread,
-        record_signed_quote_deviation, SafeRuntime,
+        record_signed_quote_deviation, until_encoding_deadline, SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -100,18 +100,19 @@ impl SwapEncoder for NativeSwapEncoder {
             ))?;
 
         let signed_quote = on_blocking_thread(|| {
-            self.runtime_handle.block_on(async {
-                protocol_state
-                    .as_indicatively_priced()?
-                    .request_signed_quote(GetAmountOutParams {
-                        amount_in: amount_in.clone(),
-                        token_in: swap.token_in().address.clone(),
-                        token_out: swap.token_out().address.clone(),
-                        sender: sender.clone(),
-                        receiver: sender,
-                    })
-                    .await
-            })
+            self.runtime_handle
+                .block_on(until_encoding_deadline(encoding_context.encoding_deadline, async {
+                    protocol_state
+                        .as_indicatively_priced()?
+                        .request_signed_quote(GetAmountOutParams {
+                            amount_in: amount_in.clone(),
+                            token_in: swap.token_in().address.clone(),
+                            token_out: swap.token_out().address.clone(),
+                            sender: sender.clone(),
+                            receiver: sender,
+                        })
+                        .await
+                }))
         })??;
         record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
         // NativeClient already bound response.amountIn and order.sellerTokenAmount to the requested
@@ -251,6 +252,7 @@ mod test {
         .with_estimated_amount_in(BigUint::from_str("3000000000").unwrap());
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
@@ -316,6 +318,7 @@ mod test {
         .with_protocol_state(Arc::new(native_state));
 
         let encoding_context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
@@ -383,6 +386,7 @@ mod test {
         .with_estimated_amount_in(BigUint::from(3_000_000_000u64))
         .with_protocol_state(Arc::new(native_state));
         let context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
@@ -428,6 +432,7 @@ mod test {
         .with_estimated_amount_in(BigUint::from(3_000_000_000u64))
         .with_protocol_state(Arc::new(native_state));
         let context = EncodingContext {
+            encoding_deadline: None,
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,

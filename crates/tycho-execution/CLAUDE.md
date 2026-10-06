@@ -365,6 +365,11 @@ either way. Hashflow quotes stay independent under this parallelism because the 
 increasing quote nonces per effective trader, so quotes with unique addresses never invalidate each other. The
 cost is a cold nonce storage slot on Hashflow's router (~17k extra gas per swap).
 
+**Encoding deadline**: `Solution::with_encoding_deadline` sets `EncodingContext::encoding_deadline`. The RFQ encoders
+(Bebop, Hashflow, Liquorice, Native) await their signed quote through `until_encoding_deadline` (`evm/utils.rs`), which
+drops the request at the deadline, and the Angstrom inline fetch times out at it. Both fail with a `RecoverableError`, so
+no network call outlives the encode. `None` leaves each call to its own timeout.
+
 **Swap grouping** (`evm/group_swaps.rs`): Consecutive swaps on the same groupable protocol
 (`GROUPABLE_PROTOCOLS` in `evm/constants.rs`: `uniswap_v4`, `uniswap_v4_hooks`, `vm:balancer_v3`,
 `ekubo_v2`, `ekubo_v3`) are batched into a single `SwapGroup` and executed via one delegatecall. The `SingleSwapStrategyEncoder` can also
@@ -433,8 +438,7 @@ swap, so one fetched window (covering `ANGSTROM_BLOCKS_IN_FUTURE` blocks, defaul
   that point; without the API key the thread never starts and Angstrom swaps fail to encode with a `FatalError`.
 - `encode_swap` reads the cache. A window older than `ANGSTROM_ATTESTATION_MAX_AGE` triggers one inline fetch on a
   scoped thread, so encoding degrades to the old behavior instead of failing. Fetch failures are `RecoverableError`.
-  `ANGSTROM_FETCH_WHILE_ENCODING=false` (read with the other variables, default `true`) skips that fetch and returns a
-  `RecoverableError` instead, for consumers that would rather encode another route than wait on the API.
+  With an encoding deadline, that fetch times out at the deadline and is skipped once it has passed.
 - On chain, `UniswapV4Executor._selectAttestation` picks the 93-byte entry (8-byte block number + 85-byte attestation)
   matching `block.number` and returns empty bytes when none match. Entries for blocks that already passed only cost
   calldata; a window that covers no upcoming block falls back to Angstrom's protocol-driven empty-batch unlock.

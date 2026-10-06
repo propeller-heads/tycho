@@ -122,6 +122,7 @@ mod tests {
 
     fn encoding_context(token_in: &Bytes, token_out: &Bytes) -> EncodingContext {
         EncodingContext {
+            encoding_deadline: None,
             router_address: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
