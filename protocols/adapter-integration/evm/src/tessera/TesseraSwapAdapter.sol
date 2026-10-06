@@ -65,10 +65,11 @@ interface ITesseraPair {
 
 /// Prices and post-swap storage come from executing TesseraSwap itself.
 ///
-/// TesseraSwap prices 4 bps lower when tx.gasprice exceeds block.basefee by
-/// more than an operator-set threshold (0.01 gwei at block 51,977,873). The
-/// Tycho VM simulates with zero gas price and base fee, so every quote and
-/// limit here is the zero-priority-fee price.
+/// TesseraSwap applies a fixed per-pair haircut (4 bps on WETH and cbBTC,
+/// up to 10 bps) when tx.gasprice exceeds block.basefee by more than an
+/// operator-set threshold (0.01 gwei at block 51,977,873). The Tycho VM
+/// simulates with zero gas price and base fee, so every quote and limit
+/// here is the zero-priority-fee price.
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
     ITesseraSwap public immutable tesseraSwap;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
@@ -49,8 +49,9 @@ contract TesseraExecutor is IExecutor {
         (address tokenIn, address tokenOut) = _decodeData(data);
         // Empty data intentionally selects fee tag 0. Non-empty tags can reduce output.
         // Output also depends on the transaction's priority fee: above
-        // TesseraSwap's threshold it is 4 bps below Tycho's quote, which is
-        // simulated at zero priority fee.
+        // TesseraSwap's threshold each pair applies a fixed haircut (4 bps on
+        // WETH and cbBTC, up to 10 bps) to Tycho's quote, which is simulated
+        // at zero priority fee.
         tesseraSwap.tesseraSwapWithAllowances(
             tokenIn, tokenOut, int256(amountIn), 0, receiver, ""
         );
