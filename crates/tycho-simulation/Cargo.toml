@@ -120,7 +120,7 @@ dialoguer = "0.10.4"
 criterion = "0.8.2"
 
 [features]
-default = ["evm", "rfq", "book-feeds", "price-level-stream"]
+default = ["evm", "book-feeds", "price-level-stream"]
 network_tests = []
 price-level-stream = ["dep:async-stream", "dep:tokio-tungstenite"]
 evm = [
@@ -132,20 +132,17 @@ evm = [
     "dep:alloy-primitives",
     "dep:tokio-tungstenite",
 ]
+# The off-chain book feeds and everything they are built from: the transport loops in
+# `snapshot_feed`, the shared `book` layer, and the `rfq` provider family. The `SnapshotFeed`
+# trait itself is unconditional — it is the contract, not a feed.
 book-feeds = [
     # `bytes_to_address` and the providers' `alloy` address types.
     "evm",
     "dep:async-stream",
     "dep:bytes",
-    "dep:http",
-    "dep:reqwest",
-    "dep:tokio-tungstenite",
-]
-rfq = [
     "dep:reqwest",
     "dep:async-trait",
     "dep:tokio-tungstenite",
-    "dep:async-stream",
     "dep:http",
     "dep:prost",
 ]

@@ -56,7 +56,7 @@ pub struct MetricClient {
 }
 
 impl MetricClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:metric";
+    pub const PROTOCOL_SYSTEM: &'static str = "book:metric";
 
     pub fn new(
         chain: Chain,

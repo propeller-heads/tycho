@@ -60,9 +60,9 @@ use crate::{
     oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
     statistics::TestStatistics,
     stream_processor::{
+        book_stream_processor::BookStreamProcessor,
         price_level_stream_processor::PriceLevelStreamProcessor,
-        protocol_stream_processor::ProtocolStreamProcessor,
-        rfq_stream_processor::RFQStreamProcessor, StreamUpdate, UpdateType,
+        protocol_stream_processor::ProtocolStreamProcessor, StreamUpdate, UpdateType,
     },
 };
 
@@ -100,13 +100,13 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
 
-    /// Disable RFQ protocols
+    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)
     #[arg(long, default_value_t = false)]
-    disable_rfq: bool,
+    disable_rfq_feeds: bool,
 
-    /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = true)]
-    run_pamm_protocols: bool,
+    /// Disable the pAMM book feeds (Metric)
+    #[arg(long, default_value_t = false)]
+    disable_pamm_feeds: bool,
 
     /// Disable the Titan pAMM price level stream (only active on Ethereum)
     #[arg(long, default_value_t = false)]
@@ -434,17 +434,18 @@ async fn run(cli: Cli) -> miette::Result<()> {
             );
         }
     }
-    if !cli.disable_rfq {
-        let rfq_stream_processor = RFQStreamProcessor::new(
+    if !cli.disable_rfq_feeds || !cli.disable_pamm_feeds {
+        let book_stream_processor = BookStreamProcessor::new(
             chain,
             tvl_threshold,
             cli.max_simulations as usize,
             Duration::from_secs(cli.skip_messages_duration),
-            cli.run_pamm_protocols,
+            !cli.disable_rfq_feeds,
+            !cli.disable_pamm_feeds,
         )
-        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        .unwrap_or_else(|e| panic!("Failed to create book stream processor: {e}"));
         rfq_handle = Some(
-            rfq_stream_processor
+            book_stream_processor
                 .run_stream(&all_tokens, rfq_tx)
                 .await?,
         );
@@ -492,7 +493,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let rfq_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let mut protocol_stream_open = true;
-    let mut rfq_stream_open = !cli.disable_rfq;
+    let mut rfq_stream_open = !cli.disable_rfq_feeds || !cli.disable_pamm_feeds;
     let mut price_level_stream_open = price_level_handle.is_some();
 
     // Staleness watchdog: if no protocol update arrives within stale_threshold_secs, mark all
@@ -1131,7 +1132,7 @@ async fn process_update(
 
             block
         }
-        UpdateType::Rfq => {
+        UpdateType::Book => {
             // RFQ updates: fetch latest block without alignment checks
             match rpc_tools
                 .provider
@@ -1344,7 +1345,7 @@ async fn process_update(
             );
             overrides.map(BlockOverrides::into_storage)
         }
-        UpdateType::Protocol | UpdateType::Rfq => None,
+        UpdateType::Protocol | UpdateType::Book => None,
     };
 
     let results = match simulate_swap_transaction(
@@ -1477,7 +1478,7 @@ fn select_components_to_process(
                     }
                 }
             }
-            UpdateType::Rfq | UpdateType::PriceLevelStream => {
+            UpdateType::Book | UpdateType::PriceLevelStream => {
                 match update.update.new_pairs.get(id) {
                     Some(comp) => comp.clone(),
                     None => {

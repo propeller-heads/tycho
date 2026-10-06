@@ -24,7 +24,7 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `evm`   | yes     | EVM simulation and execution support |
-//! | `rfq`   | no      | RFQ protocol support (implies `evm`) |
+//! | `book-feeds` | no | Off-chain book feeds: the RFQ and pAMM providers (implies `evm`) |
 
 pub use tycho_client as client;
 pub use tycho_common as common;

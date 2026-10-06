@@ -25,7 +25,7 @@ On Ethereum, Metric is available as a pAMM venue on the [pAMM price level stream
 
 The RFQ quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, Metric and Native are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, Metric and Native are the only supported providers.
 
 You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
 
@@ -40,12 +40,12 @@ export NATIVE_API_KEY=<your-native-api-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
 
-Metric needs no credentials: the client defaults to Metric's public endpoint. Override it with `METRIC_API_URL`, and set `METRIC_SECRET_KEY` only if your endpoint requires one. The example registers Metric under the `--run-pamm-protocols` flag, which is on by default, so it runs even without any authenticated RFQ credentials.
+Metric needs a trading key, set as `METRIC_API_KEY`; override its endpoint with `METRIC_API_URL`. The example runs Metric alongside the RFQ venues, so it serves on its own without any of their credentials; `--disable-pamm-feeds` leaves it out.
 
 Then run the example:
 
 ```rust
-cargo run --release --example rfq_quickstart
+cargo run --release --example book_quickstart
 ```
 
 {% hint style="info" %}
@@ -63,7 +63,7 @@ The quickstart:
 If you want to see results for a different token, amount, minimum TVL, or chain, you can set additional flags:
 
 ```bash
-cargo run --release --example rfq_quickstart -- --sell-token "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --tvl-threshold 1000 --chain "base"
+cargo run --release --example book_quickstart -- --sell-token "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --tvl-threshold 1000 --chain "base"
 ```
 
 This example would seek the best swap for 10 USDC -> WETH on Base.
@@ -226,7 +226,7 @@ This gives you full control over execution. And it protects you from MEV and sli
 This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Quickstart](#quickstart). Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example rfq_quickstart
+cargo run --release --example book_quickstart
 ```
 
 Once the best swap is found you can:

@@ -998,7 +998,7 @@ fn test_single_encoding_strategy_bebop() {
 
     let bebop_component = ProtocolComponent {
         id: String::from("bebop-rfq"),
-        protocol_system: String::from("rfq:bebop"),
+        protocol_system: String::from("book:bebop"),
         static_attributes: HashMap::new(), // No static attributes needed
         ..Default::default()
     };
@@ -1084,7 +1084,7 @@ fn test_single_encoding_strategy_bebop_aggregate() {
 
     let bebop_component = ProtocolComponent {
         id: String::from("bebop-rfq"),
-        protocol_system: String::from("rfq:bebop"),
+        protocol_system: String::from("book:bebop"),
         static_attributes: HashMap::new(),
         ..Default::default()
     };
@@ -1173,7 +1173,7 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
     };
     let bebop_component = ProtocolComponent {
         id: String::from("bebop-rfq"),
-        protocol_system: String::from("rfq:bebop"),
+        protocol_system: String::from("book:bebop"),
         ..Default::default()
     };
     let swap = Swap::new(
@@ -1287,7 +1287,7 @@ fn test_single_encoding_strategy_hashflow() {
 
     let hashflow_component = ProtocolComponent {
         id: String::from("hashflow-rfq"),
-        protocol_system: String::from("rfq:hashflow"),
+        protocol_system: String::from("book:hashflow"),
         ..Default::default()
     };
 
@@ -3248,7 +3248,7 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
 
     let liquorice_component = ProtocolComponent {
         id: String::from("liquorice-rfq"),
-        protocol_system: String::from("rfq:liquorice"),
+        protocol_system: String::from("book:liquorice"),
         ..Default::default()
     };
 
@@ -3310,7 +3310,7 @@ fn test_single_encoding_strategy_metric() {
 
     let metric_component = ProtocolComponent {
         id: String::from("0x600668566fc5E9d471A1A235937221e39aC0ed04"),
-        protocol_system: String::from("rfq:metric"),
+        protocol_system: String::from("book:metric"),
         // Token order must match the pool's token0/token1 so the encoder can
         // derive the swap direction (WETH = token0, USDC = token1).
         tokens: vec![weth_base.clone(), usdc_base.clone()],
@@ -3547,7 +3547,7 @@ fn test_single_encoding_strategy_liquorice_settle() {
 
     let liquorice_component = ProtocolComponent {
         id: String::from("liquorice-rfq"),
-        protocol_system: String::from("rfq:liquorice"),
+        protocol_system: String::from("book:liquorice"),
         ..Default::default()
     };
 
@@ -3791,7 +3791,7 @@ fn test_single_encoding_strategy_native() {
     };
 
     let component =
-        ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() };
+        ProtocolComponent { protocol_system: "book:native".to_string(), ..Default::default() };
 
     let swap = Swap::new(
         component,
@@ -3861,7 +3861,7 @@ fn test_single_encoding_strategy_native_eth_input() {
         ..Default::default()
     };
     let component =
-        ProtocolComponent { protocol_system: "rfq:native".to_string(), ..Default::default() };
+        ProtocolComponent { protocol_system: "book:native".to_string(), ..Default::default() };
     let swap = Swap::new(
         component,
         default_token(token_in.clone()),

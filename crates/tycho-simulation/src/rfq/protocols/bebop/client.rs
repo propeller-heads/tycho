@@ -80,7 +80,7 @@ pub struct BebopClient {
 }
 
 impl BebopClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:bebop";
+    pub const PROTOCOL_SYSTEM: &'static str = "book:bebop";
 
     /// Creates a fully configured client. Prefer constructing through
     /// [`BebopClientBuilder`](super::client_builder::BebopClientBuilder).
@@ -656,7 +656,7 @@ mod tests {
                                 component_with_state
                                     .component
                                     .protocol_system,
-                                "rfq:bebop"
+                                "book:bebop"
                             );
                             assert_eq!(
                                 component_with_state
