@@ -38,8 +38,8 @@ use tracing::debug;
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
-        blockchain::BlockAggregatedChanges, contract::Account, protocol::ProtocolComponentState,
-        MergeError, PaginationParams,
+        blockchain::BlockAggregatedChanges, protocol::ProtocolComponentState, MergeError,
+        PaginationParams,
     },
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
@@ -277,7 +277,8 @@ impl StateService {
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts.push(dto::ResponseAccount::from(Account::from(entry)));
+            accounts
+                .push(dto::ResponseAccount::from(entry.into_account(request.include_zero_slots)));
         }
 
         Ok(dto::StateRequestResponse::new(
@@ -667,6 +668,7 @@ mod test {
             version,
             chain: dto::Chain::Ethereum,
             pagination: dto::PaginationParams::new(0, 100),
+            include_zero_slots: true,
         }
     }
 
@@ -728,6 +730,63 @@ mod test {
         assert_eq!(response.accounts.len(), 1);
         assert_eq!(response.accounts[0].slots[&word(1)], word(expected));
         assert_eq!(response.accounts[0].token_balances[&addr(9)], Bytes::from(expected));
+    }
+
+    /// Slot 2 is zero in the cached entry; block 5, still in the window, deletes slot 3.
+    #[rstest]
+    #[case::with_zero_slots(true, &[1, 2, 3])]
+    #[case::without_zero_slots(false, &[1])]
+    fn contract_state_returns_zero_slots_only_when_asked(
+        #[case] include_zero_slots: bool,
+        #[case] expected: &[u64],
+    ) {
+        let harness = Harness::new(2);
+        harness.push(with_account(
+            msg(1),
+            AccountDelta::new(
+                Chain::Ethereum,
+                addr(1),
+                fixtures::optional_slots([(1, 1), (2, 0), (3, 3)]),
+                Some(Bytes::from(1u64)),
+                Some(Bytes::from("0x6000")),
+                ChangeType::Creation,
+            ),
+        ));
+        for n in 2..=4 {
+            harness.push(msg(n));
+        }
+        harness.push(with_account(
+            msg(5),
+            AccountDelta::new(
+                Chain::Ethereum,
+                addr(1),
+                HashMap::from([(word(3), None)]),
+                None,
+                None,
+                ChangeType::Update,
+            ),
+        ));
+        let request = contract_request(vec![addr(1)], at_block(5))
+            .with_include_zero_slots(include_zero_slots);
+
+        let response = harness
+            .service
+            .contract_state(&request)
+            .unwrap();
+
+        let mut slots: Vec<Bytes> = response.accounts[0]
+            .slots
+            .keys()
+            .cloned()
+            .collect();
+        slots.sort();
+        assert_eq!(
+            slots,
+            expected
+                .iter()
+                .map(|n| word(*n))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

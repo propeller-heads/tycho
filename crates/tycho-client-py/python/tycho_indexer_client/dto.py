@@ -318,6 +318,8 @@ class ContractStateParams(BaseModel):
     protocol_system: Optional[str] = Field(default=None)
     version: Optional[VersionParams] = None
     pagination: Optional[PaginationParams] = None
+    # False leaves out slots whose value is zero. None sends nothing: the server includes them.
+    include_zero_slots: Optional[bool] = None
 
     # Backward compatibility with old ContractId format
     # To be removed in the future

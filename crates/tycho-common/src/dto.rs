@@ -913,9 +913,7 @@ impl PaginationResponse {
     }
 }
 
-#[derive(
-    Clone, Serialize, Debug, Default, Deserialize, PartialEq, ToSchema, Eq, Hash, DeepSizeOf,
-)]
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq, ToSchema, Eq, Hash, DeepSizeOf)]
 #[serde(deny_unknown_fields)]
 pub struct StateRequestBody {
     /// Filters response by contract addresses
@@ -932,6 +930,32 @@ pub struct StateRequestBody {
     pub chain: Chain,
     #[serde(default)]
     pub pagination: PaginationParams,
+    /// Whether to return storage slots whose value is zero. A slot missing from an account reads
+    /// as zero, so leaving them out gives the same account state in a smaller response. Defaults
+    /// to `true`. Only sent when `false`, so requests stay valid for servers without this field.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub include_zero_slots: bool,
+}
+
+impl Default for StateRequestBody {
+    fn default() -> Self {
+        Self {
+            contract_ids: None,
+            protocol_system: String::new(),
+            version: VersionParam::default(),
+            chain: Chain::default(),
+            pagination: PaginationParams::default(),
+            include_zero_slots: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 // When INCREASING these limits, please read the warning in the macro definition.
@@ -945,7 +969,13 @@ impl StateRequestBody {
         chain: Chain,
         pagination: PaginationParams,
     ) -> Self {
-        Self { contract_ids, protocol_system, version, chain, pagination }
+        Self { contract_ids, protocol_system, version, chain, pagination, include_zero_slots: true }
+    }
+
+    /// Sets whether the response includes storage slots whose value is zero.
+    pub fn with_include_zero_slots(mut self, include_zero_slots: bool) -> Self {
+        self.include_zero_slots = include_zero_slots;
+        self
     }
 
     pub fn from_block(protocol_system: &str, block: BlockParam) -> Self {
@@ -955,6 +985,7 @@ impl StateRequestBody {
             version: VersionParam { timestamp: None, block: Some(block.clone()) },
             chain: block.chain.unwrap_or_default(),
             pagination: PaginationParams::default(),
+            include_zero_slots: true,
         }
     }
 
@@ -965,6 +996,7 @@ impl StateRequestBody {
             version: VersionParam { timestamp: Some(timestamp), block: None },
             chain,
             pagination: PaginationParams::default(),
+            include_zero_slots: true,
         }
     }
 }
@@ -2105,6 +2137,31 @@ mod test {
 
     use super::*;
 
+    #[test]
+    fn state_request_body_includes_zero_slots_unless_asked_not_to() {
+        let body: StateRequestBody = serde_json::from_str(r#"{"contract_ids": ["0x01"]}"#).unwrap();
+        assert!(body.include_zero_slots);
+        assert!(StateRequestBody::default().include_zero_slots);
+
+        let excluded: StateRequestBody =
+            serde_json::from_str(r#"{"contract_ids": ["0x01"], "include_zero_slots": false}"#)
+                .unwrap();
+        assert!(!excluded.include_zero_slots);
+    }
+
+    #[test]
+    fn state_request_body_sends_include_zero_slots_only_when_false() {
+        let included = serde_json::to_value(StateRequestBody::default()).unwrap();
+        assert!(included
+            .get("include_zero_slots")
+            .is_none());
+
+        let excluded =
+            serde_json::to_value(StateRequestBody::default().with_include_zero_slots(false))
+                .unwrap();
+        assert_eq!(excluded["include_zero_slots"], serde_json::json!(false));
+    }
+
     /// Test backward compatibility for Command::Subscribe compression field.
     /// Should default to false when not specified.
     #[rstest]
@@ -2384,6 +2441,7 @@ mod test {
             NaiveDateTime::parse_from_str("2069-01-01T04:20:00", "%Y-%m-%dT%H:%M:%S").unwrap();
 
         let expected = StateRequestBody {
+            include_zero_slots: true,
             contract_ids: Some(vec![contract0]),
             protocol_system: "uniswap_v2".to_string(),
             version: VersionParam {
@@ -2487,6 +2545,7 @@ mod test {
             NaiveDateTime::parse_from_str("2069-01-01T04:20:00", "%Y-%m-%dT%H:%M:%S").unwrap();
 
         let expected = StateRequestBody {
+            include_zero_slots: true,
             contract_ids: None,
             protocol_system: "uniswap_v2".to_string(),
             version: VersionParam {

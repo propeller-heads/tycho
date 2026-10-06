@@ -319,27 +319,34 @@ impl CachedAccount {
 
 impl From<CachedAccount> for Account {
     fn from(cached: CachedAccount) -> Self {
-        let code = cached.code.value;
+        cached.into_account(true)
+    }
+}
+
+impl CachedAccount {
+    /// Converts the entry into an [`Account`]. With `include_zero_slots == false`, slots whose
+    /// value is zero are left out of the account's storage.
+    pub(crate) fn into_account(self, include_zero_slots: bool) -> Account {
+        let code = self.code.value;
         Account::new(
-            cached.chain,
-            cached.address,
-            cached.title,
-            cached
-                .slots
+            self.chain,
+            self.address,
+            self.title,
+            self.slots
                 .into_iter()
+                .filter(|(_, value)| include_zero_slots || !value.value.is_zero())
                 .map(|(key, value)| (key, value.value))
                 .collect(),
-            cached.native_balance.value,
-            cached
-                .token_balances
+            self.native_balance.value,
+            self.token_balances
                 .into_iter()
                 .map(|(token, balance)| (token, balance.value))
                 .collect(),
             code.code,
             code.hash,
-            cached.balance_modify_tx,
-            cached.code_modify_tx,
-            cached.creation_tx,
+            self.balance_modify_tx,
+            self.code_modify_tx,
+            self.creation_tx,
         )
     }
 }

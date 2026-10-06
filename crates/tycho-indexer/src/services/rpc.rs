@@ -372,6 +372,14 @@ where
             }
         }
 
+        if !request.include_zero_slots {
+            for account in &mut accounts {
+                account
+                    .slots
+                    .retain(|_, value| !value.is_zero());
+            }
+        }
+
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
@@ -1774,6 +1782,7 @@ mod tests {
         let contract0 = "b4eccE46b8D4e4abFd03C9B806276A6735C9c092".into();
 
         let expected = dto::StateRequestBody {
+            include_zero_slots: true,
             contract_ids: Some(vec![contract0]),
             protocol_system: "uniswap_v2".to_string(),
             version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
@@ -1796,6 +1805,82 @@ mod tests {
         assert!(time_difference <= 1000);
         assert_eq!(result.contract_ids, expected.contract_ids);
         assert_eq!(result.version.block, expected.version.block);
+    }
+
+    /// Slot 2 is zero in the database; the pending deltas set slot 3 to zero.
+    #[rstest]
+    #[case::with_zero_slots(true, &[1, 2, 3])]
+    #[case::without_zero_slots(false, &[1])]
+    #[tokio::test]
+    async fn test_get_contract_state_returns_zero_slots_only_when_asked(
+        #[case] include_zero_slots: bool,
+        #[case] expected: &[i32],
+    ) {
+        let address = Bytes::from_str("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap();
+        let account = Account::new(
+            Chain::Ethereum,
+            address.clone(),
+            "account0".to_owned(),
+            evm_contract_slots([(1, 3), (2, 0), (3, 5)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C0C0C0"),
+            Bytes::default(),
+            Bytes::default(),
+            Bytes::default(),
+            None,
+        );
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .return_once(move |_, _, _, _, _| {
+                Box::pin(async move { Ok(WithTotal { entity: vec![account], total: Some(1) }) })
+            });
+        let mut mock_buffer = MockPendingDeltas::new();
+        mock_buffer
+            .expect_update_vm_states()
+            .return_once(|_, db_states: &mut Vec<Account>, _, _| {
+                db_states[0]
+                    .slots
+                    .insert(Bytes::from(3u32), Bytes::default());
+                Ok(())
+            });
+        mock_buffer
+            .expect_get_block_commit_status()
+            .return_once(|_, _| Ok(Some(CommitStatus::Uncommitted)));
+        let req_handler = RpcHandler::new(
+            gw,
+            Some(Arc::new(mock_buffer)),
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let request = dto::StateRequestBody {
+            include_zero_slots,
+            contract_ids: Some(vec![address]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+
+        let state = req_handler
+            .get_contract_state_inner(request)
+            .await
+            .unwrap();
+
+        let mut slots: Vec<Bytes> = state.accounts[0]
+            .slots
+            .keys()
+            .cloned()
+            .collect();
+        slots.sort();
+        let mut expected: Vec<Bytes> = expected
+            .iter()
+            .map(|slot| Bytes::from(u32::try_from(*slot).unwrap()))
+            .collect();
+        expected.sort();
+        assert_eq!(slots, expected);
     }
 
     #[tokio::test]
@@ -1879,6 +1964,7 @@ mod tests {
         );
 
         let request = dto::StateRequestBody {
+            include_zero_slots: true,
             contract_ids: Some(vec![
                 Bytes::from_str("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
                 Bytes::from_str("388C818CA8B9251b393131C08a736A67ccB19297").unwrap(),
@@ -1935,6 +2021,7 @@ mod tests {
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
 
         let request = dto::StateRequestBody {
+            include_zero_slots: true,
             contract_ids: None,
             protocol_system: "uniswap_v2".to_string(),
             version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
@@ -2080,6 +2167,7 @@ mod tests {
 
         let result = handler
             .get_contract_state_routed(dto::StateRequestBody {
+                include_zero_slots: true,
                 contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
                 protocol_system: "ex".to_string(),
                 version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
@@ -2098,6 +2186,7 @@ mod tests {
 
         let result = handler
             .get_contract_state_routed(dto::StateRequestBody {
+                include_zero_slots: true,
                 contract_ids: Some(vec![Bytes::from(2u64).lpad(20, 0)]),
                 protocol_system: "ex".to_string(),
                 version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
@@ -2188,6 +2277,7 @@ mod tests {
         );
 
         let request = dto::StateRequestBody {
+            include_zero_slots: true,
             contract_ids: Some(vec![first_page_addr, second_page_addr.clone()]),
             protocol_system: "uniswap_v2".to_string(),
             version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
@@ -2826,6 +2916,7 @@ mod tests {
 
         // Create the request body using the dto::StateRequestBody struct
         let request_body = dto::StateRequestBody {
+            include_zero_slots: true,
             contract_ids: Some(vec![
                 Bytes::from_str("b4eccE46b8D4e4abFd03C9B806276A6735C9c092").unwrap()
             ]),

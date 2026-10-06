@@ -129,6 +129,7 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     compression: bool,
     partial_blocks: bool,
     uses_dci: bool,
+    include_zero_slots: bool,
     /// Background snapshot tasks spawned for new components. Each task may be in-flight or
     /// finished; completed ones are harvested at the start of each delta iteration and their
     /// results included in that block's message.
@@ -295,6 +296,7 @@ struct FetchSnapshotParams {
     uses_dci: bool,
     retrieve_balances: bool,
     include_tvl: bool,
+    include_zero_slots: bool,
 }
 
 /// Fetches a snapshot for given components. If DCI is enabled, also traces entry
@@ -349,7 +351,8 @@ async fn fetch_snapshot<R: RPCClient>(
     )
     .entrypoints(&entrypoints_result)
     .include_balances(params.retrieve_balances)
-    .include_tvl(params.include_tvl);
+    .include_tvl(params.include_tvl)
+    .include_zero_slots(params.include_zero_slots);
 
     let snapshot = rpc_client
         .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
@@ -439,6 +442,7 @@ where
             compression,
             partial_blocks: false,
             uses_dci: false,
+            include_zero_slots: true,
             snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
@@ -455,6 +459,14 @@ where
     /// Enables receiving partial block updates.
     pub fn with_partial_blocks(mut self, partial_blocks: bool) -> Self {
         self.partial_blocks = partial_blocks;
+        self
+    }
+
+    /// Sets whether snapshots include contract storage slots whose value is zero. A slot missing
+    /// from an account reads as zero. Defaults to `true`. Servers older than this option reject
+    /// `false`.
+    pub fn with_include_zero_slots(mut self, include_zero_slots: bool) -> Self {
+        self.include_zero_slots = include_zero_slots;
         self
     }
 
@@ -631,6 +643,7 @@ where
                             uses_dci: self.uses_dci,
                             retrieve_balances: self.retrieve_balances,
                             include_tvl: self.include_tvl,
+                            include_zero_slots: self.include_zero_slots,
                         };
                         match fetch_snapshot(
                             &self.rpc_client,
@@ -967,6 +980,7 @@ where
             uses_dci: self.uses_dci,
             retrieve_balances: self.retrieve_balances,
             include_tvl: self.include_tvl,
+            include_zero_slots: self.include_zero_slots,
         };
         let ids = component_ids.clone();
         tokio::spawn(async move {
@@ -1476,6 +1490,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: true,
             include_tvl: false,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -1489,6 +1504,43 @@ mod test {
         };
 
         assert_eq!(snap, exp);
+    }
+
+    /// Fetches a snapshot with `include_zero_slots` and fails unless the RPC client receives it.
+    async fn assert_fetch_snapshot_passes_include_zero_slots(include_zero_slots: bool) {
+        let mut rpc = make_mock_client();
+        rpc.expect_get_snapshots()
+            .withf(move |request, _, _| request.include_zero_slots == include_zero_slots)
+            .times(1)
+            .returning(|_, _, _| Ok(Snapshot::default()));
+        let state_sync = with_mocked_clients(true, false, Some(rpc), None);
+        let components = HashMap::from([(
+            "Component1".to_string(),
+            ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
+        )]);
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: 1,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+            include_zero_slots,
+        };
+
+        fetch_snapshot(&state_sync.rpc_client, components, HashSet::new(), &params)
+            .await
+            .expect("Retrieving snapshot failed");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_fetch_snapshot_includes_zero_slots_by_default() {
+        assert_fetch_snapshot_passes_include_zero_slots(true).await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_fetch_snapshot_can_exclude_zero_slots() {
+        assert_fetch_snapshot_passes_include_zero_slots(false).await;
     }
 
     #[test_log::test(tokio::test)]
@@ -1568,6 +1620,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: true,
             include_tvl: true,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -1748,6 +1801,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: false,
             include_tvl: false,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -1853,6 +1907,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: false,
             include_tvl: true,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -1956,6 +2011,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: true,
             include_tvl: false,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -3837,6 +3893,7 @@ mod test {
             uses_dci: false,
             retrieve_balances: true,
             include_tvl: false,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)
@@ -3909,6 +3966,7 @@ mod test {
             uses_dci: true,
             retrieve_balances: true,
             include_tvl: false,
+            include_zero_slots: true,
         };
         let (snapshot, _, _) =
             fetch_snapshot(&state_sync.rpc_client, components, contract_ids, &params)

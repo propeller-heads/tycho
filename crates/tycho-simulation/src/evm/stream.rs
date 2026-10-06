@@ -517,6 +517,16 @@ impl ProtocolStreamBuilder {
         self
     }
 
+    /// Sets whether snapshots include contract storage slots whose value is zero.
+    ///
+    /// See [`TychoStreamBuilder::include_zero_slots`].
+    pub fn include_zero_slots(mut self, include_zero_slots: bool) -> Self {
+        self.stream_builder = self
+            .stream_builder
+            .include_zero_slots(include_zero_slots);
+        self
+    }
+
     /// Exclude additional component IDs from all registered exchanges.
     ///
     /// These IDs are added to the shipped blocklist that is already applied by default (see
