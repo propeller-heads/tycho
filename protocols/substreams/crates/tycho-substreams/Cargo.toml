@@ -1,13 +1,13 @@
 [package]
 name = "tycho-substreams"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 description = "Tycho substreams development kit, contains tycho-indexer block changes model and helper functions for common indexing tasks."
 repository = "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/crates/tycho-substreams"
 homepage = "https://www.propellerheads.xyz/tycho"
 documentation = "https://docs.propellerheads.xyz/tycho"
 keywords = ["propellerheads", "solver", "defi", "dex", "mev"]
-license = "MIT"
+license-file = "../../../../LICENSE.md"
 categories = ["finance", "wasm"]
 readme = "README.md"
 

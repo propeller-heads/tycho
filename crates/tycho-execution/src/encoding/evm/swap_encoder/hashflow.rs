@@ -9,7 +9,9 @@ use tycho_common::{
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{create_encoding_runtime, on_blocking_thread, SafeRuntime},
+    evm::utils::{
+        create_encoding_runtime, on_blocking_thread, record_signed_quote_deviation, SafeRuntime,
+    },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -71,6 +73,7 @@ impl SwapEncoder for HashflowSwapEncoder {
                     .await
             })
         })??;
+        record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
 
         // Encode packed data for the executor
         // Format: approval_needed | hashflow_calldata[..]

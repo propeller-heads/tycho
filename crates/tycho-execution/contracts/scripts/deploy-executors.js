@@ -100,6 +100,11 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
     ],
+    "arc": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+    ],
 };
 
 async function main() {

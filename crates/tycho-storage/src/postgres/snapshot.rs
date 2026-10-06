@@ -14,7 +14,9 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use diesel::{
-    pg::Pg, sql_types::BigInt, BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl,
+    pg::Pg,
+    sql_types::{BigInt, Text},
+    BoolExpressionMethods, ExpressionMethods, QueryDsl,
 };
 use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
@@ -38,6 +40,35 @@ pub(crate) fn snapshot_transaction(
     conn.build_transaction()
         .read_only()
         .repeatable_read()
+}
+
+/// Longest one snapshot read may run before Postgres cancels it.
+const SNAPSHOT_STATEMENT_TIMEOUT: &str = "10min";
+
+/// How often Postgres checks that the client is still connected while a snapshot read runs. A read
+/// that builds a hash or sorts writes nothing to the socket, so without this check it keeps running
+/// after the client is gone.
+const SNAPSHOT_CONNECTION_CHECK_INTERVAL: &str = "10s";
+
+/// Bounds every later read of the current transaction: a statement is cancelled after
+/// [`SNAPSHOT_STATEMENT_TIMEOUT`], and stops within [`SNAPSHOT_CONNECTION_CHECK_INTERVAL`] of the
+/// client disconnecting. The settings end with the transaction, so the pooled connection keeps its
+/// own.
+pub(crate) async fn bound_snapshot_reads(
+    conn: &mut AsyncPgConnection,
+) -> Result<(), PostgresError> {
+    for (name, value) in [
+        ("statement_timeout", SNAPSHOT_STATEMENT_TIMEOUT),
+        ("client_connection_check_interval", SNAPSHOT_CONNECTION_CHECK_INTERVAL),
+    ] {
+        diesel::sql_query("SELECT set_config($1, $2, true)")
+            .bind::<Text, _>(name)
+            .bind::<Text, _>(value)
+            .execute(conn)
+            .await
+            .map_err(PostgresError::from)?;
+    }
+    Ok(())
 }
 
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
@@ -79,7 +110,7 @@ fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'stati
 
 impl PostgresGateway {
     /// Every live account of `chain` (one with a live code row) with its code, balances and
-    /// slots, each value timestamped with the block of its row's `modify_tx`. Order is
+    /// slots, each value timestamped with its row's `valid_from`. Order is
     /// unspecified.
     ///
     /// # Errors
@@ -96,7 +127,7 @@ impl PostgresGateway {
 
         let accounts = schema::contract_code::table
             .inner_join(schema::account::table)
-            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+            .inner_join(schema::transaction::table)
             .filter(schema::account::chain_id.eq(chain_id))
             .filter(
                 schema::account::deleted_at
@@ -109,11 +140,7 @@ impl PostgresGateway {
                     .or(schema::contract_code::valid_to.eq(MAX_TS)),
             )
             .distinct_on(schema::contract_code::account_id)
-            .order_by((
-                schema::contract_code::account_id,
-                schema::contract_code::valid_from.desc(),
-                schema::block::number.desc(),
-            ))
+            .order_by((schema::contract_code::account_id, schema::contract_code::valid_from.desc()))
             .select((
                 schema::account::id,
                 schema::account::address,
@@ -121,62 +148,48 @@ impl PostgresGateway {
                 schema::contract_code::code,
                 schema::contract_code::hash,
                 schema::contract_code::valid_from,
-                schema::block::number,
                 schema::transaction::hash,
             ))
-            .get_results::<(i64, Address, String, Bytes, Bytes, NaiveDateTime, i64, Bytes)>(conn)
+            .get_results::<(i64, Address, String, Bytes, Bytes, NaiveDateTime, Bytes)>(conn)
             .await
             .map_err(PostgresError::from)?;
 
         let mut balances_by_account: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> =
             HashMap::new();
-        for (account_id, token_id, token, balance, valid_from, block_number) in
-            schema::account_balance::table
-                .inner_join(schema::token::table.inner_join(schema::account::table))
-                .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id)))
-                .filter(
-                    schema::account_balance::valid_to
-                        .is_null()
-                        .or(schema::account_balance::valid_to.eq(MAX_TS)),
-                )
-                .distinct_on((
-                    schema::account_balance::account_id,
-                    schema::account_balance::token_id,
-                ))
-                .order_by((
-                    schema::account_balance::account_id,
-                    schema::account_balance::token_id,
-                    schema::account_balance::valid_from.desc(),
-                    schema::block::number.desc(),
-                ))
-                .select((
-                    schema::account_balance::account_id,
-                    schema::account_balance::token_id,
-                    schema::account::address,
-                    schema::account_balance::balance,
-                    schema::account_balance::valid_from,
-                    schema::block::number,
-                ))
-                .get_results::<(i64, i64, Address, Bytes, NaiveDateTime, i64)>(conn)
-                .await
-                .map_err(PostgresError::from)?
+        for (account_id, token_id, token, balance, valid_from) in schema::account_balance::table
+            .inner_join(schema::token::table.inner_join(schema::account::table))
+            .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id)))
+            .filter(
+                schema::account_balance::valid_to
+                    .is_null()
+                    .or(schema::account_balance::valid_to.eq(MAX_TS)),
+            )
+            .distinct_on((schema::account_balance::account_id, schema::account_balance::token_id))
+            .order_by((
+                schema::account_balance::account_id,
+                schema::account_balance::token_id,
+                schema::account_balance::valid_from.desc(),
+            ))
+            .select((
+                schema::account_balance::account_id,
+                schema::account_balance::token_id,
+                schema::account::address,
+                schema::account_balance::balance,
+                schema::account_balance::valid_from,
+            ))
+            .get_results::<(i64, i64, Address, Bytes, NaiveDateTime)>(conn)
+            .await
+            .map_err(PostgresError::from)?
         {
             balances_by_account
                 .entry(account_id)
                 .or_default()
-                .push((
-                    token_id,
-                    token,
-                    balance,
-                    WriteTimestamp::new(valid_from, block_number as u64),
-                ));
+                .push((token_id, token, balance, WriteTimestamp::new(valid_from)));
         }
 
         let mut slots_by_account: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> =
             HashMap::new();
-        for (account_id, slot, value, valid_from, block_number) in schema::contract_storage::table
-            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+        for (account_id, slot, value, valid_from) in schema::contract_storage::table
             .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id)))
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .select((
@@ -184,23 +197,20 @@ impl PostgresGateway {
                 schema::contract_storage::slot,
                 schema::contract_storage::value,
                 schema::contract_storage::valid_from,
-                schema::block::number,
             ))
-            .get_results::<(i64, Bytes, Option<Bytes>, NaiveDateTime, i64)>(conn)
+            .get_results::<(i64, Bytes, Option<Bytes>, NaiveDateTime)>(conn)
             .await
             .map_err(PostgresError::from)?
         {
             slots_by_account
                 .entry(account_id)
                 .or_default()
-                .push((slot, value, WriteTimestamp::new(valid_from, block_number as u64)));
+                .push((slot, value, WriteTimestamp::new(valid_from)));
         }
 
         let mut snapshots = Vec::with_capacity(accounts.len());
-        for (id, address, title, code, code_hash, code_valid_from, code_block_number, code_tx) in
-            accounts
-        {
-            let code_written_at = WriteTimestamp::new(code_valid_from, code_block_number as u64);
+        for (id, address, title, code, code_hash, code_valid_from, code_tx) in accounts {
+            let code_written_at = WriteTimestamp::new(code_valid_from);
             let mut native_balance = None;
             let mut token_balances = HashMap::new();
             let mut token_balance_written_at = HashMap::new();
@@ -257,8 +267,8 @@ impl PostgresGateway {
     }
 
     /// Every component of `chain` that is not deleted, with its live attributes and balances,
-    /// timestamped with the newest write among its rows or, for a component without rows, the
-    /// block of its `creation_tx`. Order is unspecified.
+    /// timestamped with the newest `valid_from` among its rows or, for a component without rows,
+    /// its `created_at`. Order is unspecified.
     pub(crate) async fn component_snapshots(
         &self,
         chain: &Chain,
@@ -266,16 +276,9 @@ impl PostgresGateway {
     ) -> Result<Vec<ComponentSnapshot>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
 
-        let components: Vec<(i64, String, String, NaiveDateTime, i64)> =
+        let components: Vec<(i64, String, String, NaiveDateTime)> =
             schema::protocol_component::table
                 .inner_join(schema::protocol_system::table)
-                .inner_join(
-                    schema::transaction::table
-                        .on(schema::transaction::id.eq(schema::protocol_component::creation_tx)),
-                )
-                .inner_join(
-                    schema::block::table.on(schema::block::id.eq(schema::transaction::block_id)),
-                )
                 .filter(schema::protocol_component::chain_id.eq(chain_id))
                 .filter(
                     schema::protocol_component::deleted_at
@@ -286,8 +289,7 @@ impl PostgresGateway {
                     schema::protocol_component::id,
                     schema::protocol_component::external_id,
                     schema::protocol_system::name,
-                    schema::block::ts,
-                    schema::block::number,
+                    schema::protocol_component::created_at,
                 ))
                 .get_results(conn)
                 .await
@@ -295,8 +297,7 @@ impl PostgresGateway {
 
         let mut attributes_by_component: HashMap<i64, Vec<(String, Bytes, WriteTimestamp)>> =
             HashMap::new();
-        for (component_id, name, value, valid_from, block_number) in schema::protocol_state::table
-            .inner_join(schema::transaction::table.inner_join(schema::block::table))
+        for (component_id, name, value, valid_from) in schema::protocol_state::table
             .filter(schema::protocol_state::protocol_component_id.eq_any(component_ids(chain_id)))
             .filter(schema::protocol_state::valid_to.eq(MAX_TS))
             .select((
@@ -304,49 +305,44 @@ impl PostgresGateway {
                 schema::protocol_state::attribute_name,
                 schema::protocol_state::attribute_value,
                 schema::protocol_state::valid_from,
-                schema::block::number,
             ))
-            .get_results::<(i64, String, Bytes, NaiveDateTime, i64)>(conn)
+            .get_results::<(i64, String, Bytes, NaiveDateTime)>(conn)
             .await
             .map_err(PostgresError::from)?
         {
             attributes_by_component
                 .entry(component_id)
                 .or_default()
-                .push((name, value, WriteTimestamp::new(valid_from, block_number as u64)));
+                .push((name, value, WriteTimestamp::new(valid_from)));
         }
 
         let mut balances_by_component: HashMap<i64, Vec<(Address, Bytes, WriteTimestamp)>> =
             HashMap::new();
-        for (component_id, token, balance, valid_from, block_number) in
-            schema::component_balance::table
-                .inner_join(schema::token::table.inner_join(schema::account::table))
-                .inner_join(schema::transaction::table.inner_join(schema::block::table))
-                .filter(
-                    schema::component_balance::protocol_component_id
-                        .eq_any(component_ids(chain_id)),
-                )
-                .filter(schema::component_balance::valid_to.eq(MAX_TS))
-                .select((
-                    schema::component_balance::protocol_component_id,
-                    schema::account::address,
-                    schema::component_balance::new_balance,
-                    schema::component_balance::valid_from,
-                    schema::block::number,
-                ))
-                .get_results::<(i64, Address, Bytes, NaiveDateTime, i64)>(conn)
-                .await
-                .map_err(PostgresError::from)?
+        for (component_id, token, balance, valid_from) in schema::component_balance::table
+            .inner_join(schema::token::table.inner_join(schema::account::table))
+            .filter(
+                schema::component_balance::protocol_component_id.eq_any(component_ids(chain_id)),
+            )
+            .filter(schema::component_balance::valid_to.eq(MAX_TS))
+            .select((
+                schema::component_balance::protocol_component_id,
+                schema::account::address,
+                schema::component_balance::new_balance,
+                schema::component_balance::valid_from,
+            ))
+            .get_results::<(i64, Address, Bytes, NaiveDateTime)>(conn)
+            .await
+            .map_err(PostgresError::from)?
         {
             balances_by_component
                 .entry(component_id)
                 .or_default()
-                .push((token, balance, WriteTimestamp::new(valid_from, block_number as u64)));
+                .push((token, balance, WriteTimestamp::new(valid_from)));
         }
 
         let mut snapshots = Vec::with_capacity(components.len());
-        for (id, external_id, system, created_ts, created_block_number) in components {
-            let mut updated_at = WriteTimestamp::new(created_ts, created_block_number as u64);
+        for (id, external_id, system, created_at) in components {
+            let mut updated_at = WriteTimestamp::new(created_at);
             let mut attributes = HashMap::new();
             for (name, value, written_at) in attributes_by_component
                 .remove(&id)
@@ -613,12 +609,12 @@ mod test_serial_db {
             account,
             written_at: AccountWriteTimestamps {
                 slots: HashMap::from([
-                    (slot0, WriteTimestamp::new(ts_p1, 2)),
-                    (slot2, WriteTimestamp::new(ts, 1)),
+                    (slot0, WriteTimestamp::new(ts_p1)),
+                    (slot2, WriteTimestamp::new(ts)),
                 ]),
-                native_balance: WriteTimestamp::new(ts_p1, 2),
-                code: WriteTimestamp::new(ts, 1),
-                token_balances: HashMap::from([(usdc, WriteTimestamp::new(ts, 1))]),
+                native_balance: WriteTimestamp::new(ts_p1),
+                code: WriteTimestamp::new(ts),
+                token_balances: HashMap::from([(usdc, WriteTimestamp::new(ts))]),
             },
         }
     }
@@ -645,9 +641,9 @@ mod test_serial_db {
         AccountSnapshot {
             account,
             written_at: AccountWriteTimestamps {
-                slots: HashMap::from([(slot0, WriteTimestamp::new(ts_p1, 2))]),
-                native_balance: WriteTimestamp::new(ts_p1, 2),
-                code: WriteTimestamp::new(ts_p1, 2),
+                slots: HashMap::from([(slot0, WriteTimestamp::new(ts_p1))]),
+                native_balance: WriteTimestamp::new(ts_p1),
+                code: WriteTimestamp::new(ts_p1),
                 token_balances: HashMap::new(),
             },
         }
@@ -766,7 +762,7 @@ mod test_serial_db {
             assert_eq!(p1.state.balances[&Bytes::from_str(USDC).unwrap()], Bytes::from(1000u64));
             assert_eq!(
                 p1.updated_at,
-                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2)
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight())
             );
             let p2 = &components["p2"];
             assert_eq!(p2.system, "zigzag");
@@ -774,7 +770,7 @@ mod test_serial_db {
             assert!(p2.state.balances.is_empty());
             assert_eq!(
                 p2.updated_at,
-                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight()),
                 "creation block 2"
             );
             let p4 = &components["p4"];
@@ -782,7 +778,7 @@ mod test_serial_db {
             assert_eq!(p4.state.balances[&Bytes::from_str(USDC).unwrap()], Bytes::from(7u64));
             assert_eq!(
                 p4.updated_at,
-                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight(), 2),
+                WriteTimestamp::new(db_fixtures::yesterday_half_past_midnight()),
                 "the balance at block 2 is newer than the creation at block 1"
             );
         })
@@ -990,6 +986,109 @@ mod test_serial_db {
 
             assert_eq!(accounts.len(), 2, "reopened code, balance and account rows are live");
             assert_eq!(components.len(), 3, "reopened component rows are live");
+        })
+        .await;
+    }
+
+    /// The database versions rows by `valid_from` alone, so a value is stamped with its row's
+    /// `valid_from` even where that differs from the timestamp of the `modify_tx` block.
+    #[tokio::test]
+    async fn account_snapshots_stamp_values_with_their_valid_from_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            let written = db_fixtures::yesterday_one_am();
+            db_fixtures::insert_slots(&mut conn, f.c0, f.txn[3], &written, None, &[(9, 9, None)])
+                .await;
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let accounts = by_address(
+                gw.account_snapshots(&Chain::Ethereum, &mut conn)
+                    .await
+                    .unwrap(),
+            );
+
+            let c0 = &accounts[&Bytes::from_str(C0).unwrap()];
+            assert_eq!(
+                c0.written_at.slots[&Bytes::from(9u64).lpad(32, 0)],
+                WriteTimestamp::new(written),
+                "the block of txn 3 is at half past midnight"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn component_snapshots_stamp_a_component_without_rows_with_its_created_at_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let f = setup_accounts(&mut conn).await;
+            setup_components(&mut conn, &f).await;
+            let created = db_fixtures::yesterday_one_am();
+            diesel::update(
+                schema::protocol_component::table
+                    .filter(schema::protocol_component::external_id.eq("p2")),
+            )
+            .set(schema::protocol_component::created_at.eq(created))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            let gw = PostgresGateway::from_connection(&mut conn).await;
+
+            let p2 = gw
+                .component_snapshots(&Chain::Ethereum, &mut conn)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| c.state.component_id == "p2")
+                .unwrap();
+
+            assert_eq!(
+                p2.updated_at,
+                WriteTimestamp::new(created),
+                "the creation block of p2 is at half past midnight"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bound_snapshot_reads_applies_only_inside_the_transaction_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let setting = |name: &'static str| {
+                diesel::select(diesel::dsl::sql::<Text>(&format!("current_setting('{name}')")))
+            };
+            let before = setting("statement_timeout")
+                .get_result::<String>(&mut conn)
+                .await
+                .unwrap();
+
+            let inside = snapshot_transaction(&mut conn)
+                .run(|conn| {
+                    async move {
+                        bound_snapshot_reads(conn).await?;
+                        let timeout = setting("statement_timeout")
+                            .get_result::<String>(conn)
+                            .await
+                            .map_err(PostgresError::from)?;
+                        let check = setting("client_connection_check_interval")
+                            .get_result::<String>(conn)
+                            .await
+                            .map_err(PostgresError::from)?;
+                        Result::<_, PostgresError>::Ok((timeout, check))
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .unwrap();
+            let after = setting("statement_timeout")
+                .get_result::<String>(&mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(inside, ("10min".to_string(), "10s".to_string()));
+            assert_eq!(after, before, "the pooled connection keeps its own timeout");
         })
         .await;
     }

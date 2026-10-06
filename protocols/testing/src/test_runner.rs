@@ -602,7 +602,19 @@ impl TestRunner {
                     .wrap_err("Failed to run Tycho")?;
             }
             let rpc_server = tycho_runner.start_rpc_server()?;
-            match self.run_test(test, &config, test.stop_block) {
+            let result = self
+                .runtime
+                .block_on(self.last_indexed_block(&config.protocol_system))
+                .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
+                .and_then(|block| {
+                    info!(
+                        "Reading the snapshot at block {block}, the last one the indexer committed \
+                         (stop block {})",
+                        test.stop_block
+                    );
+                    self.run_test(test, &config, block)
+                });
+            match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
                 }
@@ -628,7 +640,7 @@ impl TestRunner {
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         // Fetch protocol data from Tycho RPC
         let expected_ids = test
@@ -638,16 +650,16 @@ impl TestRunner {
             .collect::<Vec<String>>();
 
         // Get block header to extract the timestamp
-        let block = self
+        let header = self
             .runtime
             .block_on(
                 self.rpc_provider
-                    .get_block_header(stop_block),
+                    .get_block_header(block),
             )
             .wrap_err("Failed to get block header")?;
 
         let (protocol_components, snapshot, all_tokens) =
-            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, stop_block)?;
+            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, block)?;
 
         let response_protocol_states_by_id: HashMap<String, ProtocolComponentState> = snapshot
             .states
@@ -680,7 +692,7 @@ impl TestRunner {
                 self.validate_token_balances(
                     &tokens_by_component,
                     &response_protocol_states_by_id,
-                    stop_block,
+                    block,
                 )?;
                 info!("All token balances match the values found onchain")
             }
@@ -695,12 +707,19 @@ impl TestRunner {
 
         let update = self.decode_snapshot(
             &config.protocol_system,
-            &block,
+            &header,
             snapshot,
             all_tokens,
             adapter_contract_path_str,
             self.vm_simulation_traces,
         )?;
+
+        let undecoded = undecoded_components(&test.expected_components, update.states.keys());
+        ensure!(
+            undecoded.is_empty(),
+            "Expected components failed to decode, see the StateDecodingFailure warnings: {}",
+            undecoded.join(", ")
+        );
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
@@ -717,7 +736,7 @@ impl TestRunner {
         self.runtime
             .block_on(self.run_execution(
                 execution_data,
-                &block,
+                &header,
                 &config.protocol_system,
                 &test.expected_components,
             ))?;
@@ -772,6 +791,44 @@ impl TestRunner {
             .into_diagnostic()?;
 
         Ok(())
+    }
+
+    /// Returns the last main-chain block committed by the protocol's extractor on this chain,
+    /// or `None` when it has no committed extraction state.
+    ///
+    /// Stopgap: `tycho-indexer run` does not wait for its final commit before exiting, so the
+    /// committed block is `stop_block` or `stop_block + 1` depending on how fast the stream
+    /// ends. Once the indexer commits through its stop block on stream end, read at
+    /// `stop_block` and remove this query, which depends on the indexer's private storage schema.
+    async fn last_indexed_block(&self, protocol_system: &str) -> miette::Result<Option<u64>> {
+        let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
+            .await
+            .into_diagnostic()
+            .wrap_err("Failed to connect to the test database")?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Database connection error: {:#}", e);
+            }
+        });
+
+        let row = client
+            .query_opt(
+                "SELECT b.number FROM extraction_state e \
+                 JOIN chain c ON c.id = e.chain_id \
+                 JOIN block b ON b.id = e.block_id AND b.chain_id = e.chain_id \
+                 WHERE c.name = $1 AND e.name = $2 AND b.main",
+                &[&self.chain.to_string(), &protocol_system],
+            )
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to query the last indexed block for {protocol_system} on {}",
+                    self.chain
+                )
+            })?;
+        Ok(row.map(|row| row.get::<_, i64>(0) as u64))
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
@@ -852,35 +909,30 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Fetches protocol data from the Tycho RPC server and prepares it for validation and
-    /// simulation.
+    /// Fetches protocol data from the Tycho RPC server for validation and decoding.
     ///
-    /// This method connects to the running Tycho RPC server to retrieve protocol components,
-    /// states, and contract storage. It then sets up the Tycho Decoder and creates an update
-    /// message that can be used for validation and simulation testing.
+    /// Retrieves the protocol's components, then the snapshot of the expected components at
+    /// `block`, including the contracts and storage slots their traced entry points access.
     ///
     /// # Arguments
     /// * `protocol_system` - The protocol system identifier (e.g., "uniswap_v2", "balancer_v2")
-    /// * `expected_component_ids` - List of component IDs to fetch from Tycho
-    /// * `adapter_contract` - Optional adapter contract name for VM-based protocols
-    /// * `adapter_build_signature` - Optional build signature for the adapter contract
-    /// * `adapter_build_args` - Optional build arguments for the adapter contract
-    /// * `vm_simulation_traces` - Whether to enable VM simulation traces
-    /// * `stop_block` - The block number to fetch data for
+    /// * `expected_component_ids` - Lowercase ids of the components to snapshot; empty means all of
+    ///   the protocol's components
+    /// * `block` - The block number to fetch the snapshot at
     ///
     /// # Returns
     /// A tuple containing:
-    /// - `Update` - Decoded protocol state update for simulation
-    /// - `HashMap<String, ProtocolComponentState>` - Protocol states by component ID
-    /// - `Block` - The block header for the specified block
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    /// - `Vec<ProtocolComponent>` - Every component of the protocol system
+    /// - `Snapshot` - States and contract storage of the expected components at `block`
+    /// - `HashMap<Bytes, Token>` - All tokens on the chain, by address
+    #[allow(clippy::type_complexity)]
     fn fetch_from_tycho_rpc(
         &self,
         protocol_system: &str,
         expected_component_ids: Vec<String>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<(Vec<ProtocolComponent>, Snapshot, HashMap<Bytes, Token>)> {
-        info!("Fetching protocol data from Tycho with stop block {}...", stop_block);
+        info!("Fetching protocol data from Tycho at block {block}...");
 
         // Create Tycho client for the RPC server
         let tycho_client = TychoClient::new(&self.tycho_http_url(), None)
@@ -943,7 +995,7 @@ impl TestRunner {
             .runtime
             .block_on(tycho_client.get_snapshots(
                 chain,
-                stop_block,
+                block,
                 protocol_system,
                 &components_by_id,
                 &contract_ids,
@@ -1495,7 +1547,7 @@ impl TestRunner {
         &self,
         component_tokens: &HashMap<String, Vec<Token>>,
         protocol_states_by_id: &HashMap<String, ProtocolComponentState>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         for (id, component) in protocol_states_by_id.iter() {
             let tokens = component_tokens.get(id);
@@ -1520,7 +1572,7 @@ impl TestRunner {
                             .block_on(self.rpc_provider.get_token_balance(
                                 token_address,
                                 component_address,
-                                stop_block,
+                                block,
                             ))?;
                     if balance != node_balance {
                         return Err(miette!(
@@ -1574,6 +1626,51 @@ impl TestRunner {
     }
 }
 
+/// Returns the block a range test reads its snapshot at: the last block the indexer committed.
+///
+/// The indexer keeps only the latest version of every attribute and may commit one block past
+/// `stop_block`, depending on how fast the stream ends. A read at an earlier block would miss
+/// every attribute written after it, so the read targets the committed block instead. Fails
+/// when that block is missing or below `stop_block`, because the database then lacks the range
+/// under test, and when it is past `stop_block + 1`, because the database then holds a later
+/// range, such as one reused with `--reuse-last-sync` from a longer run.
+fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
+    let Some(block) = last_indexed_block else {
+        return Err(miette!(
+            "The extractor has no committed block, expected at least stop block {stop_block}"
+        ));
+    };
+    ensure!(
+        block >= stop_block,
+        "The indexer committed up to block {block}, below the stop block {stop_block}"
+    );
+    ensure!(
+        block <= stop_block + 1,
+        "The indexer committed up to block {block}, past the stop block {stop_block}; the \
+         database holds a later range, rerun without --reuse-last-sync"
+    );
+    Ok(block)
+}
+
+/// Returns the lowercase ids of the expected components without `skip_simulation` that are
+/// absent from `decoded_ids`, compared case-insensitively. Returns an empty list when every such
+/// component decoded.
+fn undecoded_components<'a>(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    decoded_ids: impl IntoIterator<Item = &'a String>,
+) -> Vec<String> {
+    let decoded: HashSet<String> = decoded_ids
+        .into_iter()
+        .map(|id| id.to_lowercase())
+        .collect();
+    expected_components
+        .iter()
+        .filter(|component| !component.skip_simulation)
+        .map(|component| component.base.id.to_lowercase())
+        .filter(|id| !decoded.contains(id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
@@ -1583,6 +1680,48 @@ mod tests {
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
+
+    #[test]
+    fn snapshot_block_reads_at_the_last_committed_block() {
+        assert_eq!(snapshot_block(Some(51_696_284), 51_696_283).unwrap(), 51_696_284);
+        assert_eq!(snapshot_block(Some(51_696_283), 51_696_283).unwrap(), 51_696_283);
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_short_of_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_282), 51_696_283).is_err());
+        assert!(snapshot_block(None, 51_696_283).is_err());
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_past_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_285), 51_696_283).is_err());
+    }
+
+    #[test]
+    fn undecoded_components_lists_expected_components_missing_from_the_update() {
+        let expected: Vec<ProtocolComponentWithTestConfig> = serde_yaml::from_str(
+            r#"
+            - id: "0xAA"
+              tokens: []
+              creation_tx: "0x01"
+            - id: "0xbb"
+              tokens: []
+              creation_tx: "0x02"
+            - id: "0xcc"
+              tokens: []
+              creation_tx: "0x03"
+              skip_simulation: true
+            "#,
+        )
+        .unwrap();
+        let decoded = ["0xaa".to_string()];
+
+        assert_eq!(undecoded_components(&expected, &decoded), vec!["0xbb".to_string()]);
+        assert!(
+            undecoded_components(&expected, &["0xaa".to_string(), "0xBB".to_string()]).is_empty()
+        );
+    }
 
     /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
     /// size the venue reported, untouched.

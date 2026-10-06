@@ -4,7 +4,7 @@ DeFi swap execution framework: Solidity smart contracts (TychoRouterV3) + Rust e
 swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
 
 **Docs**: https://docs.propellerheads.xyz/tycho
-**License**: BUSL-1.1 (Solidity), MIT (Rust)
+**License**: Fynd License 1.1 (Solidity and Rust). See [LICENSING.md](../../LICENSING.md).
 
 ## Solidity Architecture
 

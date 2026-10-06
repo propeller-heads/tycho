@@ -27,7 +27,8 @@ from being stored in the shell history.
    export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
    ```
 
-On Robinhood Chain (`robinhood`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+On Robinhood Chain (`robinhood`) and Arc (`arc`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.

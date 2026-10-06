@@ -25,6 +25,10 @@ pub struct MockRFQState {
     pub quote_amount_in: Option<BigUint>,
     pub quote_amount_out: BigUint,
     pub quote_data: HashMap<String, Bytes>,
+    /// What `get_amount_out` returns, standing in for the maker's price levels. `None` makes
+    /// `get_amount_out` fail.
+    #[serde(default)]
+    pub level_amount_out: Option<BigUint>,
     /// How long `request_signed_quote` waits before it answers, like a network round trip.
     #[serde(default)]
     pub delay: Duration,
@@ -45,7 +49,17 @@ impl ProtocolSim for MockRFQState {
         _token_in: &Token,
         _token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        panic!("MockRFQState does not implement fee")
+        let level_amount_out = self
+            .level_amount_out
+            .clone()
+            .ok_or_else(|| {
+                SimulationError::FatalError("MockRFQState has no level_amount_out".to_string())
+            })?;
+        Ok(GetAmountOutResult::new(
+            level_amount_out,
+            BigUint::ZERO,
+            Box::new(MockRFQState::default()),
+        ))
     }
 
     fn get_limits(
@@ -113,6 +127,7 @@ pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) ->
     let state = MockRFQState {
         quote_amount_in: None,
         quote_amount_out: BigUint::from(1_000u64),
+        level_amount_out: None,
         quote_data: HashMap::from([
             ("calldata".to_string(), Bytes::from(vec![0x12, 0x34])),
             ("partial_fill_offset".to_string(), Bytes::from(12u64.to_be_bytes().to_vec())),

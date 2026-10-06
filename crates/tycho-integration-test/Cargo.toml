@@ -2,6 +2,7 @@
 name = "tycho-integration-test"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 actix-web = "4.11.0"

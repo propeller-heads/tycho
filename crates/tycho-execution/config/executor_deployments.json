@@ -194,6 +194,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
     }
   },
   "polygon": {
@@ -274,6 +278,25 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
+    }
+  },
+  "arc": {
+    "uniswap_v2": {
+      "contract": "UniswapV2Executor",
+      "args": [
+        30
+      ]
+    },
+    "uniswap_v3": {
+      "contract": "UniswapV3Executor",
+      "args": []
+    },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
     }
   }
 }
