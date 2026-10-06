@@ -258,6 +258,60 @@ contract LiquoriceExecutorTest is Constants, Permit2TestHelper, TestUtils {
         );
     }
 
+    function testSettleSingle_TwoPercentUnderQuoteFillsProRata() public {
+        uint32 partialFillOffset = 96;
+        uint256 amountIn = 3000e6 * 98 / 100;
+
+        _fundSettleSingle(amountIn);
+        liquoriceExecutor.swap(
+            amountIn,
+            _settleSingleParams(partialFillOffset, 0),
+            address(liquoriceExecutor)
+        );
+
+        assertEq(
+            IERC20(WETH_ADDR).balanceOf(address(liquoriceExecutor)),
+            1 ether * 98 / 100
+        );
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(liquoriceExecutor)), 0);
+    }
+
+    /// @dev Without `partialFill` in Liquorice's quote response, the encoder sends offset 0 and
+    /// the quoted amount as the minimum, so any shortfall reverts before reaching the settlement.
+    function testSettleSingle_UnderQuoteWithoutPartialFillReverts() public {
+        uint256 amountIn = 3000e6 * 98 / 100;
+
+        _fundSettleSingle(amountIn);
+        vm.expectRevert(
+            LiquoriceExecutor.LiquoriceExecutor__AmountBelowMinimum.selector
+        );
+        liquoriceExecutor.swap(
+            amountIn, _settleSingleParams(0, 3000e6), address(liquoriceExecutor)
+        );
+    }
+
+    function _fundSettleSingle(uint256 amountIn) internal {
+        deal(WETH_ADDR, MAKER, 1 ether);
+        deal(USDC_ADDR, address(liquoriceExecutor), amountIn);
+        vm.prank(address(liquoriceExecutor));
+        IERC20(USDC_ADDR).approve(LIQUORICE_BALANCE_MANAGER, amountIn);
+    }
+
+    /// @dev The 3000 USDC -> 1 WETH quote from `testSettleSingle`.
+    function _settleSingleParams(
+        uint32 partialFillOffset,
+        uint256 minBaseTokenAmount
+    ) internal view returns (bytes memory) {
+        return abi.encodePacked(
+            USDC_ADDR,
+            WETH_ADDR,
+            partialFillOffset,
+            uint256(3000e6),
+            minBaseTokenAmount,
+            hex"9935c86800000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f68705800000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000024000000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000000000000000320000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058000000000000000000000000000000000000000000000000000000000000000131000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041883a6506193307eebda0f3adf2cb81f84a073e030749055ebb18cbf98704eef100a03c307266527d706f9a5c3e08ed0988f5b130bc5327e0ad62dde6f3709d251b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
     function testDecodeData() public view {
         bytes memory liquoriceCalldata = abi.encodePacked(
             bytes4(0xdeadbeef),
