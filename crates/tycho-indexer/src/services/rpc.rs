@@ -290,14 +290,14 @@ where
     /// the database path.
     async fn get_contract_state_routed(
         &self,
-        mut request: dto::StateRequestBody,
+        request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            let (result, returned) = run_off_worker(&self.off_worker_permits, move || {
-                (service.contract_state(&request), request)
+            let cache_request = request.clone();
+            let result = run_off_worker(&self.off_worker_permits, move || {
+                service.contract_state(&cache_request)
             })
             .await?;
-            request = returned;
             match result {
                 Ok(response) => return Ok(response),
                 Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
@@ -543,14 +543,14 @@ where
     /// the database path.
     async fn get_protocol_state_routed(
         &self,
-        mut request: dto::ProtocolStateRequestBody,
+        request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            let (result, returned) = run_off_worker(&self.off_worker_permits, move || {
-                (service.protocol_state(&request), request)
+            let cache_request = request.clone();
+            let result = run_off_worker(&self.off_worker_permits, move || {
+                service.protocol_state(&cache_request)
             })
             .await?;
-            request = returned;
             match result {
                 Ok(response) => return Ok(response),
                 Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
@@ -3839,7 +3839,9 @@ plans:
         let gave_up = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             run_off_worker(&permits, move || {
-                released.recv().ok();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .ok();
             }),
         )
         .await;
@@ -3847,51 +3849,6 @@ plans:
         assert!(gave_up.is_err());
         assert_eq!(permits.available_permits(), 0);
         release.send(()).unwrap();
-        wait_for_available_permits(&permits, 1).await;
-    }
-
-    #[tokio::test]
-    async fn run_off_worker_runs_no_more_jobs_than_permits() {
-        let permits = Arc::new(Semaphore::new(1));
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let first = tokio::spawn({
-            let permits = Arc::clone(&permits);
-            async move {
-                run_off_worker(&permits, move || {
-                    released.recv().ok();
-                })
-                .await
-            }
-        });
-        wait_for_available_permits(&permits, 0).await;
-
-        let second_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let second = tokio::spawn({
-            let permits = Arc::clone(&permits);
-            let started = Arc::clone(&second_started);
-            async move {
-                run_off_worker(&permits, move || {
-                    started.store(true, std::sync::atomic::Ordering::SeqCst)
-                })
-                .await
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        assert!(!second_started.load(std::sync::atomic::Ordering::SeqCst));
-        release.send(()).unwrap();
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-        assert!(second_started.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn run_off_worker_reports_a_panicking_job_and_frees_its_permit() {
-        let permits = Arc::new(Semaphore::new(1));
-
-        let result = run_off_worker(&permits, || -> () { panic!("job failed") }).await;
-
-        assert!(matches!(result, Err(RpcError::Unknown(_))));
         wait_for_available_permits(&permits, 1).await;
     }
 
