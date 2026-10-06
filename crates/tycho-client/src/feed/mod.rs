@@ -1147,7 +1147,7 @@ mod tests {
     use async_trait::async_trait;
     use test_log::test;
     use tokio::sync::{oneshot, Mutex};
-    use tycho_common::models::Chain;
+    use tycho_common::models::{token::Token, Chain};
 
     use super::*;
     use crate::feed::synchronizer::{SyncResult, SynchronizerTaskHandle};
@@ -2965,6 +2965,105 @@ mod tests {
         let feed = receive_message(&mut rx).await;
         assert_ready_at(&feed, "uniswap-v2", 5, Some(0));
         assert_ready_at(&feed, "uniswap-v3", 5, Some(0));
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Gives `msg` block changes, with a new token at the address of 20 `token` bytes.
+    fn with_new_token(
+        mut msg: StateSyncMessage<BlockHeader>,
+        token: Option<u8>,
+    ) -> StateSyncMessage<BlockHeader> {
+        let mut changes = BlockAggregatedChanges::default();
+        if let Some(byte) = token {
+            let addr = Bytes::from(vec![byte; 20]);
+            changes.new_tokens = HashMap::from([(
+                addr.clone(),
+                Token::new(&addr, "T", 18, 0, &[], Chain::Ethereum, 100),
+            )]);
+        }
+        msg.deltas = Some(changes);
+        msg
+    }
+
+    fn has_new_token(feed: &FeedMessage, name: &str, token: u8) -> bool {
+        feed.state_msgs
+            .get(name)
+            .and_then(|msg| msg.deltas.as_ref())
+            .is_some_and(|changes| {
+                changes
+                    .new_tokens
+                    .contains_key(&Bytes::from(vec![token; 20]))
+            })
+    }
+
+    /// A lagging stream catches up on two blocks, and the second one introduces a token. The
+    /// catch-up merges both messages, and the merged message must still carry the token.
+    #[test(tokio::test)]
+    async fn test_lagging_catch_up_keeps_new_tokens() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, with_new_token(header_message(2), None)).await;
+
+        v2.send_header(with_new_token(header_message(3), None))
+            .await
+            .expect("v2 send failed");
+        receive_message(&mut rx).await;
+
+        v3.send_header(with_new_token(header_message(3), None))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(with_new_token(header_message(4), Some(0xee)))
+            .await
+            .expect("v3 send failed");
+        v2.send_header(with_new_token(header_message(4), None))
+            .await
+            .expect("v2 send failed");
+
+        let mut found = false;
+        for _ in 0..3 {
+            if has_new_token(&receive_message(&mut rx).await, "uniswap-v3", 0xee) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "token 0xee never reached the feed");
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A lagging stream reads an undo the history already applied, then the rebuilt block with a
+    /// new token. The catch-up merges both messages, and the merged message must still carry
+    /// the token.
+    #[test(tokio::test)]
+    async fn test_applied_undo_merged_with_rebuilt_block_keeps_new_tokens() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        for block in 2..=4 {
+            advance_both(&v2, &v3, &mut rx, with_new_token(header_message(block), None)).await;
+        }
+
+        v2.send_header(with_new_token(revert_header_message(3), None))
+            .await
+            .expect("v2 send failed");
+        receive_message(&mut rx).await;
+
+        let mut rebuilt_4 = header_message(4);
+        rebuilt_4.header.hash = Bytes::from(vec![0x34]);
+        rebuilt_4.header.parent_hash = Bytes::from(vec![3]);
+        v3.send_header(with_new_token(revert_header_message(3), None))
+            .await
+            .expect("v3 send failed");
+        v3.send_header(with_new_token(rebuilt_4, Some(0xee)))
+            .await
+            .expect("v3 send failed");
+
+        let mut found = false;
+        for _ in 0..3 {
+            if has_new_token(&receive_message(&mut rx).await, "uniswap-v3", 0xee) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "token 0xee never reached the feed");
 
         shutdown_block_synchronizer(nanny, rx).await;
     }
