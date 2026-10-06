@@ -26,6 +26,8 @@ pub use tycho_ethereum;
 pub mod book;
 #[cfg(feature = "evm")]
 pub mod evm;
+#[cfg(feature = "book-feeds")]
+pub mod pamm;
 #[cfg(feature = "price-level-stream")]
 pub mod price_level_stream;
 pub mod protocol;

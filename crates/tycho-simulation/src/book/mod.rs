@@ -18,38 +18,10 @@ use crate::{
     },
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod component;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod levels;
 pub mod quote_tokens;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod sim;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod tvl;
 
 /// One pair's book: the component that identifies the pair and the ready-to-simulate state
@@ -120,19 +92,11 @@ pub struct BookFeedConfig {
 impl BookFeedConfig {
     /// The two tokens of a pair, or `None` when either is outside the universe and the pair is
     /// therefore not served.
-    #[expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )]
     pub(crate) fn pair_tokens(&self, a: &Bytes, b: &Bytes) -> Option<(&Token, &Token)> {
         Some((self.tokens.get(a)?, self.tokens.get(b)?))
     }
 
     /// Whether a book with `tvl_usd` clears the floor; logs the book it filters out.
-    #[expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )]
     pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book: impl fmt::Display) -> bool {
         let clears = tvl_usd >= self.min_tvl_usd;
         if !clears {
@@ -190,10 +154,6 @@ pub type BookFeedOutcome = SnapshotFeedOutcome<FeedError>;
 
 /// Builds the token map of a test [`BookFeedConfig`] from `(address, symbol, decimals)` entries.
 #[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) fn test_token_map(entries: &[(&Bytes, &str, u32)]) -> HashMap<Bytes, Token> {
     entries
         .iter()

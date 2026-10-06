@@ -1,5 +1,8 @@
-pub mod client;
-pub mod client_builder;
-pub mod decoder;
-pub mod models;
+mod client;
+pub mod feed;
+mod models;
+mod source;
 pub mod state;
+
+/// Protocol system stamped on every component this integration emits.
+pub const PROTOCOL_SYSTEM: &str = "book:native";
