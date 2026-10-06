@@ -169,6 +169,17 @@ pub fn base() -> TestCase {
     }
 }
 
+/// A full-range pool at price 1 with no liquidity.
+pub fn empty_full_range_state() -> EkuboState {
+    let key = NodeKey {
+        token0: U256([1, 0, 0, 0]),
+        token1: U256([2, 0, 0, 0]),
+        config: Config { fee: 0, tick_spacing: 0, extension: U256::zero() },
+    };
+    let state = FullRangePoolState { sqrt_ratio: U256([0, 0, 1, 0]), liquidity: 0 };
+    EkuboState::FullRange(FullRangePool::new(key, state).unwrap())
+}
+
 #[fixture]
 pub fn full_range() -> TestCase {
     const POOL_KEY: NodeKey = NodeKey {

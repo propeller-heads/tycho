@@ -95,6 +95,10 @@ pub struct RawPoolState {
     /// Which Curve variant this pool is.
     pub variant: CurveVariant,
 
+    /// Admin share of the swap fee, scaled by 1e10. Required for StableSwap execution state.
+    #[serde(default)]
+    pub admin_fee: Option<U256>,
+
     /// Token balances in native token units (wei). **Updates every block.**
     ///
     /// Length determines coin count (2, 3, or 4+).
@@ -255,6 +259,7 @@ impl Default for RawPoolState {
             token_decimals: Vec::new(),
             amp: U256::ZERO,
             fee: None,
+            admin_fee: None,
             mid_fee: None,
             out_fee: None,
             fee_gamma: None,

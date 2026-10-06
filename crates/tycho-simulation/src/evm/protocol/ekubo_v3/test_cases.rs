@@ -215,6 +215,21 @@ pub fn concentrated() -> TestCase {
     }
 }
 
+/// A full-range pool at price 1 with no liquidity.
+pub fn empty_full_range_state() -> EkuboV3State {
+    let key = EvmFullRangePoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: EvmFullRangePoolConfig {
+            fee: 0,
+            pool_type_config: FullRangePoolTypeConfig,
+            extension: Address::ZERO,
+        },
+    };
+    let state = EvmFullRangePoolState { sqrt_ratio: U256::from_limbs([0, 0, 1, 0]), liquidity: 0 };
+    EkuboV3State::FullRange(FullRangePool::new(key, state).unwrap())
+}
+
 #[fixture]
 pub fn full_range() -> TestCase {
     const POOL_KEY: EvmFullRangePoolKey = EvmFullRangePoolKey {

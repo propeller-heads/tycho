@@ -94,3 +94,12 @@ export RPC_URL=..   # Ethereum mainnet RPC (the router constructor requires a fo
 
 The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op during simulation
 (the router calls it on every swap to read the router fee rate).
+
+**Open item — `UniswapV4Robinhood.runtime.json`.** This fixture skips the regeneration path above:
+it holds the bytecode `eth_getCode` returned for the Robinhood executor
+`0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366` at block 67644471, fetched directly from the public
+Robinhood RPC (SHA-256 `817b521132e15b778c7437d9cd4174fe6e77c18d48b7922c27cef8caa3bcfa0e`).
+`EXECUTOR_FIXTURES` in `update_runtime_bytecode.sh` does not list it yet, so `--check` skips it and
+cannot catch drift if Robinhood redeploys `UniswapV4Executor`. This is an open release-gate item:
+add `"UniswapV4Robinhood|robinhood|uniswap_v4"` to `EXECUTOR_FIXTURES` and confirm `--check` passes
+with foundry installed.

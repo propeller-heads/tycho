@@ -26,6 +26,10 @@ use crate::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
         middleware::{compression_middleware, rpc_metrics_middleware},
+        state::{
+            service::StateService,
+            window::{new_windows, DiscardSink, FoldSink},
+        },
     },
 };
 
@@ -42,7 +46,9 @@ mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
-pub use state::{cache::EntityCache, window::WindowConfig, EntityCacheMode};
+pub use state::{
+    cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
+};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -60,6 +66,9 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
+    /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
+    /// database.
+    entity_cache: EntityCacheSetup<Arc<EntityCache>>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -95,12 +104,23 @@ where
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
+            entity_cache: EntityCacheSetup::Off,
         }
     }
 
     /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
     pub fn window_config(mut self, v: WindowConfig) -> Self {
         self.window_config = v;
+        self
+    }
+
+    /// Sets which path answers the state endpoints, and the entity cache behind it.
+    ///
+    /// The cache must be fully loaded: the windows fold into it and requests read it from the
+    /// first block on. Ignored without extractors: the standalone rpc server has no windows, so
+    /// it always runs as [`EntityCacheSetup::Off`].
+    pub fn entity_cache(mut self, setup: EntityCacheSetup<EntityCache>) -> Self {
+        self.entity_cache = setup.map(Arc::new);
         self
     }
 
@@ -169,7 +189,7 @@ where
         // If no extractors are registered, run the server without spawning extractor-related tasks.
         if self.extractor_handles.is_empty() {
             info!("Starting standalone rpc server");
-            self.start_server(None, open_api, None)
+            self.start_server(None, open_api, None, EntityCacheSetup::Off)
         } else {
             info!("Starting full server");
             self.start_server_with_deltas(open_api)
@@ -182,13 +202,17 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let pending_deltas = PendingDeltas::with_config(
+        let sink: Arc<dyn FoldSink> = match self.entity_cache.cache() {
+            Some(cache) => cache.clone(),
+            None => Arc::new(DiscardSink),
+        };
+        let windows = new_windows(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
-            Arc::new(state::window::DiscardSink),
         );
+        let pending_deltas = PendingDeltas::from_windows(windows.clone(), sink);
         info!(
             depth = self.window_config.depth,
             min_fold_batch = self.window_config.min_fold_batch,
@@ -212,9 +236,18 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
+        let state_service = self
+            .entity_cache
+            .clone()
+            .map(|cache| Arc::new(StateService::new(windows, cache)));
+
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
-        let (server_handle, server_task) =
-            self.start_server(Some(ws_data), openapi, Some(Arc::new(pending_deltas)))?;
+        let (server_handle, server_task) = self.start_server(
+            Some(ws_data),
+            openapi,
+            Some(Arc::new(pending_deltas)),
+            state_service,
+        )?;
 
         let task = tokio::spawn(join_services([deltas_task, server_task]));
 
@@ -227,17 +260,21 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+        state_service: EntityCacheSetup<Arc<StateService>>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
-        let rpc_data = web::Data::new(rpc::RpcHandler::new(
-            self.db_gateway,
-            pending_deltas,
-            tracer,
-            self.plans_config,
-            self.dci_protocols,
-            self.protocol_systems,
-        ));
+        let rpc_data = web::Data::new(
+            rpc::RpcHandler::new(
+                self.db_gateway,
+                pending_deltas,
+                tracer,
+                self.plans_config,
+                self.dci_protocols,
+                self.protocol_systems,
+            )
+            .with_state_service(state_service),
+        );
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()

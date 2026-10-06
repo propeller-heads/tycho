@@ -82,6 +82,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
         ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
         ("robinhood-up-v3", "base-aerodrome-slipstreams"),
+        ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
     ])
 });
 
@@ -112,6 +113,24 @@ fn check_execution_slippage(
         Err(format!("amounts differ by more than {}%", MAX_EXECUTION_SLIPPAGE * 100.0))
     } else {
         Ok(())
+    }
+}
+
+/// The largest input amount a swap can actually be executed with, given `limit`.
+///
+/// Uniswap V4 settles a swap through a `BalanceDelta` of two `int128`s, and the executor's
+/// `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to `int128`, so no
+/// amount above `int128::MAX` can be executed however deep the pool is. A limit above that
+/// ceiling is not executable, and the percentages the harness trades at must stay distinct sizes,
+/// so the cap belongs on the limit itself rather than on each amount derived from it.
+///
+/// Returns `limit` unchanged when it is at or below the ceiling.
+fn executable_max_input(limit: &BigUint) -> BigUint {
+    let ceiling = BigUint::from(i128::MAX as u128);
+    if *limit > ceiling {
+        ceiling
+    } else {
+        limit.clone()
     }
 }
 
@@ -1197,6 +1216,16 @@ impl TestRunner {
                     id, token_in.symbol, token_out.symbol
                 );
 
+                let executable_input = executable_max_input(&max_input);
+                if executable_input != max_input {
+                    warn!(
+                        "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
+                         sizing trades from {executable_input} instead",
+                        id, token_in.symbol
+                    );
+                }
+                let max_input = executable_input;
+
                 // A zero limit means the venue does not quote this direction at all - a
                 // one-directional component such as ETH -> stETH staking, or a redemption
                 // rate limit with no capacity at this block. Skip the direction instead of
@@ -1267,11 +1296,16 @@ impl TestRunner {
                         continue;
                     }
 
-                    let executors_json = json!({
-                        (self.chain.to_string()): {
-                            (protocol_system): EXECUTOR_ADDRESS
-                        }
-                    });
+                    // Swaps are grouped before their encoder is looked up, and grouping folds
+                    // `uniswap_v4_hooks` into `uniswap_v4` because both swap through the same
+                    // PoolManager. Registering the executor under both names lets the lookup
+                    // find it whichever of the two the group ends up carrying.
+                    let mut executors = serde_json::Map::new();
+                    executors.insert(protocol_system.to_string(), json!(EXECUTOR_ADDRESS));
+                    if protocol_system == "uniswap_v4_hooks" {
+                        executors.insert("uniswap_v4".to_string(), json!(EXECUTOR_ADDRESS));
+                    }
+                    let executors_json = json!({ (self.chain.to_string()): executors });
                     let chain_model = self.chain;
                     let (solution, calldata) = encode_swap(
                         component,
@@ -1550,6 +1584,20 @@ mod tests {
 
     use super::*;
 
+    /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
+    /// size the venue reported, untouched.
+    #[test]
+    fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
+        let ceiling = BigUint::from(i128::MAX as u128);
+
+        assert_eq!(executable_max_input(&BigUint::from(1_000u32)), BigUint::from(1_000u32));
+        assert_eq!(executable_max_input(&ceiling), ceiling);
+        assert_eq!(executable_max_input(&(&ceiling + 1u32)), ceiling);
+        // The limit the deep Pons pool reports, some 12 orders of magnitude past the ceiling.
+        let pons_limit = BigUint::from_str("1693513416259416009682992155640660564186233").unwrap();
+        assert_eq!(executable_max_input(&pons_limit), ceiling);
+    }
+
     #[test]
     fn execution_within_slippage_tolerance_matches() {
         let executed = BigUint::from(1000u32);
@@ -1697,12 +1745,18 @@ mod tests {
     fn get_mocked_runner() -> TestRunner {
         dotenv().ok();
         let rpc_url = env::var("RPC_URL").unwrap();
+        get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
+    }
+
+    /// Builds a runner for `protocol` on `chain` rooted at the current directory. The RPC URL
+    /// is only stored, so callers that never reach the network can pass a placeholder.
+    fn get_mocked_runner_for(chain: Chain, protocol: &str, rpc_url: String) -> TestRunner {
         let current_dir = std::env::current_dir().unwrap();
         TestRunner::new(RunnerConfig {
             test_type: TestType::Range(TestTypeRange { match_test: None }),
             root_path: current_dir,
-            chain: Chain::Ethereum,
-            protocol: "test-protocol".to_string(),
+            chain,
+            protocol: protocol.to_string(),
             db_url: "".to_string(),
             rpc_url,
             tycho_server_port: 4242,
@@ -1712,6 +1766,33 @@ mod tests {
         })
         .unwrap()
     }
+
+    #[test]
+    fn robinhood_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
+        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
+        // in the no-external-deps CI job, which does not set RPC_URL.
+        let runner = get_mocked_runner_for(
+            Chain::Robinhood,
+            "robinhood-uniswap-v4-with-hooks",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("ethereum-uniswap-v4/with-hooks"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_robinhood_uniswap_v4_with_hooks.tycho.yaml")
+        );
+    }
+
     #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();

@@ -1,0 +1,19 @@
+{
+  "description": "Raw eth_getStorageAt responses for launches[0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289] on the Pons V2 MemeHook, the pool initialized in block 58759099 by tx 0xf66ca58190cc186683267cb486bbc6e1f0469176b7ad4f92e43eb68a1a0936e5. registerPool writes these words once and rejects re-registration, so the latest values are the values written in that transaction. The public endpoint keeps no historical state, so they cannot be read at a past block.",
+  "endpoint": "https://rpc.mainnet.chain.robinhood.com",
+  "contract": "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+  "pool_id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+  "base_slot": "keccak256(pool_id || uint256(10))",
+  "calls": [
+    {
+      "slot_name": "launches[poolId] word 0 (registered at low byte 0, memecoin at low bytes 2..22)",
+      "request": { "jsonrpc": "2.0", "id": 1, "method": "eth_getStorageAt", "params": ["0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044", "0x0048adbd8de985267f35480231e60bb522837a5ce3130ae7a76b0ac25bbc9819", "latest"] },
+      "response": {"jsonrpc":"2.0","id":1,"result":"0x00000000000000000000ab5983fe30f186055095305c862b0e097dab3b520101"}
+    },
+    {
+      "slot_name": "launches[poolId] word 4 (creatorTaxBps at low byte 20, hookFeeBps at low byte 26)",
+      "request": { "jsonrpc": "2.0", "id": 2, "method": "eth_getStorageAt", "params": ["0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044", "0x0048adbd8de985267f35480231e60bb522837a5ce3130ae7a76b0ac25bbc981d", "latest"] },
+      "response": {"jsonrpc":"2.0","id":2,"result":"0x0000012c006413880bb80064263ed295dafae1d9aadd6e56c4b6f9f38ee019dd"}
+    }
+  ]
+}

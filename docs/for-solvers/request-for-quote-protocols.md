@@ -11,18 +11,21 @@ Tycho supports streaming, simulating, and executing RFQ quotes as part of multi-
 
 Currently, Tycho supports the following RFQ protocols:
 
-| Protocol    | Simulation Time | Credentials              |
-| ----------- | --------------- | ------------------------ |
-| `bebop`     | 0.5 µs          | Required                 |
-| `hashflow`  | 0.4 µs          | Required                 |
-| `liquorice` | 0.4 µs          | Required                 |
-| `metric`    | -               | None (public endpoint)   |
+| Protocol    | Simulation Time | Credentials            | Chains                                   |
+| ----------- | --------------- | ---------------------- | ---------------------------------------- |
+| `bebop`     | 0.5 µs          | Required               | Ethereum, Base                           |
+| `hashflow`  | 0.4 µs          | Required               | Ethereum                                 |
+| `liquorice` | 0.4 µs          | Required               | Ethereum                                 |
+| `metric`    | -               | None (public endpoint) | Base, Robinhood                          |
+| `native`    | -               | Required               | Ethereum, Base, Arbitrum, BSC, Robinhood |
+
+On Ethereum, Metric is available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
 
 ## Quickstart
 
 The RFQ quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a> and Metric are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, Metric and Native are the only supported providers.
 
 You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
 
@@ -33,6 +36,7 @@ export HASHFLOW_USER=<your-hashflow-api-username>
 export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
+export NATIVE_API_KEY=<your-native-api-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
 
@@ -258,5 +262,7 @@ let price_level_stream = PriceLevelStreamBuilder::new()
 ```
 
 Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. The stream never terminates — run it in its own task alongside your protocol stream.
+
+`with_known_pamms()` serves these venues: Bebop, FermiSwap, Kipseli, Metric, TaurusFi and Tempest. Titan does not stream every venue at all times, so the live set can be smaller.
 
 Components arrive as `fallback:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one: `tycho-execution` routes those swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback pool named in the swap's `user_data`. `without_fallback_router()` keeps every venue on the direct `pricelevelstream:{pamm}` path, where a stale quote reverts the route.

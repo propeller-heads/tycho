@@ -17,10 +17,7 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
     protocol::{
-        curve::{
-            adapter::{build_pool, detect_eth_variant, CurveVariant, ProbingResults, RawPoolState},
-            math::Pool,
-        },
+        curve::adapter::{detect_eth_variant, CurveVariant, ProbingResults, RawPoolState},
         vm::utils::get_code_for_contract,
     },
     simulation::{PendingOverrides, SimulationEngine},
@@ -31,6 +28,7 @@ sol! {
     interface ICurve {
         function balances(uint256 i) external view returns (uint256);
         function A() external view returns (uint256);
+        function admin_fee() external view returns (uint256);
         function fee() external view returns (uint256);
         function initial_A() external view returns (uint256);
         function future_A() external view returns (uint256);
@@ -93,27 +91,6 @@ pub fn decode_raw_state(bytes: &[u8]) -> Result<RawPoolState, SimulationError> {
         .map_err(|e| SimulationError::FatalError(format!("curve state decode failed: {e}")))
 }
 
-/// Read Curve pool state for `variant` from the engine and build the matching [`Pool`].
-///
-/// `token_decimals` must be ordered to match the pool's coin indices. Returns a fully
-/// constructed [`Pool`] ready for quoting, or a [`SimulationError`] if a required getter
-/// reverts or `build_pool` rejects the assembled state.
-pub fn decode_from_vm<D: EngineDatabaseInterface + Clone + Debug>(
-    engine: &SimulationEngine<D>,
-    pool: &AlloyAddress,
-    variant: CurveVariant,
-    token_decimals: &[u8],
-) -> Result<Pool, SimulationError>
-where
-    <D as DatabaseRef>::Error: Debug,
-    <D as EngineDatabaseInterface>::Error: Debug,
-{
-    let state =
-        read_raw_pool_state(engine, pool, variant, token_decimals, &PendingOverrides::default())?;
-    build_pool(&state)
-        .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))
-}
-
 /// Read the view getters `variant` needs from `engine`, for a pool with `n_coins` coins.
 ///
 /// `overrides` allows for overriding the state the getters run against; empty [`PendingOverrides`]
@@ -134,7 +111,23 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    PoolReader::new(engine, overrides).read_pool(pool, variant, decimals)
+    let reader = PoolReader::new(engine, overrides);
+    let mut state = reader.read_pool(pool, variant, decimals)?;
+    state.admin_fee = match variant {
+        CurveVariant::StableSwapNG => Some(U256::from(5_000_000_000u64)),
+        CurveVariant::StableSwapV0 |
+        CurveVariant::StableSwapV1 |
+        CurveVariant::StableSwapV2 |
+        CurveVariant::StableSwapSTETH |
+        CurveVariant::StableSwapALend |
+        CurveVariant::StableSwapMeta => Some(reader.call(pool, ICurve::admin_feeCall {})?),
+        CurveVariant::TwoCryptoV1 |
+        CurveVariant::TwoCryptoNG |
+        CurveVariant::TwoCryptoStable |
+        CurveVariant::TriCryptoV1 |
+        CurveVariant::TriCryptoNG => None,
+    };
+    Ok(state)
 }
 
 /// Reads one pool's view getters from `engine`, under a fixed set of state overrides.
@@ -535,6 +528,7 @@ mod test {
             simulation_db::SimulationDB,
             utils::{get_client, get_runtime},
         },
+        protocol::curve::adapter::build_pool,
         simulation::SimulationEngine,
     };
 
@@ -593,7 +587,10 @@ mod test {
         let pool = AlloyAddress::from_str(pool).unwrap();
         let decimals = read_decimals(&engine, &pool, n_coins);
 
-        let decoded = decode_from_vm(&engine, &pool, variant, &decimals).expect("decode failed");
+        let raw =
+            read_raw_pool_state(&engine, &pool, variant, &decimals, &PendingOverrides::default())
+                .expect("read failed");
+        let decoded = build_pool(&raw).expect("decode failed");
         let ours = decoded
             .get_amount_out(i, j, dx)
             .expect("get_amount_out returned None");
@@ -626,6 +623,7 @@ mod test {
             dynamic_rates: Some(vec![Some(u("1000000000000000000")), None]),
             precisions: Some(vec![u("1"), u("1000000000000")]),
             eth_variant: Some(true),
+            admin_fee: Some(u("5000000000")),
         };
 
         let encoded = encode_raw_state(&state).expect("encode failed");

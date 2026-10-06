@@ -7,10 +7,26 @@ use tycho_common::simulation::errors::SimulationError;
 use super::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickInfoData")]
 pub struct TickInfo {
     pub(crate) index: i32,
     pub(crate) net_liquidity: i128,
     pub(crate) sqrt_price: U256,
+}
+
+#[derive(Deserialize)]
+struct TickInfoData {
+    index: i32,
+    net_liquidity: i128,
+}
+
+impl TryFrom<TickInfoData> for TickInfo {
+    type Error = SimulationError;
+
+    fn try_from(data: TickInfoData) -> Result<Self, Self::Error> {
+        // sqrt_price is derived from the index, never trusted from serialized input.
+        Self::new(data.index, data.net_liquidity)
+    }
 }
 
 impl TickInfo {
@@ -42,9 +58,25 @@ pub(crate) enum TickListErrorKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickListData")]
 pub(crate) struct TickList {
     tick_spacing: u16,
     ticks: Vec<TickInfo>,
+}
+
+/// Deserialized [`TickList`] fields, checked through [`TickList::from`].
+#[derive(Deserialize)]
+struct TickListData {
+    tick_spacing: u16,
+    ticks: Vec<TickInfo>,
+}
+
+impl TryFrom<TickListData> for TickList {
+    type Error = SimulationError;
+
+    fn try_from(data: TickListData) -> Result<Self, Self::Error> {
+        TickList::from(data.tick_spacing, data.ticks)
+    }
 }
 
 impl TickList {
@@ -52,6 +84,10 @@ impl TickList {
         let tick_list = TickList { tick_spacing: spacing, ticks };
         tick_list.valid_ticks()?;
         Ok(tick_list)
+    }
+
+    pub(crate) fn ticks(&self) -> &[TickInfo] {
+        &self.ticks
     }
 
     // Validates that all attributes are valid. Checks for:
@@ -64,6 +100,12 @@ impl TickList {
         }
 
         for t in &self.ticks {
+            if !(MIN_TICK..=MAX_TICK).contains(&t.index) {
+                return Err(SimulationError::FatalError(format!(
+                    "Tick index {} out of range",
+                    t.index
+                )));
+            }
             if t.index % self.tick_spacing as i32 != 0 {
                 return Err(SimulationError::FatalError(format!(
                     "Tick index {} not aligned with tick spacing {}",
@@ -74,7 +116,7 @@ impl TickList {
         if !self.ticks.is_empty() {
             for i in 0..self.ticks.len() - 1 {
                 let t = &self.ticks[i];
-                if t > &self.ticks[i + 1] {
+                if t.index >= self.ticks[i + 1].index {
                     return Err(SimulationError::FatalError(format!(
                         "Ticks are not ordered at position {}",
                         t.index
@@ -677,5 +719,33 @@ mod tests {
 
         assert!(tick_list.get_tick(-10).is_err());
         assert!(tick_list.get_tick(10).is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_out_of_range_and_duplicate_ticks() {
+        let ticks = vec![create_tick_info(0, 0), create_tick_info(0, 0)];
+        let json = serde_json::json!({"tick_spacing": 1, "ticks": ticks});
+        assert!(serde_json::from_value::<TickList>(json).is_err());
+        let mut json = serde_json::to_value(create_tick_info(0, 0)).unwrap();
+        json["index"] = serde_json::json!(i32::MIN);
+        assert!(serde_json::from_value::<TickInfo>(json).is_err());
+    }
+
+    #[test]
+    fn deserialize_recomputes_tick_sqrt_price() {
+        let tick = TickInfo::new(0, 0).unwrap();
+        let mut json = serde_json::to_value(tick).unwrap();
+        json["sqrt_price"] = serde_json::json!("0x0");
+        assert_eq!(serde_json::from_value::<TickInfo>(json).unwrap(), tick);
+    }
+
+    #[test]
+    fn test_deserialize_checks_tick_list() {
+        let ticks = vec![create_tick_info(20, 0), create_tick_info(10, 0)];
+        let json = serde_json::json!({ "tick_spacing": 10, "ticks": ticks });
+
+        let err = serde_json::from_value::<TickList>(json).unwrap_err();
+
+        assert!(err.to_string().contains("not ordered"), "unexpected error: {err}");
     }
 }

@@ -95,7 +95,7 @@ pub fn query_pool_swap(
 /// # Returns
 /// The price as f64, adjusted for decimal differences: `(num/den) * 10^(decimals_in -
 /// decimals_out)`
-fn price_to_f64_with_decimals(
+pub(crate) fn price_to_f64_with_decimals(
     price: &Price,
     decimals_in: u32,
     decimals_out: u32,
@@ -360,6 +360,43 @@ fn geometric_mean(a: &BigUint, b: &BigUint) -> BigUint {
 }
 
 #[cfg(test)]
+pub(crate) mod test_helpers {
+    use num_bigint::BigUint;
+    use tycho_common::{
+        models::token::Token,
+        simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
+    };
+
+    /// Converts a price of `token_out` per `token_in` in whole-token units into a [`Price`] in
+    /// atomic units.
+    pub(crate) fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
+        let decimal_adj = 10_f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
+        let price_no_decimals = price_f64 / decimal_adj;
+        Price::new(BigUint::from((price_no_decimals * 1e18) as u128), BigUint::from(10u128.pow(18)))
+    }
+
+    /// Builds [`QueryPoolSwapParams`] for a [`SwapConstraint::PoolTargetPrice`] with no amount
+    /// bounds.
+    pub(crate) fn target_price_params(
+        token_in: &Token,
+        token_out: &Token,
+        target: Price,
+        tolerance: f64,
+    ) -> QueryPoolSwapParams {
+        QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::PoolTargetPrice {
+                target,
+                tolerance,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
@@ -367,7 +404,10 @@ mod tests {
     use rstest::rstest;
     use tycho_common::{hex_bytes::Bytes, models::Chain, simulation::protocol_sim::Price};
 
-    use super::*;
+    use super::{
+        test_helpers::{target_price_params, to_price},
+        *,
+    };
     use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
 
     fn create_token(address: &str, symbol: &str, decimals: u32) -> Token {
@@ -831,12 +871,6 @@ mod tests {
         }
     }
 
-    fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
-        let decimal_adj = 10_f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
-        let price_no_decimals = price_f64 / decimal_adj;
-        Price::new(BigUint::from((price_no_decimals * 1e18) as u128), BigUint::from(10u128.pow(18)))
-    }
-
     // =========================================================================
     // Integration tests - PoolTargetPrice (all pool types)
     // =========================================================================
@@ -862,16 +896,8 @@ mod tests {
         let target_price_f64 = spot_price * price_multiplier;
         let target_price = to_price(target_price_f64, &token_in, &token_out);
 
-        let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: tolerance_bps / 10000.0,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
+        let params =
+            target_price_params(&token_in, &token_out, target_price, tolerance_bps / 10000.0);
 
         let result = query_pool_swap(state.as_ref(), &params);
         assert!(result.is_ok(), "query_pool_swap failed: {:?}", result.err());
@@ -962,16 +988,7 @@ mod tests {
 
         let target_price = Price::new(BigUint::from(1u32), BigUint::from(1u32));
 
-        let params = QueryPoolSwapParams::new(
-            token_in,
-            token_out,
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0.0,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
+        let params = target_price_params(&token_in, &token_out, target_price, 0.0);
 
         let result = query_pool_swap(&state, &params);
         assert!(result.is_err(), "Should return error for unreachable price");
@@ -1030,16 +1047,7 @@ mod tests {
             .unwrap();
         let target_price = to_price(spot, &token_in, &token_out);
 
-        let params = QueryPoolSwapParams::new(
-            token_in,
-            token_out,
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0.001,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
+        let params = target_price_params(&token_in, &token_out, target_price, 0.001);
 
         let result = query_pool_swap(&state, &params);
         assert!(result.is_ok());
@@ -1064,16 +1072,7 @@ mod tests {
             .unwrap();
         let target_price = to_price(spot_price * 0.95, &token_in, &token_out);
 
-        let params = QueryPoolSwapParams::new(
-            token_in,
-            token_out,
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0.001,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
+        let params = target_price_params(&token_in, &token_out, target_price, 0.001);
 
         let result = query_pool_swap(&state, &params).unwrap();
         let price_points = result.price_points();
@@ -1096,16 +1095,7 @@ mod tests {
             .unwrap();
         let target_price = to_price(spot_price * 0.90, &token_in, &token_out);
 
-        let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
-            SwapConstraint::PoolTargetPrice {
-                target: target_price,
-                tolerance: 0.001,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
+        let params = target_price_params(&token_in, &token_out, target_price, 0.001);
 
         let result = query_pool_swap(&state, &params);
         assert!(result.is_ok(), "Should handle large reserves");

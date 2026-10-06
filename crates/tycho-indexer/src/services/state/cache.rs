@@ -3,8 +3,8 @@
 //! Two entity families are cached:
 //!
 //! - **Accounts** (contract state), keyed by address. Several extractors can write the same
-//!   account, so every cached value carries a [`WriteTimestamp`]: the writing block's wall-clock
-//!   timestamp and its number. A newer write always wins.
+//!   account, so every cached value carries a [`WriteTimestamp`]: the writing block's timestamp. A
+//!   newer write always wins.
 //! - **Component states** (protocol state), keyed by protocol system, then component id. Exactly
 //!   one extractor writes each protocol system, in order, so one timestamp per entry is enough.
 //!
@@ -21,14 +21,16 @@
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
 //! applies one whole block atomically, reads take the read side. Folds are expected to take well
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
-
-// The read side is consumed by the state service, ENG-6293.
-#![allow(dead_code)]
+//!
+//! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
+//! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
+//! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
+//! so that copy happens at most once per fold instead of once per read.
 
 use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Instant,
 };
 
@@ -78,10 +80,12 @@ impl<T> Timestamped<T> {
         Self { value, written_at }
     }
 
+    #[cfg(test)]
     pub(crate) fn value(&self) -> &T {
         &self.value
     }
 
+    #[cfg(test)]
     pub(crate) fn written_at(&self) -> WriteTimestamp {
         self.written_at
     }
@@ -149,6 +153,9 @@ pub(crate) struct CachedAccount {
     native_balance: Timestamped<Balance>,
     token_balances: HashMap<Address, Timestamped<AccountBalance>>,
     code: Timestamped<CachedCode>,
+    /// The newest timestamp among the values above. A write that [`Timestamped::write`] skips
+    /// does not move it.
+    updated_at: WriteTimestamp,
     /// Transaction references come from the startup load only — folds don't carry them.
     balance_modify_tx: TxHash,
     code_modify_tx: TxHash,
@@ -159,6 +166,17 @@ impl CachedAccount {
     /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
     /// have a timestamp in `timestamps`; a missing one is a snapshot bug and panics.
     pub(crate) fn from_snapshot(account: Account, timestamps: AccountWriteTimestamps) -> Self {
+        let updated_at = timestamps
+            .slots
+            .values()
+            .chain(timestamps.token_balances.values())
+            .copied()
+            .fold(
+                timestamps
+                    .native_balance
+                    .max(timestamps.code),
+                WriteTimestamp::max,
+            );
         let slots = account
             .slots
             .into_iter()
@@ -194,6 +212,7 @@ impl CachedAccount {
                 CachedCode { code: account.code, hash: account.code_hash },
                 timestamps.code,
             ),
+            updated_at,
             balance_modify_tx: account.balance_modify_tx,
             code_modify_tx: account.code_modify_tx,
             creation_tx: account.creation_tx,
@@ -216,8 +235,9 @@ impl CachedAccount {
     }
 
     /// Applies one block's changes. Each value takes `at`; a value already written by that block
-    /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here —
-    /// there is no entry-level timestamp to compare. A deleted slot becomes the zero value, as in
+    /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here:
+    /// values of one account can have different timestamps, so the entry's `updated_at` cannot
+    /// decide for each of them. A deleted slot becomes the zero value, as in
     /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
     /// [`WriteOutcome::Conflict`]s are counted and logged once here, where the address is known.
     pub(crate) fn apply_block(
@@ -226,11 +246,12 @@ impl CachedAccount {
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
+        let mut applied = false;
         let mut conflicts = 0;
-        let mut count = |outcome| {
-            if outcome == WriteOutcome::Conflict {
-                conflicts += 1;
-            }
+        let mut count = |outcome| match outcome {
+            WriteOutcome::Applied => applied = true,
+            WriteOutcome::Skipped => {}
+            WriteOutcome::Conflict => conflicts += 1,
         };
         if let Some(delta) = delta {
             for (key, value) in &delta.slots {
@@ -257,55 +278,68 @@ impl CachedAccount {
         for (token, balance) in balances.into_iter().flatten() {
             count(write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at));
         }
+        if applied {
+            self.updated_at = self.updated_at.max(at);
+        }
         if conflicts > 0 {
             warn!(
                 address = %self.address,
-                block = at.block_number(),
+                block_ts = %at.block_ts(),
                 values = conflicts,
                 "Skipped writes from the applied block carry different values"
             );
         }
     }
 
+    /// Timestamp of the newest write applied to any value of the account.
+    pub(crate) fn updated_at(&self) -> WriteTimestamp {
+        self.updated_at
+    }
+
+    #[cfg(test)]
     pub(crate) fn slots(&self) -> &HashMap<StoreKey, Timestamped<StoreVal>> {
         &self.slots
     }
 
+    #[cfg(test)]
     pub(crate) fn native_balance(&self) -> &Timestamped<Balance> {
         &self.native_balance
     }
 
+    #[cfg(test)]
     pub(crate) fn token_balances(&self) -> &HashMap<Address, Timestamped<AccountBalance>> {
         &self.token_balances
     }
 
+    #[cfg(test)]
     pub(crate) fn code(&self) -> &Timestamped<CachedCode> {
         &self.code
     }
 }
 
-impl From<&CachedAccount> for Account {
-    fn from(cached: &CachedAccount) -> Self {
+impl From<CachedAccount> for Account {
+    fn from(cached: CachedAccount) -> Self {
+        let code = cached.code.value;
         Account::new(
             cached.chain,
-            cached.address.clone(),
-            cached.title.clone(),
+            cached.address,
+            cached.title,
             cached
                 .slots
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value().clone()))
+                .into_iter()
+                .map(|(key, value)| (key, value.value))
                 .collect(),
-            cached.native_balance.value().clone(),
+            cached.native_balance.value,
             cached
                 .token_balances
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value().clone()))
+                .into_iter()
+                .map(|(token, balance)| (token, balance.value))
                 .collect(),
-            cached.code.value().code.clone(),
-            cached.code.value().hash.clone(),
-            cached.balance_modify_tx.clone(),
-            cached.code_modify_tx.clone(),
-            cached.creation_tx.clone(),
+            code.code,
+            code.hash,
+            cached.balance_modify_tx,
+            cached.code_modify_tx,
+            cached.creation_tx,
         )
     }
 }
@@ -363,8 +397,8 @@ impl CachedComponentState {
         if at <= self.updated_at {
             warn!(
                 component = %self.component_id,
-                block = at.block_number(),
-                entry = self.updated_at.block_number(),
+                block_ts = %at.block_ts(),
+                entry_ts = %self.updated_at.block_ts(),
                 "Component change from a block already applied skipped"
             );
             return;
@@ -398,19 +432,15 @@ impl CachedComponentState {
         );
     }
 
-    /// Tag of the newest write applied to this entry.
+    /// Timestamp of the newest write applied to this entry.
     pub(crate) fn updated_at(&self) -> WriteTimestamp {
         self.updated_at
     }
 }
 
-impl From<&CachedComponentState> for ProtocolComponentState {
-    fn from(cached: &CachedComponentState) -> Self {
-        ProtocolComponentState::new(
-            &cached.component_id,
-            cached.attributes.clone(),
-            cached.balances.clone(),
-        )
+impl From<CachedComponentState> for ProtocolComponentState {
+    fn from(cached: CachedComponentState) -> Self {
+        ProtocolComponentState::new(&cached.component_id, cached.attributes, cached.balances)
     }
 }
 
@@ -421,14 +451,14 @@ pub struct EntityCache {
 
 /// The maps behind the lock.
 pub(crate) struct CacheState {
-    accounts: HashMap<Address, CachedAccount>,
+    accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
     components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
 }
 
 impl CacheState {
-    pub(crate) fn account(&self, address: &Address) -> Option<&CachedAccount> {
+    pub(crate) fn account(&self, address: &Address) -> Option<&Arc<CachedAccount>> {
         self.accounts.get(address)
     }
 
@@ -440,6 +470,7 @@ impl CacheState {
 }
 
 impl EntityCache {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
             state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
@@ -474,8 +505,10 @@ impl EntityCache {
         let StateSnapshot { accounts, components } = snapshot;
         let mut account_entries = HashMap::with_capacity(accounts.len());
         for AccountSnapshot { account, written_at } in accounts {
-            account_entries
-                .insert(account.address.clone(), CachedAccount::from_snapshot(account, written_at));
+            account_entries.insert(
+                account.address.clone(),
+                Arc::new(CachedAccount::from_snapshot(account, written_at)),
+            );
         }
         let mut component_entries: HashMap<
             ProtocolSystem,
@@ -631,10 +664,12 @@ impl CacheState {
                 continue;
             }
             match (self.accounts.get_mut(address), delta) {
-                (Some(entry), delta) => entry.apply_block(delta, balances, at),
+                (Some(entry), delta) => Arc::make_mut(entry).apply_block(delta, balances, at),
                 (None, Some(delta)) if delta.is_creation() => {
-                    self.accounts
-                        .insert(address.clone(), CachedAccount::from_creation(delta, balances, at));
+                    self.accounts.insert(
+                        address.clone(),
+                        Arc::new(CachedAccount::from_creation(delta, balances, at)),
+                    );
                 }
                 (None, _) => warn!(
                     %address,
@@ -665,7 +700,7 @@ mod test {
     use std::str::FromStr;
 
     use async_trait::async_trait;
-    use chrono::NaiveDateTime;
+    use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
@@ -676,10 +711,6 @@ mod test {
 
     const EXTRACTOR: &str = "ex";
 
-    fn ts(n: u64) -> NaiveDateTime {
-        testing::block(n).ts
-    }
-
     fn at(n: u64) -> WriteTimestamp {
         WriteTimestamp::from(&testing::block(n))
     }
@@ -688,13 +719,15 @@ mod test {
         cache
             .read()
             .account(address)
-            .map(Account::from)
+            .cloned()
+            .map(|entry| Account::from(Arc::unwrap_or_clone(entry)))
     }
 
     fn cached_component(cache: &EntityCache, id: &str) -> Option<ProtocolComponentState> {
         cache
             .read()
             .component(EXTRACTOR, id)
+            .cloned()
             .map(ProtocolComponentState::from)
     }
 
@@ -792,7 +825,7 @@ mod test {
             HashMap::new(),
             ChangeType::Creation,
             Bytes::default(),
-            ts(1),
+            testing::block(1).ts,
         )
     }
 
@@ -862,16 +895,6 @@ mod test {
     }
 
     #[test]
-    fn write_keeps_the_higher_block_at_an_equal_timestamp() {
-        let mut slot = Timestamped::new(1u64, at(5));
-        let lower_block = WriteTimestamp::new(ts(5), 4);
-
-        slot.write(2, lower_block);
-
-        assert_eq!(slot.value(), &1);
-    }
-
-    #[test]
     fn write_timestamped_inserts_a_missing_key_and_updates_a_present_one() {
         let mut map: HashMap<&str, Timestamped<u64>> = HashMap::new();
 
@@ -894,7 +917,7 @@ mod test {
             AccountWriteTimestamps::uniform(&loaded, at(1)),
         );
 
-        assert_eq!(Account::from(&cached), loaded);
+        assert_eq!(Account::from(cached.clone()), loaded);
         assert_eq!(cached.slots()[&slot(1)].written_at(), at(1));
     }
 
@@ -905,7 +928,7 @@ mod test {
 
         let cached = CachedAccount::from_creation(&delta, None, at(1));
 
-        assert_eq!(Account::from(&cached), delta.into_account_without_tx());
+        assert_eq!(Account::from(cached.clone()), delta.into_account_without_tx());
         assert_eq!(cached.code().written_at(), at(1));
     }
 
@@ -923,7 +946,7 @@ mod test {
             at(3),
         );
 
-        let slots = Account::from(&cached).slots;
+        let slots = Account::from(cached.clone()).slots;
         assert_eq!(
             slots,
             fixtures::slots([(1, 1), (2, 2), (3, 3)]),
@@ -947,7 +970,7 @@ mod test {
         );
 
         assert_eq!(
-            Account::from(&cached).slots,
+            Account::from(cached.clone()).slots,
             fixtures::slots([(1, 1), (2, 2)]),
             "block 5 already wrote this entry"
         );
@@ -977,7 +1000,7 @@ mod test {
 
         cached.apply_block(Some(&delta), None, at(2));
 
-        let account = Account::from(&cached);
+        let account = Account::from(cached.clone());
         assert_eq!(account.slots[&slot(1)], Bytes::default());
         assert_eq!(account.code, code("0x6001"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6001"))));
@@ -1001,6 +1024,49 @@ mod test {
         assert_eq!(cached.native_balance().written_at(), at(6));
     }
 
+    #[rstest]
+    #[case::slot(|ts: &mut AccountWriteTimestamps| {
+        *ts.slots.values_mut().next().unwrap() = at(9)
+    })]
+    #[case::token_balance(|ts: &mut AccountWriteTimestamps| {
+        *ts.token_balances.values_mut().next().unwrap() = at(9)
+    })]
+    fn account_updated_at_from_a_snapshot_is_its_newest_value(
+        #[case] make_newest: fn(&mut AccountWriteTimestamps),
+    ) {
+        let address = addr(1);
+        // The native balance and the code stay older than the value made newest.
+        let mut timestamps = AccountWriteTimestamps::uniform(&account(&address), at(5));
+        make_newest(&mut timestamps);
+
+        let cached = CachedAccount::from_snapshot(account(&address), timestamps);
+
+        assert_eq!(cached.updated_at(), at(9));
+    }
+
+    #[test]
+    fn account_updated_at_moves_only_with_an_applied_write() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_snapshot(
+            account(&address),
+            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+        );
+
+        cached.apply_block(
+            Some(&update(&address, fixtures::optional_slots([(1, 9)]))),
+            None,
+            at(4),
+        );
+        assert_eq!(cached.updated_at(), at(5));
+
+        cached.apply_block(
+            Some(&update(&address, fixtures::optional_slots([(1, 9)]))),
+            None,
+            at(7),
+        );
+        assert_eq!(cached.updated_at(), at(7));
+    }
+
     #[test]
     fn account_apply_keeps_code_and_hash_against_an_older_write() {
         let address = addr(1);
@@ -1011,7 +1077,7 @@ mod test {
 
         cached.apply_block(Some(&delta), None, at(4));
 
-        let account = Account::from(&cached);
+        let account = Account::from(cached.clone());
         assert_eq!(account.code, code("0x6000"));
         assert_eq!(account.code_hash, Bytes::from(keccak256(code("0x6000"))));
         assert_eq!(cached.code().written_at(), at(5));
@@ -1049,7 +1115,7 @@ mod test {
 
         let cached = CachedComponentState::from_snapshot(loaded.clone(), at(3));
 
-        assert_eq!(ProtocolComponentState::from(&cached), loaded);
+        assert_eq!(ProtocolComponentState::from(cached.clone()), loaded);
         assert_eq!(cached.updated_at(), at(3));
     }
 
@@ -1070,7 +1136,7 @@ mod test {
 
         cached.apply_block(Some(&testing::state_delta("c1", 9)), None, at(4));
 
-        assert_eq!(ProtocolComponentState::from(&cached).attributes["x"], Bytes::from(1u64));
+        assert_eq!(ProtocolComponentState::from(cached.clone()).attributes["x"], Bytes::from(1u64));
         assert_eq!(cached.updated_at(), at(5));
     }
 
@@ -1088,7 +1154,7 @@ mod test {
         cached.apply_block(Some(&delta), None, at(6));
 
         assert_eq!(
-            ProtocolComponentState::from(&cached).attributes,
+            ProtocolComponentState::from(cached.clone()).attributes,
             HashMap::from([("y".to_string(), Bytes::from(3u64))])
         );
     }
@@ -1103,7 +1169,7 @@ mod test {
             at(6),
         );
 
-        let state = ProtocolComponentState::from(&cached);
+        let state = ProtocolComponentState::from(cached.clone());
         assert_eq!(state.balances, HashMap::from([(addr(9), Bytes::from(5u64))]));
         assert_eq!(cached.updated_at(), at(6));
     }
@@ -1185,7 +1251,7 @@ mod test {
             .component(EXTRACTOR, "c1")
             .unwrap();
         assert_eq!(
-            ProtocolComponentState::from(entry).attributes["x"],
+            ProtocolComponentState::from(entry.clone()).attributes["x"],
             Bytes::from(2u64),
             "the repeated creation does not rebuild the entry"
         );
@@ -1257,6 +1323,35 @@ mod test {
         assert_eq!(
             account.token_balances,
             HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))])
+        );
+    }
+
+    #[test]
+    fn fold_leaves_an_account_a_reader_holds_unchanged() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        let held = cache
+            .read()
+            .account(&address)
+            .cloned()
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(
+                msg(2),
+                update(&address, fixtures::optional_slots([(1, 12)])),
+            ))
+            .unwrap();
+
+        assert_eq!(Account::from(Arc::unwrap_or_clone(held)).slots, fixtures::slots([(1, 1)]));
+        assert_eq!(
+            cached_account(&cache, &address)
+                .unwrap()
+                .slots,
+            fixtures::slots([(1, 12)])
         );
     }
 
@@ -1414,7 +1509,7 @@ mod test {
     }
 
     #[test]
-    fn a_lower_block_at_an_equal_timestamp_does_not_overwrite() {
+    fn a_write_at_an_applied_timestamp_does_not_overwrite() {
         let cache = EntityCache::new();
         let address = addr(1);
         cache
@@ -1436,7 +1531,7 @@ mod test {
                 .unwrap()
                 .slots,
             fixtures::slots([(1, 15)]),
-            "block 5 wins over block 4 at the same timestamp"
+            "an equal timestamp counts as the block already applied"
         );
     }
 
@@ -1543,7 +1638,7 @@ mod test {
     }
 
     #[test]
-    fn from_snapshot_timestamps_entries_with_the_row_block() {
+    fn from_snapshot_timestamps_entries_with_the_row_timestamp() {
         let snapshot = StateSnapshot { accounts: vec![], components: vec![component_snapshot(5)] };
         let cache = EntityCache::from_snapshot(snapshot);
         let x =
@@ -1554,11 +1649,12 @@ mod test {
             .unwrap();
         assert_eq!(x(&cache), Some(Bytes::from(1u64)), "block 5 is the row's own block");
 
-        let mut same_second =
-            with_state_delta(aggregated_changes(EXTRACTOR, 6, 6, Some(6)), "c1", 8);
-        same_second.block.ts = testing::block(5).ts;
-        cache.fold(&same_second).unwrap();
-        assert_eq!(x(&cache), Some(Bytes::from(8u64)), "block 6 at the same second is newer");
+        // The extractor never gives two blocks the same timestamp, so an equal timestamp is the
+        // same block.
+        let mut same_ts = with_state_delta(aggregated_changes(EXTRACTOR, 6, 6, Some(6)), "c1", 8);
+        same_ts.block.ts = testing::block(5).ts;
+        cache.fold(&same_ts).unwrap();
+        assert_eq!(x(&cache), Some(Bytes::from(1u64)), "an equal timestamp is block 5 again");
     }
 
     /// Answers every `state_snapshot` call with the same result.

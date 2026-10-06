@@ -131,6 +131,7 @@ where
         value: U256,
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
         block_overrides: Option<BlockEnvOverrides>,
+        native_balance_overrides: Option<HashMap<Address, U256>>,
     ) -> Result<TychoSimulationResponse, SimulationError> {
         let call_data = self.encode_input(selector, args);
         let params = SimulationParameters {
@@ -141,6 +142,7 @@ where
             value,
             transient_storage,
             block_overrides,
+            native_balance_overrides,
             ..Default::default()
         };
 
@@ -336,6 +338,7 @@ mod tests {
                 U256::from(0u64),
                 Some(transient_storage_params),
                 None,
+                None,
             )
             .unwrap();
 
@@ -400,6 +403,7 @@ mod tests {
                 U256::ZERO,
                 None,
                 Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) }),
+                None,
             )
             .expect("contract call should apply block overrides");
 

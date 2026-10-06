@@ -176,7 +176,8 @@
         "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
         "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
-        "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125"
+        "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
+        "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF"
       },
       "superseded": [{
         "status": "superseded",
@@ -329,6 +330,32 @@
         "router": "0x345e48768a65Ae596ac6A2Aee71202753C4866F5",
         "fee_calculator": "0xd16DBe64E5688C5771E52D530E0C21B32901F141"
       }]
+    },
+    "arc": {
+      "chain_id": 5042,
+      "status": "active",
+      "effective_at": "2026-09-29T02:42:59Z",
+      "notice_published_at": "2026-09-29T02:42:59Z",
+      "migration_deadline": null,
+      "scheduled_successor": null,
+      "deployment_record_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+      "dependency_snapshot": {
+        "source_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+        "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
+        "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
+      },
+      "router": {
+        "address": "0x72C452506a551C7fe069f1F66Beb671AC58909E9"
+      },
+      "fee_calculator": {
+        "address": "0x865CC7A956159467b800e9d51D73Fa57182dFD0C"
+      },
+      "executors": {
+        "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
+        "uniswap_v3": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
+        "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D"
+      },
+      "superseded": []
     }
   }
 }

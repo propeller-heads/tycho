@@ -16,10 +16,15 @@ use alloy::{
     },
     sol_types::SolValue,
 };
-use num_bigint::BigUint;
+use metrics::{counter, histogram};
+use num_bigint::{BigInt, BigUint};
 use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
-use tycho_common::Bytes;
+use tracing::{debug, warn};
+use tycho_common::{
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
+    Bytes,
+};
 
 use crate::encoding::{errors::EncodingError, evm::constants::ROUTER_ETH_ADDRESS, models::Swap};
 
@@ -276,6 +281,70 @@ pub(crate) async fn get_client() -> Result<EVMProvider, EncodingError> {
     Ok(Arc::new(client))
 }
 
+/// Records how far a maker's signed RFQ quote lands from the price levels of `protocol_state`.
+///
+/// Prices `signed_quote.amount_in` on `protocol_state` and emits a debug event with that level
+/// amount, `signed_quote.amount_out` and the gap between them in basis points. A negative gap
+/// means the maker signed for less than its levels advertised. If the levels cannot price the
+/// signed input, it logs a warning instead.
+pub(crate) fn record_signed_quote_deviation(
+    swap: &Swap,
+    protocol_state: &dyn ProtocolSim,
+    signed_quote: &SignedQuote,
+) {
+    let component = swap.component();
+    let labels = [("protocol", component.protocol_system.clone())];
+    let level_amount_out = match protocol_state.get_amount_out(
+        signed_quote.amount_in.clone(),
+        swap.token_in(),
+        swap.token_out(),
+    ) {
+        Ok(result) => result.amount,
+        Err(err) => {
+            counter!("rfq_signed_quote_unpriced_total", &labels).increment(1);
+            warn!(
+                protocol = %component.protocol_system,
+                component_id = %component.id,
+                token_in = %swap.token_in().address,
+                token_out = %swap.token_out().address,
+                amount_in = %signed_quote.amount_in,
+                error = %err,
+                "could not price a signed RFQ quote on its price levels"
+            );
+            return;
+        }
+    };
+    let deviation_bps = deviation_bps(&level_amount_out, &signed_quote.amount_out);
+    debug!(
+        target: "rfq_signed_quote",
+        protocol = %component.protocol_system,
+        component_id = %component.id,
+        token_in = %swap.token_in().address,
+        token_out = %swap.token_out().address,
+        amount_in = %signed_quote.amount_in,
+        level_amount_out = %level_amount_out,
+        signed_amount_out = %signed_quote.amount_out,
+        deviation_bps,
+        "signed RFQ quote against its price levels"
+    );
+    match deviation_bps {
+        Some(bps) => histogram!("rfq_signed_quote_deviation_bps", &labels).record(bps as f64),
+        None => counter!("rfq_signed_quote_unpriced_total", &labels).increment(1),
+    }
+}
+
+/// Returns `(signed - level) / level` in whole basis points, truncated toward zero.
+///
+/// Returns `None` when `level_amount_out` is zero or the result does not fit in an `i64`.
+fn deviation_bps(level_amount_out: &BigUint, signed_amount_out: &BigUint) -> Option<i64> {
+    if *level_amount_out == BigUint::ZERO {
+        return None;
+    }
+    let level = BigInt::from(level_amount_out.clone());
+    let gap = BigInt::from(signed_amount_out.clone()) - &level;
+    i64::try_from(gap * 10_000 / level).ok()
+}
+
 /// Uses prefix-length encoding to efficient encode action data.
 ///
 /// Prefix-length encoding is a data encoding method where the beginning of a data segment
@@ -339,6 +408,21 @@ pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_deviation_bps() {
+        let level = BigUint::from(1_000_000u64);
+        assert_eq!(deviation_bps(&level, &BigUint::from(1_000_000u64)), Some(0));
+        assert_eq!(deviation_bps(&level, &BigUint::from(990_000u64)), Some(-100));
+        assert_eq!(deviation_bps(&level, &BigUint::from(1_005_000u64)), Some(50));
+        assert_eq!(deviation_bps(&level, &BigUint::from(999_950u64)), Some(0));
+        assert_eq!(deviation_bps(&level, &BigUint::ZERO), Some(-10_000));
+    }
+
+    #[test]
+    fn test_deviation_bps_zero_level() {
+        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1u64)), None);
+    }
 
     #[test]
     fn test_map_on_threads_keeps_input_order_above_the_thread_cap() {

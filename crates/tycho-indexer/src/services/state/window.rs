@@ -39,14 +39,14 @@
 //! [`DeltaWindow::fold_committed`], clears the window, and lets the replay refill it.
 
 use std::{
-    collections::HashMap,
-    sync::Arc,
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use deepsize::DeepSizeOf;
 use metrics::histogram;
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 use tycho_common::{
     models::{
         blockchain::{Block, BlockAggregatedChanges},
@@ -54,7 +54,7 @@ use tycho_common::{
         protocol::{ComponentBalance, ProtocolComponentStateDelta},
         Address,
     },
-    storage::StorageError,
+    storage::{BlockIdentifier, BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
@@ -87,8 +87,25 @@ impl Default for WindowConfig {
     }
 }
 
-/// Drops every folded block.
-// Placeholder until ENG-6305 wires the entity cache in as the real sink.
+/// One empty window per extractor, keyed by extractor name, all with the same `config`. The
+/// windows are shared: every holder of the map reads and writes the same windows.
+pub(crate) fn new_windows<'a>(
+    extractors: impl IntoIterator<Item = &'a str>,
+    config: WindowConfig,
+) -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
+    extractors
+        .into_iter()
+        .map(|extractor| {
+            debug!(extractor, "Creating DeltaWindow");
+            (
+                extractor.to_string(),
+                Arc::new(Mutex::new(DeltaWindow::new(extractor.to_string(), config))),
+            )
+        })
+        .collect()
+}
+
+/// Drops every folded block: the sink for `ENTITY_CACHE_MODE=off`, which keeps no cache.
 pub(crate) struct DiscardSink;
 
 impl FoldSink for DiscardSink {
@@ -104,6 +121,10 @@ pub(crate) enum WindowResolution {
     InWindow(Block),
     /// The version is older than the window floor.
     BelowFloor,
+    /// The window holds no block: at startup, or after the extractor restarted.
+    Empty,
+    /// The version is a block hash the window does not hold.
+    UnknownHash,
     /// The version is newer than the newest block this window has seen.
     AboveTip,
 }
@@ -111,8 +132,8 @@ pub(crate) enum WindowResolution {
 /// One block's changes to a component, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComponentChange {
-    /// Block number the change belongs to.
-    pub block: u64,
+    /// Write timestamp of the block the change belongs to.
+    pub at: WriteTimestamp,
     /// State delta of the block, if the block changed the component's state.
     pub delta: Option<ProtocolComponentStateDelta>,
     /// Token balances of the block, if the block changed the component's balances.
@@ -122,21 +143,12 @@ pub(crate) struct ComponentChange {
 /// One block's changes to an account, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AccountChange {
-    /// Block number the change belongs to.
-    pub block: u64,
+    /// Write timestamp of the block the change belongs to.
+    pub at: WriteTimestamp,
     /// Account delta of the block, if the block changed the account.
     pub delta: Option<AccountDelta>,
     /// Token balances of the block, if the block changed the account's balances.
     pub balances: Option<HashMap<Address, AccountBalance>>,
-}
-
-/// Window changes for a set of keys up to a version, ascending by block within each key.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub(crate) struct WindowPatch {
-    /// Changes per component id.
-    pub components: HashMap<String, Vec<ComponentChange>>,
-    /// Changes per account address.
-    pub accounts: HashMap<Bytes, Vec<AccountChange>>,
 }
 
 /// Folds slower than this are logged at `warn`.
@@ -379,12 +391,9 @@ impl DeltaWindow {
                 .min(tip.saturating_sub(self.config.depth)),
         )
     }
-}
 
-// TODO: merge impl blocks back together once code is consumed and no longer dead
-#[allow(dead_code)] // consumed by the state service, ENG-6293
-impl DeltaWindow {
     /// The oldest block still held in the window, if any.
+    #[cfg(test)]
     pub(crate) fn floor(&self) -> Option<Block> {
         self.buffer
             .oldest()
@@ -392,69 +401,71 @@ impl DeltaWindow {
     }
 
     /// The newest block held in the window, if any.
+    #[cfg(test)]
     pub(crate) fn tip(&self) -> Option<Block> {
         self.buffer
             .newest()
             .map(|m| m.block.clone())
     }
 
-    /// Every buffered change to `components` and `accounts` up to `upto`, ascending by block.
-    /// Keys with no change are absent. An `upto` below the floor yields the floor block alone;
-    /// resolve it first with [`DeltaWindow::resolve`] if that matters.
-    pub(crate) fn capture_patch(
+    /// The blocks up to `upto`, ascending. Only the `Arc`s are copied, so a reader holds the window
+    /// lock just for this and scans the blocks with [`account_changes`] or [`component_changes`]
+    /// after releasing it. An `upto` below the floor yields the floor block alone; resolve it
+    /// first with [`DeltaWindow::resolve`] if that matters.
+    ///
+    /// # Errors
+    ///
+    /// `StorageError::NotFound` when the window is empty.
+    pub(crate) fn blocks_upto(
         &self,
-        components: &[&str],
-        accounts: &[Bytes],
-        upto: Option<BlockNumberOrTimestamp>,
-    ) -> Result<WindowPatch, StorageError> {
-        let mut patch = WindowPatch::default();
-        for entry in self.blocks(None, upto)? {
-            let block = entry.block.number;
-            for id in components {
-                let delta = entry.state_deltas.get(*id).cloned();
-                let balances = entry
-                    .component_balances
-                    .get(*id)
-                    .cloned();
-                if delta.is_some() || balances.is_some() {
-                    patch
-                        .components
-                        .entry(id.to_string())
-                        .or_default()
-                        .push(ComponentChange { block, delta, balances });
-                }
-            }
-            for address in accounts {
-                let delta = entry
-                    .account_deltas
-                    .get(address)
-                    .cloned();
-                let balances = entry
-                    .account_balances
-                    .get(address)
-                    .cloned();
-                if delta.is_some() || balances.is_some() {
-                    patch
-                        .accounts
-                        .entry(address.clone())
-                        .or_default()
-                        .push(AccountChange { block, delta, balances });
-                }
-            }
-        }
-        Ok(patch)
+        upto: u64,
+    ) -> Result<Vec<Arc<BlockAggregatedChanges>>, StorageError> {
+        Ok(self
+            .buffer
+            .get_block_range(None, Some(BlockNumberOrTimestamp::Number(upto)))?
+            .cloned()
+            .collect())
     }
 
-    /// Resolves a requested version to a servable window block.
+    /// Resolves a requested version to a servable window block, from memory only.
     ///
-    /// A timestamp newer than the tip clamps to the tip. A timestamp between two buffered blocks
-    /// rounds up to the first block whose timestamp is not older than the request, like
-    /// [`ReorgBuffer::get_block_range`]. Versions below the floor report
-    /// [`WindowResolution::BelowFloor`]; block numbers above the tip report
-    /// [`WindowResolution::AboveTip`].
-    pub(crate) fn resolve(&self, version: BlockNumberOrTimestamp) -> WindowResolution {
+    /// | Version                                    | Resolution        |
+    /// |--------------------------------------------|-------------------|
+    /// | Timestamp newer than the tip (the default) | `InWindow(tip)`   |
+    /// | Number, hash or timestamp in the window    | `InWindow(block)` |
+    /// | Number or timestamp below the floor        | `BelowFloor`      |
+    /// | Number above the tip                       | `AboveTip`        |
+    /// | Hash the window does not hold              | `BelowFloor`      |
+    /// | `Latest`                                   | `InWindow(tip)`   |
+    ///
+    /// A timestamp between two buffered blocks rounds up to the first block whose timestamp is
+    /// not older than the request, like [`ReorgBuffer::get_block_range`]. An unknown hash reports
+    /// `BelowFloor` because only the database can tell an old hash from one that never existed.
+    /// An empty window reports `BelowFloor` for every version.
+    pub(crate) fn resolve(&self, version: &BlockOrTimestamp) -> WindowResolution {
         let (Some(oldest), Some(tip)) = (self.buffer.oldest(), self.buffer.newest()) else {
-            return WindowResolution::BelowFloor;
+            return WindowResolution::Empty;
+        };
+        let version = match version {
+            BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
+                return self
+                    .blocks(None, None)
+                    .ok()
+                    .and_then(|mut blocks| blocks.find(|b| &b.block.hash == hash))
+                    .map_or(WindowResolution::UnknownHash, |b| {
+                        WindowResolution::InWindow(b.block.clone())
+                    });
+            }
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(_)) => {
+                return WindowResolution::InWindow(tip.block.clone());
+            }
+            BlockOrTimestamp::Block(BlockIdentifier::Number((_, number))) => {
+                let Ok(number) = u64::try_from(*number) else {
+                    return WindowResolution::BelowFloor;
+                };
+                BlockNumberOrTimestamp::Number(number)
+            }
+            BlockOrTimestamp::Timestamp(ts) => BlockNumberOrTimestamp::Timestamp(*ts),
         };
         if version.less_than(&oldest.block) {
             return WindowResolution::BelowFloor;
@@ -477,6 +488,99 @@ impl DeltaWindow {
             None => WindowResolution::AboveTip,
         }
     }
+}
+
+// `component_changes` and `account_changes` are kept parallel on purpose: one generic over the key,
+// delta and balance types is harder to read than the two bodies. Every `changes_*` test runs both
+// on the same blocks, so a fix to one that misses the other fails.
+
+/// Every change in `blocks` to the components `ids`, in block order. Ids with no change are absent.
+pub(crate) fn component_changes(
+    blocks: &[Arc<BlockAggregatedChanges>],
+    ids: &[&str],
+) -> HashMap<String, Vec<ComponentChange>> {
+    // The requested ids as a set. Each block is scanned by its own changed keys, which are
+    // usually far fewer than a full page of ids, and each key is checked against this set.
+    let requested: HashSet<&str> = ids.iter().copied().collect();
+
+    let mut changes: HashMap<String, Vec<ComponentChange>> = HashMap::new();
+    // Reused across blocks: the requested ids the current block touches. An id present in
+    // several of the block's maps is collected once, so the block yields one change per id.
+    let mut touched: HashSet<&str> = HashSet::new();
+    for entry in blocks {
+        // Collect the requested ids this block changed the state or balances of.
+        touched.clear();
+        touched.extend(
+            entry
+                .state_deltas
+                .keys()
+                .chain(entry.component_balances.keys())
+                .map(String::as_str)
+                .filter(|id| requested.contains(id)),
+        );
+
+        // Record one change per touched id, stamped with the block.
+        let at = WriteTimestamp::from(&entry.block);
+        for &id in &touched {
+            let delta = entry.state_deltas.get(id).cloned();
+            let balances = entry
+                .component_balances
+                .get(id)
+                .cloned();
+            changes
+                .entry(id.to_string())
+                .or_default()
+                .push(ComponentChange { at, delta, balances });
+        }
+    }
+    changes
+}
+
+/// Every change in `blocks` to the accounts `addresses`, in block order. Addresses with no change
+/// are absent.
+pub(crate) fn account_changes(
+    blocks: &[Arc<BlockAggregatedChanges>],
+    addresses: &[Bytes],
+) -> HashMap<Bytes, Vec<AccountChange>> {
+    // The requested addresses as a set. Each block is scanned by its own changed keys, which
+    // are usually far fewer than a full page of addresses, and each key is checked against
+    // this set.
+    let requested: HashSet<&Bytes> = addresses.iter().collect();
+
+    let mut changes: HashMap<Bytes, Vec<AccountChange>> = HashMap::new();
+    // Reused across blocks: the requested addresses the current block touches. An address
+    // present in both of the block's maps is collected once, so the block yields one change
+    // per address.
+    let mut touched: HashSet<&Bytes> = HashSet::new();
+    for entry in blocks {
+        // Collect the requested addresses this block changed the state or token balances of.
+        touched.clear();
+        touched.extend(
+            entry
+                .account_deltas
+                .keys()
+                .chain(entry.account_balances.keys())
+                .filter(|address| requested.contains(address)),
+        );
+
+        // Record one change per touched address, stamped with the block.
+        let at = WriteTimestamp::from(&entry.block);
+        for &address in &touched {
+            let delta = entry
+                .account_deltas
+                .get(address)
+                .cloned();
+            let balances = entry
+                .account_balances
+                .get(address)
+                .cloned();
+            changes
+                .entry(address.clone())
+                .or_default()
+                .push(AccountChange { at, delta, balances });
+        }
+    }
+    changes
 }
 
 #[cfg(test)]
@@ -502,6 +606,10 @@ mod test {
         message.block.chain = Chain::Arc;
         message.block.ts = timestamp;
         message
+    }
+
+    fn at(number: u64) -> WriteTimestamp {
+        WriteTimestamp::from(&testing::block(number))
     }
 
     fn revert_msg(number: u64) -> BlockAggregatedChanges {
@@ -612,7 +720,7 @@ mod test {
     }
 
     #[test]
-    fn capture_patch_returns_exactly_the_changes_up_to_the_version_in_order() {
+    fn changes_are_exactly_those_up_to_the_version_in_order() {
         let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
         let mut w = window(128, 1);
         for n in 1..=6u64 {
@@ -626,26 +734,21 @@ mod test {
             put(&mut w, m).unwrap();
         }
 
-        let patch = w
-            .capture_patch(
-                &["c1", "absent"],
-                std::slice::from_ref(&address),
-                Some(BlockNumberOrTimestamp::Number(5)),
-            )
-            .unwrap();
+        let components = component_changes(&w.blocks_upto(5).unwrap(), &["c1", "absent"]);
+        let accounts = account_changes(&w.blocks_upto(5).unwrap(), std::slice::from_ref(&address));
 
-        let component_blocks: Vec<u64> = patch.components["c1"]
+        let component_blocks: Vec<WriteTimestamp> = components["c1"]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at)
             .collect();
-        assert_eq!(component_blocks, vec![2, 4]);
-        assert!(!patch.components.contains_key("absent"));
-        let account_blocks: Vec<u64> = patch.accounts[&address]
+        assert_eq!(component_blocks, vec![at(2), at(4)]);
+        assert!(!components.contains_key("absent"));
+        let account_blocks: Vec<WriteTimestamp> = accounts[&address]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at)
             .collect();
-        assert_eq!(account_blocks, vec![3, 5]);
-        assert!(patch.components["c1"]
+        assert_eq!(account_blocks, vec![at(3), at(5)]);
+        assert!(components["c1"]
             .iter()
             .all(|c| c.delta.is_some() && c.balances.is_none()));
     }
@@ -661,73 +764,114 @@ mod test {
                 .unwrap();
         }
 
-        let patch = w
-            .capture_patch(&["c1"], &[], None)
-            .unwrap();
-        let blocks = patch.components["c1"]
+        let changes = component_changes(&w.blocks_upto(42).unwrap(), &["c1"]);
+        let blocks = changes["c1"]
             .iter()
-            .map(|change| change.block)
+            .map(|change| {
+                change
+                    .delta
+                    .as_ref()
+                    .unwrap()
+                    .updated_attributes["x"]
+                    .clone()
+            })
             .collect::<Vec<_>>();
         let latest = w.tip().unwrap();
 
-        assert_eq!(blocks, vec![40, 41, 42]);
+        assert_eq!(
+            blocks,
+            [40u64, 41, 42]
+                .map(Bytes::from)
+                .to_vec()
+        );
         assert_eq!(latest.number, 42);
         assert_eq!(latest.chain, Chain::Arc);
         assert_eq!(
-            w.resolve(BlockNumberOrTimestamp::Number(42)),
+            w.resolve(&BlockOrTimestamp::Block(BlockIdentifier::Number((Chain::Arc, 42)))),
             WindowResolution::InWindow(latest.clone())
         );
         assert_eq!(
-            w.resolve(BlockNumberOrTimestamp::Timestamp(timestamp + chrono::Duration::seconds(1))),
+            w.resolve(&BlockOrTimestamp::Timestamp(timestamp + chrono::Duration::seconds(1))),
             WindowResolution::InWindow(latest)
         );
     }
 
     #[test]
-    fn capture_patch_captures_balance_only_changes() {
+    fn changes_include_balance_only_changes() {
         let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
         let mut w = window(128, 1);
         put(&mut w, with_component_balance(msg(1, 0, None), "c1")).unwrap();
         put(&mut w, with_account_balance(msg(2, 0, None), &address)).unwrap();
 
-        let patch = w
-            .capture_patch(&["c1"], std::slice::from_ref(&address), None)
-            .unwrap();
+        let components = component_changes(&w.blocks_upto(2).unwrap(), &["c1"]);
+        let accounts = account_changes(&w.blocks_upto(2).unwrap(), std::slice::from_ref(&address));
 
         assert_eq!(
-            patch.components["c1"],
-            vec![ComponentChange { block: 1, delta: None, balances: Some(HashMap::new()) }]
+            components["c1"],
+            vec![ComponentChange {
+                at: WriteTimestamp::from(&testing::block(1)),
+                delta: None,
+                balances: Some(HashMap::new())
+            }]
         );
         assert_eq!(
-            patch.accounts[&address],
-            vec![AccountChange { block: 2, delta: None, balances: Some(HashMap::new()) }]
+            accounts[&address],
+            vec![AccountChange {
+                at: WriteTimestamp::from(&testing::block(2)),
+                delta: None,
+                balances: Some(HashMap::new())
+            }]
         );
     }
 
     #[test]
-    fn capture_patch_below_the_floor_yields_the_floor_block_alone() {
+    fn changes_hold_one_change_per_key_and_block() {
+        let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
+        let m = with_account_balance(
+            with_account_delta(
+                testing::with_state_delta(with_component_balance(msg(1, 0, None), "c1"), "c1", 1),
+                &address,
+                1,
+            ),
+            &address,
+        );
+        let mut w = window(128, 1);
+        put(&mut w, m).unwrap();
+
+        let components = component_changes(&w.blocks_upto(1).unwrap(), &["c1"]);
+        let accounts = account_changes(&w.blocks_upto(1).unwrap(), std::slice::from_ref(&address));
+
+        let [component] = components["c1"].as_slice() else {
+            panic!("expected one component change, got {:?}", components["c1"]);
+        };
+        assert!(component.delta.is_some() && component.balances.is_some());
+        let [account] = accounts[&address].as_slice() else {
+            panic!("expected one account change, got {:?}", accounts[&address]);
+        };
+        assert!(account.delta.is_some() && account.balances.is_some());
+    }
+
+    #[test]
+    fn changes_below_the_floor_are_the_floor_block_alone() {
         let mut w = window(128, 1);
         for n in 5..=7u64 {
             put(&mut w, testing::with_state_delta(msg(n, 0, None), "c1", n)).unwrap();
         }
 
-        let patch = w
-            .capture_patch(&["c1"], &[], Some(BlockNumberOrTimestamp::Number(2)))
-            .unwrap();
+        let changes = component_changes(&w.blocks_upto(2).unwrap(), &["c1"]);
 
-        let blocks: Vec<u64> = patch.components["c1"]
+        let blocks: Vec<WriteTimestamp> = changes["c1"]
             .iter()
-            .map(|c| c.block)
+            .map(|c| c.at)
             .collect();
-        assert_eq!(blocks, vec![5]);
+        assert_eq!(blocks, vec![at(5)]);
     }
 
     #[test]
-    fn capture_patch_on_an_empty_window_is_empty() {
-        let patch = window(128, 1)
-            .capture_patch(&["c1"], &[], None)
-            .unwrap();
-        assert!(patch.components.is_empty() && patch.accounts.is_empty());
+    fn blocks_upto_on_an_empty_window_are_not_found() {
+        let w = window(128, 1);
+
+        assert!(matches!(w.blocks_upto(1), Err(StorageError::NotFound(..))));
     }
 
     #[test]
@@ -991,45 +1135,58 @@ mod test {
         assert_eq!(w.floor(), Some(testing::block(4)));
     }
 
+    fn number(n: i64) -> BlockOrTimestamp {
+        BlockOrTimestamp::Block(BlockIdentifier::Number((Chain::Ethereum, n)))
+    }
+
     #[rstest]
-    #[case::number_in_window(
-        BlockNumberOrTimestamp::Number(5),
+    #[case::number_in_window(number(5), WindowResolution::InWindow(testing::block(5)))]
+    #[case::number_below_floor(number(0), WindowResolution::BelowFloor)]
+    #[case::negative_number(number(-1), WindowResolution::BelowFloor)]
+    #[case::number_above_tip(number(11), WindowResolution::AboveTip)]
+    #[case::hash_in_window(
+        BlockOrTimestamp::Block(BlockIdentifier::Hash(testing::block(5).hash)),
         WindowResolution::InWindow(testing::block(5))
     )]
-    #[case::number_below_floor(BlockNumberOrTimestamp::Number(0), WindowResolution::BelowFloor)]
-    #[case::number_above_tip(BlockNumberOrTimestamp::Number(11), WindowResolution::AboveTip)]
+    #[case::hash_not_in_window(
+        BlockOrTimestamp::Block(BlockIdentifier::Hash(testing::block(11).hash)),
+        WindowResolution::UnknownHash
+    )]
+    #[case::latest(
+        BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+        WindowResolution::InWindow(testing::block(10))
+    )]
     #[case::timestamp_at_block(
-        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts),
+        BlockOrTimestamp::Timestamp(testing::block(5).ts),
         WindowResolution::InWindow(testing::block(5))
     )]
     #[case::timestamp_rounds_up(
-        BlockNumberOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
+        BlockOrTimestamp::Timestamp(testing::block(5).ts + chrono::Duration::seconds(1)),
         WindowResolution::InWindow(testing::block(6))
     )]
     #[case::timestamp_after_tip_clamps(
-        BlockNumberOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
+        BlockOrTimestamp::Timestamp(testing::block(10).ts + chrono::Duration::hours(1)),
         WindowResolution::InWindow(testing::block(10))
     )]
     #[case::timestamp_before_floor(
-        BlockNumberOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
+        BlockOrTimestamp::Timestamp(testing::block(1).ts - chrono::Duration::seconds(1)),
         WindowResolution::BelowFloor
     )]
     fn resolve_maps_versions_onto_the_window(
-        #[case] version: BlockNumberOrTimestamp,
+        #[case] version: BlockOrTimestamp,
         #[case] expected: WindowResolution,
     ) {
         let mut w = window(3, 1);
         fill(&mut w, 1..=10, 10, Some(5));
 
-        assert_eq!(w.resolve(version), expected);
+        assert_eq!(w.resolve(&version), expected);
     }
 
-    #[test]
-    fn resolve_on_an_empty_window_is_below_floor() {
-        assert_eq!(
-            window(3, 1).resolve(BlockNumberOrTimestamp::Number(1)),
-            WindowResolution::BelowFloor
-        );
+    #[rstest]
+    #[case::number(number(1))]
+    #[case::latest(BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)))]
+    fn resolve_on_an_empty_window_is_empty(#[case] version: BlockOrTimestamp) {
+        assert_eq!(window(3, 1).resolve(&version), WindowResolution::Empty);
     }
 
     #[test]

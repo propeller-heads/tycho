@@ -79,7 +79,10 @@ pub struct GlobalArgs {
     )]
     pub delta_window_fold_batch: usize,
 
-    /// Entity cache rollout stage. `off` loads nothing and keeps every request on the database.
+    /// Which path answers `/contract_state` and `/protocol_state`: `off` reads the database;
+    /// `shadow` serves the database answer and compares it with the entity cache; `serve` serves
+    /// the entity cache answer and reads the database only for versions the cache cannot rebuild.
+    /// The `rpc` command has no entity cache and always runs as `off`.
     #[clap(long, env = "ENTITY_CACHE_MODE", value_enum, default_value_t = EntityCacheMode::Off)]
     pub entity_cache_mode: EntityCacheMode,
 
@@ -330,6 +333,8 @@ pub struct AnalyzeTokenArgs {
 
 #[cfg(test)]
 mod cli_tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[tokio::test]
@@ -448,35 +453,28 @@ mod cli_tests {
         assert!(Cli::try_parse_from(args_with_delta_window("128", "0")).is_err());
     }
 
-    fn args_with_entity_cache_mode(mode: &'static str) -> Vec<&'static str> {
-        vec![
-            "tycho-indexer",
-            "--endpoint",
-            "http://example.com",
-            "--database-url",
-            "my_db",
-            "--rpc-url",
-            "http://example.com",
-            "--entity-cache-mode",
-            mode,
-            "index",
-            "--extractors-config",
-            "/opt/extractors.yaml",
-            "--api_token",
-            "your_api_token",
-        ]
+    #[rstest]
+    #[case::off("off", EntityCacheMode::Off)]
+    #[case::shadow("shadow", EntityCacheMode::Shadow)]
+    #[case::serve("serve", EntityCacheMode::Serve)]
+    fn test_arg_parsing_entity_cache_mode(
+        #[case] value: &'static str,
+        #[case] expected: EntityCacheMode,
+    ) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(cli.global_args.entity_cache_mode, expected);
     }
 
     #[test]
-    fn test_arg_parsing_entity_cache_mode() {
-        let cli = Cli::try_parse_from(args_with_entity_cache_mode("serve")).expect("parse errored");
+    fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-mode", "on"]);
 
-        assert_eq!(cli.global_args.entity_cache_mode, EntityCacheMode::Serve);
-    }
-
-    #[test]
-    fn test_arg_parsing_rejects_an_unknown_entity_cache_mode() {
-        assert!(Cli::try_parse_from(args_with_entity_cache_mode("on")).is_err());
+        assert!(Cli::try_parse_from(args).is_err());
     }
 
     #[tokio::test]

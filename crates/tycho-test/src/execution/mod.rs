@@ -17,6 +17,7 @@ use tokio_retry2::{
     strategy::{jitter, ExponentialFactorBackoff},
     Retry, RetryError,
 };
+use tycho_common::Bytes;
 use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::evm::protocol::u256_num::u256_to_biguint;
 
@@ -131,10 +132,16 @@ pub async fn simulate_swap_transaction(
             }
         };
 
-        let (mut state_overwrites, metadata) = match token_slots.get(info.solution.token_in()) {
+        let token_in = info.solution.token_in();
+        let sells_native = token_in == &Bytes::zero(20);
+        let (mut state_overwrites, metadata) = match token_slots.get(token_in) {
+            None if sells_native => (
+                encoding::setup_native_user_overwrites(info.solution.amount_in()),
+                tenderly::OverwriteMetadata::new(),
+            ),
             Some(slots) => encoding::setup_user_overwrites(
                 &to_address,
-                info.solution.token_in(),
+                token_in,
                 info.solution.amount_in(),
                 slots,
             ),
@@ -142,10 +149,7 @@ pub async fn simulate_swap_transaction(
                 tycho_execution_results.insert(
                     simulation_id.clone(),
                     TychoExecutionResult::Failed {
-                        error_msg: format!(
-                            "Couldn't find storage slots for token {}",
-                            info.solution.token_in()
-                        ),
+                        error_msg: format!("Couldn't find storage slots for token {token_in}"),
                     },
                 );
                 continue;
