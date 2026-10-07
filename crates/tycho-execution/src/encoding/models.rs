@@ -145,6 +145,9 @@ pub struct Solution {
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
     user_transfer_type: UserTransferType,
+    /// A subsidy added to the first swap group's input.
+    #[serde(default)]
+    subsidy: Option<SignedSubsidy>,
 }
 
 impl Solution {
@@ -169,6 +172,7 @@ impl Solution {
             min_amount_out,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
+            subsidy: None,
         }
     }
     pub fn sender(&self) -> &Bytes {
@@ -215,6 +219,37 @@ impl Solution {
         self.user_transfer_type = user_transfer_type;
         self
     }
+
+    pub fn subsidy(&self) -> Option<&SignedSubsidy> {
+        self.subsidy.as_ref()
+    }
+
+    /// Adds the subsidy to the first swap group's input. `expected_amount_out` must be quoted
+    /// with the subsidy included, or positive slippage capture takes it.
+    pub fn with_subsidy(mut self, subsidy: SignedSubsidy) -> Self {
+        self.subsidy = Some(subsidy);
+        self
+    }
+}
+
+/// The terms the subsidy signer signs for one solution.
+///
+/// `executor` is the subsidizing executor. `nonce` must be a random number of at most 32 bytes:
+/// each nonce pays once, in any order.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Subsidy {
+    pub executor: Bytes,
+    pub token_in: Bytes,
+    pub amount: u128,
+    pub nonce: Bytes,
+    pub deadline: u64,
+}
+
+/// A [`Subsidy`] with the subsidy signer's 65-byte signature.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SignedSubsidy {
+    pub subsidy: Subsidy,
+    pub signature: Bytes,
 }
 
 /// Represents a swap operation to be performed on a pool.

@@ -7,6 +7,7 @@ import {
 } from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {FeeRecipient, FeeInput} from "../lib/FeeStructs.sol";
 import {IFeeCalculator, CustomFees} from "@interfaces/IFeeCalculator.sol";
+import {ISubsidyConfig} from "@interfaces/ISubsidyConfig.sol";
 
 error FeeCalculator__FeeTooHigh();
 error FeeCalculator__AddressZero();
@@ -21,7 +22,7 @@ error FeeCalculator__AddressZero();
  *      Router fees use an 8-decimal precision unit: 1 unit = 0.0001 BPS = 0.000001%.
  *      100% = 100_000_000 units. This allows sub-BPS fee rates (e.g. 1.5 BPS = 15_000 units).
  */
-contract FeeCalculator is AccessControl, IFeeCalculator {
+contract FeeCalculator is AccessControl, IFeeCalculator, ISubsidyConfig {
     using EnumerableSet for EnumerableSet.AddressSet;
 
     // 100% expressed in 8-decimal fee units (1 unit = 0.0001 BPS = 0.000001%)
@@ -48,6 +49,11 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
+    // Read by TychoSubsidizingExecutor
+    address private _subsidyWallet;
+    address private _subsidySigner;
+    uint32 private _subsidyBps; // Subsidy cap in fee units of the hop input
+
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
@@ -67,6 +73,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     );
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event SubsidyWalletUpdated(
+        address indexed oldWallet, address indexed newWallet
+    );
+    event SubsidySignerUpdated(
+        address indexed oldSigner, address indexed newSigner
+    );
+    event SubsidyBpsUpdated(uint32 oldBps, uint32 newBps);
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
@@ -76,6 +89,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      *      the sender, and fees credited to it can never be withdrawn.
      *      Positive slippage capture starts enabled, since that is how every
      *      deployment is operated; `setPositiveSlippageEnabled` turns it off.
+     *      The subsidy cap starts at 0.01 BPS.
      */
     constructor(address routerFeeSetter, address routerFeeReceiver) {
         if (routerFeeReceiver == address(0)) {
@@ -83,11 +97,13 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
         _routerFeeReceiver = routerFeeReceiver;
         _positiveSlippageEnabled = true;
+        _subsidyBps = 100;
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
         emit RouterFeeReceiverUpdated(address(0), routerFeeReceiver);
         emit PositiveSlippageToggled(true);
+        emit SubsidyBpsUpdated(0, 100);
     }
 
     /**
@@ -494,5 +510,53 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         returns (bool)
     {
         return _positiveSlippageExempt[client];
+    }
+
+    /// @dev A zero address disables subsidies.
+    function setSubsidyWallet(address subsidyWallet)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        address oldWallet = _subsidyWallet;
+        // Zero disables subsidies.
+        // slither-disable-next-line missing-zero-check
+        _subsidyWallet = subsidyWallet;
+        emit SubsidyWalletUpdated(oldWallet, subsidyWallet);
+    }
+
+    /// @dev A zero address disables subsidies. A new signer invalidates the
+    ///      old signer's signatures.
+    function setSubsidySigner(address subsidySigner)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        address oldSigner = _subsidySigner;
+        // Zero disables subsidies.
+        // slither-disable-next-line missing-zero-check
+        _subsidySigner = subsidySigner;
+        emit SubsidySignerUpdated(oldSigner, subsidySigner);
+    }
+
+    function setSubsidyBps(uint32 subsidyBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (subsidyBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        uint32 oldBps = _subsidyBps;
+        _subsidyBps = subsidyBps;
+        emit SubsidyBpsUpdated(oldBps, subsidyBps);
+    }
+
+    /// @inheritdoc ISubsidyConfig
+    function getSubsidyConfig()
+        external
+        view
+        returns (
+            address subsidyWallet,
+            address subsidySigner,
+            uint32 subsidyBps
+        )
+    {
+        return (_subsidyWallet, _subsidySigner, _subsidyBps);
     }
 }

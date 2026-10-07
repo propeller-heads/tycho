@@ -12,6 +12,7 @@ use crate::encoding::{
         strategy_encoder::strategy_validators::{
             SequentialSwapValidator, SingleSwapValidator, SplitSwapValidator, SwapValidator,
         },
+        subsidy::subsidize_swap_group,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::{get_token_position, map_on_threads, percentage_to_uint24, ple_encode},
     },
@@ -68,6 +69,31 @@ fn encode_swap_group(
         executor_address: swap_encoder.executor_address().clone(),
         protocol_data: initial_protocol_data,
     })
+}
+
+/// Runs the first swap group through the subsidizing executor when the solution has a subsidy.
+fn subsidize_first_group(
+    encoded_groups: &mut [EncodedSwapGroup],
+    grouped_swaps: &[SwapGroup],
+    solution: &Solution,
+) -> Result<(), EncodingError> {
+    let Some(subsidy) = solution.subsidy() else {
+        return Ok(());
+    };
+    let (Some(encoded_group), Some(grouped_swap)) =
+        (encoded_groups.first_mut(), grouped_swaps.first())
+    else {
+        return Err(EncodingError::FatalError("No swap group to subsidize".to_string()));
+    };
+    let (executor_address, protocol_data) = subsidize_swap_group(
+        subsidy,
+        grouped_swap,
+        &encoded_group.executor_address,
+        &encoded_group.protocol_data,
+    )?;
+    encoded_group.executor_address = executor_address;
+    encoded_group.protocol_data = protocol_data;
+    Ok(())
 }
 
 /// Encodes every swap group and keeps the input order.
@@ -178,8 +204,10 @@ impl SingleSwapStrategyEncoder {
             ));
         }
 
-        let encoded_group =
-            encode_swap_group(&self.swap_encoder_registry, grouped_swap, &self.router_address)?;
+        let mut encoded_groups =
+            [encode_swap_group(&self.swap_encoder_registry, grouped_swap, &self.router_address)?];
+        subsidize_first_group(&mut encoded_groups, &grouped_swaps, solution)?;
+        let [encoded_group] = encoded_groups;
         let swap_data =
             self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -257,8 +285,9 @@ impl SequentialSwapStrategyEncoder {
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
-        let encoded_groups =
+        let mut encoded_groups =
             encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        subsidize_first_group(&mut encoded_groups, &grouped_swaps, solution)?;
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
@@ -388,8 +417,9 @@ impl SplitSwapStrategyEncoder {
             ));
         }
 
-        let encoded_groups =
+        let mut encoded_groups =
             encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        subsidize_first_group(&mut encoded_groups, &grouped_swaps, solution)?;
 
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
@@ -519,6 +549,135 @@ mod tests {
 (uint32,address,uint256,uint256,bytes),((address,uint160,uint48,uint48),address,uint256),bytes,bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
+        }
+    }
+
+    mod subsidy {
+        use super::*;
+        use crate::encoding::models::{default_token, SignedSubsidy, Subsidy, Swap};
+
+        const SUBSIDIZING_EXECUTOR: &str = "1111111111111111111111111111111111111111";
+        const USV2_EXECUTOR: &str = "5615deb798bb3e4dfa0139dfa1b3d433cc23b72f";
+
+        fn swap(protocol_system: &str, pool: &str, token_in: &Bytes, token_out: &Bytes) -> Swap {
+            Swap::new(
+                ProtocolComponent {
+                    id: pool.to_string(),
+                    protocol_system: protocol_system.to_string(),
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+        }
+
+        fn subsidized_solution(token_out: &Bytes, swaps: Vec<Swap>) -> Solution {
+            let subsidy = SignedSubsidy {
+                subsidy: Subsidy {
+                    executor: Bytes::from_str(SUBSIDIZING_EXECUTOR).unwrap(),
+                    token_in: weth(),
+                    amount: 1_000_000,
+                    nonce: Bytes::from_str("0x07").unwrap(),
+                    deadline: 1_700_000_000,
+                },
+                signature: Bytes::from(vec![0xab; 65]),
+            };
+            Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                weth(),
+                token_out.clone(),
+                BigUint::from(1_000_000_000_000u64),
+                BigUint::from(1_000u64),
+                BigUint::from(900u64),
+                swaps,
+            )
+            .with_subsidy(subsidy)
+        }
+
+        fn subsidy_header() -> String {
+            [
+                "000000000000000000000000000f4240",
+                "0000000000000000000000000000000000000000000000000000000000000007",
+                "00006553f100",
+                &"ab".repeat(65),
+            ]
+            .concat()
+        }
+
+        #[test]
+        fn test_sequential_swap_subsidizes_first_hop() {
+            let wbtc = Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
+            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+            let solution = subsidized_solution(
+                &usdc,
+                vec![
+                    swap(
+                        "uniswap_v2",
+                        "0xBb2b8038a1640196FbE3e38816F3e67Cba72D940",
+                        &weth(),
+                        &wbtc,
+                    ),
+                    swap("uniswap_v2", "0x004375Dff511095CC5A197A54140a24eFEF3A416", &wbtc, &usdc),
+                ],
+            );
+            let encoder =
+                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
+                    .unwrap();
+
+            let encoded_solution = encoder
+                .encode_strategy(&solution)
+                .unwrap();
+
+            let expected = [
+                "00db",
+                SUBSIDIZING_EXECUTOR,
+                &subsidy_header(),
+                USV2_EXECUTOR,
+                "bb2b8038a1640196fbe3e38816f3e67cba72d940",
+                "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                "2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+                "0050",
+                USV2_EXECUTOR,
+                "004375dff511095cc5a197a54140a24efef3a416",
+                "2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            ]
+            .concat();
+            assert_eq!(encode(encoded_solution.swaps()), expected);
+        }
+
+        #[test]
+        fn test_single_swap_subsidizes_its_hop() {
+            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
+            let solution = subsidized_solution(
+                &dai,
+                vec![swap(
+                    "uniswap_v2",
+                    "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11",
+                    &weth(),
+                    &dai,
+                )],
+            );
+            let encoder =
+                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
+                    .unwrap();
+
+            let encoded_solution = encoder
+                .encode_strategy(&solution)
+                .unwrap();
+
+            let expected = [
+                SUBSIDIZING_EXECUTOR,
+                &subsidy_header(),
+                USV2_EXECUTOR,
+                "a478c2975ab1ea89e8196811f51a7b7ade33eb11",
+                "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                "6b175474e89094c44da98b954eedeac495271d0f",
+            ]
+            .concat();
+            assert_eq!(encode(encoded_solution.swaps()), expected);
         }
     }
 

@@ -263,6 +263,37 @@ Constraints:
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
 
+### Subsidies (`executors/TychoSubsidizingExecutor.sol`)
+
+`TychoSubsidizingExecutor` adds a signed subsidy to the input of the first hop, paid from the subsidy wallet's vault
+balance, then runs that hop through an inner executor named in its swap data. The fee receiver is the subsidy wallet,
+so subsidies come out of collected fees.
+
+Why the input side: the Dispatcher counts a hop's output as the rise in the output token's balance at `measureAt`,
+which is usually the router. Vault tokens already sit in the router, so paying them as output either counts as zero or
+lowers the measured output by the same amount. Extra input token is not measured, and the pool turns it into more
+output that is counted.
+
+- The wrapper lowers the wallet's balance in `Vault._vaultBalances` by writing the router's storage slot 5 directly,
+  then sends the tokens to the pool (`TransferType.Transfer`) or raises the pool's approval
+  (`TransferType.ProtocolWillDebit`). It copies the deployed router's storage layout.
+- Other inner executors revert `TychoSubsidizingExecutor__UnsupportedInnerExecutor`: callback protocols take the input
+  inside the callback from the user, capped at `amountIn`, and native ETH input goes as `msg.value`. RFQ protocols use
+  `ProtocolWillDebit` but their signed quotes fix the amounts, so the encoder rejects them.
+- The inner executor must be approved on the router with its timelock passed. The wrapper itself is rejected.
+- The subsidy signer signs EIP-712 `Subsidy(executor, tokenIn, subsidy, nonce, deadline)`; the router is the
+  verifying contract. A subsidy above `hop amountIn × subsidyBps` reverts, so a copier must trade as much as the signer
+  priced to take it. A used nonce skips the subsidy without a revert.
+- Nonces are an unordered bitmap at `keccak256("TychoSubsidizingExecutor#NONCE_BITMAP")` in the router's storage.
+
+Swap data: `[subsidy: 16][nonce: 32][deadline: 6][signature: 65][inner executor: 20][inner data]`.
+
+Encoding (`evm/subsidy.rs`): `Solution::with_subsidy(SignedSubsidy)` makes the strategy encoders wrap the first swap
+group. `SUBSIDIZABLE_PROTOCOLS` plus the Uniswap V2 forks are the protocols allowed; any other first protocol is an
+`InvalidInput` error. The subsidizing executor address comes from the signed `Subsidy`. The backend signs
+`Subsidy::signing_hash(chain_id, router)` and quotes `expectedAmountOut` with the subsidy included, or positive
+slippage capture takes it.
+
 ### Executor Flow, Callbacks & Output Verification
 
 **Balance-diff verification**: The Dispatcher independently verifies every swap output. It

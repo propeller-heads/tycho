@@ -9,6 +9,7 @@ mod encoding_utils;
 pub mod gas_estimator;
 mod group_swaps;
 pub mod strategy_encoder;
+mod subsidy;
 pub mod swap_encoder;
 #[cfg(feature = "test-utils")]
 pub mod testing_utils;
