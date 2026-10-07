@@ -50,15 +50,15 @@
         "vm:curve": "0xF7561795536Ede0f4122BeD2Cc9328511E1f7135",
         "vm:maverick_v2": "0xeCD7D651C0D5E477018c0949a01a46350461c8ED",
         "vm:balancer_v3": "0xf9AE8127E35612DA9d750058fCf61f326E00cA10",
-        "rfq:bebop": "0x69eae6eb2C924567912fBC435b915663c9D3D11e",
-        "rfq:hashflow": "0x67336209a32e14F52Ea3466A2064C49885CD5A0b",
-        "rfq:native": "0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522",
+        "book:bebop": "0x69eae6eb2C924567912fBC435b915663c9D3D11e",
+        "book:hashflow": "0x67336209a32e14F52Ea3466A2064C49885CD5A0b",
+        "book:native": "0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522",
         "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
         "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
         "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
         "ekubo_v3": "0xD58B803DBE049903f3C1aDaacc2D82e9e514647C",
         "native_wrapper": "0x8FD892DD5F8E153fe15cc3A7567E18ed6f7b1E0A",
-        "rfq:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
+        "book:liquorice": "0x81c7febeed3fd67a5fdcf892d43489091caeb186",
         "vm:fermiswap": "0xe2c352232127AfC9803e7eD79F129E458B20925e",
         "vm:liquidityparty": "0x95cA663A10736A748981139F3071cdb21BAAC954",
         "vm:bopamm": "0x63A1ffF3A4b6e93D5687f7B340Ff51bA3a88901C",
@@ -101,13 +101,13 @@
         "uniswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
         "pancakeswap_v3": "0xBf9B925b6f5F6a5919F70e62D56403948F27F882",
         "uniswap_v4": "0x78db9684220541601E9215bB16b219e5DF6cF0fb",
-        "rfq:bebop": "0xF35839C54A33FE88867ACB3deac9dB3AdB9bFA78",
+        "book:bebop": "0xF35839C54A33FE88867ACB3deac9dB3AdB9bFA78",
         "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
         "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
         "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
         "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
-        "rfq:metric": "0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2",
-        "rfq:native": "0x4Ee002261A676D351705934c1bE26667d3f027bc",
+        "book:metric": "0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2",
+        "book:native": "0x4Ee002261A676D351705934c1bE26667d3f027bc",
         "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De"
       },
       "superseded": [{
@@ -176,8 +176,8 @@
         "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
         "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
-        "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
-        "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF"
+        "book:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
+        "book:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF"
       },
       "superseded": [{
         "status": "superseded",
@@ -212,7 +212,7 @@
         "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
         "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
         "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
-        "rfq:native": "0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451"
+        "book:native": "0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451"
       },
       "superseded": [{
         "status": "superseded",
@@ -317,8 +317,8 @@
         "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
         "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
         "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
-        "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
-        "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
+        "book:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
+        "book:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
       },
       "superseded": [{
         "status": "superseded",

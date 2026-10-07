@@ -30,14 +30,10 @@ export METRIC_API_KEY=<optional-metric-api-key>
 Then, you can run the example with:
 
 ```bash
-cargo run --release --example rfq_quickstart
+cargo run --release --example book_quickstart
 ```
 
-To run PAMM RFQ protocols without Bebop, Hashflow, or Liquorice credentials:
-
-```bash
-cargo run --release --example rfq_quickstart -- --run-pamm-protocols
-```
+The pAMM feeds (Metric) run alongside the RFQ venues; `--disable-pamm-feeds` leaves them out.
 
 By default, the example will request price levels for 10 USDC -> WETH on Ethereum Mainnet using RFQs.
 If we choose a different chain, by default, price levels for USDC -> WETH will be requested on that chain.
@@ -45,7 +41,7 @@ If you want a different trade and chain, you can use the following command, repl
 chain that you'd like:
 
 ```bash
-cargo run --release --example rfq_quickstart -- --sell-token "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --chain "base"
+cargo run --release --example book_quickstart -- --sell-token "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --chain "base"
 ```
 
 for 10 USDC -> WETH on Base.
@@ -62,7 +58,8 @@ export PRIVATE_KEY=<your-private-key>
 ## Important Notes
 
 - **Credentials**: Contact RFQ protocols directly to obtain WebSocket API credentials for accessing live market maker
-  quotes. To run PAMM RFQ protocols, pass `--run-pamm-protocols`.
+  quotes. The pAMM feeds need none, so the example serves Metric on its own when no RFQ venue is
+  configured.
 
 ## What you'll see
 

@@ -29,7 +29,7 @@ pub mod evm;
 #[cfg(feature = "price-level-stream")]
 pub mod price_level_stream;
 pub mod protocol;
-#[cfg(feature = "rfq")]
+#[cfg(feature = "book-feeds")]
 pub mod rfq;
 pub mod serde_helpers;
 pub mod snapshot_feed;

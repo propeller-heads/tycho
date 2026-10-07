@@ -207,7 +207,7 @@ mod tests {
             },
             component: ProtocolComponent {
                 id: pool_address.to_string(),
-                protocol_system: "rfq:metric".to_string(),
+                protocol_system: "book:metric".to_string(),
                 protocol_type_name: "metric_pool".to_string(),
                 chain: ModelChain::Ethereum,
                 tokens: vec![weth.address.clone(), usdc.address.clone()],

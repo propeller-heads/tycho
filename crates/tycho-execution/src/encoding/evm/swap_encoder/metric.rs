@@ -97,7 +97,7 @@ mod tests {
     fn component(token0: &Bytes, token1: &Bytes) -> ProtocolComponent {
         ProtocolComponent {
             id: "0x1111111111111111111111111111111111111111".to_string(),
-            protocol_system: "rfq:metric".to_string(),
+            protocol_system: "book:metric".to_string(),
             tokens: vec![token0.clone(), token1.clone()],
             contract_addresses: Vec::new(),
             ..Default::default()

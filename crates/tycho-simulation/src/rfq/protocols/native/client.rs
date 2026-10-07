@@ -87,7 +87,7 @@ pub struct NativeClient {
 }
 
 impl NativeClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:native";
+    pub const PROTOCOL_SYSTEM: &'static str = "book:native";
     pub const DEFAULT_ENDPOINT: &'static str = "https://v2.api.native.org/swap-api-v2/v1";
 
     // Native API error codes:

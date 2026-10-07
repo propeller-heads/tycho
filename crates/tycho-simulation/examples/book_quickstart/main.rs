@@ -72,9 +72,9 @@ struct Cli {
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
-    /// Run PAMM RFQ protocols.
-    #[arg(long, default_value_t = true)]
-    run_pamm_protocols: bool,
+    /// Disable the pAMM book feeds (Metric), keeping the RFQ venues
+    #[arg(long, default_value_t = false)]
+    disable_pamm_feeds: bool,
 }
 
 impl Cli {
@@ -137,10 +137,12 @@ async fn main() {
         (liquorice_user.is_none() || liquorice_key.is_none()) &&
         native_key.is_none()
     {
-        if cli.run_pamm_protocols {
-            println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
+        if cli.disable_pamm_feeds {
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm-feeds to run Metric on its own.");
         } else {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols.");
+            println!(
+                "No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n"
+            );
         }
     }
 
@@ -246,7 +248,7 @@ async fn main() {
         rfq_stream_builder =
             rfq_stream_builder.add_client::<NativeState>("native", Box::new(native_client))
     }
-    if cli.run_pamm_protocols {
+    if !cli.disable_pamm_feeds {
         println!("Setting up Metric RFQ client...\n");
         match MetricClientBuilder::new(chain)
             .tokens(rfq_tokens.clone())

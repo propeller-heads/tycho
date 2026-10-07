@@ -65,7 +65,7 @@ pub struct LiquoriceClient {
 }
 
 impl LiquoriceClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:liquorice";
+    pub const PROTOCOL_SYSTEM: &'static str = "book:liquorice";
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(

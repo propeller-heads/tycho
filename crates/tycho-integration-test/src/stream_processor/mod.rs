@@ -1,6 +1,6 @@
+pub mod book_stream_processor;
 pub mod price_level_stream_processor;
 pub mod protocol_stream_processor;
-pub mod rfq_stream_processor;
 
 use std::{fmt, fmt::Display};
 
@@ -17,7 +17,7 @@ pub struct StreamUpdate {
 #[derive(Debug, PartialEq)]
 pub enum UpdateType {
     Protocol,
-    Rfq,
+    Book,
     PriceLevelStream,
 }
 
@@ -25,7 +25,7 @@ impl Display for UpdateType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UpdateType::Protocol => write!(f, "Protocol"),
-            UpdateType::Rfq => write!(f, "RFQ"),
+            UpdateType::Book => write!(f, "Book"),
             UpdateType::PriceLevelStream => write!(f, "PriceLevelStream"),
         }
     }

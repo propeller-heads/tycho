@@ -57,7 +57,7 @@ futures = "0.3.31"
 futures03 = { package = "futures", version = "0.3.31", features = ["compat"] }
 async-trait = "0.1.88"
 async-stream = "0.3.6"
-# Pinned at 0.20 for tycho-client; simulation's rfq feature uses 0.28 directly (separate semver)
+# Pinned at 0.20 for tycho-client; simulation's book-feeds feature uses 0.28 directly (separate semver)
 tokio-tungstenite = { version = "0.20.0", features = ["native-tls"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 

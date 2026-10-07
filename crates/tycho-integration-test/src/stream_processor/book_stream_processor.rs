@@ -33,96 +33,97 @@ use tycho_simulation::rfq::{
 
 use crate::stream_processor::{StreamUpdate, UpdateType};
 
+/// The venues that take credentials, which is every one that signs binding quotes. Metric
+/// is the pAMM of the family and is configured on its own.
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub enum RFQProtocol {
+pub enum RfqVenue {
     Bebop,
     Hashflow,
     Liquorice,
-    Metric,
     Native,
 }
 
-impl Display for RFQProtocol {
+impl Display for RfqVenue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RFQProtocol::Bebop => write!(f, "{}", BebopClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Hashflow => write!(f, "{}", HashflowClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Liquorice => write!(f, "{}", LiquoriceClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Metric => write!(f, "{}", MetricClient::PROTOCOL_SYSTEM),
-            RFQProtocol::Native => write!(f, "{}", NativeClient::PROTOCOL_SYSTEM),
+            RfqVenue::Bebop => write!(f, "{}", BebopClient::PROTOCOL_SYSTEM),
+            RfqVenue::Hashflow => write!(f, "{}", HashflowClient::PROTOCOL_SYSTEM),
+            RfqVenue::Liquorice => write!(f, "{}", LiquoriceClient::PROTOCOL_SYSTEM),
+            RfqVenue::Native => write!(f, "{}", NativeClient::PROTOCOL_SYSTEM),
         }
     }
 }
 
-pub struct RFQStreamProcessor {
+pub struct BookStreamProcessor {
     chain: Chain,
     tvl_threshold: f64,
-    rfq_credentials: HashMap<RFQProtocol, (String, String)>,
+    credentials: HashMap<RfqVenue, (String, String)>,
     sample_size: usize,
-    run_pamm_protocols: bool,
+    pamm_feeds: bool,
     /// The protocol's stream will skip messages for this duration after processing a message
     skip_messages_duration: Duration,
 }
 
-impl RFQStreamProcessor {
+impl BookStreamProcessor {
     pub fn new(
         chain: Chain,
         tvl_threshold: f64,
         sample_size: usize,
         skip_messages_duration: Duration,
-        run_pamm_protocols: bool,
+        rfq_feeds: bool,
+        pamm_feeds: bool,
     ) -> miette::Result<Self> {
-        let mut rfq_credentials = HashMap::new();
-        if let Ok(key) = env::var("BEBOP_KEY") {
-            info!("Bebop RFQ credentials found");
-            rfq_credentials.insert(RFQProtocol::Bebop, (String::new(), key));
-        } else {
-            info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
-        }
-        let (hashflow_user, hashflow_key) =
-            (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
-        if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
-            info!("Hashflow RFQ credentials found");
-            rfq_credentials.insert(RFQProtocol::Hashflow, (user, key));
-        } else {
-            info!("Hashflow RFQ credentials not found. Expected environment variables: HASHFLOW_USER, HASHFLOW_KEY");
-        }
-        let (liquorice_user, liquorice_key) =
-            (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
-        if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
-            info!("Liquorice RFQ credentials found");
-            rfq_credentials.insert(RFQProtocol::Liquorice, (user, key));
-        } else {
-            info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
-        }
-        if let Ok(key) = env::var("NATIVE_API_KEY") {
-            if NativeSupportedChain::try_from(chain).is_ok() {
-                info!("Native RFQ credentials found");
-                rfq_credentials.insert(RFQProtocol::Native, (String::new(), key));
+        let mut credentials = HashMap::new();
+        if rfq_feeds {
+            if let Ok(key) = env::var("BEBOP_KEY") {
+                info!("Bebop RFQ credentials found");
+                credentials.insert(RfqVenue::Bebop, (String::new(), key));
             } else {
-                info!("Native RFQ does not support chain {:?}, skipping", chain);
+                info!("Bebop RFQ credentials not found. Expected environment variable: BEBOP_KEY");
             }
-        } else {
-            info!(
-                "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
-            );
+            let (hashflow_user, hashflow_key) =
+                (env::var("HASHFLOW_USER").ok(), env::var("HASHFLOW_KEY").ok());
+            if let (Some(user), Some(key)) = (hashflow_user, hashflow_key) {
+                info!("Hashflow RFQ credentials found");
+                credentials.insert(RfqVenue::Hashflow, (user, key));
+            } else {
+                info!("Hashflow RFQ credentials not found. Expected environment variables: HASHFLOW_USER, HASHFLOW_KEY");
+            }
+            let (liquorice_user, liquorice_key) =
+                (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
+            if let (Some(user), Some(key)) = (liquorice_user, liquorice_key) {
+                info!("Liquorice RFQ credentials found");
+                credentials.insert(RfqVenue::Liquorice, (user, key));
+            } else {
+                info!("Liquorice RFQ credentials not found. Expected environment variables: LIQUORICE_USER, LIQUORICE_KEY");
+            }
+            if let Ok(key) = env::var("NATIVE_API_KEY") {
+                if NativeSupportedChain::try_from(chain).is_ok() {
+                    info!("Native RFQ credentials found");
+                    credentials.insert(RfqVenue::Native, (String::new(), key));
+                } else {
+                    info!("Native RFQ does not support chain {:?}, skipping", chain);
+                }
+            } else {
+                info!(
+                    "Native RFQ credentials not found. Expected environment variable: NATIVE_API_KEY"
+                );
+            }
         }
 
-        if rfq_credentials.is_empty() {
-            if run_pamm_protocols {
-                info!(
-                    "No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only."
-                );
+        if credentials.is_empty() {
+            if pamm_feeds {
+                info!("No RFQ venue is configured. Continuing with the pAMM feeds only.");
             } else {
-                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables. To run PAMM RFQ protocols, pass --run-pamm-protocols."));
+                return Err(miette!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm-feeds to run Metric on its own."));
             }
         }
         Ok(Self {
             chain,
             tvl_threshold,
-            rfq_credentials,
+            credentials,
             sample_size,
-            run_pamm_protocols,
+            pamm_feeds,
             skip_messages_duration,
         })
     }
@@ -132,13 +133,13 @@ impl RFQStreamProcessor {
         all_tokens: &HashMap<Bytes, Token>,
         stream_tx: Sender<miette::Result<StreamUpdate>>,
     ) -> miette::Result<JoinHandle<()>> {
-        info!("Starting RFQ stream processor for chain {:?}", self.chain);
+        info!("Starting book stream processor for chain {:?}", self.chain);
         // Set up RFQ stream
         let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
         let mut rfq_stream_builder = RFQStreamBuilder::new()
             .set_tokens(all_tokens.clone())
             .await;
-        let metric_enabled = if self.run_pamm_protocols {
+        let metric_enabled = if self.pamm_feeds {
             match MetricClientBuilder::new(self.chain)
                 .tokens(rfq_tokens.clone())
                 .tvl_threshold(self.tvl_threshold)
@@ -146,7 +147,7 @@ impl RFQStreamProcessor {
                 .build()
             {
                 Ok(metric_client) => {
-                    info!("Adding {} RFQ client...", RFQProtocol::Metric);
+                    info!("Adding {} client...", MetricClient::PROTOCOL_SYSTEM);
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<MetricState>("metric", Box::new(metric_client));
                     true
@@ -160,10 +161,10 @@ impl RFQStreamProcessor {
             false
         };
 
-        for (protocol, (user, key)) in &self.rfq_credentials {
+        for (protocol, (user, key)) in &self.credentials {
             info!("Adding {protocol} RFQ client...");
             match protocol {
-                RFQProtocol::Bebop => {
+                RfqVenue::Bebop => {
                     let bebop_client = BebopClientBuilder::new(self.chain, key.clone())
                         .tokens(rfq_tokens.clone())
                         .tvl_threshold(self.tvl_threshold)
@@ -173,7 +174,7 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<BebopState>("bebop", Box::new(bebop_client));
                 }
-                RFQProtocol::Hashflow => {
+                RfqVenue::Hashflow => {
                     let hashflow_client =
                         HashflowClientBuilder::new(self.chain, user.clone(), key.clone())
                             .tokens(rfq_tokens.clone())
@@ -185,7 +186,7 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<HashflowState>("hashflow", Box::new(hashflow_client))
                 }
-                RFQProtocol::Liquorice => {
+                RfqVenue::Liquorice => {
                     let liquorice_client =
                         LiquoriceClientBuilder::new(self.chain, user.clone(), key.clone())
                             .tokens(rfq_tokens.clone())
@@ -197,7 +198,7 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<LiquoriceState>("liquorice", Box::new(liquorice_client))
                 }
-                RFQProtocol::Native => {
+                RfqVenue::Native => {
                     let native_client = NativeClientBuilder::new(self.chain, key.clone())
                         .tokens(rfq_tokens.clone())
                         .tvl_threshold(self.tvl_threshold)
@@ -208,7 +209,6 @@ impl RFQStreamProcessor {
                     rfq_stream_builder = rfq_stream_builder
                         .add_client::<NativeState>("native", Box::new(native_client))
                 }
-                RFQProtocol::Metric => unreachable!("Metric RFQ does not use credential storage"),
             }
         }
 
@@ -219,15 +219,16 @@ impl RFQStreamProcessor {
         let sample_size = self.sample_size;
         let skip_messages_duration = self.skip_messages_duration;
         let mut next_stream_times: HashMap<String, tokio::time::Instant> = self
-            .rfq_credentials
+            .credentials
             .keys()
             .map(|protocol| (protocol.to_string(), tokio::time::Instant::now()))
             .collect();
         if metric_enabled {
-            next_stream_times.insert(RFQProtocol::Metric.to_string(), tokio::time::Instant::now());
+            next_stream_times
+                .insert(MetricClient::PROTOCOL_SYSTEM.to_string(), tokio::time::Instant::now());
         }
         let handle = tokio::spawn(async move {
-            info!("RFQ stream processor started");
+            info!("book stream processor started");
             while let Some(mut update) = rx.recv().await {
                 // Handle throttling for the update's protocol
                 if let Some((_, component)) = update.new_pairs.iter().next() {
@@ -288,7 +289,7 @@ impl RFQStreamProcessor {
 
                 // Send the latest update
                 let update = StreamUpdate {
-                    update_type: UpdateType::Rfq,
+                    update_type: UpdateType::Book,
                     update,
                     is_first_update,
                     received_at,

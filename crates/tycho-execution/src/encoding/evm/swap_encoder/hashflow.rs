@@ -145,7 +145,7 @@ mod test {
         // Hashflow requires a swap with protocol data, otherwise will return an error
         let hashflow_component = ProtocolComponent {
             id: String::from("hashflow-rfq"),
-            protocol_system: String::from("rfq:hashflow"),
+            protocol_system: String::from("book:hashflow"),
             ..Default::default()
         };
 
@@ -261,7 +261,7 @@ mod test {
 
         let hashflow_component = ProtocolComponent {
             id: String::from("hashflow-rfq"),
-            protocol_system: String::from("rfq:hashflow"),
+            protocol_system: String::from("book:hashflow"),
             ..Default::default()
         };
         let hashflow_quote_data = vec![

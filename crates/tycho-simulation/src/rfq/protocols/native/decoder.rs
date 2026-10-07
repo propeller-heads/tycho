@@ -153,7 +153,7 @@ mod tests {
             },
             component: ProtocolComponent {
                 id: "native_market_1".to_string(),
-                protocol_system: "rfq:native".to_string(),
+                protocol_system: "book:native".to_string(),
                 protocol_type_name: "native_relay_pool".to_string(),
                 chain: Chain::Ethereum,
                 tokens: vec![weth_token.address.clone(), usdc_token.address.clone()],
