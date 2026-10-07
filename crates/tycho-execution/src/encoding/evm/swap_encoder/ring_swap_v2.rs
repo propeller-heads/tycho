@@ -135,8 +135,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: dai,
+            group_token_in: dai.clone(),
             group_token_out: weth,
+            solution_token_in: dai,
         };
 
         let hex_swap = encode(
@@ -170,8 +171,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: weth,
+            group_token_in: weth.clone(),
             group_token_out: dai,
+            solution_token_in: weth,
         };
 
         let hex_swap = encode(
@@ -205,8 +207,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: fw_dai,
+            group_token_in: fw_dai.clone(),
             group_token_out: fw_weth,
+            solution_token_in: fw_dai,
         };
 
         let err = encoder()

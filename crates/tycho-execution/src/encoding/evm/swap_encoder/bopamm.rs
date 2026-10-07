@@ -93,8 +93,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in,
+            group_token_in: token_in.clone(),
             group_token_out: token_out,
+            solution_token_in: token_in,
         };
 
         let encoded_swap = encoder()
@@ -124,8 +125,9 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in,
+            group_token_in: token_in.clone(),
             group_token_out: token_out,
+            solution_token_in: token_in,
         };
 
         let encoded_swap = encoder()

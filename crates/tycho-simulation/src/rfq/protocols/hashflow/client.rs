@@ -844,6 +844,7 @@ mod tests {
             token_out: wbtc.clone(),
             sender: router.clone(),
             receiver: router.clone(),
+            requires_partial_fill: false,
         };
         let quote = client
             .request_binding_quote(&params)
@@ -1013,6 +1014,7 @@ mod tests {
             token_out,
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         }
     }
 

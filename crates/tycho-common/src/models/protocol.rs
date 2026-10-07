@@ -278,6 +278,9 @@ pub struct GetAmountOutParams {
     pub token_out: Bytes,
     pub sender: Bytes,
     pub receiver: Bytes,
+    /// The swap may receive less than `amount_in` at execution, so the signed quote must let the
+    /// taker fill below its signed amount. Venues whose quotes always allow this ignore it.
+    pub requires_partial_fill: bool,
 }
 
 impl From<dto::ProtocolStateDelta> for ProtocolComponentStateDelta {

@@ -323,6 +323,7 @@ mod tests {
             router_address: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            solution_token_in: token_in.clone(),
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
@@ -384,6 +385,7 @@ mod tests {
             router_address: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            solution_token_in: token_in.clone(),
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),
@@ -446,6 +448,7 @@ mod tests {
             router_address: None,
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            solution_token_in: token_in.clone(),
         };
         let encoder = CurveSwapEncoder::new(
             Bytes::from("0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f"),

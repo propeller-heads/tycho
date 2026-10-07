@@ -877,6 +877,7 @@ mod tests {
             token_out: token_out.clone(),
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         };
         let quote = client
             .request_binding_quote(&params)
@@ -945,6 +946,7 @@ mod tests {
             token_out: token_out.clone(),
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         };
         let quote = client
             .request_binding_quote(&params)
@@ -994,6 +996,7 @@ mod tests {
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
             receiver: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
+            requires_partial_fill: false,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
@@ -1015,6 +1018,7 @@ mod tests {
             token_out: Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(),
             sender: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
             receiver: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
+            requires_partial_fill: false,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_out, BigUint::from_str("11186653890").unwrap());
@@ -1038,6 +1042,7 @@ mod tests {
             token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
@@ -1074,6 +1079,7 @@ mod tests {
             token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
@@ -1160,6 +1166,7 @@ mod tests {
             token_out,
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         }
     }
 
@@ -1372,6 +1379,7 @@ mod tests {
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: router.clone(),
             receiver: router,
+            requires_partial_fill: false,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());

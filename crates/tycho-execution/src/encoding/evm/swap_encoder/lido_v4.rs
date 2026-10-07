@@ -121,6 +121,7 @@ mod tests {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            solution_token_in: token_in.clone(),
         }
     }
 

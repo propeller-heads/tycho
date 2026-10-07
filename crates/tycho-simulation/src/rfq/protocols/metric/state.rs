@@ -1068,6 +1068,7 @@ mod tests {
                 token_out: state.quote_token.address.clone(),
                 sender: trader.clone(),
                 receiver: trader,
+                requires_partial_fill: false,
             })
             .await
             .unwrap();

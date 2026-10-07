@@ -112,6 +112,7 @@ mod tests {
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
             router_address: Some(Bytes::default()),
+            solution_token_in: token_in.clone(),
         };
 
         let encoder = EkuboSwapEncoder::new(Bytes::default(), Chain::Ethereum, None).unwrap();
@@ -147,6 +148,7 @@ mod tests {
             group_token_in: group_token_in.clone(),
             group_token_out: group_token_out.clone(),
             router_address: Some(Bytes::default()),
+            solution_token_in: group_token_in.clone(),
         };
 
         let first_swap = Swap::new(

@@ -1363,6 +1363,7 @@ mod tests {
             token_out: Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap(),
             sender: Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap(),
             receiver: Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap(),
+            requires_partial_fill: false,
         }
     }
 
