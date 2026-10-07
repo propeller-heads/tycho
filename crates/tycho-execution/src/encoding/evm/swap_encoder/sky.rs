@@ -140,7 +140,6 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(token_in),
             group_token_out: Bytes::from(token_out),
-            solution_token_in: Bytes::from(token_in),
         };
         encoder()
             .encode_swap(&swap, &encoding_context)
@@ -208,7 +207,6 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(USDC),
             group_token_out: Bytes::from(DAI),
-            solution_token_in: Bytes::from(USDC),
         };
         assert!(encoder()
             .encode_swap(&swap, &encoding_context)

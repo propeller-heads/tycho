@@ -220,8 +220,8 @@ impl LiquoriceClient {
 
         let (quote_level, _) = best_level.ok_or_else(|| {
             RFQError::QuoteNotFound(format!(
-                "No valid Liquorice quote levels for {} {} ->{} (partial fill required: {})",
-                params.amount_in, params.token_in, params.token_out, params.requires_partial_fill,
+                "No valid Liquorice quote levels for {} {} ->{}",
+                params.amount_in, params.token_in, params.token_out,
             ))
         })?;
 
@@ -764,7 +764,6 @@ mod tests {
             token_out: Bytes::from_str(token_out).unwrap(),
             sender: Bytes::from_str("0x3333333333333333333333333333333333333333").unwrap(),
             receiver: Bytes::from_str("0x4444444444444444444444444444444444444444").unwrap(),
-            requires_partial_fill: false,
         }
     }
 
@@ -859,77 +858,6 @@ mod tests {
         assert_eq!(quote.amount_out, BigUint::from(3_500_000u64));
     }
 
-    fn partial_fill_settings() -> crate::rfq::protocols::liquorice::models::LiquoricePartialFill {
-        crate::rfq::protocols::liquorice::models::LiquoricePartialFill {
-            offset: 96,
-            min_base_token_amount: "500000000000000000".to_string(),
-        }
-    }
-
-    #[test]
-    fn test_process_quote_response_requires_partial_fill() {
-        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
-
-        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
-        let amount_in = 1_000_000_000_000_000_000u64;
-
-        let fill_or_kill_level =
-            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
-        let partial_fill_level = make_quote_level(
-            token_in,
-            token_out,
-            &amount_in.to_string(),
-            "3000000",
-            Some(partial_fill_settings()),
-        );
-        let response = LiquoriceQuoteResponse {
-            rfq_id: "r1".to_string(),
-            liquidity_available: true,
-            levels: vec![fill_or_kill_level, partial_fill_level],
-        };
-        let mut params = make_params(token_in, token_out, amount_in);
-        params.requires_partial_fill = true;
-
-        let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
-
-        assert_eq!(quote.amount_out, BigUint::from(3_000_000u64));
-        assert!(quote
-            .quote_attributes
-            .contains_key("partial_fill_offset"));
-    }
-
-    #[test]
-    fn test_process_quote_response_requires_partial_fill_without_partial_fill_level() {
-        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
-
-        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
-        let amount_in = 1_000_000_000_000_000_000u64;
-
-        let response = LiquoriceQuoteResponse {
-            rfq_id: "r1".to_string(),
-            liquidity_available: true,
-            levels: vec![make_quote_level(
-                token_in,
-                token_out,
-                &amount_in.to_string(),
-                "3500000",
-                None,
-            )],
-        };
-        let mut params = make_params(token_in, token_out, amount_in);
-        params.requires_partial_fill = true;
-
-        let result = LiquoriceClient::process_quote_response(response, &params);
-
-        assert!(
-            matches!(result, Err(RFQError::QuoteNotFound(_))),
-            "expected QuoteNotFound, got {:?}",
-            result
-        );
-    }
-
     fn create_test_quote_params() -> GetAmountOutParams {
         let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
@@ -941,7 +869,6 @@ mod tests {
             token_out,
             sender: router.clone(),
             receiver: router,
-            requires_partial_fill: false,
         }
     }
 

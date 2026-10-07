@@ -67,7 +67,6 @@ impl SwapEncoder for HashflowSwapEncoder {
                         token_out: swap.token_out().address.clone(),
                         sender: router_address.clone(),
                         receiver: router_address,
-                        requires_partial_fill: false,
                     })
                     .await
             })
@@ -165,7 +164,6 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
-            solution_token_in: token_in.clone(),
         };
 
         let encoder = HashflowSwapEncoder::new(
@@ -208,7 +206,6 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: swap.token_in().address.clone(),
             group_token_out: swap.token_out().address.clone(),
-            solution_token_in: swap.token_in().address.clone(),
         };
         HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
@@ -344,7 +341,6 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
-            solution_token_in: token_in.clone(),
         };
 
         let encoder = HashflowSwapEncoder::new(

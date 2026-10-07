@@ -253,12 +253,6 @@ impl LiquoriceQuoteLevel {
                 params.amount_in, self.base_token_amount
             )));
         }
-        if params.requires_partial_fill && self.partial_fill.is_none() {
-            return Err(RFQError::FatalError(format!(
-                "Maker {} does not allow partial fills, which this swap requires",
-                self.maker
-            )));
-        }
         Ok(())
     }
 }
@@ -379,7 +373,6 @@ mod tests {
                 token_out: hex_to_bytes("0x2222222222222222222222222222222222222222"),
                 sender: hex_to_bytes("0x6666666666666666666666666666666666666666"),
                 receiver: hex_to_bytes("0x3333333333333333333333333333333333333333"),
-                requires_partial_fill: false,
             }
         }
 

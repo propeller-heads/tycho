@@ -78,7 +78,6 @@ impl SwapEncoder for LiquoriceSwapEncoder {
             token_out: swap.token_out().address.clone(),
             sender: router_address.clone(),
             receiver: router_address.clone(),
-            requires_partial_fill: swap.token_in().address != encoding_context.solution_token_in,
         };
 
         let signed_quote = on_blocking_thread(|| {
@@ -245,7 +244,6 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
-            solution_token_in: token_in.clone(),
         };
 
         let encoder = LiquoriceSwapEncoder::new(

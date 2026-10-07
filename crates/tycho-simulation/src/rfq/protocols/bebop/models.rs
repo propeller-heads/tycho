@@ -621,7 +621,6 @@ mod tests {
                 token_out: hex_to_bytes("0x3333333333333333333333333333333333333333"),
                 sender: hex_to_bytes("0x2222222222222222222222222222222222222222"),
                 receiver: hex_to_bytes("0x5555555555555555555555555555555555555555"),
-                requires_partial_fill: false,
             }
         }
 

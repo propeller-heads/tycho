@@ -510,14 +510,11 @@ impl PartialEq for PermitDetails {
 ///   solution does not require router address.
 /// * `group_token_in`: Token to be used as the input for the group swap.
 /// * `group_token_out`: Token to be used as the output for the group swap.
-/// * `solution_token_in`: The solution's input token. A swap from any other token follows an
-///   earlier swap, so its input is only known at execution.
 #[derive(Clone, Debug)]
 pub struct EncodingContext {
     pub router_address: Option<Bytes>,
     pub group_token_in: Bytes,
     pub group_token_out: Bytes,
-    pub solution_token_in: Bytes,
 }
 
 #[derive(PartialEq)]

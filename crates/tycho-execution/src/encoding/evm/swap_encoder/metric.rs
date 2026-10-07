@@ -111,7 +111,6 @@ mod tests {
             ),
             group_token_in: Bytes::zero(20),
             group_token_out: Bytes::zero(20),
-            solution_token_in: Bytes::zero(20),
         }
     }
 

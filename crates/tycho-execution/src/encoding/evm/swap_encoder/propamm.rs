@@ -120,9 +120,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
+            group_token_in: token_in,
             group_token_out: token_out,
-            solution_token_in: token_in,
         };
 
         let encoded_swap = encoder()
@@ -153,7 +152,6 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(format!("0x{WETH}").as_str()),
             group_token_out: Bytes::from(format!("0x{USDC}").as_str()),
-            solution_token_in: Bytes::from(format!("0x{WETH}").as_str()),
         };
 
         let result = encoder().encode_swap(&swap, &encoding_context);

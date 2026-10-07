@@ -289,7 +289,6 @@ mod tests {
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
-            solution_token_in: token_in.clone(),
         };
         let encoder = UniswapV4SwapEncoder::new(
             Bytes::from("0xF62849F9A0B5Bf2913b396098F7c7019b51A820a"),
@@ -360,7 +359,6 @@ mod tests {
             group_token_in: group_token_in.clone(),
             // Token out is the same as the group token out
             group_token_out: token_out.clone(),
-            solution_token_in: group_token_in.clone(),
         };
 
         let encoder = UniswapV4SwapEncoder::new(
@@ -404,7 +402,6 @@ mod tests {
             router_address: Some(router_address.clone()),
             group_token_in: usde_address.clone(),
             group_token_out: wbtc_address.clone(),
-            solution_token_in: usde_address.clone(),
         };
 
         // Setup - First sequence: USDE -> USDT
@@ -536,7 +533,6 @@ mod tests {
                 router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
                 group_token_in: usdc_address.clone(),
                 group_token_out: usdt_address.clone(),
-                solution_token_in: usdc_address.clone(),
             };
 
             // Setup first pool: USDC -> WETH (use real tick spacing and fee from on-chain)
