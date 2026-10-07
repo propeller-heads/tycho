@@ -1960,6 +1960,7 @@ impl PostgresGateway {
 
         if let Some(pagination) = pagination_params {
             query = query
+                .order_by(ct::protocol_component_id)
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }
