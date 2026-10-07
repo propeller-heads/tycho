@@ -170,6 +170,9 @@ Committed blocks are therefore retained and served, so window contents and DB ro
 to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
+Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one sample per
+folded block), `delta_window_blocks` and `delta_window_tip_block` (gauges, set after every insert
+and every restart clear; an empty window reports 0 blocks and keeps its last tip).
 
 With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
 snapshot after the extractors are built and before the server starts (`EntityCache::load` in
