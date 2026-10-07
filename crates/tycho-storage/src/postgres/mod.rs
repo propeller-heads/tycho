@@ -147,6 +147,7 @@ use unicode_segmentation::UnicodeSegmentation;
 pub mod builder;
 pub mod cache;
 mod chain;
+pub mod component_index;
 mod contract;
 pub mod direct;
 mod entry_point;
@@ -461,6 +462,9 @@ pub(crate) struct PostgresGateway {
     /// In-memory token store serving `get_tokens` without DB access. `None` means
     /// token queries fall back to SQL (e.g. in the token analysis job).
     pub(crate) token_cache: Option<Arc<token_cache::TokenCache>>,
+    /// In-memory index counting and paging `get_protocol_components` requests by protocol system.
+    /// `None` means those requests run entirely in SQL.
+    pub(crate) component_index: Option<Arc<component_index::ComponentIndex>>,
     /// Any versions dated before this date, as per their `valid_to` column, will be
     /// discarded and never be inserted into the db. We supply this as an absolute date
     /// since updating it must be done carefully. To avoid gaps in versions this can't
@@ -475,6 +479,7 @@ impl PostgresGateway {
         native_token_cache: Arc<NativeTokenEnumCache>,
         protocol_system_cache: Arc<ProtocolSystemEnumCache>,
         token_cache: Option<Arc<token_cache::TokenCache>>,
+        component_index: Option<Arc<component_index::ComponentIndex>>,
         retention_horizon: NaiveDateTime,
     ) -> Self {
         Self {
@@ -482,6 +487,7 @@ impl PostgresGateway {
             chain_id_cache: chain_cache,
             native_token_id_cache: native_token_cache,
             token_cache,
+            component_index,
             retention_horizon,
         }
     }
@@ -502,6 +508,7 @@ impl PostgresGateway {
             Arc::new(chain_cache),
             Arc::new(native_token_cache),
             Arc::new(protocol_system_cache),
+            None,
             None,
             NaiveDateTime::default(),
         )
@@ -534,6 +541,7 @@ impl PostgresGateway {
         pool: Pool<AsyncPgConnection>,
         retention_horizon: NaiveDateTime,
         token_cache_chains: Option<&[Chain]>,
+        component_index_chains: Option<&[Chain]>,
     ) -> Result<Self, StorageError> {
         let chain_cache = ChainEnumCache::from_pool(pool.clone()).await?;
         let native_token_cache = Self::native_cache_from_pool(pool.clone(), &chain_cache).await?;
@@ -545,11 +553,18 @@ impl PostgresGateway {
             }
             None => None,
         };
+        let component_index = match component_index_chains {
+            Some(chains) => Some(Arc::new(
+                component_index::ComponentIndex::from_pool(pool.clone(), chains).await?,
+            )),
+            None => None,
+        };
         let gw = PostgresGateway::with_cache(
             Arc::new(chain_cache),
             Arc::new(native_token_cache),
             Arc::new(protocol_system_cache),
             token_cache,
+            component_index,
             retention_horizon,
         );
 

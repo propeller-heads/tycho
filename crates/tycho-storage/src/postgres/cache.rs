@@ -44,6 +44,7 @@ use tycho_common::{
 };
 
 use super::{
+    component_index::NewComponentRow,
     is_transaction_conflict,
     snapshot::{bound_snapshot_reads, snapshot_transaction},
     PostgresError, PostgresGateway,
@@ -320,6 +321,9 @@ pub(crate) struct DBCacheWriteExecutor {
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
     max_retries: u64,
+    /// Components inserted by the current transaction attempt, added to the component index once
+    /// the transaction commits.
+    inserted_components: Vec<NewComponentRow>,
 }
 
 impl DBCacheWriteExecutor {
@@ -342,7 +346,16 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
+        Self {
+            name,
+            chain,
+            pool,
+            state_gateway,
+            persisted_block,
+            msg_receiver,
+            max_retries: 3,
+            inserted_components: Vec::new(),
+        }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -385,6 +398,7 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        self.inserted_components.clear();
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
@@ -433,7 +447,11 @@ impl DBCacheWriteExecutor {
 
         if res.is_ok() {
             debug!("DBTransactionCommitted");
+            if let Some(component_index) = &self.state_gateway.component_index {
+                component_index.insert(&self.inserted_components);
+            }
         }
+        self.inserted_components.clear();
 
         if let Err(e) = &res {
             error!(error = ?e, "DBTransactionFailed");
@@ -505,9 +523,12 @@ impl DBCacheWriteExecutor {
                     .await?
             }
             WriteOp::InsertProtocolComponents(components) => {
-                self.state_gateway
+                let inserted = self
+                    .state_gateway
                     .add_protocol_components(components.as_slice(), conn)
-                    .await?
+                    .await?;
+                self.inserted_components
+                    .extend(inserted);
             }
             WriteOp::InsertTokens(tokens) => {
                 self.state_gateway
@@ -1371,13 +1392,14 @@ impl StateSnapshotGateway for CachedGateway {
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
-    use diesel::{sql_query, QueryableByName};
+    use diesel::{sql_query, ExpressionMethods, QueryDsl, QueryableByName};
     use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
     use crate::postgres::{
-        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+        component_index::ComponentIndex, db_fixtures, db_fixtures::yesterday_one_am, orm, schema,
+        testing::run_against_db,
     };
 
     #[tokio::test]
@@ -1952,6 +1974,120 @@ mod test_serial_db {
             assert_eq!(fetched_block, block_1);
 
             handle.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_adds_only_committed_components_to_component_index() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let system_id =
+                db_fixtures::insert_protocol_system(&mut connection, "ambient".to_owned()).await;
+            db_fixtures::insert_protocol_type(&mut connection, "ambient_pool", None, None, None)
+                .await;
+            let mut gateway = PostgresGateway::from_connection(&mut connection).await;
+            let component_index =
+                ComponentIndex::from_connection(&mut connection, &[Chain::Ethereum])
+                    .await
+                    .unwrap();
+            gateway.component_index = Some(Arc::new(component_index));
+            let (tx, rx) = mpsc::channel(10);
+            let handle = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await
+            .run();
+
+            let tx_1 = get_sample_transaction(1);
+            let usdt_address = Bytes::from("0xdAC17F958D2ee523a2206206994597C13D831ec7");
+            let token = models::token::Token::new(
+                &usdt_address,
+                "USDT",
+                6,
+                0,
+                &[Some(64), None],
+                Chain::Ethereum,
+                100,
+            );
+            let component = |id: &str| models::protocol::ProtocolComponent {
+                id: id.to_string(),
+                protocol_system: "ambient".to_string(),
+                protocol_type_name: "ambient_pool".to_string(),
+                chain: Chain::Ethereum,
+                tokens: vec![usdt_address.clone()],
+                contract_addresses: vec![],
+                change: ChangeType::Creation,
+                creation_tx: tx_1.hash.clone(),
+                static_attributes: Default::default(),
+                created_at: Default::default(),
+            };
+            let block_1 = get_sample_block(1);
+            let block_ops = vec![
+                WriteOp::UpsertBlock(vec![block_1.clone()]),
+                WriteOp::UpsertTx(vec![tx_1.clone()]),
+                WriteOp::InsertTokens(vec![token]),
+            ];
+
+            // The balance references an unknown token, so the whole batch rolls back after the
+            // component insert succeeded.
+            let mut failing_ops = block_ops.clone();
+            failing_ops.extend([
+                WriteOp::InsertProtocolComponents(vec![component("rolled_back")]),
+                WriteOp::InsertComponentBalances(vec![models::protocol::ComponentBalance {
+                    token: Bytes::from("0x00000000000000000000000000000000000000ff"),
+                    balance_float: 0.0,
+                    balance: Bytes::from(&[0u8]),
+                    modify_tx: tx_1.hash.clone(),
+                    component_id: "rolled_back".to_string(),
+                }]),
+            ]);
+            send_write_message(&tx, block_1.clone(), failing_ops)
+                .await
+                .await
+                .expect("Response from channel ok")
+                .expect_err("the batch must fail");
+
+            let mut committing_ops = block_ops;
+            committing_ops.push(WriteOp::InsertProtocolComponents(vec![component("committed")]));
+            send_write_message(&tx, block_1, committing_ops)
+                .await
+                .await
+                .expect("Response from channel ok")
+                .expect("Transaction committed");
+            handle.abort();
+
+            let committed_db_id = schema::protocol_component::table
+                .filter(schema::protocol_component::external_id.eq("committed"))
+                .select(schema::protocol_component::id)
+                .first::<i64>(&mut connection)
+                .await
+                .unwrap();
+            let page = gateway
+                .component_index
+                .as_ref()
+                .unwrap()
+                .query(&Chain::Ethereum, system_id, None, None)
+                .unwrap();
+            assert_eq!(page.ids, vec![committed_db_id]);
+            assert_eq!(page.total, 1);
         })
         .await;
     }

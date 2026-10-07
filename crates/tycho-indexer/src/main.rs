@@ -440,6 +440,7 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
     let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
         .enable_token_cache()
+        .set_component_index(global_args.component_index)
         .build_direct_gw()
         .await?;
 
@@ -494,6 +495,7 @@ async fn create_indexing_tasks(
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
+        .set_component_index(global_args.component_index)
         .build()
         .await?;
     let chain = *chains
