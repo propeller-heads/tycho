@@ -253,6 +253,15 @@ impl LiquoriceQuoteLevel {
                 params.amount_in, self.base_token_amount
             )));
         }
+        // A swap after the first receives the previous swap's actual output, which can fall short
+        // of `amount_in`. Without partial fill settings the level must be filled for exactly its
+        // signed amount, so that shortfall reverts.
+        if self.partial_fill.is_none() {
+            return Err(RFQError::FatalError(format!(
+                "Maker {} does not allow partial fills",
+                self.maker
+            )));
+        }
         Ok(())
     }
 }
@@ -362,7 +371,10 @@ mod tests {
                 quote_token: "0x2222222222222222222222222222222222222222".to_string(),
                 base_token_amount: "1000".to_string(),
                 quote_token_amount: "2000".to_string(),
-                partial_fill: None,
+                partial_fill: Some(LiquoricePartialFill {
+                    offset: 68,
+                    min_base_token_amount: "500".to_string(),
+                }),
             }
         }
 
@@ -398,6 +410,14 @@ mod tests {
             let mut level = quote_level();
             level.base_token_amount = "9999".to_string();
             assert!(matches!(level.validate(&params), Err(RFQError::FatalError(_))));
+        }
+
+        #[test]
+        fn test_validate_without_partial_fill() {
+            let mut level = quote_level();
+            level.partial_fill = None;
+
+            assert!(matches!(level.validate(&params()), Err(RFQError::FatalError(_))));
         }
     }
 }

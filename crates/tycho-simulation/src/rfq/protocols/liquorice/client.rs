@@ -685,7 +685,7 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let json_response = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
+        let json_response = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":{"offset":68,"minBaseTokenAmount":"500000000000000000"},"allowances":[]}]}"#;
 
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -841,11 +841,22 @@ mod tests {
         // One level with wrong base_token_amount (will fail validate) and two
         // valid levels with different quote_token_amounts; expect the higher one
         // to be chosen.
-        let invalid_level = make_quote_level(token_in, token_out, "999", "9999999", None);
-        let lower_level =
-            make_quote_level(token_in, token_out, &amount_in.to_string(), "3000000", None);
-        let best_level =
-            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
+        let invalid_level =
+            make_quote_level(token_in, token_out, "999", "9999999", Some(partial_fill_settings()));
+        let lower_level = make_quote_level(
+            token_in,
+            token_out,
+            &amount_in.to_string(),
+            "3000000",
+            Some(partial_fill_settings()),
+        );
+        let best_level = make_quote_level(
+            token_in,
+            token_out,
+            &amount_in.to_string(),
+            "3500000",
+            Some(partial_fill_settings()),
+        );
 
         let response = LiquoriceQuoteResponse {
             rfq_id: "r1".to_string(),
@@ -856,6 +867,72 @@ mod tests {
 
         let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
         assert_eq!(quote.amount_out, BigUint::from(3_500_000u64));
+    }
+
+    fn partial_fill_settings() -> crate::rfq::protocols::liquorice::models::LiquoricePartialFill {
+        crate::rfq::protocols::liquorice::models::LiquoricePartialFill {
+            offset: 68,
+            min_base_token_amount: "500000000000000000".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_process_quote_response_skips_level_without_partial_fill() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+
+        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+        let amount_in = 1_000_000_000_000_000_000u64;
+
+        let fill_or_kill_level =
+            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
+        let partial_fill_level = make_quote_level(
+            token_in,
+            token_out,
+            &amount_in.to_string(),
+            "3000000",
+            Some(partial_fill_settings()),
+        );
+        let response = LiquoriceQuoteResponse {
+            rfq_id: "r1".to_string(),
+            liquidity_available: true,
+            levels: vec![fill_or_kill_level, partial_fill_level],
+        };
+        let params = make_params(token_in, token_out, amount_in);
+
+        let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
+
+        assert_eq!(quote.amount_out, BigUint::from(3_000_000u64));
+    }
+
+    #[test]
+    fn test_process_quote_response_without_partial_fill_level() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+
+        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+        let amount_in = 1_000_000_000_000_000_000u64;
+
+        let response = LiquoriceQuoteResponse {
+            rfq_id: "r1".to_string(),
+            liquidity_available: true,
+            levels: vec![make_quote_level(
+                token_in,
+                token_out,
+                &amount_in.to_string(),
+                "3500000",
+                None,
+            )],
+        };
+        let params = make_params(token_in, token_out, amount_in);
+
+        let result = LiquoriceClient::process_quote_response(response, &params);
+
+        assert!(
+            matches!(result, Err(RFQError::QuoteNotFound(_))),
+            "expected QuoteNotFound, got {:?}",
+            result
+        );
     }
 
     fn create_test_quote_params() -> GetAmountOutParams {
@@ -927,7 +1004,7 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let json_response = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
+        let json_response = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":{"offset":68,"minBaseTokenAmount":"500000000000000000"},"allowances":[]}]}"#;
 
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
