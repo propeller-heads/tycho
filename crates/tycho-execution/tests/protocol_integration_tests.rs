@@ -4022,3 +4022,81 @@ fn test_sequential_encoding_strategy_sky() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
+
+#[test]
+fn test_single_encoding_strategy_tessera_weth_usdc() {
+    encode_tessera_router_fixture(false);
+}
+
+#[test]
+fn test_single_encoding_strategy_tessera_usdc_weth() {
+    encode_tessera_router_fixture(true);
+}
+
+fn encode_tessera_router_fixture(reverse: bool) {
+    let tessera_pair = ProtocolComponent {
+        id: String::from("0xf524c1bc1c64a2c99bc7eccf19ede9a1d89d5a7c"),
+        protocol_system: String::from("vm:tessera"),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let (token_in, token_out, amount, expected, minimum, fixture) = if reverse {
+        (
+            usdc,
+            weth,
+            "100000000",
+            "30000000000000000",
+            "20000000000000000",
+            "test_single_encoding_strategy_tessera_usdc_weth",
+        )
+    } else {
+        (
+            weth,
+            usdc,
+            "10000000000000000",
+            "24000000",
+            "23520000",
+            "test_single_encoding_strategy_tessera_weth_usdc",
+        )
+    };
+    let swap = Swap::new(
+        tessera_pair,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from_str(amount).unwrap(),
+        BigUint::from_str(expected).unwrap(),
+        BigUint::from_str(minimum).unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        encoded_solution,
+        &solution,
+        &Bytes::zero(20),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(fixture, hex_calldata.as_str());
+}
