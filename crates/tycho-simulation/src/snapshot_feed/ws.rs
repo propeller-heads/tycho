@@ -101,10 +101,6 @@ pub(crate) async fn run_ws_feed<S: WsSource>(
 /// A data-bearing WebSocket frame. Control frames never reach a [`WsSource`]: the loop
 /// reconnects on `Close`, tokio-tungstenite answers pings while the stream is polled, and
 /// tungstenite never yields raw frames on the read side.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) enum WsPayload {
     Text(Utf8Bytes),
     Binary(Bytes),

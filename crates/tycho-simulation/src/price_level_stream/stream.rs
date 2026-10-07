@@ -355,11 +355,8 @@ impl SnapshotTracker {
                     continue;
                 }
                 let sells_token0 = token_in < token_out;
-                let key = if sells_token0 {
-                    (token_in.clone(), token_out.clone())
-                } else {
-                    (token_out.clone(), token_in.clone())
-                };
+                // The pair in address order, so both directions of a pair share one entry.
+                let key = if sells_token0 { (token_in, token_out) } else { (token_out, token_in) };
                 let quotes = order_book
                     .into_iter()
                     .map(|TitanPriceLevel { amount_in, amount_out }| {

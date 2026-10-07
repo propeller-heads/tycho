@@ -1,13 +1,15 @@
-# RFQ QuickStart
+# Off-Chain Book QuickStart
 
 This quickstart guide enables you to:
 
-1. Connect to the RFQ WebSocket stream for real-time pricing data.
-2. Leverage Tycho Simulation to get the best quoted prices from RFQ market makers.
+1. Open a live feed per off-chain book venue — the RFQ market makers and the pAMMs — and read
+   each venue's complete current book.
+2. Leverage Tycho Simulation to get the best quoted prices across them.
 
 ## How to run
 
-You need to set up the WebSocket credentials of the desired RFQs to access live pricing data:
+The example loads the chain's token list from Tycho, and each venue needs its own credentials to
+serve live pricing data:
 
 ```bash
 export TYCHO_URL=<tycho-api-url-for-chain>
@@ -23,9 +25,11 @@ export LIQUORICE_KEY=<your-liquorice-key>
 
 export NATIVE_API_KEY=<your-native-api-key>
 
-export METRIC_API_URL=<optional-custom-metric-api-url>
-export METRIC_API_KEY=<optional-metric-api-key>
+export METRIC_API_KEY=<your-metric-trading-key>
 ```
+
+`TYCHO_URL` defaults to the hosted endpoint for the chain and `TYCHO_API_KEY` to `sampletoken`,
+which works against a local dev instance.
 
 Then, you can run the example with:
 
@@ -33,9 +37,14 @@ Then, you can run the example with:
 cargo run --release --example book_quickstart
 ```
 
-The pAMM feeds (Metric) run alongside the RFQ venues; `--disable-pamm-feeds` leaves them out.
+The pAMM feeds (Metric) run alongside the RFQ venues by default, and need only `METRIC_API_KEY` —
+so the example works with no RFQ credentials at all. Pass `--disable-pamm-feeds` to leave them out:
 
-By default, the example will request price levels for 10 USDC -> WETH on Ethereum Mainnet using RFQs.
+```bash
+cargo run --release --example book_quickstart -- --disable-pamm-feeds
+```
+
+By default, the example will request price levels for 10 USDC -> WETH on Ethereum Mainnet.
 If we choose a different chain, by default, price levels for USDC -> WETH will be requested on that chain.
 If you want a different trade and chain, you can use the following command, replacing the values with the token and
 chain that you'd like:
@@ -57,16 +66,16 @@ export PRIVATE_KEY=<your-private-key>
 
 ## Important Notes
 
-- **Credentials**: Contact RFQ protocols directly to obtain WebSocket API credentials for accessing live market maker
-  quotes. The pAMM feeds need none, so the example serves Metric on its own when no RFQ venue is
-  configured.
+- **Credentials**: Contact each venue directly to obtain API credentials for accessing its live
+  book. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm-feeds` leaves them out.
 
 ## What you'll see
 
 The example will:
 
-1. Connect to the RFQ's WebSocket API using your credentials
-2. Stream live price quotes from market makers for your specified token pair
+1. Open a feed per venue you have credentials for
+2. Stream each venue's complete book for your specified token pair, republished whenever it
+   changes
 3. Display the best available quotes with pricing information
 4. Allow you to simulate or execute swaps when a private key is provided
 

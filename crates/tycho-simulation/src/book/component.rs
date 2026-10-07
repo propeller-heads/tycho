@@ -22,10 +22,6 @@ pub fn pair_component_id(protocol_system: &str, base: &Bytes, quote: &Bytes) -> 
 
 /// A book's component: no contracts, no static attributes, the two tokens in the book's
 /// orientation. `id` is the pair's identity (see [`pair_component_id`]) or the pool's address.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub fn pair_component(
     id: Bytes,
     protocol_system: impl Into<String>,

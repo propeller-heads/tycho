@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tycho_common::simulation::errors::SimulationError;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum RFQError {
     #[error("RFQ connection error: {0}")]
     ConnectionError(String),

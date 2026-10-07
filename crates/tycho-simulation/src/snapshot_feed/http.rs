@@ -55,10 +55,6 @@ pub struct HttpFeedConfig {
 /// stretch that to 10, 20 and at most 40 s while polls keep failing, retry forever, and withdraw
 /// a snapshot that has gone 30 s without being refreshed — two polls' worth of silence with room
 /// for one hung poll on top.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) fn default_http_feed_config() -> HttpFeedConfig {
     HttpFeedConfig {
         poll_interval: Duration::from_secs(5),
@@ -278,10 +274,6 @@ pub(crate) async fn fetch_json<T: DeserializeOwned>(
 
 /// Parses `response`'s JSON body, the second half of [`fetch_json`] for a caller that sends the
 /// request itself.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) async fn read_json<T: DeserializeOwned>(
     response: Response,
     what: &str,
