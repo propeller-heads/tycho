@@ -30,7 +30,7 @@
 //! # Memory
 //!
 //! There is no cap and no eviction, so the protection is visibility. A reporter publishes entry
-//! counts every minute and measures the bytes every ten minutes, per family and, for components,
+//! counts every 10 seconds and measures the bytes every 5 minutes, per family and, for components,
 //! per protocol system. Accounts have no protocol system: several extractors can share one.
 //! Nothing on the fold path counts bytes. The measurement holds the read lock only for short
 //! steps; see [`EntityCache::measure`].
@@ -566,11 +566,11 @@ impl EntityCache {
     }
 }
 
-/// How often the reporter publishes entry counts. Same cadence as `pending_deltas_buffer_size`.
-const REPORT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the reporter publishes entry counts.
+const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Reports between size walks, counting the first report as a walk.
-const MEASURE_EVERY: u32 = 10;
+/// Reports between size walks, counting the first report as a walk: one walk every 5 minutes.
+const MEASURE_EVERY: u32 = 30;
 
 /// Bytes each entity family holds, as [`EntityCache::measure`] counted them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
