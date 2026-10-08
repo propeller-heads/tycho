@@ -68,7 +68,10 @@ use tycho_indexer::{
         EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
     },
 };
-use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
+use tycho_storage::postgres::{
+    builder::{GatewayBuilder, IndexerGateways},
+    cache::CachedGateway,
+};
 
 mod ot;
 
@@ -437,9 +440,13 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
 
     let rpc_client = global_args.rpc.build_client()?;
 
-    let direct_gw = GatewayBuilder::new(&global_args.database_url)
+    let mut gateway_builder = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
-        .enable_token_cache()
+        .enable_token_cache();
+    if let Some(size) = global_args.rpc_db_pool_size {
+        gateway_builder = gateway_builder.set_pool_size(size);
+    }
+    let direct_gw = gateway_builder
         .build_direct_gw()
         .await?;
 
@@ -489,13 +496,19 @@ async fn create_indexing_tasks(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let (cached_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
+    let mut gateway_builder = GatewayBuilder::new(&global_args.database_url)
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
-        .build()
-        .await?;
+        .set_pool_size(global_args.extraction_db_pool_size);
+    if let Some(size) = global_args.rpc_db_pool_size {
+        gateway_builder = gateway_builder.set_rpc_pool_size(size);
+    }
+    let IndexerGateways { extraction: cached_gw, rpc: rpc_gw, writer: gw_writer_handle } =
+        gateway_builder
+            .build_with_rpc_gateway()
+            .await?;
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
@@ -530,7 +543,7 @@ async fn create_indexing_tasks(
         EntityCacheMode::Off => EntityCacheSetup::Off,
         mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
             info!(?mode, "Loading the entity cache");
-            let cache = EntityCache::load(&cached_gw, &chain)
+            let cache = EntityCache::load(&rpc_gw, &chain)
                 .await
                 .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
             if mode == EntityCacheMode::Shadow {
@@ -541,23 +554,22 @@ async fn create_indexing_tasks(
         }
     };
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .dci_protocols(dci_protocols)
-            .protocol_systems(protocol_systems)
-            .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs)
-            .window_config(WindowConfig {
-                depth: global_args.delta_window_depth,
-                min_fold_batch: global_args.delta_window_fold_batch,
-            })
-            .entity_cache(entity_cache)
-            .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
-            .run()?;
+    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .dci_protocols(dci_protocols)
+        .protocol_systems(protocol_systems)
+        .register_extractors(extractor_handles.clone())
+        .pending_deltas(pending_deltas_rxs)
+        .window_config(WindowConfig {
+            depth: global_args.delta_window_depth,
+            min_fold_batch: global_args.delta_window_fold_batch,
+        })
+        .entity_cache(entity_cache)
+        .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
+        .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
