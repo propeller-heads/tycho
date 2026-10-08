@@ -37,6 +37,20 @@ for any protocol indexed by Tycho.
   `with_fallback_router()` on the Bebop, Hashflow and Metric builders labels components
   `fallback:rfq:bebop` / `fallback:rfq:hashflow` / `fallback:rfq:metric`, so they execute through
   those venues' fallback routers. Off by default: those routers are not deployed yet
+- **`snapshot_feed/`**: the latest-value feed layer, both ends. `SnapshotFeed` is the contract a
+  feed implements: `run(self, publisher)` drives it, and the `Publisher` it is handed — which
+  nothing outside the crate can construct — owns the `watch` channel, so reading a feed is the only
+  way to run one. Readers are `SnapshotFeedStream` (one feed as a stream of events),
+  `SnapshotFeedStreams` (any number, keyed, one await point) and `SnapshotFeedWatch` (receiver
+  clones for a consumer that prices on demand). `http`/`ws` hold the two transport loops: a
+  provider implements `HttpSource` or `WsSource`, and the loop polls or reads for it, counts
+  failures, backs off, and withdraws a snapshot nobody refreshed. The trait and the readers are
+  unconditional; everything with a transport in it is behind `book-feeds`
+- **`book/`**: what the off-chain venues' feeds share — `Book`/`BookSnapshot` (one pair's book, and
+  a venue's complete set), `BookFeedConfig` (chain, token universe, minimum TVL), `levels` (the
+  validated price ladder and the arithmetic over it), `sim` (direction, scaling, fills, limits),
+  `tvl`, `component` (pair ids and components) and `quote_tokens`. The `BookFeed*` aliases fill the
+  snapshot types into the feed readers
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
@@ -93,6 +107,7 @@ math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent
 |---------|---------|----------|
 | `evm` | yes | `revm`, `SimulationEngine`, all EVM protocol impls |
 | `rfq` | yes | RFQ WebSocket client and protocol adapters |
+| `book-feeds` | yes | The `book/` layer and the `snapshot_feed` transport loops |
 | `price-level-stream` | yes | Titan pAMM price level stream client |
 | `network_tests` | no | Gates tests that require live network access |
 

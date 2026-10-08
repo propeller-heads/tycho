@@ -163,7 +163,10 @@ clients). When an RPC query arrives, the handler fetches the DB snapshot then ap
 pending deltas on top, giving a consistent view up to the chain tip. Without this feed the RPC
 would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
-`db_committed_block_height` on each message is one of the three watermarks bounding retention.
+`db_committed_block_height` on each message is the height whose writes reached Postgres
+(`CachedGateway::flushed_block_height`), not the last drained block: during catch-up the gateway
+holds the tail of a drained batch in memory until the next flush. It is one of the three
+watermarks bounding retention.
 Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until it is at or below
 `min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
 Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
