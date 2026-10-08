@@ -95,8 +95,8 @@ pub struct GlobalArgs {
 
     /// Count and page `/protocol_components` requests by protocol system from an in-memory index
     /// of component ids and TVLs, instead of SQL. Postgres then loads only the components on the
-    /// requested page.
-    #[clap(long, env = "COMPONENT_INDEX")]
+    /// requested page. On by default; `false` serves these requests entirely from SQL.
+    #[clap(long, env = "COMPONENT_INDEX", default_value_t = true, action = clap::ArgAction::Set)]
     pub component_index: bool,
 
     /// Name of the s3 bucket used to retrieve spkgs
@@ -399,7 +399,7 @@ mod cli_tests {
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
                 entity_cache_shadow_sample_rate: 0.0,
-                component_index: false,
+                component_index: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -497,15 +497,15 @@ mod cli_tests {
     }
 
     #[test]
-    fn test_arg_parsing_component_index_flag() {
-        let without_flag =
+    fn test_arg_parsing_component_index_is_on_by_default() {
+        let default =
             Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
         let mut args = args_with_delta_window("128", "1");
-        args.insert(1, "--component-index");
-        let with_flag = Cli::try_parse_from(args).expect("parse errored");
+        args.splice(1..1, ["--component-index", "false"]);
+        let disabled = Cli::try_parse_from(args).expect("parse errored");
 
-        assert!(!without_flag.global_args.component_index);
-        assert!(with_flag.global_args.component_index);
+        assert!(default.global_args.component_index);
+        assert!(!disabled.global_args.component_index);
     }
 
     #[test]
@@ -590,7 +590,7 @@ mod cli_tests {
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
                 entity_cache_shadow_sample_rate: 0.0,
-                component_index: false,
+                component_index: true,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
