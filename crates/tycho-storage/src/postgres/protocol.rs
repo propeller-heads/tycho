@@ -466,13 +466,11 @@ impl PostgresGateway {
         Ok(res)
     }
 
-    /// Inserts components that do not exist yet and returns the rows it inserted. Components
-    /// already stored are left untouched and are not returned.
     pub async fn add_protocol_components(
         &self,
         new: &[ProtocolComponent],
         conn: &mut AsyncPgConnection,
-    ) -> Result<Vec<NewComponentRow>, StorageError> {
+    ) -> Result<(), StorageError> {
         use super::schema::{
             account::dsl::*, protocol_component::dsl::*, protocol_component_holds_contract::dsl::*,
             protocol_component_holds_token::dsl::*, token::dsl::*,
@@ -538,7 +536,7 @@ impl PostgresGateway {
         .instrument(debug_span!("insert_protocol_components", count = component_count))
         .await?;
 
-        let inserted_rows = inserted_protocol_components
+        let inserted_rows: Vec<NewComponentRow> = inserted_protocol_components
             .iter()
             .map(|(pc_id, _, ps_id, chain_id_db)| NewComponentRow {
                 chain_id: *chain_id_db,
@@ -707,7 +705,13 @@ impl PostgresGateway {
         .instrument(debug_span!("insert_component_contract_junction"))
         .await?;
 
-        Ok(inserted_rows)
+        // Like the token cache, this runs before the enclosing transaction commits; see the
+        // component index module docs for what a rollback leaves behind.
+        if let Some(component_index) = &self.component_index {
+            component_index.insert(&inserted_rows);
+        }
+
+        Ok(())
     }
 
     pub async fn delete_protocol_components(

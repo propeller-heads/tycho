@@ -337,13 +337,9 @@ impl ProtocolGateway for DirectGateway {
             self.pool.get().await.map_err(|e| {
                 StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
             })?;
-        let inserted = self
-            .state_gateway
-            .add_protocol_components(new, &mut conn)
+        self.state_gateway
+            .add_protocol_components(new.to_vec().as_slice(), &mut conn)
             .await?;
-        if let Some(component_index) = &self.state_gateway.component_index {
-            component_index.insert(&inserted);
-        }
         Ok(())
     }
 
