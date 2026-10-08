@@ -1,6 +1,6 @@
 # Off-Chain Priced Venues
 
-Integrate here if your venue prices off the chain: instead of pool state Tycho reads from the chain, you publish a complete **book** — the price levels you will trade at — over a WebSocket or an API. Two kinds share that shape: RFQ market makers, who price indicatively and sign a binding quote at execution (Bebop, Hashflow, Liquorice, Native), and off-chain-priced pAMMs, whose book prices a pool a taker executes against directly, with nothing to sign (Metric). Tycho stamps your components `book:<venue>`.
+Integrate here if your venue prices off the chain: instead of pool state Tycho reads from the chain, you publish a complete **book** — the price levels you will trade at — over a WebSocket or an API. Two kinds share that shape: RFQ market makers, who price indicatively and sign a binding quote at execution (Bebop, Hashflow, Liquorice, Native), and off-chain-priced pAMMs, whose book prices a pool a taker executes against directly, with nothing to sign (Metric). Tycho stamps your components `rfq:<venue>`.
 
 You implement a feed, a client, a state, and the logic to encode and execute trades.
 

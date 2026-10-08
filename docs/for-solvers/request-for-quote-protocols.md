@@ -1,6 +1,6 @@
 # Off-Chain Priced Venues
 
-Some venues price off the chain. Instead of pool state Tycho reads from the chain and simulates against, they publish a complete **book** — the price levels they will trade at — over a WebSocket or an API, and republish it whenever it changes. Tycho streams those books, simulates against them, and executes them as part of multi-protocol swaps. Their components carry the `book:` protocol systems in the table below.
+Some venues price off the chain. Instead of pool state Tycho reads from the chain and simulates against, they publish a complete **book** — the price levels they will trade at — over a WebSocket or an API, and republish it whenever it changes. Tycho streams those books, simulates against them, and executes them as part of multi-protocol swaps. Their components carry the `rfq:` protocol systems in the table below.
 
 Two kinds share that shape, and the difference shows at execution:
 

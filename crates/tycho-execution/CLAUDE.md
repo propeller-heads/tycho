@@ -426,7 +426,7 @@ flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
-e.g. `vm:balancer_v2`, `vm:curve`), `book:` (off-chain book feeds — the RFQ venues and Metric,
+e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (off-chain book feeds — the RFQ venues and Metric,
 e.g. `rfq:bebop`, `rfq:metric`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
 with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
