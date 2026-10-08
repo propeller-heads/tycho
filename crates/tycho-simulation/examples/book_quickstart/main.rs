@@ -42,8 +42,8 @@ use tycho_execution::encoding::{
 };
 use tycho_simulation::{
     book::{
-        quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookFeedEvent, BookFeedStreams,
-        BookSnapshot,
+        quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookFeedEvent, BookFeedOutcome,
+        BookFeedStreams, BookSnapshot,
     },
     pamm::protocols::metric::{self, feed::MetricFeedBuilder},
     protocol::models::ProtocolComponent,
@@ -53,7 +53,6 @@ use tycho_simulation::{
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
     },
-    snapshot_feed::SnapshotFeedOutcome,
     tycho_common::models::Chain,
     utils::{get_default_url, load_all_tokens},
 };
@@ -310,15 +309,15 @@ async fn main() {
                 );
                 continue;
             }
-            BookFeedEvent::Ended(SnapshotFeedOutcome::Failed(error)) => {
+            BookFeedEvent::Ended(BookFeedOutcome::Failed(error)) => {
                 eprintln!("Book feed {protocol_system} gave up: {error}");
                 continue;
             }
-            BookFeedEvent::Ended(SnapshotFeedOutcome::Panicked(error)) => {
+            BookFeedEvent::Ended(BookFeedOutcome::Panicked(error)) => {
                 eprintln!("Book feed {protocol_system} died of a bug: {error}");
                 continue;
             }
-            BookFeedEvent::Ended(SnapshotFeedOutcome::RanOut) => {
+            BookFeedEvent::Ended(BookFeedOutcome::RanOut) => {
                 eprintln!("Book feed {protocol_system} has nothing left to serve");
                 continue;
             }

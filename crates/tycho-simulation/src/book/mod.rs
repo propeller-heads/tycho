@@ -118,8 +118,7 @@ impl BookFeedConfig {
 ///
 /// ```
 /// # use futures::StreamExt as _;
-/// # use tycho_simulation::book::{BookFeedEvent, BookFeedStreams};
-/// # use tycho_simulation::snapshot_feed::SnapshotFeedOutcome;
+/// # use tycho_simulation::book::{BookFeedEvent, BookFeedOutcome, BookFeedStreams};
 /// # async fn consume() {
 /// // Anchored like the snapshots it carries; `add` infers this from the feed.
 /// let mut feeds: BookFeedStreams = BookFeedStreams::new();
@@ -129,7 +128,7 @@ impl BookFeedConfig {
 ///         BookFeedEvent::Published(snapshot) => { /* quote from `snapshot.books` */ }
 ///         BookFeedEvent::Withdrawn => { /* stop quoting `provider` until it publishes again */ }
 ///         // `provider` is out of the set now, whichever of the three ended it.
-///         BookFeedEvent::Ended(SnapshotFeedOutcome::Failed(error)) => { /* it gave up */ }
+///         BookFeedEvent::Ended(BookFeedOutcome::Failed(error)) => { /* it gave up */ }
 ///         BookFeedEvent::Ended(outcome) => { /* ran out, or died of a bug */ }
 ///     }
 /// }

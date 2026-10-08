@@ -12,8 +12,8 @@ use tycho_common::{
 use tycho_execution::encoding::evm::get_router_address;
 use tycho_simulation::{
     book::{
-        quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookFeedEvent, BookFeedStreams,
-        BookSnapshot,
+        quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookFeedEvent, BookFeedOutcome,
+        BookFeedStreams, BookSnapshot,
     },
     pamm::protocols::metric::{self, feed::MetricFeedBuilder},
     rfq::protocols::{
@@ -22,7 +22,7 @@ use tycho_simulation::{
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
     },
-    snapshot_feed::{http::HttpFeedConfig, SnapshotFeedOutcome},
+    snapshot_feed::http::HttpFeedConfig,
 };
 use tycho_test::execution::encoding::USER_ADDR;
 
@@ -285,13 +285,13 @@ impl BookStreamProcessor {
                         warn!("{protocol_system} withdrew its books, nothing servable from it");
                         continue;
                     }
-                    BookFeedEvent::Ended(SnapshotFeedOutcome::Failed(error)) => {
+                    BookFeedEvent::Ended(BookFeedOutcome::Failed(error)) => {
                         Err(miette!(error).wrap_err(format!("{protocol_system} gave up")))
                     }
-                    BookFeedEvent::Ended(SnapshotFeedOutcome::Panicked(error)) => {
+                    BookFeedEvent::Ended(BookFeedOutcome::Panicked(error)) => {
                         Err(miette!(error).wrap_err(format!("{protocol_system} feed task died")))
                     }
-                    BookFeedEvent::Ended(SnapshotFeedOutcome::RanOut) => {
+                    BookFeedEvent::Ended(BookFeedOutcome::RanOut) => {
                         Err(miette!("{protocol_system} has nothing left to serve"))
                     }
                 };

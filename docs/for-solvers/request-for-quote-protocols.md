@@ -135,7 +135,7 @@ while let Some((provider, event)) = feeds.next().await {
 // every provider has ended
 ```
 
-A single feed reads the same way through `snapshot_feed::SnapshotFeedStream::spawn(provider, feed)`. Dropping a `BookFeedStreams` or a `SnapshotFeedStream` aborts the feed tasks it holds.
+A single feed reads the same way through `BookFeedStream::spawn(provider, feed)`. Dropping a `BookFeedStreams` or a `BookFeedStream` aborts the feed tasks it holds.
 
 If you price on demand rather than reacting to every update, read the feed as a `BookFeedWatch` instead: `BookFeedWatch::spawn(provider, feed)` runs it the same way and `receiver()` hands out `watch::Receiver` clones you read with `borrow()`, without awaiting and without slowing the venue's connection. `None` in the channel means nothing is servable — nothing yet, gone stale, or the feed is over — and since those look alike to a reader, `ended()` is what tells the last one apart: it resolves when the feed stops, with a `BookFeedOutcome` saying whether it gave up (and why), ran out, or died of a bug. Until then the venue is only quiet. The outcome is reported once; afterwards `ended()` stays pending, so it sits in a `select!` loop beside your other work without ever firing twice.
 
