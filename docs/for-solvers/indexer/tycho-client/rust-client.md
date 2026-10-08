@@ -76,6 +76,17 @@ async fn main() {
 }
 ```
 
+### Snapshot jitter
+
+When the Tycho server or one of its extractors restarts, every client restarts its synchronizers at the same moment. To spread the load, a restarted synchronizer waits a random time in `[0, jitter]` before it requests a new snapshot. It discards deltas during the wait and takes the snapshot at the next block. The first start has no delay, and a restart that continues from the next expected block has no delay.
+
+The default jitter is 60 seconds. Use `snapshot_jitter` on the builder to change it, or pass `Duration::ZERO` to turn it off:
+
+```rust
+let builder = TychoStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum)
+    .snapshot_jitter(std::time::Duration::from_secs(10));
+```
+
 You can also use the client to interact with Tycho RPC for fetching static information. For example, you can fetch tokens (available at [#v1-tokens](../tycho-rpc.md#v1-tokens "mention") endpoint) with the following:
 
 ```rust
