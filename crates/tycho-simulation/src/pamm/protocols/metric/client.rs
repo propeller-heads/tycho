@@ -145,8 +145,7 @@ impl MetricClient {
             .await
             .map_err(|_| {
                 FeedError::Connection(format!(
-                    "Metric bid/ask request timed out after {} seconds",
-                    BID_ASK_TIMEOUT.as_secs()
+                    "Metric bid/ask request timed out after {BID_ASK_TIMEOUT:?}",
                 ))
             })?
     }

@@ -151,8 +151,8 @@ impl BebopClient {
             if elapsed >= self.quote_timeout {
                 return Err(last_error.unwrap_or_else(|| {
                     RFQError::ConnectionError(format!(
-                        "Bebop quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
+                        "Bebop quote request timed out after {:?}",
+                        self.quote_timeout
                     ))
                 }));
             }
@@ -181,8 +181,8 @@ impl BebopClient {
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
-                        "Bebop quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
+                        "Bebop quote request timed out after {:?}",
+                        self.quote_timeout
                     )));
                 }
             };

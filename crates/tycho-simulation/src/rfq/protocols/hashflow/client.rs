@@ -170,8 +170,8 @@ impl HashflowClient {
             if elapsed >= self.quote_timeout {
                 return Err(last_error.unwrap_or_else(|| {
                     RFQError::ConnectionError(format!(
-                        "Hashflow quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
+                        "Hashflow quote request timed out after {:?}",
+                        self.quote_timeout
                     ))
                 }));
             }
@@ -201,8 +201,8 @@ impl HashflowClient {
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
-                        "Hashflow quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
+                        "Hashflow quote request timed out after {:?}",
+                        self.quote_timeout
                     )));
                 }
             };
