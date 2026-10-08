@@ -506,8 +506,6 @@ impl EntityCache {
         let cache = Self::from_snapshot(snapshot);
         let elapsed = started.elapsed();
         gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
-        gauge!("entity_cache_accounts").set(accounts as f64);
-        gauge!("entity_cache_components").set(components as f64);
         info!(accounts, components, ?elapsed, "Entity cache loaded");
         Ok(cache)
     }
@@ -578,6 +576,26 @@ fn table_size<K, V>(map: &HashMap<K, V>) -> usize {
 }
 
 impl EntityCache {
+    /// Publishes the entry count per entity family and per component protocol system. Reads only
+    /// map lengths under the read lock.
+    pub(crate) fn report(&self) {
+        let state = self.read();
+        let accounts = state.accounts.len();
+        let systems: Vec<(ProtocolSystem, usize)> = state
+            .components
+            .iter()
+            .map(|(system, components)| (system.clone(), components.len()))
+            .collect();
+        drop(state);
+        let mut components = 0;
+        for (system, count) in systems {
+            components += count;
+            gauge!("entity_cache_component_entries", "extractor" => system).set(count as f64);
+        }
+        gauge!("entity_cache_entries", "family" => "accounts").set(accounts as f64);
+        gauge!("entity_cache_entries", "family" => "components").set(components as f64);
+    }
+
     /// Measures the bytes per entity family and per component protocol system, publishes them
     /// with the walk duration, and returns the family totals. Each total equals one
     /// `deep_size_of` over its map.
@@ -1869,5 +1887,24 @@ mod test {
         for entry in state.accounts.values() {
             assert_eq!(Arc::strong_count(entry), 1);
         }
+    }
+
+    #[test]
+    fn report_publishes_entry_counts_per_family() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let cache = populated_cache();
+
+        metrics::with_local_recorder(&recorder, || cache.report());
+
+        let gauges = recorded_gauges(&snapshotter);
+        assert_eq!(gauges[&gauge("entity_cache_entries", Some("accounts"))], 2.0);
+        assert_eq!(gauges[&gauge("entity_cache_entries", Some("components"))], 2.0);
+        assert_eq!(gauges[&gauge("entity_cache_component_entries", Some(EXTRACTOR))], 1.0);
+        assert_eq!(gauges[&gauge("entity_cache_component_entries", Some("other_system"))], 1.0);
+        assert!(
+            !gauges.contains_key(&gauge("entity_cache_size_bytes", Some("accounts"))),
+            "report does not walk"
+        );
     }
 }
