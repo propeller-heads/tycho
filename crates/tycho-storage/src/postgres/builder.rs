@@ -23,9 +23,10 @@ const TOKEN_CACHE_REFRESH_PERIOD: std::time::Duration = std::time::Duration::fro
 /// How often the component index checks the database for changes.
 const COMPONENT_INDEX_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Longest time between two full rebuilds of the component index, whatever the change check says.
-const COMPONENT_INDEX_REBUILD_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(10 * 60);
+/// Longest time between two full reloads of the component index. A safety net for changes the
+/// write counters and `modified_ts` cannot show, so it can be long.
+const COMPONENT_INDEX_FULL_RELOAD_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
 
 impl GatewayBuilder {
     pub fn new(database_url: &str) -> Self {
@@ -57,7 +58,8 @@ impl GatewayBuilder {
 
     /// Counts and pages `get_protocol_components` requests by protocol system from an in-memory
     /// index instead of SQL; Postgres only loads the components on the requested page. Costs a
-    /// full component load at startup plus periodic change checks and rebuilds.
+    /// full component load at startup, a cheap change check every 30 s, a TVL load after TVL
+    /// writes, and a full reload every 6 hours.
     pub fn set_component_index(mut self, enabled: bool) -> Self {
         self.component_index = enabled;
         self
@@ -169,7 +171,7 @@ fn spawn_refresh_tasks(
         component_index.spawn_refresh_task(
             pool.clone(),
             COMPONENT_INDEX_REFRESH_PERIOD,
-            COMPONENT_INDEX_REBUILD_INTERVAL,
+            COMPONENT_INDEX_FULL_RELOAD_INTERVAL,
         );
     }
 }

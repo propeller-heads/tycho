@@ -57,10 +57,11 @@ periodic `modified_ts` delta poll for out-of-process writers. See the module doc
 `get_protocol_components` requests with a protocol system and no ids skip the SQL `COUNT` and
 `OFFSET` scan; Postgres only loads the components on the page, by primary key. Opt-in via
 `GatewayBuilder::set_component_index(true)` (the `--component-index` flag / `COMPONENT_INDEX`
-env var of the `index` and `rpc` commands). Kept fresh by write-through after the write
-executor commits, a 30 s change check (new ids, plus `pg_stat_user_tables` write counters of
-`component_tvl` that trigger a full rebuild), and a full rebuild every 10 minutes. See the
-module docs for design.
+env var of the `index` and `rpc` commands). Components arrive by write-through after the write
+executor commits, plus a 30 s new-id check. TVL is written by other processes: every 30 s the
+`pg_stat_user_tables` write counters of `component_tvl` decide whether to read nothing, the rows
+with an unread `modified_ts` (`idx_component_tvl_modified_ts`), or all TVL. Components and TVL
+are read again in full on component deletes and every 6 hours. See the module docs for design.
 
 ## Write Order
 
