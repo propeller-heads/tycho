@@ -89,10 +89,19 @@ impl BebopFeedBuilder {
         self
     }
 
-    /// The feed tuning a new builder starts from: the shared values every WebSocket feed uses
-    /// (see [`WsFeedConfig`]). Spread from it to change individual fields:
-    /// `WsFeedConfig { read_idle_timeout: Duration::from_secs(30),
-    /// ..BebopFeedBuilder::default_feed_config() }`.
+    /// The feed tuning a new builder starts from: the set every WebSocket feed shares, since
+    /// nothing about how often Bebop pushes, or how long it goes quiet, has been measured. Spread
+    /// from it to change one field:
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use tycho_simulation::rfq::protocols::bebop::feed::BebopFeedBuilder;
+    /// # use tycho_simulation::snapshot_feed::ws::WsFeedConfig;
+    /// let tuned = WsFeedConfig {
+    ///     read_idle_timeout: Duration::from_secs(30),
+    ///     ..BebopFeedBuilder::default_feed_config()
+    /// };
+    /// ```
     pub fn default_feed_config() -> WsFeedConfig {
         default_ws_feed_config()
     }

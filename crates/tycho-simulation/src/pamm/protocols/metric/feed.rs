@@ -72,15 +72,25 @@ impl MetricFeedBuilder {
         self
     }
 
-    /// The feed tuning a new builder starts from. Spread from it to change individual fields:
-    /// `HttpFeedConfig { poll_interval: Duration::from_secs(10),
-    /// ..MetricFeedBuilder::default_feed_config() }`.
+    /// The feed tuning a new builder starts from.
     ///
     /// Metric is the one venue whose poll is many requests — a page of pool metadata, then one
     /// bid/ask per pool — so it costs more per poll than the shared default and is given more
     /// time to finish one. Measured live, it reprices every 2-3 s against a poll that can take
     /// close to 9 s: the cadence is as tight as leaves `request_timeout` room for the worst poll
     /// while still fitting inside the interval, and the withdrawal age is three missed polls.
+    ///
+    /// Spread from it to change one field:
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use tycho_simulation::pamm::protocols::metric::feed::MetricFeedBuilder;
+    /// # use tycho_simulation::snapshot_feed::http::HttpFeedConfig;
+    /// let tuned = HttpFeedConfig {
+    ///     poll_interval: Duration::from_secs(10),
+    ///     ..MetricFeedBuilder::default_feed_config()
+    /// };
+    /// ```
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
             poll_interval: Duration::from_secs(20),

@@ -53,10 +53,19 @@ impl NativeFeedBuilder {
         }
     }
 
-    /// The feed tuning a new builder starts from: the shared values every HTTP feed uses
-    /// (see [`HttpFeedConfig`]). Spread from it to change individual fields:
-    /// `HttpFeedConfig { poll_interval: Duration::from_secs(10),
-    /// ..NativeFeedBuilder::default_feed_config() }`.
+    /// The feed tuning a new builder starts from: the set every HTTP feed shares, since nothing
+    /// about Native's cadence or response times has been measured. Spread from it to change one
+    /// field:
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use tycho_simulation::rfq::protocols::native::feed::NativeFeedBuilder;
+    /// # use tycho_simulation::snapshot_feed::http::HttpFeedConfig;
+    /// let tuned = HttpFeedConfig {
+    ///     poll_interval: Duration::from_secs(10),
+    ///     ..NativeFeedBuilder::default_feed_config()
+    /// };
+    /// ```
     pub fn default_feed_config() -> HttpFeedConfig {
         default_http_feed_config()
     }
