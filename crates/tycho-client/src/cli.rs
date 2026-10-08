@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, time::Duration};
 
 use clap::Parser;
 use tracing::info;
@@ -121,6 +121,12 @@ struct CliArgs {
     #[clap(long, default_value = "32")]
     max_retries: u64,
 
+    /// Maximum random delay in seconds before a restarted synchronizer requests a snapshot.
+    /// Spreads snapshot requests after a server or extractor restart. The first start has no
+    /// delay. Set to 0 to request snapshots without delay.
+    #[clap(long, default_value = "60")]
+    snapshot_jitter: u64,
+
     /// Path to a TOML file containing component IDs to exclude from tracking.
     #[clap(long)]
     blocklist_config: Option<std::path::PathBuf>,
@@ -237,6 +243,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
         .no_state(args.no_state)
         .include_tvl(args.include_tvl)
         .max_retries(args.max_retries)
+        .snapshot_jitter(Duration::from_secs(args.snapshot_jitter))
         .blocklisted_ids(blocklist);
 
     if let Some(bt) = args.block_time {
@@ -359,6 +366,16 @@ mod cli_tests {
         assert!(args.example);
         assert_eq!(args.disable_compression, false);
         assert_eq!(args.partial_blocks, false);
+        assert_eq!(args.snapshot_jitter, 60);
         assert_eq!(args.blocklist_config, Some(std::path::PathBuf::from("blocklist.toml")));
+
+        let args = CliArgs::parse_from([
+            "tycho-client",
+            "--exchange",
+            "uniswap_v2",
+            "--snapshot-jitter",
+            "0",
+        ]);
+        assert_eq!(args.snapshot_jitter, 0);
     }
 }
