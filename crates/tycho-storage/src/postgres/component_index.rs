@@ -24,65 +24,65 @@
 //! Only requests with a protocol system and without component ids use the index. The others go to
 //! SQL, where id lookups are cheap.
 //!
-//! # How the index stays correct
+//! # How the index stays fresh
 //!
-//! The database is the source of truth. The two halves of the index change differently, so each
-//! has its own way to stay fresh.
+//! The database is the source of truth. The index converges to it through four mechanisms:
 //!
-//! **Components** are only ever inserted, apart from rare manual hard deletes:
+//! 1. **Write-through** — the gateway adds the components it inserts, before the enclosing
+//!    transaction commits.
+//! 2. **New-component poll** — every refresh reads the components with an id above the highest id a
+//!    poll or full reload has seen. This catches components inserted by other processes.
+//! 3. **TVL poll** — every refresh reads the `component_tvl` rows whose `modified_ts` is newer than
+//!    the newest one read so far. The update trigger and the column default set `modified_ts` on
+//!    every write. When a write changed more than [`TVL_BULK_ROWS`] rows, such as a cron rewriting
+//!    the whole table, the poll stops and all TVL is read in one sequential scan instead.
+//! 4. **Full reload** — at startup and at a fixed interval, components and TVL are read again and
+//!    swapped in.
 //!
-//! - The write path adds the components it inserted, after its transaction commits. A rolled-back
-//!   transaction therefore never leaves an id behind.
-//! - Every refresh loads the components with an id above the highest indexed id. This catches
-//!   components inserted by other processes, with one primary-key range read.
+//! Full reads of components or TVL are sequential scans of one table without `ORDER BY`; the polls
+//! use the primary key and the `modified_ts` index. Rows are sorted here, and TVL rows are matched
+//! to components by id, so no read joins the two tables.
 //!
-//! **TVL** is written by other processes, at a cadence and in a way this code does not control:
+//! # Unexpected cases
 //!
-//! - Every refresh reads the write counters of `component_tvl` from `pg_stat_user_tables`. They
-//!   move on every insert, update and delete, including writes that bypass triggers, and reading
-//!   them scans no table. Unchanged counters mean no TVL query at all.
-//! - Inserts or updates: load the rows with a `modified_ts` no load has read yet (see
-//!   [`TvlCursor`]). When the counters grew but no such row exists, the writes did not move
-//!   `modified_ts`, and all TVL is reloaded instead. Rolled-back writes and statistics resets also
-//!   move the counters, which only costs an extra load.
-//! - A write that touched a large share of the rows reads all TVL directly (see
-//!   [`BULK_WRITE_SHARE`]).
-//! - Deletes: `modified_ts` cannot show a deleted row, so all TVL is reloaded.
+//! The polls cannot see the cases below. None happens in normal operation; the next full reload
+//! corrects each of them.
 //!
-//! Known limit: a writer that bypasses `modified_ts` for some rows while it moves it for others is
-//! not detected; the periodic full reload corrects those rows.
-//!
-//! **Full reload**: at startup, when the delete counter of `protocol_component` moves, and at a
-//! long fixed interval as a safety net, components and TVL are both read again and swapped in. This
-//! also picks up a component another process committed with a lower id than one already indexed,
-//! which the id check cannot see.
-//!
-//! Full reads of components or TVL are sequential scans of one table without `ORDER BY`; the
-//! other reads use the primary key or the `modified_ts` index. Rows are sorted here, and TVL rows
-//! are matched to components by id, so no read joins the two tables.
+//! - **Rolled-back write path.** Write-through runs before the transaction commits. When the
+//!   transaction rolls back, the index keeps an id without a row, and the retry inserts the
+//!   component again under a new id. The phantom id has no TVL, so requests with a TVL threshold
+//!   never see it; requests without one count it in `total` and return its page one row short.
+//! - **Deleted rows.** A component or TVL row deleted from the database stays in the index: a
+//!   deleted component like a phantom id, a deleted TVL row with its last value.
+//! - **Writes that do not move `modified_ts`.** An insert that sets `modified_ts` explicitly, or a
+//!   write with triggers disabled, as restore tooling does.
+//! - **Concurrent TVL writers.** `modified_ts` is the start time of the writing transaction, not
+//!   its commit time. With two TVL writers, one can commit rows stamped before rows of the other
+//!   that a poll already read; the poll then never reads them.
+//! - **Component ids committed out of order** by another process: the new-component poll only reads
+//!   ids above the highest one it has seen.
 //!
 //! # Concurrency
 //!
 //! Each chain's index sits behind one `RwLock`, never held across an `await`. A query holds the
-//! read lock for one scan of one protocol system. TVL loads take the write lock only to write the
-//! fetched values. A full reload builds a new index without the lock, then swaps it in. Components
-//! written through while it ran are recorded in a journal and applied again on the swap, so the
-//! swap never drops them.
+//! read lock for one scan of one protocol system. TVL reads take the write lock only to write the
+//! fetched values. A full reload builds a new index without the lock, then swaps it in; components
+//! written through while it ran come back with the new-component poll that follows it.
 //!
 //! # Cost
 //!
-//! 16 bytes per component plus a small per-system overhead: ~85 MB for 5.25M components. A load
-//! holds the fetched rows, ~24 bytes each, until they are applied; a full reload also holds a
+//! 16 bytes per component plus a small per-system overhead: ~85 MB for 5.25M components. A full TVL
+//! read holds the fetched rows, ~24 bytes each, until they are applied; a full reload also holds a
 //! second index until the swap.
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 
 use chrono::NaiveDateTime;
-use diesel::{prelude::*, sql_types::BigInt};
+use diesel::prelude::*;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection, RunQueryDsl};
 use tracing::{debug, error, info, warn};
 use tycho_common::{
@@ -95,25 +95,10 @@ use crate::postgres::{schema, PostgresError};
 /// TVL of a component without a `component_tvl` row. It never compares greater than a threshold.
 const NO_TVL: f64 = f64::NEG_INFINITY;
 
-/// How far behind the newest `modified_ts` already applied a TVL load reads again. The update
-/// trigger stamps a row with the start time of its transaction, so a writer transaction that ran
-/// while an earlier load read the table commits rows older than what that load saw.
-const TVL_OVERLAP: chrono::Duration = chrono::Duration::minutes(10);
-
-/// Share of the indexed components a TVL write must touch to be read as a full TVL reload instead
-/// of a delta. Right after a large write, the planner's statistics do not show it yet, so a delta
-/// read would walk the `modified_ts` index over most of the table instead of scanning it.
-const BULK_WRITE_SHARE: f64 = 0.1;
-
-/// Fewest written rows that count as a bulk write. A delta read of fewer rows is cheap whatever
-/// plan Postgres picks.
-const BULK_WRITE_MIN_ROWS: i64 = 10_000;
-
-/// Most `modified_ts` values a TVL load excludes in SQL. Each one splits the read into one more
-/// index range: `modified_ts <> ALL(...)` would hide the excluded rows from the planner's estimate
-/// and turn the read into a sequential scan. Above this, the load reads the whole overlap window
-/// and drops the rows already read after receiving them.
-const MAX_EXCLUDED_STAMPS: usize = 50;
+/// Most rows a TVL poll applies. A poll that finds more reads all TVL in one sequential scan
+/// instead: right after a large write, the planner's statistics do not show it yet, and a read
+/// through the `modified_ts` index would visit most of the table in random order.
+const TVL_BULK_ROWS: usize = 10_000;
 
 /// A component row inserted by the write path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,16 +116,16 @@ pub(crate) struct ComponentPage {
     pub(crate) total: i64,
 }
 
-/// What a [`ComponentIndex::refresh`] did, besides loading new component ids.
+/// What a [`ComponentIndex::refresh`] did with TVL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshOutcome {
-    /// The TVL counters did not move; no TVL was read.
+    /// No TVL row changed.
     Unchanged,
-    /// Loaded the TVL rows with a recent `modified_ts`.
+    /// Applied the TVL rows that changed.
     TvlDelta { n_rows: usize },
-    /// Reloaded all TVL: rows were deleted, or a write did not move `modified_ts`.
+    /// Too many TVL rows changed; read all TVL.
     TvlReload { n_rows: usize },
-    /// Reloaded components and TVL.
+    /// Read components and TVL again.
     FullReload { n_components: usize },
 }
 
@@ -203,11 +188,10 @@ impl SystemIndex {
 #[derive(Debug, Default)]
 struct ChainIndex {
     systems: HashMap<i64, SystemIndex>,
-    /// Highest component id in the index, 0 when empty.
-    max_id: i64,
-    /// Components inserted while a full reload runs, as `(protocol system id, id)`. `None` when no
-    /// full reload runs.
-    journal: Option<Vec<(i64, i64)>>,
+    /// Highest component id read by a new-component poll or a full reload, 0 when none. Write-
+    /// through does not move it, so the next poll also reads the components written through since,
+    /// and brings back any that a full reload swapped out.
+    polled_max_id: i64,
 }
 
 impl ChainIndex {
@@ -217,6 +201,7 @@ impl ChainIndex {
         for (id, protocol_system_id) in rows {
             chain_index.insert(*protocol_system_id, *id, NO_TVL);
         }
+        chain_index.polled_max_id = rows.last().map_or(0, |(id, _)| *id);
         chain_index
     }
 
@@ -225,10 +210,6 @@ impl ChainIndex {
             .entry(protocol_system_id)
             .or_default()
             .insert(id, tvl);
-        self.max_id = self.max_id.max(id);
-        if let Some(journal) = &mut self.journal {
-            journal.push((protocol_system_id, id));
-        }
     }
 
     /// Writes the TVL of `rows`, which must be sorted by component id. Rows of components that are
@@ -278,112 +259,11 @@ struct TvlRow {
     modified_ts: NaiveDateTime,
 }
 
-/// Write counters of the tables the index derives from, as reported by `pg_stat_user_tables`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct WriteCounters {
-    pub(crate) tvl_inserts: i64,
-    pub(crate) tvl_updates: i64,
-    pub(crate) tvl_deletes: i64,
-    pub(crate) component_deletes: i64,
-}
-
-#[derive(QueryableByName)]
-struct TableCounters {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    relname: String,
-    #[diesel(sql_type = BigInt)]
-    n_tup_ins: i64,
-    #[diesel(sql_type = BigInt)]
-    n_tup_upd: i64,
-    #[diesel(sql_type = BigInt)]
-    n_tup_del: i64,
-}
-
-impl WriteCounters {
-    async fn read(conn: &mut AsyncPgConnection) -> Result<Self, StorageError> {
-        let rows: Vec<TableCounters> = diesel::sql_query(
-            "SELECT relname::text AS relname, n_tup_ins, n_tup_upd, n_tup_del \
-             FROM pg_stat_user_tables \
-             WHERE relid IN ('component_tvl'::regclass, 'protocol_component'::regclass)",
-        )
-        .load(conn)
-        .await
-        .map_err(PostgresError::from)?;
-
-        let mut counters = WriteCounters::default();
-        for row in rows {
-            match row.relname.as_str() {
-                "component_tvl" => {
-                    counters.tvl_inserts = row.n_tup_ins;
-                    counters.tvl_updates = row.n_tup_upd;
-                    counters.tvl_deletes = row.n_tup_del;
-                }
-                "protocol_component" => counters.component_deletes = row.n_tup_del,
-                other => warn!(table = other, "Unexpected table in component index counters"),
-            }
-        }
-        Ok(counters)
-    }
-
-    fn tvl_writes(&self) -> i64 {
-        self.tvl_inserts + self.tvl_updates
-    }
-}
-
-/// Which `component_tvl` rows a TVL load still has to read.
-///
-/// A writer transaction stamps all its rows with one `modified_ts`, its start time, and its rows
-/// become visible together when it commits. Once a load has read rows with a given stamp, no row
-/// with that stamp can arrive later. A row committed after an earlier load can still carry a stamp
-/// older than the newest one read, so loads read again from [`TVL_OVERLAP`] before the newest
-/// stamp, minus the stamps already read in that window.
-#[derive(Debug, Default)]
-struct TvlCursor {
-    /// Newest `modified_ts` read so far.
-    newest: NaiveDateTime,
-    /// Stamps read within [`TVL_OVERLAP`] of `newest`.
-    seen: BTreeSet<NaiveDateTime>,
-}
-
-impl TvlCursor {
-    /// Rows with a `modified_ts` above this may still be unread.
-    fn since(&self) -> NaiveDateTime {
-        self.newest - TVL_OVERLAP
-    }
-
-    /// Stamps a load can exclude in SQL, empty when there are too many to list.
-    fn excluded_stamps(&self) -> Vec<NaiveDateTime> {
-        if self.seen.len() > MAX_EXCLUDED_STAMPS {
-            return Vec::new();
-        }
-        self.seen.iter().copied().collect()
-    }
-
-    fn is_unread(&self, modified_ts: NaiveDateTime) -> bool {
-        modified_ts > self.since() && !self.seen.contains(&modified_ts)
-    }
-
-    fn record(&mut self, rows: &[TvlRow]) {
-        for row in rows {
-            self.newest = self.newest.max(row.modified_ts);
-        }
-        let since = self.since();
-        self.seen.extend(
-            rows.iter()
-                .map(|row| row.modified_ts)
-                .filter(|ts| *ts > since),
-        );
-        self.seen = self.seen.split_off(&since);
-        self.seen.remove(&since);
-    }
-}
-
 /// Bookkeeping of the refresh loop.
 #[derive(Debug)]
 struct RefreshState {
-    /// Counters read before the last successful refresh.
-    counters: WriteCounters,
-    tvl_cursor: TvlCursor,
+    /// Newest `modified_ts` among the TVL rows read so far.
+    newest_tvl_ts: NaiveDateTime,
     last_full_reload: Instant,
 }
 
@@ -397,6 +277,8 @@ pub struct ComponentIndex {
     /// Database id of each indexed chain.
     chain_db_ids: HashMap<Chain, i64>,
     refresh_state: Mutex<RefreshState>,
+    /// [`TVL_BULK_ROWS`], lowered by tests.
+    tvl_bulk_rows: usize,
 }
 
 impl ComponentIndex {
@@ -448,14 +330,12 @@ impl ComponentIndex {
                 .collect(),
             chain_db_ids,
             refresh_state: Mutex::new(RefreshState {
-                counters: WriteCounters::default(),
-                tvl_cursor: TvlCursor::default(),
+                newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
             }),
+            tvl_bulk_rows: TVL_BULK_ROWS,
         };
-        let counters = WriteCounters::read(conn).await?;
         index.full_reload(conn).await?;
-        index.state().counters = counters;
         Ok(index)
     }
 
@@ -488,7 +368,7 @@ impl ComponentIndex {
     }
 
     /// Adds components inserted by the write path. Rows of chains that are not indexed are
-    /// ignored. A new component has no TVL until a TVL load finds its row, like in the database.
+    /// ignored. A new component has no TVL until a TVL poll reads its row, like in the database.
     pub(crate) fn insert(&self, rows: &[NewComponentRow]) {
         if rows.is_empty() {
             return;
@@ -507,67 +387,45 @@ impl ComponentIndex {
         }
     }
 
-    /// Brings the index up to date with the database: loads new component ids, then reads TVL or
-    /// reloads everything as the write counters require (see the module docs). Does a full
-    /// reload when the last one is older than `full_reload_interval`. On error the counters are
-    /// not advanced, so the next call retries.
+    /// Brings the index up to date with the database: a full reload when the last one is older
+    /// than `full_reload_interval`, otherwise the new-component and TVL polls.
     pub async fn refresh(
         &self,
         conn: &mut AsyncPgConnection,
         full_reload_interval: Duration,
     ) -> Result<RefreshOutcome, StorageError> {
-        let counters = WriteCounters::read(conn).await?;
-        self.refresh_with_counters(conn, counters, full_reload_interval)
-            .await
-    }
-
-    /// [`Self::refresh`] with counters read by the caller. The counters must be read before any
-    /// table, so a write that lands during this refresh moves them again for the next one.
-    async fn refresh_with_counters(
-        &self,
-        conn: &mut AsyncPgConnection,
-        counters: WriteCounters,
-        full_reload_interval: Duration,
-    ) -> Result<RefreshOutcome, StorageError> {
-        let (last, full_reload_due) = {
-            let state = self.state();
-            (state.counters, state.last_full_reload.elapsed() >= full_reload_interval)
-        };
-
-        let outcome = if full_reload_due || counters.component_deletes != last.component_deletes {
-            RefreshOutcome::FullReload { n_components: self.full_reload(conn).await? }
-        } else {
+        if self.state().last_full_reload.elapsed() >= full_reload_interval {
+            let n_components = self.full_reload(conn).await?;
             self.load_new_components(conn).await?;
-            if counters.tvl_deletes != last.tvl_deletes {
-                RefreshOutcome::TvlReload { n_rows: self.reload_tvl(conn).await? }
-            } else if counters.tvl_writes() != last.tvl_writes() {
-                let n_writes = counters.tvl_writes() - last.tvl_writes();
-                if self.is_bulk_write(n_writes) {
-                    RefreshOutcome::TvlReload { n_rows: self.reload_tvl(conn).await? }
-                } else {
-                    self.load_changed_tvl(conn, n_writes)
-                        .await?
-                }
-            } else {
-                RefreshOutcome::Unchanged
-            }
-        };
+            return Ok(RefreshOutcome::FullReload { n_components });
+        }
 
-        self.state().counters = counters;
-        Ok(outcome)
+        self.load_new_components(conn).await?;
+        let newest = self.state().newest_tvl_ts;
+        let rows = load_tvl(conn, Some((newest, self.tvl_bulk_rows as i64 + 1))).await?;
+        if rows.is_empty() {
+            return Ok(RefreshOutcome::Unchanged);
+        }
+        if rows.len() > self.tvl_bulk_rows {
+            let rows = load_tvl(conn, None).await?;
+            self.write_tvl(&rows, true);
+            return Ok(RefreshOutcome::TvlReload { n_rows: rows.len() });
+        }
+        self.write_tvl(&rows, false);
+        Ok(RefreshOutcome::TvlDelta { n_rows: rows.len() })
     }
 
-    /// Adds the components with an id above the highest indexed id of their chain.
+    /// Adds the components with an id above the highest id a poll or full reload has seen.
     async fn load_new_components(&self, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
         for (chain, chain_db_id) in &self.chain_db_ids {
             let chain_lock = &self.chains[chain];
-            let max_id = chain_lock
+            let polled_max_id = chain_lock
                 .read()
                 .expect("component index lock poisoned")
-                .max_id;
+                .polled_max_id;
             let rows: Vec<(i64, i64)> = schema::protocol_component::table
                 .filter(schema::protocol_component::chain_id.eq(*chain_db_id))
-                .filter(schema::protocol_component::id.gt(max_id))
+                .filter(schema::protocol_component::id.gt(polled_max_id))
                 .select((
                     schema::protocol_component::id,
                     schema::protocol_component::protocol_system_id,
@@ -575,59 +433,23 @@ impl ComponentIndex {
                 .load(conn)
                 .await
                 .map_err(PostgresError::from)?;
-            if rows.is_empty() {
+            let Some(max_id) = rows.iter().map(|(id, _)| *id).max() else {
                 continue;
-            }
-            debug!(chain = %chain, n_components = rows.len(), "Component index loaded new components");
+            };
+            debug!(chain = %chain, n_components = rows.len(), "Component index polled new components");
             let mut chain_index = chain_lock
                 .write()
                 .expect("component index lock poisoned");
             for (id, protocol_system_id) in rows {
                 chain_index.insert(protocol_system_id, id, NO_TVL);
             }
+            chain_index.polled_max_id = chain_index.polled_max_id.max(max_id);
         }
         Ok(())
     }
 
-    /// Loads the TVL rows the [`TvlCursor`] has not read yet. Falls back to a full TVL reload when
-    /// there are none: the counters reported `n_writes` writes, so those writes did not move
-    /// `modified_ts`.
-    async fn load_changed_tvl(
-        &self,
-        conn: &mut AsyncPgConnection,
-        n_writes: i64,
-    ) -> Result<RefreshOutcome, StorageError> {
-        let (since, excluded) = {
-            let state = self.state();
-            (state.tvl_cursor.since(), state.tvl_cursor.excluded_stamps())
-        };
-        let mut rows = load_tvl(conn, Some(since), &excluded).await?;
-        {
-            let state = self.state();
-            rows.retain(|row| {
-                state
-                    .tvl_cursor
-                    .is_unread(row.modified_ts)
-            });
-        }
-        if rows.is_empty() {
-            warn!(n_writes, "TVL writes without a new modified_ts; reloading all component TVL");
-            return Ok(RefreshOutcome::TvlReload { n_rows: self.reload_tvl(conn).await? });
-        }
-        let n_rows = rows.len();
-        self.write_tvl(&rows, false);
-        Ok(RefreshOutcome::TvlDelta { n_rows })
-    }
-
-    /// Reads every TVL row and replaces the TVL of the index with it. Returns the number of rows.
-    async fn reload_tvl(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
-        let rows = load_tvl(conn, None, &[]).await?;
-        self.write_tvl(&rows, true);
-        Ok(rows.len())
-    }
-
     /// Writes `rows`, sorted by component id, into every chain's index. With `replace_all`, all
-    /// other components lose their TVL. Records the rows as read.
+    /// other components lose their TVL.
     fn write_tvl(&self, rows: &[TvlRow], replace_all: bool) {
         for chain_lock in self.chains.values() {
             let mut chain_index = chain_lock
@@ -638,71 +460,23 @@ impl ComponentIndex {
             }
             chain_index.apply_tvl(rows);
         }
-        self.state().tvl_cursor.record(rows);
+        self.advance_newest_tvl_ts(rows);
+    }
+
+    fn advance_newest_tvl_ts(&self, rows: &[TvlRow]) {
+        if let Some(newest) = rows
+            .iter()
+            .map(|row| row.modified_ts)
+            .max()
+        {
+            let mut state = self.state();
+            state.newest_tvl_ts = state.newest_tvl_ts.max(newest);
+        }
     }
 
     /// Reads components and TVL again and swaps the result in. Returns the number of components.
     async fn full_reload(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
         let started = Instant::now();
-        for chain_lock in self.chains.values() {
-            chain_lock
-                .write()
-                .expect("component index lock poisoned")
-                .journal = Some(Vec::new());
-        }
-
-        let loaded = self.load_full(conn).await;
-
-        let mut n_components = 0;
-        let rebuilt = match loaded {
-            Ok(rebuilt) => rebuilt,
-            Err(err) => {
-                for chain_lock in self.chains.values() {
-                    chain_lock
-                        .write()
-                        .expect("component index lock poisoned")
-                        .journal = None;
-                }
-                return Err(err);
-            }
-        };
-        let (mut rebuilt, tvl_rows) = rebuilt;
-        for (chain, chain_lock) in &self.chains {
-            let mut new_index = rebuilt
-                .remove(chain)
-                .unwrap_or_default();
-            let mut chain_index = chain_lock
-                .write()
-                .expect("component index lock poisoned");
-            for (protocol_system_id, id) in chain_index
-                .journal
-                .take()
-                .unwrap_or_default()
-            {
-                new_index.insert(protocol_system_id, id, NO_TVL);
-            }
-            n_components += new_index.n_components();
-            info!(
-                chain = %chain,
-                n_components = new_index.n_components(),
-                n_protocol_systems = new_index.systems.len(),
-                n_tvl_rows = tvl_rows.len(),
-                elapsed = ?started.elapsed(),
-                "Reloaded component index"
-            );
-            *chain_index = new_index;
-        }
-        let mut state = self.state();
-        state.tvl_cursor.record(&tvl_rows);
-        state.last_full_reload = Instant::now();
-        Ok(n_components)
-    }
-
-    /// Reads the components of every indexed chain, then all TVL, and builds new chain indexes.
-    async fn load_full(
-        &self,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<(HashMap<Chain, ChainIndex>, Vec<TvlRow>), StorageError> {
         let mut components = HashMap::new();
         for (chain, chain_db_id) in &self.chain_db_ids {
             let mut rows: Vec<(i64, i64)> = schema::protocol_component::table
@@ -717,32 +491,28 @@ impl ComponentIndex {
             rows.sort_unstable();
             components.insert(*chain, rows);
         }
-        let tvl_rows = load_tvl(conn, None, &[]).await?;
+        let tvl_rows = load_tvl(conn, None).await?;
 
-        let mut rebuilt = HashMap::new();
+        let mut n_components = 0;
         for (chain, rows) in components {
-            let mut chain_index = ChainIndex::from_sorted_components(&rows);
-            chain_index.apply_tvl(&tvl_rows);
-            rebuilt.insert(chain, chain_index);
+            let mut rebuilt = ChainIndex::from_sorted_components(&rows);
+            rebuilt.apply_tvl(&tvl_rows);
+            n_components += rebuilt.n_components();
+            info!(
+                chain = %chain,
+                n_components = rebuilt.n_components(),
+                n_protocol_systems = rebuilt.systems.len(),
+                n_tvl_rows = tvl_rows.len(),
+                elapsed = ?started.elapsed(),
+                "Reloaded component index"
+            );
+            *self.chains[&chain]
+                .write()
+                .expect("component index lock poisoned") = rebuilt;
         }
-        Ok((rebuilt, tvl_rows))
-    }
-
-    fn is_bulk_write(&self, n_writes: i64) -> bool {
-        n_writes >= BULK_WRITE_MIN_ROWS &&
-            n_writes as f64 >= self.n_components() as f64 * BULK_WRITE_SHARE
-    }
-
-    fn n_components(&self) -> usize {
-        self.chains
-            .values()
-            .map(|chain_lock| {
-                chain_lock
-                    .read()
-                    .expect("component index lock poisoned")
-                    .n_components()
-            })
-            .sum()
+        self.advance_newest_tvl_ts(&tvl_rows);
+        self.state().last_full_reload = Instant::now();
+        Ok(n_components)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, RefreshState> {
@@ -801,13 +571,12 @@ impl ComponentIndex {
     }
 }
 
-/// Reads the `component_tvl` rows modified after `since` with a `modified_ts` not in `excluded`
-/// (sorted), or all rows, sorted by component id. Rows of every chain are returned; `component_tvl`
-/// has no chain column, and matching by id discards the others.
+/// Reads the `component_tvl` rows, sorted by component id: with `newer_than = (ts, limit)` at most
+/// `limit` rows with a `modified_ts` after `ts`, otherwise all rows. Rows of every chain are
+/// returned; `component_tvl` has no chain column, and matching by id discards the others.
 async fn load_tvl(
     conn: &mut AsyncPgConnection,
-    since: Option<NaiveDateTime>,
-    excluded: &[NaiveDateTime],
+    newer_than: Option<(NaiveDateTime, i64)>,
 ) -> Result<Vec<TvlRow>, StorageError> {
     let mut query = schema::component_tvl::table
         .select((
@@ -816,15 +585,10 @@ async fn load_tvl(
             schema::component_tvl::modified_ts,
         ))
         .into_boxed();
-    if let Some(since) = since {
-        let mut bounds = vec![since];
-        bounds.extend(
-            excluded
-                .iter()
-                .copied()
-                .filter(|stamp| *stamp > since),
-        );
-        query = query.filter(between_stamps(&bounds));
+    if let Some((since, limit)) = newer_than {
+        query = query
+            .filter(schema::component_tvl::modified_ts.gt(since))
+            .limit(limit);
     }
     let rows: Vec<(i64, f64, NaiveDateTime)> = query
         .load(conn)
@@ -840,39 +604,6 @@ async fn load_tvl(
         .collect();
     rows.sort_unstable_by_key(|row| row.component_id);
     Ok(rows)
-}
-
-/// `modified_ts` strictly between consecutive `bounds`, or after the last one, as a disjunction of
-/// index ranges. `bounds` must be sorted and not empty.
-fn between_stamps(
-    bounds: &[NaiveDateTime],
-) -> Box<
-    dyn BoxableExpression<
-        schema::component_tvl::table,
-        diesel::pg::Pg,
-        SqlType = diesel::sql_types::Bool,
-    >,
-> {
-    use schema::component_tvl::modified_ts;
-
-    let last = *bounds
-        .last()
-        .expect("between_stamps requires at least one bound");
-    let mut condition: Box<
-        dyn BoxableExpression<
-            schema::component_tvl::table,
-            diesel::pg::Pg,
-            SqlType = diesel::sql_types::Bool,
-        >,
-    > = Box::new(modified_ts.gt(last));
-    for pair in bounds.windows(2) {
-        condition = Box::new(
-            condition.or(modified_ts
-                .gt(pair[0])
-                .and(modified_ts.lt(pair[1]))),
-        );
-    }
-    condition
 }
 
 /// Maps a `component_tvl.tvl` value to its index representation. Postgres orders `NaN` above every
@@ -984,18 +715,22 @@ mod test {
     }
 
     fn index_with(chain_db_id: i64, rows: &[(i64, i64)]) -> ComponentIndex {
-        let mut chain_index = ChainIndex::default();
-        for (protocol_system_id, id) in rows {
-            chain_index.insert(*protocol_system_id, *id, NO_TVL);
-        }
+        let mut sorted: Vec<(i64, i64)> = rows
+            .iter()
+            .map(|(protocol_system_id, id)| (*id, *protocol_system_id))
+            .collect();
+        sorted.sort_unstable();
         ComponentIndex {
-            chains: HashMap::from([(Chain::Ethereum, RwLock::new(chain_index))]),
+            chains: HashMap::from([(
+                Chain::Ethereum,
+                RwLock::new(ChainIndex::from_sorted_components(&sorted)),
+            )]),
             chain_db_ids: HashMap::from([(Chain::Ethereum, chain_db_id)]),
             refresh_state: Mutex::new(RefreshState {
-                counters: WriteCounters::default(),
-                tvl_cursor: TvlCursor::default(),
+                newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
             }),
+            tvl_bulk_rows: TVL_BULK_ROWS,
         }
     }
 
@@ -1008,99 +743,45 @@ mod test {
     }
 
     #[test]
-    fn test_insert_ignores_other_chains_and_sets_no_tvl() {
-        let index = index_with(1, &[]);
+    fn test_insert_ignores_other_chains_sets_no_tvl_and_leaves_the_poll_watermark() {
+        let index = index_with(1, &[(7, 50)]);
         index.insert(&[
             NewComponentRow { chain_id: 1, protocol_system_id: 7, id: 100 },
             NewComponentRow { chain_id: 2, protocol_system_id: 7, id: 101 },
         ]);
 
-        assert_eq!(index.query(&Chain::Ethereum, 7, None, None), Some(page(&[100], 1)));
+        assert_eq!(index.query(&Chain::Ethereum, 7, None, None), Some(page(&[50, 100], 2)));
         assert_eq!(index.query(&Chain::Ethereum, 7, Some(-1.0), None), Some(page(&[], 0)));
+        assert_eq!(
+            index.chains[&Chain::Ethereum]
+                .read()
+                .unwrap()
+                .polled_max_id,
+            50
+        );
     }
 
     #[test]
-    fn test_insert_during_full_reload_is_journaled() {
+    fn test_newest_tvl_ts_never_moves_back() {
         let index = index_with(1, &[]);
-        index.chains[&Chain::Ethereum]
-            .write()
-            .unwrap()
-            .journal = Some(Vec::new());
+        let at = |secs| {
+            chrono::DateTime::from_timestamp(secs, 0)
+                .unwrap()
+                .naive_utc()
+        };
 
-        index.insert(&[NewComponentRow { chain_id: 1, protocol_system_id: 7, id: 100 }]);
+        index.advance_newest_tvl_ts(&[TvlRow { modified_ts: at(2_000), ..tvl_row(1, 1.0) }]);
+        index.advance_newest_tvl_ts(&[TvlRow { modified_ts: at(1_000), ..tvl_row(1, 1.0) }]);
+        index.advance_newest_tvl_ts(&[]);
 
-        let journal = index.chains[&Chain::Ethereum]
-            .write()
-            .unwrap()
-            .journal
-            .take()
-            .unwrap();
-        assert_eq!(journal, vec![(7, 100)]);
-    }
-
-    fn at(secs: i64) -> NaiveDateTime {
-        chrono::DateTime::from_timestamp(secs, 0)
-            .unwrap()
-            .naive_utc()
-    }
-
-    fn stamped(modified_ts: NaiveDateTime) -> TvlRow {
-        TvlRow { modified_ts, ..tvl_row(1, 1.0) }
-    }
-
-    #[test]
-    fn test_tvl_cursor_newest_never_moves_back() {
-        let mut cursor = TvlCursor::default();
-
-        cursor.record(&[stamped(at(2_000))]);
-        cursor.record(&[stamped(at(1_000))]);
-        cursor.record(&[]);
-
-        assert_eq!(cursor.newest, at(2_000));
-    }
-
-    #[test]
-    fn test_tvl_cursor_reads_unseen_stamps_within_the_overlap_only() {
-        let mut cursor = TvlCursor::default();
-        let newest = at(100_000);
-        cursor.record(&[stamped(newest), stamped(newest - chrono::Duration::minutes(3))]);
-
-        assert!(!cursor.is_unread(newest));
-        assert!(!cursor.is_unread(newest - chrono::Duration::minutes(3)));
-        assert!(cursor.is_unread(newest - chrono::Duration::minutes(5)));
-        assert!(cursor.is_unread(newest + chrono::Duration::seconds(1)));
-        assert!(!cursor.is_unread(newest - TVL_OVERLAP));
-        assert_eq!(cursor.excluded_stamps().len(), 2);
-    }
-
-    #[test]
-    fn test_tvl_cursor_forgets_stamps_that_leave_the_overlap() {
-        let mut cursor = TvlCursor::default();
-        cursor.record(&[stamped(at(100_000))]);
-
-        cursor.record(&[stamped(at(100_000) + TVL_OVERLAP)]);
-
-        assert_eq!(cursor.seen.len(), 1);
-    }
-
-    #[test]
-    fn test_tvl_cursor_stops_listing_too_many_stamps() {
-        let mut cursor = TvlCursor::default();
-        let rows: Vec<TvlRow> = (0..=MAX_EXCLUDED_STAMPS as i64)
-            .map(|offset| stamped(at(100_000) + chrono::Duration::milliseconds(offset)))
-            .collect();
-
-        cursor.record(&rows);
-
-        assert!(cursor.excluded_stamps().is_empty());
-        assert!(!cursor.is_unread(at(100_000)));
+        assert_eq!(index.state().newest_tvl_ts, at(2_000));
     }
 }
 
 /// Benchmark of the load, refresh and query paths against a real database.
 ///
-/// Read-only unless `BENCH_WRITES=1`, which also updates `component_tvl` to time the TVL delta
-/// paths; only set it against a disposable database. Run with:
+/// Read-only unless `BENCH_WRITES=1`, which also updates `component_tvl` to time the TVL polls;
+/// only set it against a disposable database. Run with:
 ///   DATABASE_URL=... BENCH_CHAIN=bsc cargo test -p tycho-storage --release --lib \
 ///     component_index_benchmark -- --ignored --nocapture
 #[cfg(test)]
@@ -1108,6 +789,9 @@ mod benchmark {
     use diesel_async::AsyncConnection;
 
     use super::*;
+
+    /// Long enough that the benchmark never triggers the periodic full reload.
+    const NO_PERIODIC_RELOAD: Duration = Duration::from_secs(24 * 3600);
 
     fn rss_mib() -> f64 {
         std::fs::read_to_string("/proc/self/status")
@@ -1171,12 +855,6 @@ mod benchmark {
                 .unwrap();
         }
 
-        let started = Instant::now();
-        WriteCounters::read(&mut conn)
-            .await
-            .unwrap();
-        println!("counters read: {:?}", started.elapsed());
-
         let rss_before = rss_mib();
         let started = Instant::now();
         let index = ComponentIndex::from_connection(&mut conn, &[chain])
@@ -1205,21 +883,19 @@ mod benchmark {
         }
 
         let started = Instant::now();
-        index
-            .load_new_components(&mut conn)
+        let outcome = index
+            .refresh(&mut conn, NO_PERIODIC_RELOAD)
             .await
             .unwrap();
-        println!("new-ids poll (nothing new): {:?}", started.elapsed());
+        println!("refresh, nothing written: {:?} -> {outcome:?}", started.elapsed());
 
         let started = Instant::now();
-        let rows = load_tvl(&mut conn, None, &[])
-            .await
-            .unwrap();
+        let rows = load_tvl(&mut conn, None).await.unwrap();
         let fetch_elapsed = started.elapsed();
         let started = Instant::now();
         index.write_tvl(&rows, true);
         println!(
-            "full TVL reload: fetch+sort {fetch_elapsed:?} ({} rows), write under lock {:?}, RSS {:.0} MiB",
+            "full TVL read: fetch+sort {fetch_elapsed:?} ({} rows), write under lock {:?}, RSS {:.0} MiB",
             rows.len(),
             started.elapsed(),
             rss_mib()
@@ -1227,11 +903,11 @@ mod benchmark {
         drop(rows);
 
         let started = Instant::now();
-        let n_components = index
-            .full_reload(&mut conn)
+        let outcome = index
+            .refresh(&mut conn, Duration::ZERO)
             .await
             .unwrap();
-        println!("full reload: {:?} ({n_components} components)", started.elapsed());
+        println!("refresh, full reload: {:?} -> {outcome:?}", started.elapsed());
 
         if !writes {
             return;
@@ -1244,23 +920,20 @@ mod benchmark {
             ("1000 rows changed, before autoanalyze", small_write),
             ("autoanalyze", "ANALYZE component_tvl"),
             ("1000 rows changed, after autoanalyze", small_write),
-            ("counters moved without a visible write (e.g. rolled back)", "SELECT 1"),
         ] {
-            let n_written = diesel::sql_query(sql)
+            diesel::sql_query(sql)
                 .execute(&mut conn)
                 .await
                 .unwrap();
             if label == "autoanalyze" {
                 continue;
             }
-            let mut counters = index.state().counters;
-            counters.tvl_updates += n_written as i64;
             let started = Instant::now();
             let outcome = index
-                .refresh_with_counters(&mut conn, counters, Duration::from_secs(6 * 3600))
+                .refresh(&mut conn, NO_PERIODIC_RELOAD)
                 .await
                 .unwrap();
-            println!("TVL refresh, {label}: {:?} -> {outcome:?}", started.elapsed());
+            println!("refresh, {label}: {:?} -> {outcome:?}", started.elapsed());
         }
     }
 }
@@ -1269,12 +942,16 @@ mod benchmark {
 /// through the index as through the SQL path, after each kind of refresh.
 #[cfg(test)]
 mod serial_db_test {
-    use tycho_common::models::protocol::ProtocolComponent;
+    use tycho_common::{
+        models::{protocol::ProtocolComponent, ChangeType},
+        Bytes,
+    };
 
     use super::*;
     use crate::postgres::{db_fixtures, testing::run_against_db, PostgresGateway};
 
     const TX_HASH_0: &str = "0xbb7e16d797a9e2fbc537e30f91ed3d27a254dd9578aa4c3af3e5f0d3e8130945";
+    const TOKEN: &str = "0000000000000000000000000000000000000001";
 
     /// Long enough that no test triggers the periodic full reload by accident.
     const NO_PERIODIC_RELOAD: Duration = Duration::from_secs(3600);
@@ -1298,19 +975,43 @@ mod serial_db_test {
             assert_equivalent(&self.sql_gateway, &self.indexed_gateway, conn).await;
         }
 
-        /// Refreshes with the stored counters grown as given, as if Postgres had reported those
-        /// writes.
-        async fn refresh(
-            &self,
-            conn: &mut AsyncPgConnection,
-            grow: impl FnOnce(&mut WriteCounters),
-        ) -> RefreshOutcome {
-            let mut counters = self.index().state().counters;
-            grow(&mut counters);
+        async fn refresh(&self, conn: &mut AsyncPgConnection) -> RefreshOutcome {
             self.index()
-                .refresh_with_counters(conn, counters, NO_PERIODIC_RELOAD)
+                .refresh(conn, NO_PERIODIC_RELOAD)
                 .await
                 .unwrap()
+        }
+
+        /// Inserts a `sys_b` component the way another process would: straight into the table.
+        async fn insert_component_elsewhere(
+            &self,
+            conn: &mut AsyncPgConnection,
+            external_id: &str,
+        ) -> i64 {
+            let (chain_id, type_id, tx_id, token_id): (i64, i64, i64, i64) =
+                schema::protocol_component::table
+                    .inner_join(schema::protocol_component_holds_token::table)
+                    .filter(schema::protocol_component::id.eq(self.component_db_ids[0]))
+                    .select((
+                        schema::protocol_component::chain_id,
+                        schema::protocol_component::protocol_type_id,
+                        schema::protocol_component::creation_tx,
+                        schema::protocol_component_holds_token::token_id,
+                    ))
+                    .first(conn)
+                    .await
+                    .unwrap();
+            db_fixtures::insert_protocol_component(
+                conn,
+                external_id,
+                chain_id,
+                self.system_ids[1],
+                type_id,
+                tx_id,
+                Some(vec![token_id]),
+                None,
+            )
+            .await
         }
     }
 
@@ -1335,24 +1036,10 @@ mod serial_db_test {
             )
             .await;
         }
-        let (_, token_id) = db_fixtures::insert_token(
-            conn,
-            chain_id,
-            "0000000000000000000000000000000000000001",
-            "T1",
-            18,
-            Some(100),
-        )
-        .await;
-        let (_, starknet_token_id) = db_fixtures::insert_token(
-            conn,
-            starknet_id,
-            "0000000000000000000000000000000000000001",
-            "T1",
-            18,
-            Some(100),
-        )
-        .await;
+        let (_, token_id) =
+            db_fixtures::insert_token(conn, chain_id, TOKEN, "T1", 18, Some(100)).await;
+        let (_, starknet_token_id) =
+            db_fixtures::insert_token(conn, starknet_id, TOKEN, "T1", 18, Some(100)).await;
         let blocks = db_fixtures::insert_blocks(conn, chain_id).await;
         let txns = db_fixtures::insert_txns(conn, &[(blocks[0], 1, TX_HASH_0)]).await;
         let sys_a = db_fixtures::insert_protocol_system(conn, "sys_a".to_string()).await;
@@ -1429,32 +1116,6 @@ mod serial_db_test {
             .unwrap();
     }
 
-    /// Sets a TVL with triggers disabled, so `modified_ts` keeps the given value.
-    async fn set_tvl_without_trigger(
-        conn: &mut AsyncPgConnection,
-        component_db_id: i64,
-        tvl: f64,
-        modified_ts: NaiveDateTime,
-    ) {
-        diesel::sql_query("SET session_replication_role = replica")
-            .execute(conn)
-            .await
-            .unwrap();
-        diesel::update(schema::component_tvl::table)
-            .filter(schema::component_tvl::protocol_component_id.eq(component_db_id))
-            .set((
-                schema::component_tvl::tvl.eq(tvl),
-                schema::component_tvl::modified_ts.eq(modified_ts),
-            ))
-            .execute(conn)
-            .await
-            .unwrap();
-        diesel::sql_query("SET session_replication_role = origin")
-            .execute(conn)
-            .await
-            .unwrap();
-    }
-
     async fn query(
         gateway: &PostgresGateway,
         conn: &mut AsyncPgConnection,
@@ -1522,14 +1183,6 @@ mod serial_db_test {
         }
     }
 
-    async fn delete_tvl(conn: &mut AsyncPgConnection, component_db_id: i64) {
-        diesel::delete(schema::component_tvl::table)
-            .filter(schema::component_tvl::protocol_component_id.eq(component_db_id))
-            .execute(conn)
-            .await
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn test_serial_db_index_matches_sql() {
         run_against_db(|pool| async move {
@@ -1567,26 +1220,18 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_unchanged_counters_read_no_tvl() {
+    async fn test_serial_db_refresh_without_writes_is_unchanged() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
-            set_tvl(&mut conn, fixture.component_db_ids[0], 50.0).await;
 
-            let outcome = fixture.refresh(&mut conn, |_| {}).await;
-
-            assert_eq!(outcome, RefreshOutcome::Unchanged);
-            let page = fixture
-                .index()
-                .query(&Chain::Ethereum, fixture.system_ids[0], Some(10.0), None)
-                .unwrap();
-            assert_eq!(page.total, 0, "a TVL write the counters did not report must not be read");
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
         })
         .await;
     }
 
     #[tokio::test]
-    async fn test_serial_db_tvl_writes_load_the_changed_rows() {
+    async fn test_serial_db_tvl_poll_applies_only_the_changed_rows() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
@@ -1594,14 +1239,8 @@ mod serial_db_test {
             set_tvl(&mut conn, fixture.component_db_ids[2], 7.0).await;
             set_tvl(&mut conn, fixture.component_db_ids[4], -3.0).await;
 
-            let outcome = fixture
-                .refresh(&mut conn, |counters| {
-                    counters.tvl_inserts += 1;
-                    counters.tvl_updates += 1;
-                })
-                .await;
+            let outcome = fixture.refresh(&mut conn).await;
 
-            // Rows written by transactions an earlier load already read are not read again.
             assert_eq!(outcome, RefreshOutcome::TvlDelta { n_rows: 2 });
             fixture
                 .assert_equivalent(&mut conn)
@@ -1611,30 +1250,28 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_delta_reads_rows_stamped_before_the_marker_within_the_overlap() {
+    async fn test_serial_db_bulk_tvl_write_reads_all_tvl() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
-            let fixture = setup(&mut conn).await;
-            let newest = fixture
-                .index()
-                .state()
-                .tvl_cursor
-                .newest;
-            // A writer transaction that started before the last load stamps its rows with its
-            // start time, older than the newest stamp read so far.
-            set_tvl_without_trigger(
-                &mut conn,
-                fixture.component_db_ids[0],
-                0.5,
-                newest - chrono::Duration::minutes(2),
+            let mut fixture = setup(&mut conn).await;
+            let index = Arc::get_mut(
+                fixture
+                    .indexed_gateway
+                    .component_index
+                    .as_mut()
+                    .unwrap(),
             )
-            .await;
+            .unwrap();
+            index.tvl_bulk_rows = 1;
+            // Three changed rows: more than the poll fetches (bulk rows + 1), so only the full
+            // read sees all of them.
+            set_tvl(&mut conn, fixture.component_db_ids[0], 0.5).await;
+            set_tvl(&mut conn, fixture.component_db_ids[1], 50.0).await;
+            set_tvl(&mut conn, fixture.component_db_ids[4], 0.2).await;
 
-            let outcome = fixture
-                .refresh(&mut conn, |counters| counters.tvl_updates += 1)
-                .await;
+            let outcome = fixture.refresh(&mut conn).await;
 
-            assert_eq!(outcome, RefreshOutcome::TvlDelta { n_rows: 1 });
+            assert_eq!(outcome, RefreshOutcome::TvlReload { n_rows: 6 });
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
@@ -1643,26 +1280,30 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_write_without_modified_ts_reloads_all_tvl() {
+    async fn test_serial_db_write_through_shows_new_components_without_tvl() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
-            // An update that bypasses the trigger keeps the stamp a load already read.
-            let modified_ts = schema::component_tvl::table
-                .filter(
-                    schema::component_tvl::protocol_component_id.eq(fixture.component_db_ids[0]),
-                )
-                .select(schema::component_tvl::modified_ts)
-                .first::<NaiveDateTime>(&mut conn)
+            let component = ProtocolComponent {
+                id: "b1".to_string(),
+                protocol_system: "sys_b".to_string(),
+                protocol_type_name: "pool".to_string(),
+                chain: Chain::Ethereum,
+                tokens: vec![Bytes::from_str(TOKEN).unwrap()],
+                contract_addresses: vec![],
+                static_attributes: Default::default(),
+                change: ChangeType::Creation,
+                creation_tx: Bytes::from_str(TX_HASH_0).unwrap(),
+                created_at: Default::default(),
+            };
+
+            fixture
+                .indexed_gateway
+                .add_protocol_components(&[component], &mut conn)
                 .await
                 .unwrap();
-            set_tvl_without_trigger(&mut conn, fixture.component_db_ids[0], 0.5, modified_ts).await;
 
-            let outcome = fixture
-                .refresh(&mut conn, |counters| counters.tvl_updates += 1)
-                .await;
-
-            assert!(matches!(outcome, RefreshOutcome::TvlReload { .. }), "{outcome:?}");
+            // No refresh: write-through alone makes the component visible.
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
@@ -1671,83 +1312,21 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_bulk_tvl_write_reloads_all_tvl() {
+    async fn test_serial_db_poll_reads_components_and_tvl_of_other_writers() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
-            set_tvl(&mut conn, fixture.component_db_ids[0], 0.5).await;
-
-            let outcome = fixture
-                .refresh(&mut conn, |counters| counters.tvl_updates += BULK_WRITE_MIN_ROWS)
+            let new_component = fixture
+                .insert_component_elsewhere(&mut conn, "b1")
                 .await;
 
-            assert!(matches!(outcome, RefreshOutcome::TvlReload { .. }), "{outcome:?}");
-            fixture
-                .assert_equivalent(&mut conn)
-                .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_serial_db_tvl_deletes_reload_all_tvl() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-            let fixture = setup(&mut conn).await;
-            delete_tvl(&mut conn, fixture.component_db_ids[1]).await;
-
-            let outcome = fixture
-                .refresh(&mut conn, |counters| counters.tvl_deletes += 1)
-                .await;
-
-            assert!(matches!(outcome, RefreshOutcome::TvlReload { .. }), "{outcome:?}");
-            fixture
-                .assert_equivalent(&mut conn)
-                .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_serial_db_new_components_are_loaded_without_tvl_until_tvl_moves() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-            let fixture = setup(&mut conn).await;
-            let (chain_id, type_id, tx_id, token_id): (i64, i64, i64, i64) =
-                schema::protocol_component::table
-                    .inner_join(schema::protocol_component_holds_token::table)
-                    .filter(schema::protocol_component::id.eq(fixture.component_db_ids[0]))
-                    .select((
-                        schema::protocol_component::chain_id,
-                        schema::protocol_component::protocol_type_id,
-                        schema::protocol_component::creation_tx,
-                        schema::protocol_component_holds_token::token_id,
-                    ))
-                    .first(&mut conn)
-                    .await
-                    .unwrap();
-            let new_component = db_fixtures::insert_protocol_component(
-                &mut conn,
-                "b1",
-                chain_id,
-                fixture.system_ids[1],
-                type_id,
-                tx_id,
-                Some(vec![token_id]),
-                None,
-            )
-            .await;
-
-            let outcome = fixture.refresh(&mut conn, |_| {}).await;
-            assert_eq!(outcome, RefreshOutcome::Unchanged);
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
 
             set_tvl(&mut conn, new_component, 3.0).await;
-            fixture
-                .refresh(&mut conn, |counters| counters.tvl_inserts += 1)
-                .await;
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::TvlDelta { n_rows: 1 });
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
@@ -1756,11 +1335,18 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_component_deletes_reload_everything() {
+    async fn test_serial_db_full_reload_corrects_what_the_polls_cannot_see() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
-            // A hard delete cascades to the TVL row.
+            // A deleted TVL row, and a hard-deleted component (its TVL row goes with it).
+            diesel::delete(schema::component_tvl::table)
+                .filter(
+                    schema::component_tvl::protocol_component_id.eq(fixture.component_db_ids[1]),
+                )
+                .execute(&mut conn)
+                .await
+                .unwrap();
             diesel::delete(schema::protocol_component::table)
                 .filter(schema::protocol_component::id.eq(fixture.component_db_ids[0]))
                 .execute(&mut conn)
@@ -1768,48 +1354,15 @@ mod serial_db_test {
                 .unwrap();
 
             let outcome = fixture
-                .refresh(&mut conn, |counters| {
-                    counters.component_deletes += 1;
-                    counters.tvl_deletes += 1;
-                })
-                .await;
-
-            assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 5 });
-            fixture
-                .assert_equivalent(&mut conn)
-                .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_serial_db_periodic_full_reload() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-            let fixture = setup(&mut conn).await;
-
-            let outcome = fixture
                 .index()
                 .refresh(&mut conn, Duration::ZERO)
                 .await
                 .unwrap();
 
-            assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 6 });
+            assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 5 });
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_serial_db_write_counters_are_readable() {
-        run_against_db(|pool| async move {
-            let mut conn = pool.get().await.unwrap();
-
-            let counters = WriteCounters::read(&mut conn).await;
-
-            assert!(counters.is_ok(), "{counters:?}");
         })
         .await;
     }
