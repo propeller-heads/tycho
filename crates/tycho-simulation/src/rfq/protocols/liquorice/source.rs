@@ -41,7 +41,7 @@ impl LiquoriceBookSource {
         quote_token: &Bytes,
         prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
     ) -> Option<f64> {
-        tvl::in_usd_quote_tokens(
+        tvl::tvl_in_usd(
             raw_tvl,
             quote_token,
             &self.usd_quote_tokens,

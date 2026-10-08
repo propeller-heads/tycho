@@ -1,3 +1,131 @@
+## [0.447.1](https://github.com/propeller-heads/tycho/compare/0.447.0...0.447.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* add missing executors to the router trades table ([821e301](https://github.com/propeller-heads/tycho/commit/821e3010fe404e7acc36b37a4e2699795c9dd6a6))
+* add missing executors to the router trades table ([#1567](https://github.com/propeller-heads/tycho/issues/1567)) ([66b646e](https://github.com/propeller-heads/tycho/commit/66b646e2698f92cfbb761f090a97f07d1a59369b))
+
+## [0.447.0](https://github.com/propeller-heads/tycho/compare/0.446.0...0.447.0) (2026-10-08)
+
+
+### Features
+
+* build runtime bytecode fixtures with a Foundry test ([#1455](https://github.com/propeller-heads/tycho/issues/1455)) ([e589d53](https://github.com/propeller-heads/tycho/commit/e589d53b60a83bf1a21006b0f7fce9daac970b84))
+* **testing:** build runtime bytecode fixtures with a Foundry test ([a4a7587](https://github.com/propeller-heads/tycho/commit/a4a7587f1096317c1be16c57c5c91c1273dd0fd6))
+
+
+### Bug Fixes
+
+* **testing:** preserve executor self-calls in bytecode fixtures ([534249b](https://github.com/propeller-heads/tycho/commit/534249bc3f7ac923cb05a5b89fc5796cef71aa66))
+
+## [0.446.0](https://github.com/propeller-heads/tycho/compare/0.445.1...0.446.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **snapshot-feed:** report a panicked feed task as a message
+
+### Features
+
+* **snapshot-feed:** add the latest-value snapshot feed layer ([cf06a5a](https://github.com/propeller-heads/tycho/commit/cf06a5a1d4dcc3c5ddc7cef56e1672ce4818fc34))
+* **snapshot-feed:** add the latest-value snapshot feed layer ([#1554](https://github.com/propeller-heads/tycho/issues/1554)) ([5472845](https://github.com/propeller-heads/tycho/commit/5472845ee9b31fb7625d1af29c90040bf092de55))
+
+
+### Bug Fixes
+
+* **snapshot-feed:** count a handshake the source could not build ([7dbf14c](https://github.com/propeller-heads/tycho/commit/7dbf14c647e03fe312aac64a2b71f194120e7cbb)), closes [#1561](https://github.com/propeller-heads/tycho/issues/1561)
+
+
+### Code Refactoring
+
+* **snapshot-feed:** report a panicked feed task as a message ([8b14925](https://github.com/propeller-heads/tycho/commit/8b149255c767637b3d49ad665e3ddfa9572f331b))
+
+## [0.445.1](https://github.com/propeller-heads/tycho/compare/0.445.0...0.445.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **indexer:** report the flushed height as the committed height ([4bae66c](https://github.com/propeller-heads/tycho/commit/4bae66cbad9d28002601c13b2d01a096b705be3e))
+* **indexer:** report the flushed height as the committed height ([#1564](https://github.com/propeller-heads/tycho/issues/1564)) ([91319c2](https://github.com/propeller-heads/tycho/commit/91319c219f95ee8acda8df1a7cb455e34dd37dba))
+
+## [0.445.0](https://github.com/propeller-heads/tycho/compare/0.444.0...0.445.0) (2026-10-07)
+
+
+### Features
+
+* **execution:** add BebopFallbackRouter and BebopFallbackExecutor ([02e19d6](https://github.com/propeller-heads/tycho/commit/02e19d6f5234390c906076f06f9f0dd3e7b9d586))
+* **execution:** add HashflowFallbackRouter and HashflowFallbackExecutor ([f2f8d37](https://github.com/propeller-heads/tycho/commit/f2f8d3741d8bd9f5df3f8dfc13a39f33c2a22dbc))
+* **execution:** add Metric, Bebop and Hashflow fallback routers on a shared base ([#1518](https://github.com/propeller-heads/tycho/issues/1518)) ([7563c01](https://github.com/propeller-heads/tycho/commit/7563c013fd920aab5df99546bf340e2f8c3cf131))
+* **execution:** add MetricFallbackRouter and MetricFallbackExecutor ([db46550](https://github.com/propeller-heads/tycho/commit/db46550c3bdbd501acd72d2a0865cfb1a61cd61b))
+* **execution:** deploy any fallback router from deploy-fallback-router.js ([3727609](https://github.com/propeller-heads/tycho/commit/3727609efbad91115dadb1553cc7d74ca6fb46af))
+* **execution:** encode swaps for the Metric and Bebop fallback routers ([30c2448](https://github.com/propeller-heads/tycho/commit/30c24486e97fef54a2c7487a8b81165beb7bf135))
+* **execution:** quote Metric by simulation on chains without a quoter ([39912b3](https://github.com/propeller-heads/tycho/commit/39912b358f728132c416adbb04bfea183b0efcec))
+* **execution:** quote Metric only by simulation ([d45a9dc](https://github.com/propeller-heads/tycho/commit/d45a9dc031b0224fb447beeaa019e84881353a14))
+* **execution:** run fallbacks on Robinhood ([48506cd](https://github.com/propeller-heads/tycho/commit/48506cdf7e41eb76ca6411e515020ec35c1d3870))
+* **simulation:** label Metric and Bebop components for the fallback router ([92d3348](https://github.com/propeller-heads/tycho/commit/92d33485294eb6d4b1f7320328aa920654ada41f))
+
+
+### Bug Fixes
+
+* **execution:** add a gas buffer to executor deployments ([6cf101f](https://github.com/propeller-heads/tycho/commit/6cf101f4056206fa6e83b562272bc4527c51cb48))
+* **execution:** list the fallback executors in the deployment registry ([a431278](https://github.com/propeller-heads/tycho/commit/a431278c359f2b6ee0e423d9ffeb67fbbbeb5f97))
+
+## [0.444.0](https://github.com/propeller-heads/tycho/compare/0.443.0...0.444.0) (2026-10-07)
+
+
+### Features
+
+* **client:** decode contract state faster and in parallel ([#1553](https://github.com/propeller-heads/tycho/issues/1553)) ([47a3eb6](https://github.com/propeller-heads/tycho/commit/47a3eb66ca8160f43fad9e4965403fbc5e49b3d1))
+* **client:** fetch contract state in smaller chunks, decoded in parallel ([8c7b0aa](https://github.com/propeller-heads/tycho/commit/8c7b0aa703ab2701906047c61987b94a683ed709))
+
+## [0.443.0](https://github.com/propeller-heads/tycho/compare/0.442.0...0.443.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **execution:** EncodingError gains the SignedQuoteShortfall variant. The
+enum is not #[non_exhaustive], so callers that match it exhaustively no
+longer compile.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+
+### Features
+
+* **execution:** fail an RFQ encode on a signed quote short of its levels ([cc27d4b](https://github.com/propeller-heads/tycho/commit/cc27d4b53740dfbaa83dad7c02e3c72394c72159))
+* **execution:** fail an RFQ encode on a signed quote short of its levels ([#1552](https://github.com/propeller-heads/tycho/issues/1552)) ([ceba841](https://github.com/propeller-heads/tycho/commit/ceba841eccce4612c2131ae91e244cd9f028884d))
+
+## [0.442.0](https://github.com/propeller-heads/tycho/compare/0.441.1...0.442.0) (2026-10-06)
+
+
+### Features
+
+* **indexer:** classify shadow failures by their domain error ([dc39f91](https://github.com/propeller-heads/tycho/commit/dc39f91ace7e3be0952e36c5816e89574901a462))
+* **indexer:** compare contract state answers in shadow mode ([303447e](https://github.com/propeller-heads/tycho/commit/303447efc28ebaefdfa236b4f9525b296f2e6452))
+* **indexer:** compare protocol state answers in shadow mode ([8f9d081](https://github.com/propeller-heads/tycho/commit/8f9d08130fc9b4ebb8685a71810a2f4f6a1bc5fd))
+* **indexer:** count other extractors' unsaved account changes as a known mismatch ([4577d36](https://github.com/propeller-heads/tycho/commit/4577d368df8399ffe20d4c8db1f9cb9524f874de))
+* **indexer:** log known shadow mismatches at debug ([17c7b7a](https://github.com/propeller-heads/tycho/commit/17c7b7a4f607b4b54d6dc068149cddfc2429c8ed))
+* **indexer:** outline shadow mode from the flag to the comparison ([662366d](https://github.com/propeller-heads/tycho/commit/662366de8990a1616b159b02b6ec87350bee12b5))
+* **indexer:** record shadow comparisons in metrics and logs ([2a78be4](https://github.com/propeller-heads/tycho/commit/2a78be4d282ec82e7790ab1d0ac08cf6d7e04648))
+* **indexer:** run the shadow procedure and discard straddled reads ([1e300b5](https://github.com/propeller-heads/tycho/commit/1e300b51f214050cf8f01abf22aaaf892cd8a5b9))
+
+
+### Bug Fixes
+
+* **indexer:** name the first missing address on the database path ([ecaf8a1](https://github.com/propeller-heads/tycho/commit/ecaf8a11d7610547167fc83f87aa5bb1f190df72))
+
+## [0.441.1](https://github.com/propeller-heads/tycho/compare/0.441.0...0.441.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **testing:** clarify range test snapshot block messages ([77469f5](https://github.com/propeller-heads/tycho/commit/77469f5c1563d5343a90670d9179302f240ad9c1))
+* **testing:** fail range tests whose expected components do not decode ([f085be1](https://github.com/propeller-heads/tycho/commit/f085be1b12ce32652681ea2f9ec84893597397e3))
+* **testing:** read range test snapshots at the last committed block ([77cb8c0](https://github.com/propeller-heads/tycho/commit/77cb8c00d34ad970c553ef4abecb837550a71b7c))
+* **testing:** read range test snapshots at the last committed block ([#1537](https://github.com/propeller-heads/tycho/issues/1537)) ([247cbf3](https://github.com/propeller-heads/tycho/commit/247cbf3a085a6c51abc10b44615693ddaac3430e))
+* **testing:** reject range tests reading past stop_block + 1 ([3cf5c10](https://github.com/propeller-heads/tycho/commit/3cf5c10a8df712d11ed30dae472c66917ea2e7a4))
+* **testing:** scope committed block query to protocol ([ff9d2d8](https://github.com/propeller-heads/tycho/commit/ff9d2d8c1287602e432a12e2038f6c29d42e5666))
+
 ## [0.441.0](https://github.com/propeller-heads/tycho/compare/0.440.1...0.441.0) (2026-10-06)
 
 

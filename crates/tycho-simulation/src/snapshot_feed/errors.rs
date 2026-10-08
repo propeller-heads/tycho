@@ -5,16 +5,9 @@ use tycho_common::simulation::errors::SimulationError;
 
 /// Failures of the feed layer: fetching, decoding, and publishing a provider's snapshots.
 ///
-/// The variant says what a caller can do about it, which for the feed loops is the difference
-/// between another attempt and giving up. Match on it; the message beside it is diagnostic, is
-/// written for a log line, and its wording carries no promise across versions. A distinction
-/// worth acting on belongs in a variant, not in the text.
-///
-/// The payloads are messages rather than source errors: the causes are heterogeneous (HTTP,
-/// WebSocket, JSON, protobuf), nothing inspects them, and a library's public error type should
-/// not hand its consumers an opaque one to downcast through.
-///
-/// The quoting layer has an error type of its own; it never reaches a public signature.
+/// Match on the variant: it says whether another attempt could answer differently, which is what
+/// a feed's retrying and the conversion to [`SimulationError`] both turn on. The message beside
+/// it is written for a log line, and its wording carries no promise across versions.
 #[derive(Clone, Debug, Error)]
 pub enum FeedError {
     /// The provider could not be reached, or answered with something a later attempt may not
@@ -34,8 +27,8 @@ pub enum FeedError {
 }
 
 impl FeedError {
-    /// Whether another attempt is pointless. The feed loops stop on these, whatever failure
-    /// budget they were configured with.
+    /// Whether another attempt is pointless. A feed stops on these, whatever failure budget it
+    /// was configured with.
     pub fn is_fatal(&self) -> bool {
         matches!(self, FeedError::Fatal(_))
     }

@@ -1,5 +1,11 @@
 {
   "ethereum": {
+    "fallback:rfq:bebop": {
+      "fallback_router": "0xE51A1f575671364f295f61F121992788631553a1"
+    },
+    "fallback:rfq:hashflow": {
+      "fallback_router": "0x29D7A3cd3485710585d4f3bee5E43fE28633915F"
+    },
     "uniswap_v4": {
       "angstrom_hook_address": "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
     },
@@ -19,6 +25,9 @@
     }
   },
   "base": {
+    "fallback:rfq:bebop": {
+      "fallback_router": "0x4bB02166188132103fc608402B8993c0c0857708"
+    },
     "rfq:native": {
       "router_v6": "0x9706D3fff42571305Fc201F996ADC0e768d72911"
     }

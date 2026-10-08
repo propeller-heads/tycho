@@ -7,7 +7,9 @@ use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
-        protocols::bebop::{client::BebopClient, source::BebopBookSource},
+        protocols::bebop::{
+            client::BebopClient, source::BebopBookSource, FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
+        },
     },
     snapshot_feed::{
         errors::FeedError,
@@ -31,6 +33,7 @@ pub struct BebopFeed {
 /// rejecting quote requests in which a required field is missing. See
 /// <https://docs.bebop.xyz/rfq-api/guides/best-practices#6-pass-origin-so-we-can-identify-legitimate-flow>.
 pub struct BebopFeedBuilder {
+    protocol_system: &'static str,
     book_config: BookFeedConfig,
     usd_quote_tokens: Arc<HashSet<Bytes>>,
     ws_key: String,
@@ -56,6 +59,7 @@ impl BebopFeedBuilder {
             origin_target: None,
             origin_source: None,
             feed_config: Self::default_feed_config(),
+            protocol_system: PROTOCOL_SYSTEM,
         }
     }
 
@@ -93,6 +97,15 @@ impl BebopFeedBuilder {
         default_ws_feed_config()
     }
 
+    /// Settles this venue's swaps through Tycho's `BebopFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
     /// Tune the price feed loop (timeouts, backoff, failure limit)
     pub fn feed_config(mut self, feed_config: WsFeedConfig) -> Self {
         self.feed_config = feed_config;
@@ -105,6 +118,7 @@ impl BebopFeedBuilder {
         Ok(BebopFeed {
             feed_config: self.feed_config,
             source: BebopBookSource {
+                protocol_system: self.protocol_system,
                 book_config: self.book_config,
                 usd_quote_tokens: self.usd_quote_tokens,
                 client: Arc::new(BebopClient::new(

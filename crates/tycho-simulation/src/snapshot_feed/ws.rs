@@ -42,10 +42,9 @@ pub struct WsFeedConfig {
     pub max_snapshot_age: Option<Duration>,
 }
 
-/// The values every WebSocket feed builder starts from: 10 s handshake deadline, 60 s idle
-/// window, a reconnect wait of 1 s doubling to at most 32 s, retry forever, and withdrawal after
-/// 60 s without a snapshot, which is the idle window — the moment the loop declares the socket
-/// dead it also stops serving the snapshot.
+/// The values every WebSocket feed builder starts from. The relation among them worth keeping
+/// through a retune: the withdrawal age is the idle window, so the moment the loop gives up on
+/// the socket it stops serving what that socket brought.
 pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
     WsFeedConfig {
         connect_timeout: Duration::from_secs(10),
@@ -65,8 +64,10 @@ pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
 /// them.
 ///
 /// Resolves `Err` when the feed gives up: on a fatal error from the source, whatever the failure
-/// budget, after `max_consecutive_failures` failed connections where one is configured, or right
-/// away with `InvalidInput` for a zero `max_snapshot_age`. Resolves `Ok(())` as soon as the last
+/// budget, after `max_consecutive_failures` failed attempts where one is configured, or right
+/// away with `InvalidInput` for a zero `max_snapshot_age`. An attempt fails when the source
+/// cannot build its handshake, when the connection cannot be opened, or when the one that opened
+/// serves no snapshot. Resolves `Ok(())` as soon as the last
 /// receiver goes away, mid-connect or mid-read included, since nothing it read from then on could
 /// reach anyone; reconnecting itself never runs out, so a feed is otherwise stopped by dropping
 /// its future, which withdraws the published snapshot on the way out.
@@ -136,17 +137,29 @@ fn streamed_snapshots<S: WsSource>(
 ) -> impl Stream<Item = Result<S::Snapshot, FeedError>> {
     try_stream! {
         loop {
-            let request = source.request()?;
-            let connected = timeout(connect_timeout, connect_async(request)).await;
+            // Every way of not getting a usable connection lands here, so each of them reaches
+            // the failure budget below on the same terms.
+            let opened = match source.request() {
+                Err(e) if e.is_fatal() => Err(e)?,
+                Err(e) => Err(e.in_context("request failed")),
+                Ok(request) => match timeout(connect_timeout, connect_async(request)).await {
+                    Ok(Ok((ws_stream, _))) => Ok(ws_stream),
+                    Ok(Err(e)) => Err(FeedError::Connection(format!("connect failed: {e}"))),
+                    Err(_) => Err(FeedError::Connection(format!(
+                        "connect timed out after {connect_timeout:?}"
+                    ))),
+                },
+            };
+
             // Why this connection ended, in the words of whoever found out. Every end is a
             // failure to this loop — a WebSocket that closes is not serving snapshots — so the
             // reason is reported once, here, with the streak it belongs to.
-            let ended = match connected {
-                Ok(Ok((mut ws_stream, _))) => {
+            let ended = match opened {
+                Ok(mut ws_stream) => {
                     info!("connected");
                     loop {
                         match read_next_snapshot(read_idle_timeout, &mut ws_stream, &mut source).await {
-                            ConnectionRead::Snapshot(snapshot) => {
+                            Ok(snapshot) => {
                                 // A completed handshake says nothing about whether the
                                 // connection works, so only a decoded snapshot clears the counter.
                                 let cleared = failures.record_success();
@@ -155,16 +168,12 @@ fn streamed_snapshots<S: WsSource>(
                                 }
                                 yield snapshot;
                             }
-                            ConnectionRead::Reconnect(reason) => break reason,
-                            ConnectionRead::Fatal(e) => Err(e)?,
+                            Err(e) if e.is_fatal() => Err(e)?,
+                            Err(reason) => break reason,
                         }
                     }
                 }
-                Ok(Err(e)) => FeedError::Connection(format!("connect failed: {e}")),
-                Err(_) => FeedError::Connection(format!(
-                    "connect timed out after {}s",
-                    connect_timeout.as_secs()
-                )),
+                Err(reason) => reason,
             };
 
             let retry = failures
@@ -188,42 +197,25 @@ fn streamed_snapshots<S: WsSource>(
     }
 }
 
-/// What one read of a WebSocket connection produced, and with it what the caller does next.
-enum ConnectionRead<T> {
-    /// A frame decoded into a complete snapshot: publish it and read on.
-    Snapshot(T),
-    /// This connection will serve no more snapshots — it was closed, went silent, or answered with
-    /// something the source cannot read — so the caller opens another. The reason is carried
-    /// rather than logged, so one warning can report it together with the failure streak it
-    /// belongs to, and so the feed that eventually gives up gives up on this error rather than
-    /// on a retyped copy of its message.
-    Reconnect(FeedError),
-    /// The source reported a failure another connection would answer the same way, so the
-    /// caller gives up.
-    Fatal(FeedError),
-}
-
 /// Reads frames off one WebSocket connection until one decodes into a snapshot, or until the
 /// connection becomes unusable. Frames that carry no snapshot are read past.
+///
+/// `Err` carries why this connection served no snapshot, for the caller to report with the
+/// failure streak it belongs to and to classify with [`FeedError::is_fatal`].
 async fn read_next_snapshot<S: WsSource>(
     read_idle_timeout: Duration,
     ws_stream: &mut (impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin),
     source: &mut S,
-) -> ConnectionRead<S::Snapshot> {
+) -> Result<S::Snapshot, FeedError> {
     loop {
         let received = timeout(read_idle_timeout, ws_stream.next()).await;
         let message = match received {
             Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(e))) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!("read failed: {e}")))
-            }
-            Ok(None) => {
-                return ConnectionRead::Reconnect(FeedError::Connection("stream ended".to_string()))
-            }
+            Ok(Some(Err(e))) => return Err(FeedError::Connection(format!("read failed: {e}"))),
+            Ok(None) => return Err(FeedError::Connection("stream ended".to_string())),
             Err(_) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!(
-                    "no frame within the {}s read_idle_timeout",
-                    read_idle_timeout.as_secs()
+                return Err(FeedError::Connection(format!(
+                    "no frame within the {read_idle_timeout:?} read_idle_timeout"
                 )))
             }
         };
@@ -235,12 +227,10 @@ async fn read_next_snapshot<S: WsSource>(
             // reaction.
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(Some(frame)) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!(
-                    "closed by server: {frame}"
-                )))
+                return Err(FeedError::Connection(format!("closed by server: {frame}")))
             }
             Message::Close(None) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(
+                return Err(FeedError::Connection(
                     "closed by server without a close frame".to_string(),
                 ))
             }
@@ -255,14 +245,9 @@ async fn read_next_snapshot<S: WsSource>(
         let decoded = debug_span!("ws_frame").in_scope(|| source.decode(payload));
         return match decoded {
             Ok(None) => continue,
-            Ok(Some(snapshot)) => ConnectionRead::Snapshot(snapshot),
-            Err(e) => {
-                if e.is_fatal() {
-                    ConnectionRead::Fatal(e)
-                } else {
-                    ConnectionRead::Reconnect(e.in_context("decode failed"))
-                }
-            }
+            Ok(Some(snapshot)) => Ok(snapshot),
+            Err(e) if e.is_fatal() => Err(e),
+            Err(e) => Err(e.in_context("decode failed")),
         }
     }
 }
@@ -364,7 +349,7 @@ mod tests {
         WsFeedConfig { backoff_unit: Duration::from_millis(1), ..default_ws_feed_config() }
     }
 
-    /// Delivers `script` to [`read_next_book`] as a connection would, each frame after its own
+    /// Delivers `script` to [`read_next_snapshot`] as a connection would, each frame after its own
     /// wait, and then stays silent forever. Nothing here touches a socket, so on a paused clock
     /// the frames arrive at exactly the times the script names.
     fn scripted_frames(
@@ -420,6 +405,57 @@ mod tests {
         assert!(matches!(result, Err(FeedError::Fatal(_))));
         assert_eq!(connections.load(Ordering::SeqCst), 1, "the feed reconnected after the fatal");
         assert!(rx.borrow_and_update().is_none(), "the snapshot must be withdrawn");
+    }
+
+    /// A source that cannot build its handshake, refusing every time with the error it holds.
+    struct NoRequest(FeedError);
+
+    impl WsSource for NoRequest {
+        type Snapshot = u32;
+
+        fn request(&self) -> Result<Request<()>, FeedError> {
+            Err(self.0.clone())
+        }
+
+        fn decode(&mut self, _: WsPayload) -> Result<Option<u32>, FeedError> {
+            unreachable!("the feed never connects")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_the_source_cannot_build_counts_against_the_budget() {
+        let config = WsFeedConfig { max_consecutive_failures: Some(2), ..config() };
+        let (publisher, _rx) = Publisher::channel();
+        let source = NoRequest(FeedError::Connection("nothing to connect with".to_string()));
+
+        let feed = tokio::spawn(run_ws_feed(config, publisher, source));
+
+        let Ok(Err(FeedError::Connection(message))) =
+            expect_to_finish("feed did not give up", feed).await
+        else {
+            panic!("a retryable request failure must be counted, not end the feed at once")
+        };
+        assert_eq!(
+            message,
+            "gave up after 2 consecutive failures: request failed: nothing to connect with"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handshake_the_source_will_never_build_ends_the_feed_at_once() {
+        // The budget is unlimited, so the classification is the only thing that can end this
+        // feed, and the error reaches the caller as the source wrote it.
+        let (publisher, _rx) = Publisher::channel();
+        let source = NoRequest(FeedError::Fatal("unsupported chain".to_string()));
+
+        let feed = tokio::spawn(run_ws_feed(config(), publisher, source));
+
+        let Ok(Err(FeedError::Fatal(message))) =
+            expect_to_finish("feed retried a handshake it can never build", feed).await
+        else {
+            panic!("a fatal request failure must end the feed, whatever the budget")
+        };
+        assert_eq!(message, "unsupported chain");
     }
 
     #[tokio::test]
@@ -481,7 +517,7 @@ mod tests {
                 if let Ok(mut ws_stream) = accept_async(stream).await {
                     let _ = ws_stream.send(snapshot_frame()).await;
                     loop {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                         if ws_stream
                             .send(Message::Ping(vec![1, 2, 3].into()))
                             .await
@@ -491,7 +527,7 @@ mod tests {
                         }
                         // Drain incoming frames without blocking the ping cadence.
                         while let Ok(Some(Ok(message))) =
-                            timeout(Duration::from_millis(10), ws_stream.next()).await
+                            timeout(Duration::from_millis(1), ws_stream.next()).await
                         {
                             if matches!(message, Message::Pong(_)) {
                                 pong_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -502,15 +538,16 @@ mod tests {
             }
         });
 
-        let (publisher, rx) = Publisher::channel();
+        let (publisher, _rx) = Publisher::channel();
         let _feed = tokio::spawn(run_ws_feed(config(), publisher, MockSource { url }));
 
         // Never read the receiver: a stalled consumer must not stall the socket.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        drop(rx);
-
-        let pongs = pong_count.load(Ordering::SeqCst);
-        assert!(pongs >= 5, "expected at least 5 pongs while consumer stalled, got {pongs}");
+        expect_to_finish("the feed stopped answering pings", async {
+            while pong_count.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -689,7 +726,7 @@ mod tests {
 
         assert_eq!(start.elapsed(), give_up_at);
         match read {
-            ConnectionRead::Reconnect(FeedError::Connection(reason)) => {
+            Err(FeedError::Connection(reason)) => {
                 assert_eq!(reason, "no frame within the 60s read_idle_timeout")
             }
             _ => panic!("a silent connection must be given up on, not read further"),

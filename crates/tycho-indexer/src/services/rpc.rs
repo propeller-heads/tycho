@@ -33,7 +33,10 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
-        state::service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
+        state::{
+            service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
+            shadow::{self, Endpoint, SampledRequest, Shadow},
+        },
     },
 };
 
@@ -115,7 +118,7 @@ pub struct RpcHandler<G, T> {
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
     /// Which path answers state requests. `Off` without extractors.
-    state_service: EntityCacheSetup<Arc<StateService>>,
+    state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -176,7 +179,7 @@ where
     /// Sets which path answers the state endpoints.
     pub(crate) fn with_state_service(
         mut self,
-        state_service: EntityCacheSetup<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Self {
         if matches!(state_service, EntityCacheSetup::Serve(_)) {
             register_db_path_counters();
@@ -189,9 +192,17 @@ where
     fn serving_state_service(&self) -> Option<&StateService> {
         match &self.state_service {
             EntityCacheSetup::Serve(service) => Some(service),
-            // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
-            // it with the database answer.
             EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
+        }
+    }
+
+    /// The shadow comparison, when `shadow` compares `request`.
+    fn sampling_shadow(&self, request: &impl std::hash::Hash) -> Option<&Shadow> {
+        match &self.state_service {
+            EntityCacheSetup::Shadow(shadow) if shadow.samples(request) => Some(shadow),
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Serve(_) | EntityCacheSetup::Off => {
+                None
+            }
         }
     }
 
@@ -279,7 +290,8 @@ where
     }
 
     /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path.
+    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
+    /// the client still gets the database answer.
     async fn get_contract_state_routed(
         &self,
         request: dto::StateRequestBody,
@@ -287,9 +299,38 @@ where
         if let Some(service) = self.serving_state_service() {
             match service.contract_state(&request) {
                 Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ContractState, reason)
+                }
                 Err(err) => return Err(err.into()),
             }
+        }
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ContractState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .contract_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_contract_state_inner(request.clone()),
+                    |service| service.contract_state(&request),
+                    |service, db, cache| {
+                        shadow::compare_contract_state(db, cache, |address| {
+                            service.unsaved_elsewhere(
+                                &request.protocol_system,
+                                &request.version,
+                                address,
+                            )
+                        })
+                    },
+                )
+                .await;
         }
         self.get_contract_state_inner(request)
             .await
@@ -520,7 +561,8 @@ where
     }
 
     /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path.
+    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
+    /// the client still gets the database answer.
     async fn get_protocol_state_routed(
         &self,
         request: dto::ProtocolStateRequestBody,
@@ -528,9 +570,32 @@ where
         if let Some(service) = self.serving_state_service() {
             match service.protocol_state(&request) {
                 Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ProtocolState, reason)
+                }
                 Err(err) => return Err(err.into()),
             }
+        }
+        if let Some(shadow) = self.sampling_shadow(&request) {
+            let sampled = SampledRequest {
+                endpoint: Endpoint::ProtocolState,
+                protocol_system: &request.protocol_system,
+                version: &request.version,
+                id_count: request
+                    .protocol_ids
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            };
+            return shadow
+                .run(
+                    sampled,
+                    self.get_protocol_state_inner(request.clone()),
+                    |service| service.protocol_state(&request),
+                    |_, db, cache| {
+                        shadow::compare_protocol_state(request.include_balances, db, cache)
+                    },
+                )
+                .await;
         }
         self.get_protocol_state_inner(request)
             .await
@@ -1157,17 +1222,17 @@ impl From<StateServiceError> for RpcError {
 }
 
 /// Counts a state request the entity cache handed to the database path.
-fn count_db_path(endpoint: &'static str, reason: FallbackReason) {
-    metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+fn count_db_path(endpoint: Endpoint, reason: FallbackReason) {
+    metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
         .increment(1);
 }
 
 /// Registers every `db_path_requests` series at zero. Alerts read the first value of a new series
 /// as growth, so a series that first appears on its first fallback would fire them.
 fn register_db_path_counters() {
-    for endpoint in ["contract_state", "protocol_state"] {
+    for endpoint in Endpoint::ALL {
         for reason in FallbackReason::ALL {
-            metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+            metrics::counter!("db_path_requests", "endpoint" => endpoint.label(), "reason" => reason.as_str())
                 .increment(0);
         }
     }
@@ -1562,6 +1627,7 @@ mod tests {
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
+    use metrics_util::debugging::DebuggingRecorder;
     use mockall::{mock, predicate::eq};
     use rstest::rstest;
     use tycho_common::{
@@ -1588,7 +1654,8 @@ mod tests {
         extractor::models::fixtures,
         services::state::{
             cache::EntityCache,
-            window::{new_windows, WindowConfig},
+            shadow::{testing::moved_comparisons, Sampler},
+            window::{new_windows, DeltaWindow, FoldSink, WindowConfig},
         },
         testing::{self, evm_contract_slots, MockGateway},
     };
@@ -1919,7 +1986,7 @@ mod tests {
         let service = Arc::new(StateService::new(windows, Arc::new(EntityCache::new())));
         let setup = match mode {
             CacheMode::Serve => EntityCacheSetup::Serve(service),
-            CacheMode::Shadow => EntityCacheSetup::Shadow(service),
+            CacheMode::Shadow => EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(0.0))),
         };
         RpcHandler::new(
             gw,
@@ -1963,6 +2030,420 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(RpcError::Storage(StorageError::NotFound(..)))), "{result:?}");
+    }
+
+    fn shadow_account() -> Account {
+        Account::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            "account".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C0C0C0"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        )
+    }
+
+    fn shadow_handler(
+        gw: MockGateway,
+        windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
+        cache: Arc<EntityCache>,
+        rate: f64,
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let service = Arc::new(StateService::new(windows, cache));
+        RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
+    }
+
+    fn uniswap_v2_windows() -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
+        new_windows(["uniswap_v2"], WindowConfig::default())
+    }
+
+    fn shadow_request(protocol_system: &str, ids: Option<Vec<Bytes>>) -> dto::StateRequestBody {
+        dto::StateRequestBody {
+            contract_ids: ids,
+            protocol_system: protocol_system.to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        }
+    }
+
+    fn gateway_returning(account: Account) -> MockGateway {
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![account], total: Some(1) });
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| Box::pin(async move { response }));
+        gw
+    }
+
+    #[rstest]
+    #[case::shadow_sampled(EntityCacheSetup::Shadow(()), 1.0, true)]
+    #[case::shadow_at_rate_zero(EntityCacheSetup::Shadow(()), 0.0, false)]
+    #[case::serve(EntityCacheSetup::Serve(()), 1.0, false)]
+    #[case::off(EntityCacheSetup::Off, 1.0, false)]
+    #[tokio::test]
+    async fn test_sampling_shadow_samples_only_in_shadow_mode(
+        #[case] mode: EntityCacheSetup<()>,
+        #[case] rate: f64,
+        #[case] expected: bool,
+    ) {
+        let service =
+            Arc::new(StateService::new(uniswap_v2_windows(), Arc::new(EntityCache::new())));
+        let state_service = match mode {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(()) => {
+                EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate)))
+            }
+            EntityCacheSetup::Serve(()) => EntityCacheSetup::Serve(service),
+        };
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(state_service);
+
+        let request = shadow_request("uniswap_v2", Some(vec![Bytes::from(1u64).lpad(20, 0)]));
+
+        assert_eq!(
+            handler
+                .sampling_shadow(&request)
+                .is_some(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_answer_when_the_cache_path_falls_back() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let handler = shadow_handler(
+            gateway_returning(account.clone()),
+            uniswap_v2_windows(),
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+        // No window for this system: the cache path falls back to the database path.
+        let request = shadow_request("curve", Some(vec![account.address.clone()]));
+
+        let answer = handler
+            .get_contract_state_routed(request)
+            .await;
+
+        assert_eq!(answer.unwrap().accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_discards_a_comparison_that_straddled_a_fold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let cache = Arc::new(EntityCache::new());
+        let folding = cache.clone();
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
+        // The fold lands while the database path runs, between the two token reads.
+        gw.expect_get_contracts()
+            .return_once(move |_, _, _, _, _| {
+                folding
+                    .fold(&crate::testing::aggregated_changes("uniswap_v2", 7, 7, Some(7)))
+                    .unwrap();
+                Box::pin(async move { response })
+            });
+        let handler = shadow_handler(gw, uniswap_v2_windows(), cache, 1.0);
+        let request = shadow_request("uniswap_v2", Some(vec![account.address.clone()]));
+
+        let answer = handler
+            .get_contract_state_routed(request)
+            .await;
+
+        assert_eq!(answer.unwrap().accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "discarded".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_counts_a_request_without_ids_as_a_fallback() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let account = shadow_account();
+        let handler = shadow_handler(
+            gateway_returning(account.clone()),
+            uniswap_v2_windows(),
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        let answer = handler
+            .get_contract_state_routed(shadow_request("uniswap_v2", None))
+            .await
+            .unwrap();
+
+        assert_eq!(answer.accounts, vec![account.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_error() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async move { Err(StorageError::Unexpected("db down".to_string())) })
+            });
+        let address = Bytes::from(1u64).lpad(20, 0);
+        // The window holds the account, so the cache path answers.
+        let mut block = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        block.account_deltas.insert(
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                fixtures::optional_slots([(1, 7)]),
+                Some(Bytes::from(100u64)),
+                Some(Bytes::from("0x6000")),
+                ChangeType::Creation,
+            ),
+        );
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let handler = shadow_handler(gw, windows, Arc::new(EntityCache::new()), 1.0);
+        let request = shadow_request("uniswap_v2", Some(vec![address]));
+
+        let answer = handler
+            .get_contract_state_routed(request)
+            .await;
+
+        // `off` returns the gateway error as `RpcError::Storage`; shadow must return the same.
+        assert!(matches!(answer, Err(RpcError::Storage(_))), "{answer:?}");
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "db_failed".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_returns_the_database_answer_for_protocol_state() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let state = ProtocolComponentState::new("c1", HashMap::new(), HashMap::new());
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![state.clone()], total: Some(1) });
+        gw.expect_get_protocol_states()
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
+        let handler = shadow_handler(gw, uniswap_v2_windows(), Arc::new(EntityCache::new()), 1.0);
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "curve".to_string(),
+            ..Default::default()
+        };
+
+        let answer = handler
+            .get_protocol_state_routed(request)
+            .await;
+
+        assert_eq!(answer.unwrap().states, vec![state.into()]);
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("protocol_state".to_string(), "fallback".to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_matches_an_account_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let delta = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let mut block = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        block
+            .account_deltas
+            .insert(address.clone(), delta.clone());
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let handler = shadow_handler(
+            gateway_returning(delta.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), "match".to_string(), 1)]
+        );
+    }
+
+    /// Block 1 of `uniswap_v2` creates the account and block 2 of `other` changes its slot. The
+    /// database path does not apply block 2, so the answers differ. Whether `other` saved block 2
+    /// decides the outcome.
+    #[rstest]
+    #[case::unsaved(None, "known_mismatch")]
+    #[case::saved(Some(2), "mismatch")]
+    #[tokio::test]
+    async fn test_shadow_classifies_another_extractors_account_change(
+        #[case] other_committed: Option<u64>,
+        #[case] expected: &str,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let address = Bytes::from(1u64).lpad(20, 0);
+        let creation = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 7)]),
+            Some(Bytes::from(100u64)),
+            Some(Bytes::from("0x6000")),
+            ChangeType::Creation,
+        );
+        let update = AccountDelta::new(
+            Chain::Ethereum,
+            address.clone(),
+            fixtures::optional_slots([(1, 9)]),
+            None,
+            None,
+            ChangeType::Update,
+        );
+        let mut own_1 = testing::aggregated_changes("uniswap_v2", 1, 0, None);
+        own_1
+            .account_deltas
+            .insert(address.clone(), creation.clone());
+        // Block 2 of `uniswap_v2` moves the version up to block 2, so block 2 of `other` is at
+        // or below it.
+        let own_2 = testing::aggregated_changes("uniswap_v2", 2, 0, None);
+        let mut other_2 = testing::aggregated_changes("other", 2, 2, other_committed);
+        other_2
+            .account_deltas
+            .insert(address.clone(), update);
+        let windows = new_windows(["uniswap_v2", "other"], WindowConfig::default());
+        for (system, block) in [("uniswap_v2", own_1), ("uniswap_v2", own_2), ("other", other_2)] {
+            windows[system]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let handler = shadow_handler(
+            gateway_returning(creation.into_account_without_tx()),
+            windows,
+            Arc::new(EntityCache::new()),
+            1.0,
+        );
+
+        handler
+            .get_contract_state_routed(shadow_request("uniswap_v2", Some(vec![address])))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("contract_state".to_string(), expected.to_string(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shadow_matches_a_component_both_paths_hold() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut block = testing::with_state_delta(
+            testing::aggregated_changes("uniswap_v2", 1, 0, None),
+            "c1",
+            7,
+        );
+        block.new_protocol_components.insert(
+            "c1".to_string(),
+            ProtocolComponent {
+                id: "c1".to_string(),
+                protocol_system: "uniswap_v2".to_string(),
+                ..Default::default()
+            },
+        );
+        let windows = uniswap_v2_windows();
+        windows["uniswap_v2"]
+            .lock()
+            .unwrap()
+            .insert(&Arc::new(block))
+            .unwrap();
+        let state = ProtocolComponentState::new(
+            "c1",
+            HashMap::from([("x".to_string(), Bytes::from(7u64))]),
+            HashMap::new(),
+        );
+        let mut gw = MockGateway::new();
+        let response = Ok(WithTotal { entity: vec![state], total: Some(1) });
+        gw.expect_get_protocol_states()
+            .return_once(|_, _, _, _, _, _| Box::pin(async move { response }));
+        let handler = shadow_handler(gw, windows, Arc::new(EntityCache::new()), 1.0);
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            ..Default::default()
+        };
+
+        handler
+            .get_protocol_state_routed(request)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            moved_comparisons(&snapshotter),
+            vec![("protocol_state".to_string(), "match".to_string(), 1)]
+        );
     }
 
     /// A state service failure gets the body the database path returns for the same failure.

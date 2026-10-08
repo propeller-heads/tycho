@@ -28,15 +28,13 @@ pub(crate) mod tvl;
 /// holding the provider's price levels for it.
 ///
 /// The state is shared, so keeping one past the snapshot it came from costs a reference count;
-/// cloning a whole book copies the component. A consumer whose own store holds states by value
-/// calls [`ProtocolSim::clone_box`] on the entry it wants.
+/// cloning a whole book copies the component.
 #[derive(Clone, Debug)]
 pub struct Book {
     pub component: ProtocolComponent,
     pub state: Arc<dyn ProtocolSim>,
-    /// When the provider last updated this book, for providers that report it (Bebop, Liquorice,
-    /// Metric). `None` for those that do not (Hashflow, Native). The provider's clock, not this
-    /// machine's; the snapshot's [`ReceivedAt`] anchor is the feed's own.
+    /// When the provider last updated this book, on the provider's clock; `None` when the
+    /// provider reports none. The snapshot's [`ReceivedAt`] anchor is the feed's own.
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -96,12 +94,13 @@ impl BookFeedConfig {
         Some((self.tokens.get(a)?, self.tokens.get(b)?))
     }
 
-    /// Whether a book with `tvl_usd` clears the floor; logs the book it filters out.
-    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book: impl fmt::Display) -> bool {
+    /// Whether a book with `tvl_usd` clears the floor; names `book_label` in the log line when
+    /// it does not.
+    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book_label: impl fmt::Display) -> bool {
         let clears = tvl_usd >= self.min_tvl_usd;
         if !clears {
             debug!(
-                book = %book,
+                book = %book_label,
                 tvl_usd,
                 min_tvl_usd = self.min_tvl_usd,
                 "filtering out book below the TVL floor"

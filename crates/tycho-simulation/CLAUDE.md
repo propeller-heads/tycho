@@ -45,7 +45,7 @@ for any protocol indexed by Tycho.
   reads is stopped by dropping its task rather than by noticing. The consumer types all spawn
   the feed — hence `spawn`, not `new` — and abort it when dropped: `SnapshotFeedStream` yields
   `Published` / `Withdrawn` and, as its last item, `Ended(SnapshotFeedOutcome)` — `RanOut`,
-  `Failed(E)` or `Panicked(JoinError)`, the same three the watch reports. `Ended` is an event
+  `Failed(E)` or `Panicked(String)`, the same three the watch reports. `Ended` is an event
   rather than just the stream ending because the keyed set needs it per feed: its own end comes
   only once every feed has ended. `SnapshotFeedStreams` keys any number of those by label, is
   itself a `Stream` of `(label, event)`, and hands a feed back from `add` when the label is
@@ -94,7 +94,9 @@ for any protocol indexed by Tycho.
   Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
   signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting
   layer and never reaches a public signature. Credentials are constructor arguments of the feed builders; the
-  library never reads the environment
+  library never reads the environment. `with_fallback_router()` on the Bebop and Hashflow builders
+  (and Metric's, in `pamm/`) stamps components `fallback:rfq:{venue}` instead, so tycho-execution
+  routes their swaps through that venue's fallback router; off by default
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
   the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
   and its client is held by the feed alone rather than by every state).

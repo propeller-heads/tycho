@@ -1,16 +1,97 @@
+use std::{collections::HashMap, fmt, hash::Hash, marker::PhantomData};
+
 use hex::FromHexError;
+use serde::{de, Deserialize, Deserializer};
 
+use crate::Bytes;
+
+/// Decodes a hex string with an optional `0x` prefix. An odd number of digits has an implied
+/// leading zero.
 fn decode_hex_with_prefix(val: &str) -> Result<Vec<u8>, FromHexError> {
-    let mut stripped: String =
-        if let Some(stripped) = val.strip_prefix("0x") { stripped } else { val }.into();
+    let digits = val
+        .strip_prefix("0x")
+        .unwrap_or(val)
+        .as_bytes();
+    let mut out = vec![0u8; digits.len().div_ceil(2)];
+    if digits.len().is_multiple_of(2) {
+        hex::decode_to_slice(digits, &mut out)?;
+    } else if let (Some((first, rest)), Some((first_out, rest_out))) =
+        (digits.split_first(), out.split_first_mut())
+    {
+        hex::decode_to_slice([b'0', *first], std::slice::from_mut(first_out))?;
+        hex::decode_to_slice(rest, rest_out)?;
+    }
+    Ok(out)
+}
 
-    // Check if the length of the string is odd
-    if !stripped.len().is_multiple_of(2) {
-        // If it's odd, prepend a zero
-        stripped.insert(0, '0');
+/// Bytes decoded from a hex string. The string is decoded where the deserializer holds it, without
+/// copying it into a `String` first.
+struct HexValue(Vec<u8>);
+
+impl<'de> Deserialize<'de> for HexValue {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct HexVisitor;
+
+        impl de::Visitor<'_> for HexVisitor {
+            type Value = HexValue;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a hex string")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<HexValue, E> {
+                decode_hex_with_prefix(value)
+                    .map(HexValue)
+                    .map_err(|e| E::custom(e.to_string()))
+            }
+        }
+
+        d.deserialize_str(HexVisitor)
+    }
+}
+
+impl From<HexValue> for Bytes {
+    fn from(value: HexValue) -> Self {
+        Bytes::from(value.0)
+    }
+}
+
+/// Deserializes a map straight into its final types: each entry is read as `(KR, VR)` and
+/// converted, with no intermediate map.
+fn deserialize_map<'de, D, KR, VR, K, V>(d: D) -> Result<HashMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    KR: Deserialize<'de> + Into<K>,
+    VR: Deserialize<'de> + Into<V>,
+    K: Eq + Hash,
+{
+    struct MapVisitor<KR, VR, K, V>(PhantomData<(KR, VR, K, V)>);
+
+    impl<'de, KR, VR, K, V> de::Visitor<'de> for MapVisitor<KR, VR, K, V>
+    where
+        KR: Deserialize<'de> + Into<K>,
+        VR: Deserialize<'de> + Into<V>,
+        K: Eq + Hash,
+    {
+        type Value = HashMap<K, V>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a map")
+        }
+
+        fn visit_map<A: de::MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+            let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((key, value)) = access.next_entry::<KR, VR>()? {
+                map.insert(key.into(), value.into());
+            }
+            Ok(map)
+        }
     }
 
-    hex::decode(&stripped)
+    d.deserialize_map(MapVisitor::<KR, VR, K, V>(PhantomData))
 }
 
 /// A buffer for writing bytes as `0x`-prefixed lowercase hex.
@@ -51,7 +132,7 @@ impl HexBuffer {
 pub mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{HexBuffer, HexValue};
 
     /// Serialize a byte vec as a hex string with 0x prefix
     pub fn serialize<S, T>(x: T, s: S) -> Result<S::Ok, S::Error>
@@ -69,10 +150,7 @@ pub mod hex_bytes {
         D: Deserializer<'de>,
         T: From<Vec<u8>>,
     {
-        let value = String::deserialize(d)?;
-        decode_hex_with_prefix(&value)
-            .map(Into::into)
-            .map_err(|e| serde::de::Error::custom(e.to_string()))
+        HexValue::deserialize(d).map(|value| value.0.into())
     }
 }
 
@@ -80,7 +158,7 @@ pub mod hex_bytes {
 pub mod hex_bytes_option {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{HexBuffer, HexValue};
 
     /// Serialize a byte vec as a Some hex string with 0x prefix
     pub fn serialize<S, T>(x: &Option<T>, s: S) -> Result<S::Ok, S::Error>
@@ -102,15 +180,8 @@ pub mod hex_bytes_option {
         D: Deserializer<'de>,
         T: From<Vec<u8>>,
     {
-        let value: Option<String> = Option::deserialize(d)?;
-
-        match value {
-            Some(val) => decode_hex_with_prefix(&val)
-                .map(Into::into)
-                .map(Some)
-                .map_err(|e| serde::de::Error::custom(e.to_string())),
-            None => Ok(None),
-        }
+        let value: Option<HexValue> = Option::deserialize(d)?;
+        Ok(value.map(|value| value.0.into()))
     }
 }
 
@@ -118,9 +189,9 @@ pub mod hex_bytes_option {
 pub mod hex_hashmap_key {
     use std::collections::HashMap;
 
-    use serde::{de, ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{deserialize_map, HexBuffer, HexValue};
     use crate::Bytes;
 
     pub fn serialize<S, V>(x: &HashMap<Bytes, V>, s: S) -> Result<S::Ok, S::Error>
@@ -141,15 +212,7 @@ pub mod hex_hashmap_key {
         D: Deserializer<'de>,
         V: Deserialize<'de>,
     {
-        let interim = HashMap::<String, V>::deserialize(d)?;
-
-        interim
-            .into_iter()
-            .map(|(k, v)| {
-                let k = decode_hex_with_prefix(&k).map_err(|e| de::Error::custom(e.to_string()))?;
-                Ok((Bytes::from(k), v))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()
+        deserialize_map::<D, HexValue, V, Bytes, V>(d)
     }
 }
 
@@ -157,7 +220,7 @@ pub mod hex_hashmap_key {
 pub mod hex_bytes_vec {
     use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{HexBuffer, HexValue};
 
     /// Serialize Vec<Vec<u8>> as a list of hex strings with 0x prefix
     pub fn serialize<S>(list: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error>
@@ -177,13 +240,11 @@ pub mod hex_bytes_vec {
     where
         D: Deserializer<'de>,
     {
-        let hex_strings = Vec::<String>::deserialize(d)?;
-        hex_strings
+        let values = Vec::<HexValue>::deserialize(d)?;
+        Ok(values
             .into_iter()
-            .map(|s| {
-                decode_hex_with_prefix(&s).map_err(|e| serde::de::Error::custom(e.to_string()))
-            })
-            .collect()
+            .map(|value| value.0)
+            .collect())
     }
 }
 
@@ -191,9 +252,9 @@ pub mod hex_bytes_vec {
 pub mod hex_hashmap_value {
     use std::collections::HashMap;
 
-    use serde::{de, ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{deserialize_map, HexBuffer, HexValue};
     use crate::Bytes;
 
     pub fn serialize<S, K>(x: &HashMap<K, Bytes>, s: S) -> Result<S::Ok, S::Error>
@@ -214,15 +275,7 @@ pub mod hex_hashmap_value {
         D: Deserializer<'de>,
         K: Deserialize<'de> + Eq + std::hash::Hash, // HashMap key trait bounds
     {
-        let interim = HashMap::<K, String>::deserialize(d)?;
-
-        interim
-            .into_iter()
-            .map(|(k, v)| {
-                let v = decode_hex_with_prefix(&v).map_err(|e| de::Error::custom(e.to_string()))?;
-                Ok((k, Bytes::from(v)))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()
+        deserialize_map::<D, K, HexValue, K, Bytes>(d)
     }
 }
 
@@ -230,9 +283,9 @@ pub mod hex_hashmap_value {
 pub mod hex_hashmap_key_value {
     use std::collections::HashMap;
 
-    use serde::{de, ser::SerializeMap, Deserialize, Deserializer, Serializer};
+    use serde::{ser::SerializeMap, Deserializer, Serializer};
 
-    use super::{decode_hex_with_prefix, HexBuffer};
+    use super::{deserialize_map, HexBuffer, HexValue};
     use crate::Bytes;
 
     pub fn serialize<S>(x: &HashMap<Bytes, Bytes>, s: S) -> Result<S::Ok, S::Error>
@@ -251,15 +304,7 @@ pub mod hex_hashmap_key_value {
     where
         D: Deserializer<'de>,
     {
-        let interim = HashMap::<String, String>::deserialize(d)?;
-        interim
-            .into_iter()
-            .map(|(k, v)| {
-                let k = decode_hex_with_prefix(&k).map_err(|e| de::Error::custom(e.to_string()))?;
-                let v = decode_hex_with_prefix(&v).map_err(|e| de::Error::custom(e.to_string()))?;
-                Ok((k.into(), v.into()))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()
+        deserialize_map::<D, HexValue, HexValue, Bytes, Bytes>(d)
     }
 }
 
@@ -389,6 +434,18 @@ mod tests {
             }
             map.end()
         }
+
+        /// Decodes by copying the digits and prepending a zero to an odd count.
+        pub fn decode(val: &str) -> Result<Vec<u8>, hex::FromHexError> {
+            let mut digits: String = val
+                .strip_prefix("0x")
+                .unwrap_or(val)
+                .into();
+            if !digits.len().is_multiple_of(2) {
+                digits.insert(0, '0');
+            }
+            hex::decode(&digits)
+        }
     }
 
     #[derive(Serialize)]
@@ -506,5 +563,103 @@ mod tests {
         assert_eq!(deserialized.bytes, test_struct.bytes);
         assert_eq!(deserialized.bytes_option, Some(vec![]));
         assert_eq!(deserialized.bytes_vec, test_struct.bytes_vec);
+    }
+
+    /// Every case as lowercase and uppercase digits, with and without the prefix, and with an odd
+    /// number of digits where the first one is a zero.
+    fn hex_strings() -> Vec<String> {
+        let mut strings = vec![];
+        for value in hex_cases() {
+            let digits = hex::encode(&value);
+            for digits in [digits.clone(), digits.to_uppercase()] {
+                strings.push(format!("0x{digits}"));
+                strings.push(digits.clone());
+                if let Some(odd) = digits.strip_prefix('0') {
+                    strings.push(format!("0x{odd}"));
+                    strings.push(odd.to_string());
+                }
+            }
+        }
+        strings
+    }
+
+    #[test]
+    fn decode_hex_with_prefix_reads_the_same_bytes_as_the_reference_decoder() {
+        for string in hex_strings() {
+            assert_eq!(
+                decode_hex_with_prefix(&string).unwrap(),
+                reference::decode(&string).unwrap(),
+                "differs for {}",
+                &string[..string.len().min(20)]
+            );
+        }
+    }
+
+    #[test]
+    fn decode_hex_with_prefix_rejects_what_the_reference_decoder_rejects() {
+        for string in ["0xzz", "0x1g", "0xg", "g", "0x0x", "é", "0xé", "0x0é", "é0", "0x é", "0x-1"]
+        {
+            assert!(reference::decode(string).is_err(), "reference accepts {string}");
+            assert!(decode_hex_with_prefix(string).is_err(), "accepts {string}");
+        }
+    }
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct DecodedMaps {
+        #[serde(with = "hex_hashmap_key")]
+        key: HashMap<Bytes, u64>,
+        #[serde(with = "hex_hashmap_value")]
+        value: HashMap<String, Bytes>,
+        #[serde(with = "hex_hashmap_key_value")]
+        key_value: HashMap<Bytes, Bytes>,
+    }
+
+    #[test]
+    fn hex_deserializers_read_borrowed_escaped_and_owned_strings() {
+        // "\u0030x0a" is "0x0a" with an escaped first character: the deserializer can't lend it
+        // from the input.
+        let json = r#"{
+            "key": {"0x0a": 1, "\u0030x0b": 2},
+            "value": {"a": "0x0c", "b": "\u0030x0d"},
+            "key_value": {"0x01": "0x0002", "3": "0xff", "\u0030x04": "0x"}
+        }"#;
+        let expected = DecodedMaps {
+            key: HashMap::from([(Bytes::from(vec![0x0a]), 1), (Bytes::from(vec![0x0b]), 2)]),
+            value: HashMap::from([
+                ("a".to_string(), Bytes::from(vec![0x0c])),
+                ("b".to_string(), Bytes::from(vec![0x0d])),
+            ]),
+            key_value: HashMap::from([
+                (Bytes::from(vec![0x01]), Bytes::from(vec![0x00, 0x02])),
+                (Bytes::from(vec![0x03]), Bytes::from(vec![0xff])),
+                (Bytes::from(vec![0x04]), Bytes::from(vec![])),
+            ]),
+        };
+
+        let from_str: DecodedMaps = serde_json::from_str(json).unwrap();
+        let from_reader: DecodedMaps = serde_json::from_reader(json.as_bytes()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let from_value: DecodedMaps = serde_json::from_value(value).unwrap();
+
+        assert_eq!(from_str, expected);
+        assert_eq!(from_reader, expected);
+        assert_eq!(from_value, expected);
+    }
+
+    #[test]
+    fn hex_deserializers_reject_invalid_hex_and_non_strings() {
+        let invalid = [
+            r#"{"key": {"0xzz": 1}, "value": {}, "key_value": {}}"#,
+            r#"{"key": {}, "value": {"a": "0x1g"}, "key_value": {}}"#,
+            r#"{"key": {}, "value": {}, "key_value": {"0x01": "é"}}"#,
+            r#"{"key": {}, "value": {"a": 1}, "key_value": {}}"#,
+        ];
+        for json in invalid {
+            assert!(serde_json::from_str::<DecodedMaps>(json).is_err(), "accepts {json}");
+        }
+        assert!(serde_json::from_str::<TestStruct>(
+            r#"{"bytes": 1, "bytes_option": null, "bytes_vec": []}"#
+        )
+        .is_err());
     }
 }

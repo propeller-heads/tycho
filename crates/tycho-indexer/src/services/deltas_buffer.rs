@@ -133,6 +133,7 @@ impl PendingDeltas {
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
         guard.fold_committed(self.sink.as_ref())?;
         guard.clear();
+        guard.report_metrics();
         debug!(extractor, "PendingDeltas window cleared");
         Ok(())
     }
@@ -156,6 +157,7 @@ impl PendingDeltas {
         );
         guard.insert(message)?;
         guard.fold_evictable(self.sink.as_ref())?;
+        guard.report_metrics();
         Ok(())
     }
 
@@ -419,23 +421,18 @@ impl PendingDeltasBuffer for PendingDeltas {
         version: Option<BlockNumberOrTimestamp>,
         protocol_system: &str,
     ) -> Result<()> {
-        let mut missing_addresses: HashSet<Bytes> = addresses
-            .unwrap_or_default()
-            .iter()
-            .cloned()
-            .collect();
-
-        // update db states with buffered deltas
+        let mut found: HashSet<Bytes> = HashSet::new();
         for state in db_states.iter_mut() {
             self.update_vm_state(state, version, protocol_system)?;
-            missing_addresses.remove(&state.address);
+            found.insert(state.address.clone());
         }
 
-        // for new accounts (not in the db yet), build a new state from the buffered deltas
-        // and add it to the db states
-        for address in missing_addresses {
-            let account = self.get_account(address, version)?;
-            db_states.push(account);
+        // For new accounts (not in the db yet), build a new state from the buffered deltas. Walk
+        // the request in order, so a missing account fails with the first missing address.
+        for address in addresses.unwrap_or_default() {
+            if found.insert(address.clone()) {
+                db_states.push(self.get_account(address.clone(), version)?);
+            }
         }
 
         Ok(())
@@ -1010,6 +1007,72 @@ mod test {
         assert!(has_block(&buffer, 5));
     }
 
+    /// Gauge values recorded for `native:extractor`, by metric name.
+    fn native_gauges(snapshotter: &metrics_util::debugging::Snapshotter) -> HashMap<String, f64> {
+        use metrics_util::debugging::DebugValue;
+
+        let mut gauges = HashMap::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let ours = key
+                .key()
+                .labels()
+                .any(|l| l.key() == "extractor" && l.value() == "native:extractor");
+            if let (true, DebugValue::Gauge(v)) = (ours, value) {
+                gauges.insert(key.key().name().to_string(), v.0);
+            }
+        }
+        gauges
+    }
+
+    #[test]
+    fn insert_reports_the_window_block_count_and_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
+            Arc::new(DiscardSink),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=5 {
+                buffer
+                    .insert(&native_msg(n, Some(4), n))
+                    .unwrap();
+            }
+        });
+
+        // bound = min(finalized 5, committed 4, tip 5 - 1) = 4, so only block 5 stays
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&1.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&5.0));
+    }
+
+    #[test]
+    fn a_restart_clear_reports_an_empty_window_and_keeps_the_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::new(["native:extractor"]);
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=3 {
+                buffer
+                    .insert(&native_msg(n, Some(2), n))
+                    .unwrap();
+            }
+            buffer
+                .fold_committed_and_clear("native:extractor")
+                .unwrap();
+        });
+
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&0.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&3.0));
+    }
+
     #[test]
     fn a_revert_purges_the_abandoned_blocks_and_keeps_the_commit_status() {
         let buffer = PendingDeltas::new(["native:extractor"]);
@@ -1243,6 +1306,30 @@ mod test {
 
         assert_eq!(&state[0], &exp0);
         assert_eq!(&state[1], &exp1);
+    }
+
+    #[test]
+    fn test_update_vm_states_names_the_first_missing_address() {
+        let buffer = PendingDeltas::new(["vm:extractor"]);
+        buffer
+            .insert(&Arc::new(vm_block_deltas()))
+            .unwrap();
+        let unknown: Vec<Bytes> = (1..=8u64)
+            .map(|n| Bytes::from(n).lpad(20, 0))
+            .collect();
+
+        let err = buffer
+            .update_vm_states(Some(&unknown), &mut vec![], None, "vm:extractor")
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PendingDeltasError::ReorgBufferError(StorageError::NotFound(kind, id))
+                    if kind == "Contract" && id == &unknown[0].to_string()
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

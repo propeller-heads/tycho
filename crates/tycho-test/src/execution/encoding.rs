@@ -40,6 +40,8 @@ pub const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
 const GAS_LIMIT: u64 = 100_000_000;
 // 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
 const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
+// RuntimeBytecodeFixtures.sol deploys executor fixtures here so immutable self-calls work.
+// Keep the generator and its execution regression tests aligned when changing this address.
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";

@@ -69,9 +69,8 @@ impl Levels {
     /// whatever their price (some venues publish `[0, 0]` placeholders). Fails on a negative or
     /// non-finite quantity, or a price that is not finite and positive on a level with quantity.
     pub fn new(levels: Vec<PriceLevel>) -> Result<Self, InvalidLevel> {
-        // Collecting out of the caller's own `Vec` builds the ladder in that buffer, which a
-        // deserializer grew by doubling and left with up to half of it unused; the shrink hands
-        // that back, since a ladder is held for as long as the book it prices.
+        // A ladder lives as long as the book it prices, so hand back the spare capacity a
+        // deserializer's doubling left in the caller's buffer.
         let mut levels: Vec<_> = levels
             .into_iter()
             .filter_map(|level| level.fillable().transpose())
@@ -92,9 +91,9 @@ impl Levels {
             return Fill { amount_out: 0.0, remaining_in: amount_in };
         }
 
-        // Summing what the ladder gives and subtracting once, rather than decrementing per level:
-        // a walk of the whole ladder then adds its quantities in the same order `totals` does, so
-        // filling exactly what `totals` reported leaves exactly nothing.
+        // Accumulate what the walk takes and subtract once, so a walk of the whole ladder adds
+        // its quantities in the same order `totals` does and filling exactly what `totals`
+        // reported leaves exactly nothing.
         let mut consumed = 0.0;
         let mut amount_out = 0.0;
         for level in &self.0 {
@@ -140,10 +139,7 @@ impl Levels {
 
     /// The ladder's value in output units: the sum of `price * quantity` over every level.
     pub fn notional(&self) -> f64 {
-        self.0
-            .iter()
-            .map(|level| level.price * level.quantity)
-            .sum()
+        self.totals().1
     }
 
     /// Total input the ladder absorbs and the output it pays for it: the two swap limits.
@@ -284,8 +280,8 @@ mod tests {
     }
 
     /// Ten levels whose quantities sum to 98.008172. Subtracting them from that sum one at a
-    /// time leaves 7.1e-15 behind — the sum and the subtractions round differently — which used
-    /// to make a swap of exactly the ladder's depth report itself unfilled.
+    /// time leaves 7.1e-15 behind — the sum and the subtractions round differently — so a swap
+    /// of exactly the ladder's depth has to report itself filled all the same.
     #[test]
     fn filling_the_whole_ladder_leaves_nothing() {
         let quantities = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 48.508172];

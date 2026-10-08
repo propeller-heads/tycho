@@ -15,7 +15,6 @@ use crate::{
         client::MetricClient,
         models::{MetricBidAskResponse, MetricMetadata},
         state::MetricState,
-        PROTOCOL_SYSTEM,
     },
     protocol::models::ProtocolComponent,
     snapshot_feed::{errors::FeedError, http::HttpSource},
@@ -25,6 +24,9 @@ use crate::{
 /// whose USD TVL clears the threshold, as simulate-ready books. `Debug` output omits the API key.
 #[derive(derive_more::Debug, Clone)]
 pub struct MetricBookSource {
+    /// The protocol system stamped on this source's components: the venue's own, or its
+    /// fallback-router one for a feed built with `with_fallback_router()`.
+    pub protocol_system: &'static str,
     pub book_config: BookFeedConfig,
     /// Reads the venue's pool metadata and quotes.
     pub client: MetricClient,
@@ -48,7 +50,7 @@ impl MetricBookSource {
         };
         let component = pair_component(
             component_id,
-            PROTOCOL_SYSTEM,
+            self.protocol_system,
             "metric_pool",
             self.book_config.chain,
             token0,
@@ -137,6 +139,7 @@ mod tests {
             client::DEFAULT_BID_ASK_CONCURRENCY,
             feed::MetricFeedBuilder,
             models::{MetricDepth, MetricDepthBin},
+            PROTOCOL_SYSTEM,
         },
         snapshot_feed::http::test_support::spawn_http_server,
     };
@@ -189,6 +192,7 @@ mod tests {
     /// A source for `chain_endpoint` with an empty token universe and no TVL floor.
     fn source(chain: Chain, chain_endpoint: &str, api_key: &str) -> MetricBookSource {
         MetricBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
             book_config: BookFeedConfig {
                 chain,
                 tokens: Arc::new(HashMap::new()),

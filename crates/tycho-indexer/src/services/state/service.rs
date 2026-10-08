@@ -55,11 +55,11 @@ use super::{
 ///
 /// A cache mode without a cache, or `Off` with one, cannot be expressed.
 #[derive(Clone, Debug)]
-pub enum EntityCacheSetup<T> {
+pub enum EntityCacheSetup<T, S = T> {
     /// See [`EntityCacheMode::Off`](super::EntityCacheMode::Off).
     Off,
     /// See [`EntityCacheMode::Shadow`](super::EntityCacheMode::Shadow).
-    Shadow(T),
+    Shadow(S),
     /// See [`EntityCacheMode::Serve`](super::EntityCacheMode::Serve).
     Serve(T),
 }
@@ -153,6 +153,15 @@ pub(crate) enum StateServiceError {
     Merge(#[from] MergeError),
 }
 
+/// What a read depends on besides the request: the window of the requested system and the entity
+/// cache. A read straddles a change when the tokens taken before and after it differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StraddleToken {
+    /// `None` when the system has no window or its lock is poisoned; the read then fails anyway.
+    window_generation: Option<u64>,
+    folds: u64,
+}
+
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
 pub(crate) struct StateService {
     /// One window per protocol system, shared with the pump that writes them.
@@ -166,6 +175,50 @@ impl StateService {
         cache: Arc<EntityCache>,
     ) -> Self {
         Self { windows, cache }
+    }
+
+    /// Reads the [`StraddleToken`] of `protocol_system`.
+    pub(crate) fn straddle_token(&self, protocol_system: &str) -> StraddleToken {
+        let window_generation = self
+            .windows
+            .get(protocol_system)
+            .and_then(|window| window.lock().ok())
+            .map(|window| window.generation());
+        StraddleToken { window_generation, folds: self.cache.folds() }
+    }
+
+    /// Whether a window other than the one of `protocol_system` holds an unsaved block at or below
+    /// `version` that changes `address`: an account delta or a token balance. `false` when
+    /// `version` does not resolve in the window of `protocol_system`. A poisoned window counts as
+    /// not holding the change.
+    pub(crate) fn unsaved_elsewhere(
+        &self,
+        protocol_system: &str,
+        version: &dto::VersionParam,
+        address: &Bytes,
+    ) -> bool {
+        let Ok((version, _)) = self.read_window(protocol_system, version) else {
+            return false;
+        };
+        self.windows
+            .iter()
+            .filter(|(system, _)| system.as_str() != protocol_system)
+            .filter_map(|(_, window)| window.lock().ok())
+            .any(|window| {
+                window
+                    .uncommitted_blocks()
+                    .is_ok_and(|mut blocks| {
+                        blocks.any(|block| {
+                            WriteTimestamp::from(&block.block) <= version &&
+                                (block
+                                    .account_deltas
+                                    .contains_key(address) ||
+                                    block
+                                        .account_balances
+                                        .contains_key(address))
+                        })
+                    })
+            })
     }
 
     /// Serves `/contract_state` from the cache.
@@ -537,6 +590,118 @@ mod test {
             window.insert(&Arc::new(m)).unwrap();
             window.fold_evictable(cache).unwrap();
         }
+    }
+
+    #[test]
+    fn straddle_token_moves_with_a_block_or_a_fold() {
+        let harness = Harness::new(2);
+        let empty = harness.service.straddle_token(SYSTEM);
+
+        harness.push(msg(1));
+        let one_block = harness.service.straddle_token(SYSTEM);
+        // A fold from another extractor can change a shared account, so it moves the token too.
+        harness
+            .cache
+            .fold(&testing::aggregated_changes("other", 7, 7, Some(7)))
+            .unwrap();
+
+        assert_ne!(empty, one_block);
+        assert_ne!(one_block, harness.service.straddle_token(SYSTEM));
+    }
+
+    #[test]
+    fn straddle_token_moves_when_the_window_lock_is_poisoned() {
+        let harness = Harness::new(2);
+        let before = harness.service.straddle_token(SYSTEM);
+        let window = harness.window.clone();
+
+        let _ = std::thread::spawn(move || {
+            let _guard = window.lock().unwrap();
+            panic!("cache path bug");
+        })
+        .join();
+
+        assert_ne!(harness.service.straddle_token(SYSTEM), before);
+    }
+
+    /// Block 2 of `OTHER` with save watermark `committed`: block 2 is unsaved at 1, saved at 2.
+    fn other_block_2(committed: u64) -> BlockAggregatedChanges {
+        testing::aggregated_changes(OTHER, 2, 2, Some(committed))
+    }
+
+    /// `SYSTEM` holds blocks 1-3, all saved. `OTHER` holds its saved block 1, then `block`.
+    #[rstest]
+    #[case::an_unsaved_account_delta(
+        with_account(other_block_2(1), account_delta(&addr(1), 2, ChangeType::Update)),
+        at_block(3),
+        true
+    )]
+    #[case::an_unsaved_token_balance(
+        with_account_balance(other_block_2(1), &addr(1), &addr(9), 2),
+        at_block(3),
+        true
+    )]
+    #[case::a_saved_account_delta(
+        with_account(other_block_2(2), account_delta(&addr(1), 2, ChangeType::Update)),
+        at_block(3),
+        false
+    )]
+    #[case::an_unsaved_delta_above_the_version(
+        with_account(other_block_2(1), account_delta(&addr(1), 2, ChangeType::Update)),
+        at_block(1),
+        false
+    )]
+    #[case::an_unsaved_delta_for_another_address(
+        with_account(other_block_2(1), account_delta(&addr(2), 2, ChangeType::Update)),
+        at_block(3),
+        false
+    )]
+    fn unsaved_elsewhere_finds_another_extractors_unsaved_change(
+        #[case] block: BlockAggregatedChanges,
+        #[case] version: dto::VersionParam,
+        #[case] expected: bool,
+    ) {
+        let harness = Harness::new(10);
+        for n in 1..=3 {
+            harness.push(msg(n));
+        }
+        harness.push_other(other_msg(1));
+        harness.push_other(block);
+
+        assert_eq!(
+            harness
+                .service
+                .unsaved_elsewhere(SYSTEM, &version, &addr(1)),
+            expected
+        );
+    }
+
+    #[test]
+    fn unsaved_elsewhere_ignores_the_requested_systems_window() {
+        let harness = Harness::new(10);
+        harness.push(msg(1));
+        harness.push(with_account(
+            testing::aggregated_changes(SYSTEM, 2, 1, Some(1)),
+            account_delta(&addr(1), 2, ChangeType::Update),
+        ));
+
+        assert!(!harness
+            .service
+            .unsaved_elsewhere(SYSTEM, &at_block(2), &addr(1)));
+    }
+
+    #[test]
+    fn unsaved_elsewhere_is_false_for_a_version_the_window_cannot_resolve() {
+        let harness = Harness::new(10);
+        harness.push(msg(1));
+        harness.push_other(with_account(
+            testing::aggregated_changes(OTHER, 1, 0, None),
+            account_delta(&addr(1), 1, ChangeType::Update),
+        ));
+
+        assert!(!harness
+            .service
+            .unsaved_elsewhere(SYSTEM, &at_block(5), &addr(1)));
     }
 
     /// Block `n`, finalized and committed.

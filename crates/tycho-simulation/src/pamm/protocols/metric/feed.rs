@@ -11,6 +11,7 @@ use crate::{
     pamm::protocols::metric::{
         client::{MetricClient, DEFAULT_BID_ASK_CONCURRENCY},
         source::MetricBookSource,
+        FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -34,6 +35,7 @@ pub struct MetricFeed {
 /// Builds a [`MetricFeed`] from the shared [`BookFeedConfig`] and the Bearer trading key. The feed
 /// talks to Metric's public API unless [`base_url`](Self::base_url) says otherwise.
 pub struct MetricFeedBuilder {
+    protocol_system: &'static str,
     book_config: BookFeedConfig,
     base_url: String,
     api_key: String,
@@ -51,6 +53,7 @@ impl MetricFeedBuilder {
             api_key,
             bid_ask_concurrency: DEFAULT_BID_ASK_CONCURRENCY,
             feed_config: Self::default_feed_config(),
+            protocol_system: PROTOCOL_SYSTEM,
         }
     }
 
@@ -87,6 +90,15 @@ impl MetricFeedBuilder {
         }
     }
 
+    /// Settles this venue's swaps through Tycho's `MetricFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
     /// Tune the price feed loop (poll cadence, request timeout, failure limit)
     pub fn feed_config(mut self, feed_config: HttpFeedConfig) -> Self {
         self.feed_config = feed_config;
@@ -101,6 +113,7 @@ impl MetricFeedBuilder {
         Ok(MetricFeed {
             feed_config: self.feed_config,
             source: MetricBookSource {
+                protocol_system: self.protocol_system,
                 book_config: self.book_config,
                 client: MetricClient::new(
                     format!("{chain_endpoint}/metadata"),

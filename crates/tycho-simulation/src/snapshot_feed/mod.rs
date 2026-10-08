@@ -45,10 +45,8 @@ pub mod ws;
 
 /// A source that can be turned into a live snapshot feed.
 ///
-/// `run` consumes the source: one value, one feed. For a second independent feed, clone the
-/// source. It publishes through a [`Publisher`] it is handed and cannot construct, so the
-/// channel, its `None` seed, the task and the decision to stop all stay with whoever reads the
-/// feed — a consumer cannot take a feed's future and give it their own pace.
+/// `run` consumes the source: one value, one feed. It publishes through a [`Publisher`] the
+/// reader supplies.
 pub trait SnapshotFeed {
     /// What the feed publishes. Each one replaces its predecessor entirely, so a consumer that
     /// falls behind may skip every snapshot but the newest without losing anything. A feed with
@@ -81,8 +79,8 @@ pub trait SnapshotFeed {
 /// stream itself ends. The feed's sender is dropped with its future, so everything it published
 /// — the withdrawal it performs on its way out included — is yielded before that.
 ///
-/// A feed that simply ran out says so in an event rather than only by the stream ending, because
-/// one read through a [`SnapshotFeedStreams`] has no end of its own to say it with.
+/// A feed that simply ran out reports it in that event too, because one read through a
+/// [`SnapshotFeedStreams`] has no end of its own to say it with.
 ///
 /// ```
 /// # use futures::StreamExt;
@@ -137,10 +135,9 @@ pub enum SnapshotFeedOutcome<E> {
     RanOut,
     /// The feed gave up, and `E` says why.
     Failed(E),
-    /// The task driving the feed panicked: a bug rather than a feed giving up. A [`JoinError`]
-    /// also reports a cancelled task, but the only thing that cancels this one is the consumer's
-    /// own `Drop`, so a reader never sees that.
-    Panicked(JoinError),
+    /// The task driving the feed panicked: a bug rather than a feed giving up. The message
+    /// names the task and what it panicked with, and is for logs — match on the variant.
+    Panicked(String),
 }
 
 impl<E> SnapshotFeedOutcome<E> {
@@ -149,7 +146,7 @@ impl<E> SnapshotFeedOutcome<E> {
         match joined {
             Ok(Ok(())) => SnapshotFeedOutcome::RanOut,
             Ok(Err(error)) => SnapshotFeedOutcome::Failed(error),
-            Err(error) => SnapshotFeedOutcome::Panicked(error),
+            Err(error) => SnapshotFeedOutcome::Panicked(error.to_string()),
         }
     }
 }
@@ -650,8 +647,8 @@ mod tests {
     }
 
     /// A feed's events are attributable: the span carries the provider it was added under, and
-    /// is entered even when the subscriber only passes warnings — an `info`-level span would not
-    /// be, and the warning would print bare, which is the failure that produced this rule.
+    /// is entered even when the subscriber only passes warnings, so a warning names the feed it
+    /// came from.
     #[tokio::test]
     async fn what_a_feed_warns_about_names_the_provider_it_runs_under() {
         /// Collects what a subscriber writes, so a test can read it back.

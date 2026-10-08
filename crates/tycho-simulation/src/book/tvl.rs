@@ -6,15 +6,15 @@ use tycho_common::Bytes;
 
 use crate::book::levels::Levels;
 
-/// `raw_tvl`, a notional quoted in `quote_token`, expressed in USD quote-token units: unchanged
-/// when `quote_token` is one of them, and otherwise converted at the price of a pair that sells
-/// `quote_token` for one. `None` when `priced_pairs` holds no such pair — the venue's response
+/// `raw_tvl`, a notional quoted in `quote_token`, in USD: unchanged when `quote_token` is one of
+/// the USD quote tokens, and otherwise converted at the price of a pair that sells `quote_token`
+/// for one. `None` when `priced_pairs` holds no such pair — the venue's response
 /// does not say what the book is worth, so it cannot be measured against a USD floor.
 ///
 /// `priced_pairs` are the `(base, quote, levels)` of everything the venue priced in the same
 /// response; the first pair that both converts and has a price is the one used, so a venue that
 /// prices its quote token against several USD tokens may pick either.
-pub fn in_usd_quote_tokens<'a>(
+pub fn tvl_in_usd<'a>(
     raw_tvl: f64,
     quote_token: &Bytes,
     usd_quote_tokens: &HashSet<Bytes>,
@@ -74,7 +74,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let normalized = in_usd_quote_tokens(
+        let normalized = tvl_in_usd(
             500.0,
             &address(quote_token),
             &usd_quote_tokens,

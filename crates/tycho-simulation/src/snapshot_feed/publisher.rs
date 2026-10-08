@@ -88,7 +88,7 @@ impl<T> Publisher<T> {
             _ = tx.closed() => None,
             max_age = going_stale(*published_at, max_age) => {
                 warn!(
-                    max_age_secs = max_age.as_secs(),
+                    ?max_age,
                     "no snapshot received within max_snapshot_age, withdrawing the published one"
                 );
                 withdraw(tx, published_at);

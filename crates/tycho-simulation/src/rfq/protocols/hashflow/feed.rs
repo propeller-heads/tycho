@@ -7,7 +7,10 @@ use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
-        protocols::hashflow::{client::HashflowClient, source::HashflowBookSource},
+        protocols::hashflow::{
+            client::HashflowClient, source::HashflowBookSource, FALLBACK_PROTOCOL_SYSTEM,
+            PROTOCOL_SYSTEM,
+        },
     },
     snapshot_feed::{
         errors::FeedError,
@@ -26,6 +29,7 @@ pub struct HashflowFeed {
 
 /// Builds a [`HashflowFeed`] from the shared [`BookFeedConfig`] and Hashflow's API credentials.
 pub struct HashflowFeedBuilder {
+    protocol_system: &'static str,
     book_config: BookFeedConfig,
     usd_quote_tokens: Arc<HashSet<Bytes>>,
     auth_user: String,
@@ -48,6 +52,7 @@ impl HashflowFeedBuilder {
             auth_key,
             feed_config: Self::default_feed_config(),
             quote_timeout: DEFAULT_QUOTE_TIMEOUT,
+            protocol_system: PROTOCOL_SYSTEM,
         }
     }
 
@@ -57,6 +62,15 @@ impl HashflowFeedBuilder {
     /// ..HashflowFeedBuilder::default_feed_config() }`.
     pub fn default_feed_config() -> HttpFeedConfig {
         default_http_feed_config()
+    }
+
+    /// Settles this venue's swaps through Tycho's `HashflowFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
     }
 
     /// Tune the price feed loop (poll cadence, request timeout, failure limit)
@@ -75,6 +89,7 @@ impl HashflowFeedBuilder {
         Ok(HashflowFeed {
             feed_config: self.feed_config,
             source: HashflowBookSource {
+                protocol_system: self.protocol_system,
                 client: Arc::new(HashflowClient::new(
                     self.book_config.chain,
                     "https://api.hashflow.com/taker/v3/rfq".to_string(),

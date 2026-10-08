@@ -14,7 +14,6 @@ use crate::{
     protocol::models::ProtocolComponent,
     rfq::protocols::hashflow::{
         client::HashflowClient, models::HashflowMarketMakerLevels, state::HashflowState,
-        PROTOCOL_SYSTEM,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -23,6 +22,9 @@ use crate::{
 /// configured tokens whose normalized TVL clears the threshold, as simulate-ready books.
 #[derive(Clone, Debug)]
 pub struct HashflowBookSource {
+    /// The protocol system stamped on this source's components: the venue's own, or its
+    /// fallback-router one for a feed built with `with_fallback_router()`.
+    pub protocol_system: &'static str,
     pub book_config: BookFeedConfig,
     /// USD-priced tokens the book's TVL is normalized into before the threshold applies.
     pub usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -39,7 +41,7 @@ impl HashflowBookSource {
         quote_token: &Bytes,
         levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
     ) -> Option<f64> {
-        tvl::in_usd_quote_tokens(
+        tvl::tvl_in_usd(
             raw_tvl,
             quote_token,
             &self.usd_quote_tokens,
@@ -71,7 +73,7 @@ impl HashflowBookSource {
         };
         let component = pair_component(
             component_id,
-            PROTOCOL_SYSTEM,
+            self.protocol_system,
             "hashflow_pool",
             self.book_config.chain,
             base_token,
@@ -107,7 +109,7 @@ impl HashflowBookSource {
                 };
 
                 // Hashflow's levels price one direction, so the reverse pair is a different book.
-                let component_id = pair_component_id(PROTOCOL_SYSTEM, base_bytes, quote_bytes);
+                let component_id = pair_component_id(self.protocol_system, base_bytes, quote_bytes);
                 let tvl = mm_level.levels.notional();
                 let Some(normalized_tvl) = self.normalize_tvl(tvl, quote_bytes, &levels_by_mm)
                 else {
@@ -166,7 +168,7 @@ mod tests {
             levels::{Levels, PriceLevel},
             test_token_map,
         },
-        rfq::protocols::hashflow::models::HashflowPair,
+        rfq::protocols::hashflow::{models::HashflowPair, PROTOCOL_SYSTEM},
         snapshot_feed::http::test_support::spawn_http_server,
     };
 
@@ -187,6 +189,7 @@ mod tests {
             .map(|address| (*address, "T", 18))
             .collect();
         HashflowBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
             book_config: BookFeedConfig {
                 chain: Chain::Ethereum,
                 tokens: Arc::new(test_token_map(&entries)),

@@ -19,7 +19,6 @@ use crate::{
         client::BebopClient,
         models::{BebopBook, BebopPricingUpdate},
         state::BebopState,
-        PROTOCOL_SYSTEM,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -32,6 +31,9 @@ use crate::{
 /// threshold, as simulate-ready books.
 #[derive(Clone, Debug)]
 pub struct BebopBookSource {
+    /// The protocol system stamped on this source's components: the venue's own, or its
+    /// fallback-router one for a feed built with `with_fallback_router()`.
+    pub protocol_system: &'static str,
     pub book_config: BookFeedConfig,
     // USD-priced tokens the book's TVL is normalized into before the threshold applies.
     pub usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -52,7 +54,7 @@ impl BebopBookSource {
     ) -> (ProtocolComponent, BebopState) {
         let component = pair_component(
             component_id,
-            PROTOCOL_SYSTEM,
+            self.protocol_system,
             "bebop_pool",
             self.book_config.chain,
             base_token.clone(),
@@ -127,7 +129,7 @@ impl BebopBookSource {
             else {
                 continue;
             };
-            let component_id = pair_component_id(PROTOCOL_SYSTEM, &book.base, &book.quote);
+            let component_id = pair_component_id(self.protocol_system, &book.base, &book.quote);
             let Some(tvl) = tvl else { continue };
             if !self
                 .book_config
@@ -180,60 +182,64 @@ impl WsSource for BebopBookSource {
 }
 
 #[cfg(test)]
-pub fn test_client(pricing_ws_endpoint: String) -> Arc<BebopClient> {
-    Arc::new(BebopClient::new(
-        "".to_string(),
-        pricing_ws_endpoint,
-        "test_key".to_string(),
-        std::time::Duration::from_secs(5),
-        None,
-        None,
-        None,
-    ))
-}
-
-/// A WETH/USDC source with USDC as the only USD quote token.
-#[cfg(test)]
-pub fn test_source(price_ws: String, tvl: f64) -> BebopBookSource {
-    let weth: Bytes = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-        .parse()
-        .unwrap();
-    let usdc: Bytes = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-        .parse()
-        .unwrap();
-    let tokens = crate::book::test_token_map(&[(&weth, "WETH", 18), (&usdc, "USDC", 6)]);
-    BebopBookSource {
-        book_config: BookFeedConfig {
-            chain: tycho_common::models::Chain::Ethereum,
-            tokens: Arc::new(tokens),
-            min_tvl_usd: tvl,
-        },
-        usd_quote_tokens: Arc::new(HashSet::from([usdc])),
-        client: test_client(price_ws),
-    }
-}
-
-#[cfg(test)]
-fn weth_usdc_price_data(bid_price: f32) -> crate::rfq::protocols::bebop::models::BebopPriceData {
-    use crate::rfq::protocols::bebop::models::BebopPriceData;
-
-    BebopPriceData {
-        base: hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-        quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-        last_update_ts: 1752617378,
-        bids: vec![bid_price, 0.325717f32],
-        asks: vec![bid_price + 0.5f32, 0.325717f32],
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::{book::test_token_map, rfq::protocols::bebop::models::BebopPriceData};
+    use crate::{
+        book::test_token_map,
+        rfq::protocols::bebop::{models::BebopPriceData, PROTOCOL_SYSTEM},
+    };
+
+    fn test_client(pricing_ws_endpoint: String) -> Arc<BebopClient> {
+        Arc::new(BebopClient::new(
+            "".to_string(),
+            pricing_ws_endpoint,
+            "test_key".to_string(),
+            std::time::Duration::from_secs(5),
+            None,
+            None,
+            None,
+        ))
+    }
+
+    /// A WETH/USDC source with USDC as the only USD quote token.
+    fn test_source(price_ws: String, tvl: f64) -> BebopBookSource {
+        let weth: Bytes = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+            .parse()
+            .unwrap();
+        let usdc: Bytes = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap();
+        let tokens = crate::book::test_token_map(&[(&weth, "WETH", 18), (&usdc, "USDC", 6)]);
+        BebopBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
+            book_config: BookFeedConfig {
+                chain: tycho_common::models::Chain::Ethereum,
+                tokens: Arc::new(tokens),
+                min_tvl_usd: tvl,
+            },
+            usd_quote_tokens: Arc::new(HashSet::from([usdc])),
+            client: test_client(price_ws),
+        }
+    }
+
+    #[cfg(test)]
+    fn weth_usdc_price_data(
+        bid_price: f32,
+    ) -> crate::rfq::protocols::bebop::models::BebopPriceData {
+        use crate::rfq::protocols::bebop::models::BebopPriceData;
+
+        BebopPriceData {
+            base: hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+            quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
+            last_update_ts: 1752617378,
+            bids: vec![bid_price, 0.325717f32],
+            asks: vec![bid_price + 0.5f32, 0.325717f32],
+        }
+    }
 
     #[rstest::rstest]
     #[case::approved_quote_included(0.0, 3000.0, true)]
@@ -317,6 +323,7 @@ mod tests {
         let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
         let tokens = test_token_map(&[(&weth, "WETH", 18), (&wbtc, "WBTC", 8)]);
         let source = BebopBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
             book_config: BookFeedConfig {
                 chain: Chain::Ethereum,
                 tokens: Arc::new(tokens),
