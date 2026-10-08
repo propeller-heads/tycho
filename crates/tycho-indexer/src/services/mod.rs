@@ -218,6 +218,9 @@ where
             Some(cache) => cache.clone(),
             None => Arc::new(DiscardSink),
         };
+        if let Some(cache) = self.entity_cache.cache() {
+            tokio::spawn(Arc::clone(cache).run_reporter());
+        }
         let windows = new_windows(
             self.extractor_handles
                 .keys()

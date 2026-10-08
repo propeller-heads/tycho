@@ -26,6 +26,14 @@
 //! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
 //! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
 //! so that copy happens at most once per fold instead of once per read.
+//!
+//! # Memory
+//!
+//! There is no cap and no eviction, so the protection is visibility. A reporter publishes entry
+//! counts every minute and measures the bytes every ten minutes, per family and, for components,
+//! per protocol system. Accounts have no protocol system: several extractors can share one.
+//! Nothing on the fold path counts bytes. The measurement holds the read lock only for short
+//! steps; see [`EntityCache::measure`].
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -558,6 +566,12 @@ impl EntityCache {
     }
 }
 
+/// How often the reporter publishes entry counts. Same cadence as `pending_deltas_buffer_size`.
+const REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reports between size walks, counting the first report as a walk.
+const MEASURE_EVERY: u32 = 10;
+
 /// Bytes each entity family holds, as [`EntityCache::measure`] counted them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CacheSize {
@@ -576,6 +590,25 @@ fn table_size<K, V>(map: &HashMap<K, V>) -> usize {
 }
 
 impl EntityCache {
+    /// Publishes the entry counts every [`REPORT_INTERVAL`], starting at once, and runs
+    /// [`Self::measure`] on the first report and every [`MEASURE_EVERY`] reports after it. The
+    /// walk runs on the blocking pool, because it can take seconds of CPU. Never returns.
+    pub(crate) async fn run_reporter(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(REPORT_INTERVAL);
+        let mut reports = 0u32;
+        loop {
+            tick.tick().await;
+            self.report();
+            if reports.is_multiple_of(MEASURE_EVERY) {
+                let cache = Arc::clone(&self);
+                if let Err(error) = tokio::task::spawn_blocking(move || cache.measure()).await {
+                    warn!(%error, "Entity cache size walk failed");
+                }
+            }
+            reports = reports.wrapping_add(1);
+        }
+    }
+
     /// Publishes the entry count per entity family and per component protocol system. Reads only
     /// map lengths under the read lock.
     pub(crate) fn report(&self) {

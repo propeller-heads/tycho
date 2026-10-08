@@ -183,6 +183,13 @@ snapshot after the extractors are built and before the server starts (`EntityCac
 `services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
 window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
 load, and the windows fold into `DiscardSink`.
+While the cache exists, a reporter (`EntityCache::run_reporter`) publishes
+`entity_cache_entries{family}` and `entity_cache_component_entries{extractor}` every 60 s, and
+runs a size walk at start and every 10 minutes: `entity_cache_size_bytes{family}`,
+`entity_cache_component_size_bytes{extractor}` and `entity_cache_measure_duration_seconds`.
+`family` is `accounts` or `components`; `extractor` is the protocol system. The walk copies the
+account `Arc`s under one short read lock and measures them outside it; it measures components
+under one read lock per protocol system.
 
 In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
 first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
