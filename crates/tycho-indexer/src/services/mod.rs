@@ -215,12 +215,12 @@ where
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let sink: Arc<dyn FoldSink> = match self.entity_cache.cache() {
-            Some(cache) => cache.clone(),
+            Some(cache) => {
+                tokio::spawn(Arc::clone(cache).run_reporter());
+                cache.clone()
+            }
             None => Arc::new(DiscardSink),
         };
-        if let Some(cache) = self.entity_cache.cache() {
-            tokio::spawn(Arc::clone(cache).run_reporter());
-        }
         let windows = new_windows(
             self.extractor_handles
                 .keys()
