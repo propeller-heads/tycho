@@ -150,14 +150,23 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
-/// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
-/// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Protocol
-/// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`.
+/// Protocol system prefix for components executed through a fallback router, which retries a
+/// failing primary on the fallback protocol named in the swap's `user_data`. pAMM suffixes follow
+/// `PRICE_LEVEL_STREAM_PREFIX`.
 pub const FALLBACK_PREFIX: &str = "fallback:";
 
 /// The executor-config key serving the whole fallback protocol family, mirroring
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const FALLBACK_KEY: &str = "fallback";
+
+/// Metric components executed through `MetricFallbackRouter`.
+pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
+
+/// Bebop components executed through `BebopFallbackRouter`.
+pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
+
+/// Hashflow components executed through `HashflowFallbackRouter`.
+pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
 
 #[cfg(test)]
 mod tests {
@@ -169,6 +178,9 @@ mod tests {
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
+        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

@@ -133,6 +133,7 @@ impl PendingDeltas {
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
         guard.fold_committed(self.sink.as_ref())?;
         guard.clear();
+        guard.report_metrics();
         debug!(extractor, "PendingDeltas window cleared");
         Ok(())
     }
@@ -156,6 +157,7 @@ impl PendingDeltas {
         );
         guard.insert(message)?;
         guard.fold_evictable(self.sink.as_ref())?;
+        guard.report_metrics();
         Ok(())
     }
 
@@ -1003,6 +1005,72 @@ mod test {
         // bound = min(finalized 5, committed 4, tip 5 - 1) = 4
         assert!(!has_block(&buffer, 4));
         assert!(has_block(&buffer, 5));
+    }
+
+    /// Gauge values recorded for `native:extractor`, by metric name.
+    fn native_gauges(snapshotter: &metrics_util::debugging::Snapshotter) -> HashMap<String, f64> {
+        use metrics_util::debugging::DebugValue;
+
+        let mut gauges = HashMap::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let ours = key
+                .key()
+                .labels()
+                .any(|l| l.key() == "extractor" && l.value() == "native:extractor");
+            if let (true, DebugValue::Gauge(v)) = (ours, value) {
+                gauges.insert(key.key().name().to_string(), v.0);
+            }
+        }
+        gauges
+    }
+
+    #[test]
+    fn insert_reports_the_window_block_count_and_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
+            Arc::new(DiscardSink),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=5 {
+                buffer
+                    .insert(&native_msg(n, Some(4), n))
+                    .unwrap();
+            }
+        });
+
+        // bound = min(finalized 5, committed 4, tip 5 - 1) = 4, so only block 5 stays
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&1.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&5.0));
+    }
+
+    #[test]
+    fn a_restart_clear_reports_an_empty_window_and_keeps_the_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::new(["native:extractor"]);
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=3 {
+                buffer
+                    .insert(&native_msg(n, Some(2), n))
+                    .unwrap();
+            }
+            buffer
+                .fold_committed_and_clear("native:extractor")
+                .unwrap();
+        });
+
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&0.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&3.0));
     }
 
     #[test]

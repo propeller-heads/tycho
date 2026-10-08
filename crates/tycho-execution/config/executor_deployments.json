@@ -84,8 +84,20 @@
     },
     "pricelevelstream": { "contract": "PropAMMExecutor", "args": [] },
     "fallback": {
-      "contract": "FallbackExecutor",
+      "contract": "PropAMMFallbackExecutor",
       "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0xB5c9a380DC501440F26420CD8015a1586Fd6E9e1"]
+    },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0xE51A1f575671364f295f61F121992788631553a1"]
+    },
+    "fallback:rfq:hashflow": {
+      "contract": "HashflowFallbackExecutor",
+      "args": ["0x29D7A3cd3485710585d4f3bee5E43fE28633915F"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
@@ -142,8 +154,16 @@
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
     "fallback": {
-      "contract": "FallbackExecutor",
+      "contract": "PropAMMFallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
+    },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0x4bB02166188132103fc608402B8993c0c0857708"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
@@ -274,6 +294,10 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x6f37069B1dcd2e33595F1fF711559CfdDe5338E5"]
     },
     "rfq:native": {
       "contract": "NativeExecutor",

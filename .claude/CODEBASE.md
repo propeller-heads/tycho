@@ -85,7 +85,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - On `BlockUndoSignal`: purge blocks after the reverted hash (falling back to the target height when the hash is unknown), emit revert messages — no DB rollback needed
    - Drain to DB when `count_blocks_before(finalized_block_height) >= commit_batch_size` — only finalized blocks ever reach DB
 4. Drained blocks: `BlockChanges` → `BlockAggregatedChanges` (merge all tx-level deltas into one state per component/account)
-5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message
+5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message to `CachedGateway::flushed_block_height`, the height whose writes reached Postgres (not the last drained block)
 6. Broadcast a `DeltaCommand` on the internal channel — `Block(BlockAggregatedChanges)` for all
    blocks (including pending/non-committed), or `ExtractorRestarted` when the supervisor rebuilt
    the extractor
