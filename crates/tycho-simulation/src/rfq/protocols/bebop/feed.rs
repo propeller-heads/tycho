@@ -217,7 +217,7 @@ mod tests {
         assert!(!pairs.is_empty());
         println!("Received {} components in this book", pairs.len());
         for pair in pairs.values() {
-            assert_eq!(pair.component.protocol_system, "book:bebop");
+            assert_eq!(pair.component.protocol_system, "rfq:bebop");
             assert_eq!(pair.component.protocol_type_name, "bebop_pool");
             assert_eq!(pair.component.chain, Chain::Ethereum);
 

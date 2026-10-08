@@ -54,12 +54,12 @@ mod tests {
 
     #[test]
     fn the_id_is_the_protocol_system_followed_by_the_two_addresses() {
-        let id = pair_component_id("book:venue", &addr(0x11), &addr(0x22));
+        let id = pair_component_id("rfq:venue", &addr(0x11), &addr(0x22));
 
-        // "book:venue" in ASCII, then the twenty bytes of each address.
+        // "rfq:venue" in ASCII, then the twenty bytes of each address.
         assert_eq!(
             id.to_string(),
-            "0x626f6f6b3a76656e7565\
+            "0x7266713a76656e7565\
              1111111111111111111111111111111111111111\
              2222222222222222222222222222222222222222"
         );
@@ -69,8 +69,8 @@ mod tests {
     fn the_id_distinguishes_orientation_and_venue() {
         let (a, b) = (addr(1), addr(2));
 
-        assert_ne!(pair_component_id("book:v", &a, &b), pair_component_id("book:v", &b, &a));
+        assert_ne!(pair_component_id("rfq:v", &a, &b), pair_component_id("rfq:v", &b, &a));
         // Two protocol systems' books for the same pair are two components.
-        assert_ne!(pair_component_id("book:v", &a, &b), pair_component_id("v", &a, &b));
+        assert_ne!(pair_component_id("rfq:v", &a, &b), pair_component_id("v", &a, &b));
     }
 }

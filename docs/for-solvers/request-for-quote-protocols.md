@@ -8,12 +8,12 @@ Two kinds share that shape, and the difference shows at execution:
 * **Off-chain-priced pAMMs** — Metric. The book prices a pool you execute against directly: there is no quote to request and nothing to sign.
 
 | Protocol    | Kind | Simulation Time | Credentials | Chains                                   | Protocol system  |
-| ----------- | ---- | --------------- | ----------- | ---------------------------------------- | ---------------- |
-| `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, Base                           | `book:bebop`     |
-| `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `book:hashflow`  |
-| `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `book:liquorice` |
-| `native`    | RFQ  | 0.4 µs          | Required    | Ethereum, Base, Arbitrum, BSC, Robinhood | `book:native`    |
-| `metric`    | pAMM | -               | Required    | Any chain with an EVM chain id           | `book:metric`    |
+|-------------|------|-----------------|-------------|------------------------------------------|------------------|
+| `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, Base                           | `rfq:bebop`      |
+| `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `rfq:hashflow`   |
+| `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `rfq:liquorice`  |
+| `native`    | RFQ  | 0.4 µs          | Required    | Ethereum, Base, Arbitrum, BSC, Robinhood | `rfq:native`     |
+| `metric`    | pAMM | -               | Required    | Any chain with an EVM chain id           | `rfq:metric`     |
 
 On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
 

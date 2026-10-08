@@ -33,7 +33,7 @@ The loops own connection handling, failure counting, backoff and stale-book with
 
 Classify failures with `FeedError`, and reserve `Fatal` for what no attempt can answer differently — an unsupported chain, a request that cannot be built — because it ends the feed whatever the failure budget says. A credential the venue refuses is not fatal: it is fixed at the venue while the feed keeps trying, and the attempt that follows serves the book again. Everything else is `Connection` or `Parsing`, and the variant your source picks is the one the feed reports if it eventually gives up.
 
-Expose the provider identifier stamped on emitted components (e.g. `book:bebop`) as a `PROTOCOL_SYSTEM` constant in the provider's module (`rfq::protocols::bebop::PROTOCOL_SYSTEM`), so consumers can label the feed.
+Expose the provider identifier stamped on emitted components (e.g. `rfq:bebop`) as a `PROTOCOL_SYSTEM` constant in the provider's module (`rfq::protocols::bebop::PROTOCOL_SYSTEM`), so consumers can label the feed.
 
 Binding quotes are not part of the trait. If your venue signs them, the request is another method on the same client, the emitted states share that client via `Arc`, and they expose it through `IndicativelyPriced` (see the Bebop client). A pAMM whose book needs no quote implements neither, and its client is held by the feed alone (see the Metric client).
 

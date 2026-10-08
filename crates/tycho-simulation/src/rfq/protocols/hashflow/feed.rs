@@ -165,7 +165,7 @@ mod tests {
         );
         println!("Received {} components in this book", pairs.len());
         for pair in pairs.values() {
-            assert_eq!(pair.component.protocol_system, "book:hashflow");
+            assert_eq!(pair.component.protocol_system, "rfq:hashflow");
             // A streamed state carries a market maker's levels: it can quote a spot price.
             let [base, quote] = pair.component.tokens.as_slice() else {
                 panic!("expected exactly two tokens")

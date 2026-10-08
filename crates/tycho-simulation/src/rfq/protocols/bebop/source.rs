@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(books.len(), usize::from(expect_included));
         if expect_included {
             let book = books.values().next().unwrap();
-            assert_eq!(book.component.protocol_system, "book:bebop");
+            assert_eq!(book.component.protocol_system, "rfq:bebop");
         }
     }
 
