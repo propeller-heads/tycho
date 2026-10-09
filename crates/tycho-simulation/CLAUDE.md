@@ -21,9 +21,9 @@ for any protocol indexed by Tycho.
   snapshot's `FailurePolicy`
 - **`evm/protocol/`**: Protocol implementations
   - **Native** (`uniswap_v2/`, `uniswap_v3/`, `uniswap_v4/`, `ekubo/`, `ekubo_v3/`, `cowamm/`,
-    `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`, `pancakeswap_v2/`,
-    `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
-    `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
+    `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`, `camelot_v3/`,
+    `pancakeswap_v2/`, `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`,
+    `etherfi/`, `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
