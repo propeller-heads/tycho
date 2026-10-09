@@ -404,6 +404,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
 
         encoder(chain)
@@ -599,6 +600,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
 
         let err = encoder
@@ -802,6 +804,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(format!("0x{USDC}").as_str()),
             group_token_out: Bytes::from(format!("0x{WETH}").as_str()),
+            origin: None,
         };
 
         let result = encoder(Chain::Ethereum).encode_swap(&swap, &encoding_context);

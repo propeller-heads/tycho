@@ -29,6 +29,7 @@ fn encode_swap_group(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swap: &SwapGroup,
     router_address: &Bytes,
+    origin: Option<&Bytes>,
 ) -> Result<EncodedSwapGroup, EncodingError> {
     let protocol = &grouped_swap.protocol_system;
     let swap_encoder = swap_encoder_registry
@@ -41,6 +42,7 @@ fn encode_swap_group(
         router_address: Some(router_address.clone()),
         group_token_in: grouped_swap.token_in.clone(),
         group_token_out: grouped_swap.token_out.clone(),
+        origin: origin.cloned(),
     };
 
     let mut grouped_protocol_data: Vec<Vec<u8>> = vec![];
@@ -78,6 +80,7 @@ fn encode_swap_groups(
     swap_encoder_registry: &SwapEncoderRegistry,
     grouped_swaps: &[SwapGroup],
     router_address: &Bytes,
+    origin: Option<&Bytes>,
 ) -> Result<Vec<EncodedSwapGroup>, EncodingError> {
     let any_group_blocks = grouped_swaps.iter().any(|group| {
         swap_encoder_registry
@@ -91,12 +94,13 @@ fn encode_swap_groups(
                 swap_encoder_registry,
                 grouped_swap,
                 router_address,
+                origin,
             )?);
         }
         return Ok(encoded_groups);
     }
     map_on_threads(grouped_swaps, |grouped_swap| {
-        encode_swap_group(swap_encoder_registry, grouped_swap, router_address)
+        encode_swap_group(swap_encoder_registry, grouped_swap, router_address, origin)
     })
 }
 
@@ -178,8 +182,12 @@ impl SingleSwapStrategyEncoder {
             ));
         }
 
-        let encoded_group =
-            encode_swap_group(&self.swap_encoder_registry, grouped_swap, &self.router_address)?;
+        let encoded_group = encode_swap_group(
+            &self.swap_encoder_registry,
+            grouped_swap,
+            &self.router_address,
+            solution.origin(),
+        )?;
         let swap_data =
             self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -257,8 +265,12 @@ impl SequentialSwapStrategyEncoder {
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
-        let encoded_groups =
-            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        let encoded_groups = encode_swap_groups(
+            &self.swap_encoder_registry,
+            &grouped_swaps,
+            &self.router_address,
+            solution.origin(),
+        )?;
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
@@ -388,8 +400,12 @@ impl SplitSwapStrategyEncoder {
             ));
         }
 
-        let encoded_groups =
-            encode_swap_groups(&self.swap_encoder_registry, &grouped_swaps, &self.router_address)?;
+        let encoded_groups = encode_swap_groups(
+            &self.swap_encoder_registry,
+            &grouped_swaps,
+            &self.router_address,
+            solution.origin(),
+        )?;
 
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
@@ -461,9 +477,60 @@ mod tests {
         Bytes::from_str("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2").unwrap()
     }
 
+    fn usdc() -> Bytes {
+        Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap()
+    }
+
+    fn bebop_solution(swaps: Vec<crate::encoding::models::Swap>) -> Solution {
+        Solution::new(
+            Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+            Bytes::default(),
+            usdc(),
+            weth(),
+            BigUint::from(1_000u64),
+            BigUint::from(1_000u64),
+            BigUint::from(900u64),
+            swaps,
+        )
+    }
+
     mod single {
         use super::*;
-        use crate::encoding::models::{default_token, Swap};
+        use crate::encoding::{
+            evm::testing_utils::recording_bebop_swap,
+            models::{default_token, Swap},
+        };
+
+        #[test]
+        fn test_single_swap_passes_solution_origin_to_rfq_quote() {
+            let origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+            let (swap, received_origins) = recording_bebop_swap(usdc(), weth());
+            let solution = bebop_solution(vec![swap]).with_origin(origin.clone());
+            let encoder =
+                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
+                    .unwrap();
+
+            encoder
+                .encode_strategy(&solution)
+                .unwrap();
+
+            assert_eq!(*received_origins.lock().unwrap(), vec![Some(origin)]);
+        }
+
+        #[test]
+        fn test_single_swap_sends_no_origin_to_rfq_quote_without_solution_origin() {
+            let (swap, received_origins) = recording_bebop_swap(usdc(), weth());
+            let solution = bebop_solution(vec![swap]);
+            let encoder =
+                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
+                    .unwrap();
+
+            encoder
+                .encode_strategy(&solution)
+                .unwrap();
+
+            assert_eq!(*received_origins.lock().unwrap(), vec![None]);
+        }
 
         #[test]
         fn test_single_swap_strategy_encoder() {
@@ -525,9 +592,28 @@ mod tests {
     mod sequential {
         use super::*;
         use crate::encoding::{
-            evm::testing_utils::delayed_bebop_swap,
+            evm::testing_utils::{delayed_bebop_swap, recording_bebop_swap},
             models::{default_token, Swap},
         };
+
+        #[test]
+        fn test_sequential_swap_passes_solution_origin_to_every_rfq_hop() {
+            let origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
+            let (first_hop, first_origins) = recording_bebop_swap(usdc(), weth());
+            let (second_hop, second_origins) = recording_bebop_swap(weth(), dai);
+            let solution = bebop_solution(vec![first_hop, second_hop]).with_origin(origin.clone());
+            let encoder =
+                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
+                    .unwrap();
+
+            encoder
+                .encode_strategy(&solution)
+                .unwrap();
+
+            assert_eq!(*first_origins.lock().unwrap(), vec![Some(origin.clone())]);
+            assert_eq!(*second_origins.lock().unwrap(), vec![Some(origin)]);
+        }
 
         #[test]
         fn test_sequential_swap_strategy_encoder_no_permit2() {
