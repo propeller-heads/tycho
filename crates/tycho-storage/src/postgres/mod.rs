@@ -614,7 +614,6 @@ impl PostgresGateway {
 /// # Arguments
 ///
 /// - `db_url`: A string slice that holds the URL of the database to connect to.
-/// - `max_size`: The most connections the pool opens; `None` keeps deadpool's default.
 ///
 /// # Returns
 ///
@@ -623,27 +622,16 @@ impl PostgresGateway {
 /// - `Ok`: Contains a `Pool` of `AsyncPgConnection`s if the connection was established
 ///   successfully.
 /// - `Err`: Contains a `StorageError` if there was an issue creating the connection pool.
-async fn connect(
-    db_url: &str,
-    max_size: Option<usize>,
-) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let pool = new_pool(db_url, max_size)?;
+async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let pool = new_pool(db_url)?;
     run_migrations(db_url);
     Ok(pool)
 }
 
-/// Creates a connection pool without running migrations. `max_size` caps the open connections;
-/// `None` keeps deadpool's default of twice the number of CPUs.
-fn new_pool(
-    db_url: &str,
-    max_size: Option<usize>,
-) -> Result<Pool<AsyncPgConnection>, StorageError> {
+/// Creates a connection pool without running migrations.
+fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
     let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
-    let mut builder = Pool::builder(config);
-    if let Some(max_size) = max_size {
-        builder = builder.max_size(max_size);
-    }
-    builder
+    Pool::builder(config)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))
 }

@@ -68,10 +68,7 @@ use tycho_indexer::{
         EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
     },
 };
-use tycho_storage::postgres::{
-    builder::{GatewayBuilder, IndexerGateways},
-    cache::CachedGateway,
-};
+use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
 mod ot;
 
@@ -440,13 +437,9 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
 
     let rpc_client = global_args.rpc.build_client()?;
 
-    let mut gateway_builder = GatewayBuilder::new(&global_args.database_url)
+    let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
-        .enable_token_cache();
-    if let Some(size) = global_args.rpc_db_pool_size {
-        gateway_builder = gateway_builder.set_pool_size(size);
-    }
-    let direct_gw = gateway_builder
+        .enable_token_cache()
         .build_direct_gw()
         .await?;
 
@@ -496,19 +489,13 @@ async fn create_indexing_tasks(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let mut gateway_builder = GatewayBuilder::new(&global_args.database_url)
+    let (cached_gw, rpc_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
-        .set_pool_size(global_args.extraction_db_pool_size);
-    if let Some(size) = global_args.rpc_db_pool_size {
-        gateway_builder = gateway_builder.set_rpc_pool_size(size);
-    }
-    let IndexerGateways { extraction: cached_gw, rpc: rpc_gw, writer: gw_writer_handle } =
-        gateway_builder
-            .build_with_rpc_gateway()
-            .await?;
+        .build_with_rpc_gateway()
+        .await?;
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?

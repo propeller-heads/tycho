@@ -61,16 +61,6 @@ pub struct GlobalArgs {
     #[clap(long, default_value = "0")]
     pub database_insert_batch_size: usize,
 
-    /// Database connections for extractors and the database writer. The `index` command keeps
-    /// them apart from the connections that serve requests, so request load never delays block
-    /// processing.
-    #[clap(long, env, default_value_t = 8, value_parser = parse_pool_size)]
-    pub extraction_db_pool_size: usize,
-
-    /// Database connections that serve requests. Defaults to twice the number of CPUs.
-    #[clap(long, env, value_parser = parse_pool_size)]
-    pub rpc_db_pool_size: Option<usize>,
-
     /// Minimum number of blocks each extractor's delta window retains in memory
     #[clap(
         long,
@@ -127,15 +117,6 @@ pub struct GlobalArgs {
     /// RPC configuration (URL and retry settings)
     #[command(flatten)]
     pub rpc: RPCArgs,
-}
-
-/// Parses a connection pool size. Rejects 0, which would leave the pool unable to connect.
-fn parse_pool_size(value: &str) -> Result<usize, String> {
-    match value.parse::<usize>() {
-        Ok(0) => Err("must be at least 1".to_string()),
-        Ok(size) => Ok(size),
-        Err(err) => Err(format!("`{value}` is not a number: {err}")),
-    }
 }
 
 /// Parses a share from 0.0 to 1.0. Rejects NaN.
@@ -408,8 +389,6 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 256,
-                extraction_db_pool_size: 8,
-                rpc_db_pool_size: None,
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
@@ -511,35 +490,6 @@ mod cli_tests {
     }
 
     #[test]
-    fn test_arg_parsing_db_pool_sizes() {
-        let defaults =
-            Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
-        let mut args = args_with_delta_window("128", "1");
-        args.splice(1..1, ["--extraction-db-pool-size", "4", "--rpc-db-pool-size", "32"]);
-        let set = Cli::try_parse_from(args).expect("parse errored");
-
-        assert_eq!(
-            defaults
-                .global_args
-                .extraction_db_pool_size,
-            8
-        );
-        assert_eq!(defaults.global_args.rpc_db_pool_size, None);
-        assert_eq!(set.global_args.extraction_db_pool_size, 4);
-        assert_eq!(set.global_args.rpc_db_pool_size, Some(32));
-    }
-
-    #[rstest]
-    #[case::extraction("--extraction-db-pool-size")]
-    #[case::rpc("--rpc-db-pool-size")]
-    fn test_arg_parsing_rejects_an_empty_db_pool(#[case] flag: &'static str) {
-        let mut args = args_with_delta_window("128", "1");
-        args.splice(1..1, [flag, "0"]);
-
-        assert!(Cli::try_parse_from(args).is_err());
-    }
-
-    #[test]
     fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
         let mut args = args_with_delta_window("128", "1");
         args.splice(1..1, ["--entity-cache-mode", "on"]);
@@ -617,8 +567,6 @@ mod cli_tests {
                 endpoint_url: "http://example.com".to_string(),
                 database_url: "my_db".to_string(),
                 database_insert_batch_size: 0,
-                extraction_db_pool_size: 8,
-                rpc_db_pool_size: None,
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,

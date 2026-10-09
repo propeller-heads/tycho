@@ -737,9 +737,6 @@ impl CachedGateway {
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
     /// connections from `pool`.
-    ///
-    /// Use it to give request handling its own connections, so a burst of requests never makes
-    /// extractors or the database writer wait for a connection.
     pub fn with_pool(&self, pool: Pool<AsyncPgConnection>) -> Self {
         CachedGateway { pool, ..self.new_instance() }
     }

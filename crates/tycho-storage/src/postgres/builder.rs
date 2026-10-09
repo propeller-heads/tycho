@@ -1,5 +1,4 @@
 use chrono::NaiveDateTime;
-use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tycho_common::{models::Chain, storage::StorageError};
 
@@ -15,18 +14,6 @@ pub struct GatewayBuilder {
     retention_horizon: NaiveDateTime,
     chains: Vec<Chain>,
     token_cache: bool,
-    pool_size: Option<usize>,
-    rpc_pool_size: Option<usize>,
-}
-
-/// The gateways of an indexer that extracts and serves requests in one process.
-pub struct IndexerGateways {
-    /// For extractors. Reads and the database writer share its pool and nothing else does.
-    pub extraction: CachedGateway,
-    /// For request handling and background reads. Has its own pool.
-    pub rpc: CachedGateway,
-    /// The database writer task.
-    pub writer: JoinHandle<()>,
 }
 
 /// How often the token cache polls for token rows modified by other processes.
@@ -52,21 +39,6 @@ impl GatewayBuilder {
         self
     }
 
-    /// Caps the connections of the pool that `build`, `build_gw` and `build_direct_gw` create,
-    /// and of the extraction pool of `build_with_rpc_gateway`. Without it, the pool opens up to
-    /// twice the number of CPUs.
-    pub fn set_pool_size(mut self, size: usize) -> Self {
-        self.pool_size = Some(size);
-        self
-    }
-
-    /// Caps the connections of the request pool of `build_with_rpc_gateway`. Without it, the
-    /// pool opens up to twice the number of CPUs.
-    pub fn set_rpc_pool_size(mut self, size: usize) -> Self {
-        self.rpc_pool_size = Some(size);
-        self
-    }
-
     /// Serves `get_tokens` from an in-memory copy of the token tables instead of SQL.
     /// Costs a full token load at startup plus a periodic refresh query; intended for
     /// the long-running `index` and `rpc` services.
@@ -89,34 +61,8 @@ impl GatewayBuilder {
     }
 
     pub async fn build(self) -> Result<(CachedGateway, JoinHandle<()>), StorageError> {
-        let pool = postgres::connect(&self.database_url, self.pool_size).await?;
-        self.build_cached(pool.clone(), pool)
-            .await
-    }
-
-    /// Builds an extraction gateway and a request gateway with separate connection pools.
-    ///
-    /// Extractors read through the extraction pool and the database writer commits through it.
-    /// Request handling and the token cache refresh use the request pool. A burst of requests
-    /// then waits only for request connections and never delays block processing.
-    pub async fn build_with_rpc_gateway(self) -> Result<IndexerGateways, StorageError> {
-        let extraction_pool = postgres::connect(&self.database_url, self.pool_size).await?;
-        let rpc_pool = postgres::new_pool(&self.database_url, self.rpc_pool_size)?;
-        let (extraction, writer) = self
-            .build_cached(extraction_pool, rpc_pool.clone())
-            .await?;
-        let rpc = extraction.with_pool(rpc_pool);
-        Ok(IndexerGateways { extraction, rpc, writer })
-    }
-
-    /// Builds a gateway and its database writer on `pool`. The token cache refresh, if
-    /// enabled, runs on `refresh_pool`.
-    async fn build_cached(
-        self,
-        pool: Pool<AsyncPgConnection>,
-        refresh_pool: Pool<AsyncPgConnection>,
-    ) -> Result<(CachedGateway, JoinHandle<()>), StorageError> {
         let chain = self.single_chain()?;
+        let pool = postgres::connect(&self.database_url).await?;
         let mut conn = pool
             .get()
             .await
@@ -133,7 +79,7 @@ impl GatewayBuilder {
         )
         .await?;
         if let Some(token_cache) = &inner_gw.token_cache {
-            token_cache.spawn_refresh_task(refresh_pool, TOKEN_CACHE_REFRESH_PERIOD);
+            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
         }
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
@@ -146,12 +92,25 @@ impl GatewayBuilder {
         .await;
         let handle = write_executor.run();
 
-        let cached_gw = CachedGateway::new(tx, pool, inner_gw);
+        let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());
         Ok((cached_gw, handle))
     }
 
+    /// Like `build`, plus a gateway for request handling with its own connection pool, so a
+    /// burst of requests never makes extractors or the database writer wait for a connection.
+    ///
+    /// Returns the extraction gateway, the request gateway and the database writer task.
+    pub async fn build_with_rpc_gateway(
+        self,
+    ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
+        let rpc_pool = postgres::new_pool(&self.database_url)?;
+        let (extraction_gw, writer) = self.build().await?;
+        let rpc_gw = extraction_gw.with_pool(rpc_pool);
+        Ok((extraction_gw, rpc_gw, writer))
+    }
+
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
-        let pool = postgres::connect(&self.database_url, self.pool_size).await?;
+        let pool = postgres::connect(&self.database_url).await?;
 
         let inner_gw = PostgresGateway::new(
             pool.clone(),
@@ -171,7 +130,7 @@ impl GatewayBuilder {
 
     pub async fn build_direct_gw(self) -> Result<DirectGateway, StorageError> {
         let chain = self.single_chain()?;
-        let pool = postgres::connect(&self.database_url, self.pool_size).await?;
+        let pool = postgres::connect(&self.database_url).await?;
         let mut conn = pool
             .get()
             .await
@@ -200,60 +159,37 @@ impl GatewayBuilder {
 mod test_serial_db {
     use std::time::Duration;
 
+    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+
     use super::*;
     use crate::postgres::testing::run_against_db;
-
-    fn database_url() -> String {
-        std::env::var("DATABASE_URL").expect("Database URL must be set for testing")
-    }
-
-    /// Takes a connection from `pool`, failing instead of waiting when its users hold them all.
-    async fn connect(pool: &Pool<AsyncPgConnection>) -> impl Drop {
-        tokio::time::timeout(Duration::from_secs(5), pool.get())
-            .await
-            .expect("waited for a connection held by the other pool's users")
-            .expect("pool should connect")
-    }
 
     #[tokio::test]
     async fn build_with_rpc_gateway_keeps_request_connections_apart_serial_db() {
         run_against_db(|_| async move {
-            let gateways = GatewayBuilder::new(&database_url())
+            let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set");
+            let (extraction_gw, rpc_gw, _writer) = GatewayBuilder::new(&db_url)
                 .set_chains(&[Chain::Ethereum])
-                .set_pool_size(2)
-                .set_rpc_pool_size(3)
                 .build_with_rpc_gateway()
                 .await
                 .expect("gateways should build");
-            let extraction = gateways.extraction.pool();
-            let rpc = gateways.rpc.pool();
-            assert_eq!(extraction.status().max_size, 2);
-            assert_eq!(rpc.status().max_size, 3);
+            let rpc_pool = rpc_gw.pool();
 
             // Requests hold every request connection; extraction still connects at once.
+            let connect = |pool: &Pool<AsyncPgConnection>| {
+                let pool = pool.clone();
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), pool.get())
+                        .await
+                        .expect("waited for a connection held by the other pool's users")
+                        .expect("pool should connect")
+                }
+            };
             let mut held = Vec::new();
-            for _ in 0..3 {
-                held.push(connect(rpc).await);
+            for _ in 0..rpc_pool.status().max_size {
+                held.push(connect(rpc_pool).await);
             }
-            let extraction_conn = connect(extraction).await;
-
-            assert_eq!(rpc.status().available, 0);
-            drop((extraction_conn, held));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn build_uses_one_pool_of_the_set_size_serial_db() {
-        run_against_db(|_| async move {
-            let (gateway, _writer) = GatewayBuilder::new(&database_url())
-                .set_chains(&[Chain::Ethereum])
-                .set_pool_size(3)
-                .build()
-                .await
-                .expect("gateway should build");
-
-            assert_eq!(gateway.pool().status().max_size, 3);
+            held.push(connect(extraction_gw.pool()).await);
         })
         .await;
     }
