@@ -1,3 +1,11 @@
+## [0.452.1](https://github.com/propeller-heads/tycho/compare/0.452.0...0.452.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* reject negative pages and empty page sizes ([bf1cd53](https://github.com/propeller-heads/tycho/commit/bf1cd53163c1329d4e02e8fc3bb5a4317dea257c))
+* reject negative pages and empty page sizes ([#1578](https://github.com/propeller-heads/tycho/issues/1578)) ([db41340](https://github.com/propeller-heads/tycho/commit/db41340c20b457c7eeccb9df4c3baea2e0f5f18e))
+
 ## [0.452.0](https://github.com/propeller-heads/tycho/compare/0.451.0...0.452.0) (2026-10-09)
 
 
