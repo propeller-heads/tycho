@@ -990,7 +990,7 @@ async fn process_update(
     match &update.payload {
         StreamUpdatePayload::Protocol(protocol_update) => info!(
             "Got protocol update with block {}, {} new pairs, and {} states",
-            protocol_update.block_number_or_timestamp,
+            protocol_update.block_number,
             protocol_update.new_pairs.len(),
             protocol_update.states.len()
         ),
@@ -1002,7 +1002,7 @@ async fn process_update(
         ),
         StreamUpdatePayload::PriceLevelStream(pls_update) => info!(
             "Got price level update targeting block {} with {} new pairs and {} states",
-            pls_update.block_number_or_timestamp,
+            pls_update.block_number,
             pls_update.new_pairs.len(),
             pls_update.states.len()
         ),
@@ -1052,7 +1052,7 @@ async fn process_update(
                 current_state.next_update_seq()
             };
 
-            let update_block_number = protocol_update.block_number_or_timestamp;
+            let update_block_number = protocol_update.block_number;
 
             if !update_seq.is_multiple_of(cli.test_every_n_updates) {
                 metrics::record_protocol_update_sampled_out();
@@ -1158,7 +1158,7 @@ async fn process_update(
                 let mut stats = stats
                     .write()
                     .expect("Failed to get write lock for statistics (record block)");
-                stats.record_block_processed(protocol_update.block_number_or_timestamp);
+                stats.record_block_processed(protocol_update.block_number);
             }
 
             block
@@ -1184,7 +1184,7 @@ async fn process_update(
         StreamUpdatePayload::PriceLevelStream(pls_update) => {
             // The quotes target the block Titan was building, so execution is simulated at
             // exactly that block: the overrides carry its timestamp.
-            let target_block = pls_update.block_number_or_timestamp;
+            let target_block = pls_update.block_number;
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
             // RPC failures propagate instead of counting as a miss: the miss metric means "the
             // chain did not reach the quoted block", not "the RPC was down".
