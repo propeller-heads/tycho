@@ -72,3 +72,8 @@ drops expired partitions of `protocol_state`, `component_balance` and `contract_
 `cleanup_orphaned_transactions()` deletes transaction rows nothing references any more (tracked via
 `transaction_cleanup_progress`). Both read the horizon from the `partition_retention_config` table
 (default 1 month). See `scripts/prune_transaction_table.md`.
+
+The live-row partitions (`protocol_state_default`, `component_balance_default`) are updated in place
+on every change, which bloats their `modify_tx` indexes without bound. Weekly pg_cron jobs rebuild
+them online with `REINDEX INDEX CONCURRENTLY` (Tuesday 09:20 UTC, a watchdog cancels after 30 min,
+invalid leftovers are dropped).

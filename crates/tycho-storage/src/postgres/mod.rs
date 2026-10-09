@@ -1763,3 +1763,49 @@ mod tests_partition_retention {
         .await;
     }
 }
+
+#[cfg(test)]
+mod tests_weekly_reindex {
+    use diesel::prelude::*;
+    use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+
+    use super::testing::run_against_db;
+
+    #[derive(QueryableByName)]
+    struct Job {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        schedule: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        command: String,
+    }
+
+    /// The weekly maintenance jobs are scheduled on Tuesdays and their commands run as-is,
+    /// the way pg_cron executes them (one statement, outside a transaction block).
+    #[tokio::test]
+    async fn test_weekly_reindex_jobs_scheduled_serial_db() {
+        run_against_db(|connection_pool| async move {
+            let mut conn = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+
+            let jobs = diesel::sql_query(
+                "SELECT schedule, command FROM cron.job
+                 WHERE jobname IN ('reindex_protocol_state_modify_tx',
+                                   'reindex_component_balance_modify_tx', 'drop_invalid_indexes')",
+            )
+            .load::<Job>(&mut conn)
+            .await
+            .expect("querying cron.job failed");
+            assert_eq!(jobs.len(), 3, "each maintenance job must be scheduled exactly once");
+
+            for job in &jobs {
+                assert!(job.schedule.ends_with(" * * 2"), "{} must run on Tuesdays", job.schedule);
+                conn.batch_execute(&job.command)
+                    .await
+                    .unwrap_or_else(|e| panic!("job command failed: {e}\n{}", job.command));
+            }
+        })
+        .await;
+    }
+}
