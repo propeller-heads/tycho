@@ -1,0 +1,64 @@
+specVersion: v0.1.0
+package:
+  name: "base_biconomy"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-biconomy"
+  description: "Biconomy PropAMM venue on Base: executor boards, venue makers and provider inventory"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/base_biconomy.wasm
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 52327804
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 52327804
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_watched
+    kind: store
+    initialBlock: 52327804
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 52327804
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+      - store: store_watched
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_protocol_components: "venue=0x000000Da21a0f02b2626874870b6447Db220C1EF&executor=0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26&tokens=0x4200000000000000000000000000000000000006,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf&bootstrap_block=52327812"
+  store_watched: "venue=0x000000Da21a0f02b2626874870b6447Db220C1EF&executor=0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26&tokens=0x4200000000000000000000000000000000000006,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf&bootstrap_block=52327812"
+  map_protocol_changes: "venue=0x000000Da21a0f02b2626874870b6447Db220C1EF&executor=0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26&tokens=0x4200000000000000000000000000000000000006,0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf&bootstrap_block=52327812"
+
+network: base

@@ -18,6 +18,7 @@ use tycho_simulation::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
+            biconomy::BiconomyState,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -458,6 +459,9 @@ impl ProtocolStreamProcessor {
             }
             "lunarbase" => {
                 stream = stream.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
+            }
+            "biconomy" => {
+                stream = stream.exchange::<BiconomyState>("biconomy", tvl_filter.clone(), None);
             }
             "ring_swap_v2" => {
                 stream =

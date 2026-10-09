@@ -1,0 +1,21 @@
+substreams_yaml_path: ./base-biconomy.yaml
+protocol_system: "biconomy"
+protocol_type_names:
+  - "biconomy_venue"
+module_name: "map_protocol_changes"
+# The venue holds no inventory: makers' providers pay fills, so the component has no token
+# balances to check.
+skip_balance_check: true
+tests:
+  - name: test_venue_component
+    start_block: 52327804
+    stop_block: 52330000
+    expected_components:
+      - id: "0x000000da21a0f02b2626874870b6447db220c1ef"
+        tokens:
+          - "0x4200000000000000000000000000000000000006"
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        creation_tx: "0xcbb87b13913b4f7490c25ef3c612ea4ce941bf028d749cfb90cd80ae95c44180"
+        # No maker has committed a board on Base yet, so there is nothing to simulate.
+        skip_simulation: true
