@@ -10022,6 +10022,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "lru 0.16.3",
+ "metrics",
  "pretty_assertions",
  "roaring",
  "rstest 0.24.0",

@@ -23,6 +23,7 @@ hex.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 lru.workspace = true
+metrics = "0.24"
 diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 diesel_migrations = "2.1.0"
 itertools = "0.12.1"
