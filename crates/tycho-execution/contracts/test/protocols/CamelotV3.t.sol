@@ -4,7 +4,7 @@ import "../TychoRouterTestSetup.sol";
 import {Constants} from "../Constants.sol";
 
 /// @dev Camelot V3 (Algebra V1.9) pools on Arbitrum One are executed by the
-/// unchanged UniswapV3Executor: the pool exposes the same `swap` entry point
+/// standard UniswapV3Executor: the pool exposes the same `swap` entry point
 /// and its `algebraSwapCallback` reaches the executor through the router's
 /// selector-agnostic fallback. The calldata comes from the Rust encoder test
 /// of the same name.

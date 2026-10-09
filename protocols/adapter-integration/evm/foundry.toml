@@ -11,7 +11,6 @@ evm_version = 'cancun'
 [rpc_endpoints]
 mainnet = "${ETH_RPC_URL}"
 sepolia = "${SEPOLIA_RPC_URL}"
-arbitrum = "${ARBITRUM_RPC_URL}"
 
 [fmt]
 line_length = 80

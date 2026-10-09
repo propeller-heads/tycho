@@ -22,9 +22,10 @@ use crate::encoding::{
 ///
 /// The executor funds the callback with the encoded input amount. Should the pool run out of
 /// liquidity before absorbing all of it, the surplus stays in the pool and only the router's
-/// minimum-output check bounds the loss, exactly as for Uniswap V3. Simulation refuses such
-/// trades up front: the adapter reverts with `LimitExceeded` instead of reporting a partial
-/// fill.
+/// minimum-output check bounds the loss, exactly as for Uniswap V3. Simulation reports such a
+/// trade as a partial fill, like `UniswapV3State`: `CamelotV3State::get_amount_out` returns
+/// `InvalidInput("Ticks exceeded", Some(partial))`, so a caller must encode the amount the
+/// pool absorbs, not the amount it asked for.
 ///
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
@@ -92,7 +93,7 @@ mod tests {
         // Camelot V3 WETH/USDC pool on Arbitrum One: token0 = WETH, token1 = USDC.
         let pool = ProtocolComponent {
             id: String::from("0xB1026b8e7276e7AC75410F1fcbbe21796e8f7526"),
-            protocol_system: String::from("vm:camelot_v3"),
+            protocol_system: String::from("camelot_v3"),
             ..Default::default()
         };
         let weth = Bytes::from("0x82af49447d8a07e3bd95bd0d56f35241523fbab1");

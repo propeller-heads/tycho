@@ -212,8 +212,8 @@ impl SwapEncoderRegistry {
             }
             // Camelot V3 (Algebra V1.9) pools have the same `swap` entry point and settle through
             // `algebraSwapCallback`; the dedicated encoder documents why the standard Uniswap V3
-            // executor runs them unchanged.
-            "vm:camelot_v3" => {
+            // executor runs them.
+            "camelot_v3" => {
                 Ok(Box::new(CamelotV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {

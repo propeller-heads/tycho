@@ -3658,7 +3658,7 @@ fn test_single_encoding_strategy_camelot_v3_arbitrum() {
     // WETH -> (Camelot V3 WETH/USDC) -> USDC on Arbitrum, executed by the Uniswap V3 executor
     let camelot_pool = ProtocolComponent {
         id: String::from("0xB1026b8e7276e7AC75410F1fcbbe21796e8f7526"),
-        protocol_system: String::from("vm:camelot_v3"),
+        protocol_system: String::from("camelot_v3"),
         ..Default::default()
     };
     let token_in = Bytes::from("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"); // WETH
