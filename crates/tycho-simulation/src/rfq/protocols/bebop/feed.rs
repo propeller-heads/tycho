@@ -126,7 +126,6 @@ impl BebopFeedBuilder {
     pub fn build(self) -> Result<BebopFeed, FeedError> {
         let chain =
             BebopSupportedChain::try_from(self.book_config.chain).map_err(FeedError::Fatal)?;
-        let url = format!("api.bebop.xyz/pmm/{}/v3", chain.as_str());
         Ok(BebopFeed {
             feed_config: self.feed_config,
             source: BebopBookSource {
@@ -134,8 +133,7 @@ impl BebopFeedBuilder {
                 book_config: self.book_config,
                 usd_quote_tokens: self.usd_quote_tokens,
                 client: Arc::new(BebopClient::new(
-                    format!("https://{url}/quote"),
-                    format!("wss://{url}/pricing?format=protobuf"),
+                    chain,
                     self.ws_key,
                     self.quote_timeout,
                     self.origin_address,

@@ -181,16 +181,18 @@ mod tests {
         body.to_string()
     }
 
-    /// The `/bid_ask` target of `pool` as the client requests it (checksummed address).
+    /// The `/bid_ask` target of `pool` on Ethereum as the client requests it: the chain's own
+    /// prefix, then the pool's checksummed address.
     fn bid_ask_target(pool: &str) -> String {
         let checksummed = bytes_to_address(&Bytes::from_str(pool).unwrap())
             .unwrap()
             .to_checksum(None);
-        format!("/{checksummed}/bid_ask")
+        format!("/public/v1/evm/1/{checksummed}/bid_ask")
     }
 
-    /// A source for `chain_endpoint` with an empty token universe and no TVL floor.
-    fn source(chain: Chain, chain_endpoint: &str, api_key: &str) -> MetricBookSource {
+    /// A source against the Metric deployment at `base_url`, with an empty token universe and no
+    /// TVL floor.
+    fn source(chain: Chain, base_url: &str, api_key: &str) -> MetricBookSource {
         MetricBookSource {
             protocol_system: PROTOCOL_SYSTEM,
             book_config: BookFeedConfig {
@@ -199,8 +201,8 @@ mod tests {
                 min_tvl_usd: 0.0,
             },
             client: MetricClient::new(
-                format!("{chain_endpoint}/metadata"),
-                chain_endpoint.to_string(),
+                &reqwest::Url::parse(base_url).unwrap(),
+                chain.try_id().unwrap(),
                 api_key.to_string(),
                 DEFAULT_BID_ASK_CONCURRENCY,
             ),
@@ -253,7 +255,7 @@ mod tests {
     #[test]
     fn build_pair_component_and_state() {
         let metadata = metadata();
-        let source = source(Chain::Ethereum, "https://metric.example/public/v1/evm/1", "key");
+        let source = source(Chain::Ethereum, "https://metric.example", "key");
         let (component, state) = source.build_book(
             metadata.pool_address.clone(),
             weth(),
@@ -299,7 +301,7 @@ mod tests {
             None,
         );
         let server = spawn_http_server(move |target| {
-            if target.starts_with("/metadata?") {
+            if target.starts_with("/public/v1/evm/1/metadata?") {
                 return Some(("200 OK", page.clone()));
             }
             if target == bid_ask_target(HEALTHY) {
@@ -358,7 +360,7 @@ mod tests {
     #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
     async fn live_metric_poll_fits_the_request_timeout_at_the_default_concurrency() {
         let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
-        let mut source = source(Chain::Base, "https://api.metric.xyz/public/v1/evm/8453", &api_key);
+        let mut source = source(Chain::Base, "https://api.metric.xyz", &api_key);
         let metadata = source
             .client
             .fetch_metadata()

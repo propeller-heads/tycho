@@ -17,9 +17,12 @@ use crate::{
     evm::protocol::utils::bytes_to_address,
     rfq::{
         errors::RFQError,
-        protocols::bebop::models::{BebopOrderToSign, BebopQuoteResponse},
+        protocols::bebop::models::{BebopOrderToSign, BebopQuoteResponse, BebopSupportedChain},
     },
 };
+
+/// Host serving Bebop's PMM API; every per-chain path hangs off it.
+const BEBOP_API_HOST: &str = "api.bebop.xyz";
 
 /// Requests binding Bebop quotes. One instance is shared (via `Arc`) by every state a
 /// [`BebopFeed`](super::feed::BebopFeed) emits, so all of them reuse the same HTTP
@@ -48,18 +51,20 @@ pub struct BebopClient {
 }
 
 impl BebopClient {
+    /// A client for Bebop's public API on `chain`, whose quote and pricing endpoints share the
+    /// chain's own path.
     pub fn new(
-        quote_endpoint: String,
-        pricing_ws_endpoint: String,
+        chain: BebopSupportedChain,
         key: String,
         quote_timeout: Duration,
         origin_address: Option<Bytes>,
         origin_target: Option<Bytes>,
         origin_source: Option<String>,
     ) -> Self {
+        let chain_path = format!("{BEBOP_API_HOST}/pmm/{}/v3", chain.as_str());
         BebopClient {
-            quote_endpoint,
-            pricing_ws_endpoint,
+            quote_endpoint: format!("https://{chain_path}/quote"),
+            pricing_ws_endpoint: format!("wss://{chain_path}/pricing?format=protobuf"),
             key,
             quote_timeout,
             origin_address,
@@ -343,8 +348,7 @@ mod tests {
 
     fn test_client() -> BebopClient {
         BebopClient::new(
-            "https://api.bebop.xyz/pmm/ethereum/v3/quote".to_string(),
-            "wss://api.bebop.xyz/pmm/ethereum/v3/pricing?format=protobuf".to_string(),
+            BebopSupportedChain::Ethereum,
             "secret_key".to_string(),
             Duration::from_secs(30),
             None,
@@ -504,16 +508,20 @@ mod tests {
         addr
     }
 
+    /// A client whose quotes go to a server of the test's own, with everything else as
+    /// [`BebopClient::new`] builds it for Ethereum.
     fn create_test_client(quote_endpoint: String, quote_timeout: Duration) -> BebopClient {
-        BebopClient::new(
+        BebopClient {
             quote_endpoint,
-            "wss://api.bebop.xyz/pmm/ethereum/v3/pricing?format=protobuf".to_string(),
-            "test_key".to_string(),
-            quote_timeout,
-            None,
-            None,
-            None,
-        )
+            ..BebopClient::new(
+                BebopSupportedChain::Ethereum,
+                "test_key".to_string(),
+                quote_timeout,
+                None,
+                None,
+                None,
+            )
+        }
     }
 
     /// Helper function to create test quote params matching aggregate_order.json
@@ -683,6 +691,25 @@ mod tests {
                 .get("calldata")
                 .unwrap()[..4],
             ROUTER_SWAP_SELECTOR
+        );
+    }
+
+    /// Both endpoints Bebop serves a chain under hang off that chain's own path.
+    #[test]
+    fn the_endpoints_carry_the_chain_the_client_prices_on() {
+        let client = BebopClient::new(
+            BebopSupportedChain::Base,
+            "secret_key".to_string(),
+            Duration::from_secs(30),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(client.quote_endpoint, "https://api.bebop.xyz/pmm/base/v3/quote");
+        assert_eq!(
+            client.pricing_ws_endpoint,
+            "wss://api.bebop.xyz/pmm/base/v3/pricing?format=protobuf"
         );
     }
 }

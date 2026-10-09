@@ -4,6 +4,8 @@
 
 use std::{future::Future, num::NonZeroUsize, time::Duration};
 
+use reqwest::Url;
+
 use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     pamm::protocols::metric::{
@@ -113,9 +115,9 @@ impl MetricFeedBuilder {
         self
     }
 
-    /// Fails for an empty trading key, and for a chain with no numeric chain id, which is all
-    /// Metric's API is addressed by. Whether the venue serves that chain is Metric's own
-    /// answer, and the first poll carries it.
+    /// Fails for an empty trading key, for a base URL that is not one, and for a chain with no
+    /// numeric chain id, which is all Metric's API is addressed by. Whether the venue serves
+    /// that chain is Metric's own answer, and the first poll carries it.
     pub fn build(self) -> Result<MetricFeed, FeedError> {
         // Metric answers an empty bearer token with the same `Unknown chainId` it refuses an
         // unserved chain with, where a key it rejects is a plain 401. A key that authenticates
@@ -124,16 +126,18 @@ impl MetricFeedBuilder {
             return Err(FeedError::InvalidInput("Metric trading key is empty".to_string()));
         }
         let chain_id = self.book_config.chain_id()?;
-        let base_url = self.base_url.trim_end_matches('/');
-        let chain_endpoint = format!("{base_url}/public/v1/evm/{chain_id}");
+        // A base URL that is not one fails every poll the same way, so the feed does not start.
+        let base_url = Url::parse(&self.base_url).map_err(|error| {
+            FeedError::InvalidInput(format!("Metric base URL {}: {error}", self.base_url))
+        })?;
         Ok(MetricFeed {
             feed_config: self.feed_config,
             source: MetricBookSource {
                 protocol_system: self.protocol_system,
                 book_config: self.book_config,
                 client: MetricClient::new(
-                    format!("{chain_endpoint}/metadata"),
-                    chain_endpoint,
+                    &base_url,
+                    chain_id,
                     self.api_key,
                     self.bid_ask_concurrency,
                 ),
@@ -179,6 +183,18 @@ mod tests {
 
         assert!(!rendered.contains("secret_key"));
         assert!(rendered.contains("metric.example"));
+    }
+
+    /// A base URL the venue cannot be reached at would fail every poll alike, so the feed does
+    /// not start.
+    #[test]
+    fn a_base_url_that_is_not_one_is_rejected() {
+        let error = builder(Chain::Ethereum)
+            .base_url("api.metric.xyz".to_string())
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
     }
 
     /// Metric answers an empty bearer token the way it refuses a chain, which no retry would

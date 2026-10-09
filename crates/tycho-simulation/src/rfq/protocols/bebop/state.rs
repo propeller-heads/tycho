@@ -194,7 +194,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::bebop::models::BebopPriceData;
+    use crate::rfq::protocols::bebop::models::{BebopPriceData, BebopSupportedChain};
 
     fn wbtc() -> Token {
         Token::new(
@@ -238,8 +238,7 @@ mod tests {
 
     fn empty_client() -> Arc<BebopClient> {
         Arc::new(BebopClient::new(
-            "https://api.bebop.xyz/pmm/ethereum/v3/quote".to_string(),
-            "wss://api.bebop.xyz/pmm/ethereum/v3/pricing?format=protobuf".to_string(),
+            BebopSupportedChain::Ethereum,
             String::new(),
             Duration::from_secs(30),
             None,

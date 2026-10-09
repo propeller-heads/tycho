@@ -5,7 +5,7 @@
 use std::num::NonZeroUsize;
 
 use futures::{stream, StreamExt};
-use reqwest::Client;
+use reqwest::{Client, Url};
 use tokio::time::{timeout, Duration};
 use tracing::debug;
 use tycho_common::Bytes;
@@ -57,14 +57,18 @@ pub struct MetricClient {
 }
 
 impl MetricClient {
+    /// A client for the Metric deployment at `base_url`, serving the chain with `chain_id`.
+    /// Every endpoint it requests hangs off that chain's own prefix.
     pub fn new(
-        metadata_endpoint: String,
-        chain_endpoint: String,
+        base_url: &Url,
+        chain_id: u64,
         api_key: String,
         bid_ask_concurrency: NonZeroUsize,
     ) -> Self {
+        let chain_endpoint =
+            format!("{}/public/v1/evm/{chain_id}", base_url.as_str().trim_end_matches('/'));
         MetricClient {
-            metadata_endpoint,
+            metadata_endpoint: format!("{chain_endpoint}/metadata"),
             chain_endpoint,
             api_key,
             bid_ask_concurrency,
@@ -179,10 +183,10 @@ mod tests {
         serde_json::json!({ "data": data, "nextOffset": next_offset }).to_string()
     }
 
-    fn client(chain_endpoint: &str, api_key: &str) -> MetricClient {
+    fn client(base_url: &str, chain_id: u64, api_key: &str) -> MetricClient {
         MetricClient::new(
-            format!("{chain_endpoint}/metadata"),
-            chain_endpoint.to_string(),
+            &Url::parse(base_url).unwrap(),
+            chain_id,
             api_key.to_string(),
             DEFAULT_BID_ASK_CONCURRENCY,
         )
@@ -216,7 +220,7 @@ mod tests {
         })
         .await;
         let endpoint = server.url();
-        let client = client(&endpoint, "key");
+        let client = client(&endpoint, Chain::Ethereum.id(), "key");
 
         // A broken stop condition polls the same page forever; the timeout turns that into a
         // failure.
@@ -243,7 +247,7 @@ mod tests {
     #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
     async fn live_metric_api_serves_quotable_pools(#[case] chain_id: u64) {
         let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
-        let client = client(&format!("https://api.metric.xyz/public/v1/evm/{chain_id}"), &api_key);
+        let client = client("https://api.metric.xyz", chain_id, &api_key);
         let metadata = client.fetch_metadata().await.unwrap();
         assert!(!metadata.is_empty());
 
@@ -282,6 +286,23 @@ mod tests {
         assert!(ask >= bid);
     }
 
+    /// Every endpoint hangs off the chain's own prefix, whether or not the base URL is given
+    /// with a trailing slash.
+    #[test]
+    fn the_endpoints_carry_the_chain_the_client_serves() {
+        let chain_id = Chain::Arbitrum.id();
+        let client = client("https://api.metric.xyz/", chain_id, "key");
+
+        assert_eq!(
+            client.chain_endpoint,
+            format!("https://api.metric.xyz/public/v1/evm/{chain_id}")
+        );
+        assert_eq!(
+            client.metadata_endpoint,
+            format!("https://api.metric.xyz/public/v1/evm/{chain_id}/metadata")
+        );
+    }
+
     /// Metric answers a pool it does not know with the same 404 as a chain it does not serve, so
     /// only the refusal that names the chain ends the feed.
     #[rstest]
@@ -296,7 +317,7 @@ mod tests {
         #[case] fatal: bool,
     ) {
         let server = spawn_http_server(move |_| Some(("404 Not Found", body.to_string()))).await;
-        let client = client(&server.url(), "key");
+        let client = client(&server.url(), Chain::Unichain.id(), "key");
 
         let error = client
             .fetch_metadata()
@@ -312,8 +333,7 @@ mod tests {
     #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
     async fn live_metric_api_refuses_a_chain_it_does_not_serve() {
         let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
-        let chain_id = Chain::Unichain.id();
-        let client = client(&format!("https://api.metric.xyz/public/v1/evm/{chain_id}"), &api_key);
+        let client = client("https://api.metric.xyz", Chain::Unichain.id(), &api_key);
 
         let error = client
             .fetch_metadata()

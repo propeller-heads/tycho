@@ -190,13 +190,15 @@ mod tests {
     use super::*;
     use crate::{
         book::test_token_map,
-        rfq::protocols::bebop::{models::BebopPriceData, PROTOCOL_SYSTEM},
+        rfq::protocols::bebop::{
+            models::{BebopPriceData, BebopSupportedChain},
+            PROTOCOL_SYSTEM,
+        },
     };
 
     fn test_client() -> Arc<BebopClient> {
         Arc::new(BebopClient::new(
-            "https://bebop.example/quote".to_string(),
-            "wss://bebop.example/pricing".to_string(),
+            BebopSupportedChain::Ethereum,
             "test_key".to_string(),
             std::time::Duration::from_secs(5),
             None,
