@@ -227,6 +227,7 @@ impl HashflowClient {
             };
 
             if response.status() != 200 {
+                let status = response.status();
                 let err_msg = match response.text().await {
                     Ok(text) => text,
                     Err(e) => {
@@ -242,8 +243,11 @@ impl HashflowClient {
                         }
                     }
                 };
-                last_error = Some(RFQError::FatalError(format!(
-                    "Failed to send Hashflow quote request: {err_msg}",
+                // The venue answering a quote request at all means the request reached it,
+                // so a status it refuses with is about this attempt: a rate limit, a gateway
+                // between us and it, or a key to be fixed at the venue while the feed runs on.
+                last_error = Some(RFQError::ConnectionError(format!(
+                    "Hashflow quote request failed with {status}: {err_msg}",
                 )));
                 if attempt < MAX_RETRIES - 1 {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
@@ -392,9 +396,9 @@ impl HashflowClient {
                             "Hashflow API error: request failed without an error".to_string(),
                         ));
                     };
-                    // A declined trade leaves the route to be priced elsewhere; Hashflow
-                    // publishes no catalogue of its codes, so anything else is taken to be the
-                    // request itself being wrong.
+                    // A declined trade leaves the route to be priced elsewhere; a code the
+                    // venue has not been seen to decline with is taken to be the request itself
+                    // being wrong.
                     return Err(if error.declines_the_trade() {
                         RFQError::QuoteNotFound(format!("Hashflow quote: {error}"))
                     } else {
@@ -540,6 +544,24 @@ mod tests {
         assert!(!rendered.contains("test_user"));
         assert!(!rendered.contains("test_key"));
         assert!(rendered.contains("hashflow.example"));
+    }
+
+    /// A status the venue refuses a quote with says the request reached it and this attempt
+    /// failed — a rate limit, a gateway in between, a key to be fixed at the venue — so the
+    /// state asks again instead of being retired.
+    #[tokio::test]
+    async fn a_refused_status_leaves_the_component_quotable() {
+        let server =
+            spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RFQError::ConnectionError(_)), "{error}");
+        assert!(error.to_string().contains("429"), "{error}");
     }
 
     /// Helper function to create test quote params

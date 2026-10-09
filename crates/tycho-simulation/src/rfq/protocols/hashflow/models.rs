@@ -17,6 +17,11 @@ pub struct HashflowError {
     pub message: String,
 }
 
+/// The codes below are the ones Hashflow has been seen to answer with. The venue publishes no
+/// catalogue of them — the numbered vocabulary in its documentation belongs to the market-maker
+/// WebSocket API, not to the taker endpoints these reach — and one code covers several
+/// conditions, so what a code not listed here means is unknown, and telling two of them apart
+/// can need the message.
 impl HashflowError {
     /// No maker quotes the request: the one it was addressed to declined it, or is unknown to
     /// the API.
@@ -34,9 +39,8 @@ impl HashflowError {
 
     /// Whether this is Hashflow stating it does not price the chain it was asked about.
     ///
-    /// The venue publishes no catalogue of these codes, and the one it answers here with covers
-    /// an unknown market maker and an unknown chain type too, so what it refused is in the
-    /// message alone.
+    /// The code it answers here with covers an unknown market maker and an unknown chain type
+    /// too, so what it refused is in the message alone.
     pub fn refuses_the_chain(&self) -> bool {
         self.message
             .starts_with("Invalid chainId")

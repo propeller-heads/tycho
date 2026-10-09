@@ -192,7 +192,8 @@ impl LiquoriceClient {
                 }
             };
 
-            if response.status() != 200 {
+            let status = response.status();
+            if status != 200 {
                 let err_msg = match response.text().await {
                     Ok(text) => text,
                     Err(e) => {
@@ -208,8 +209,11 @@ impl LiquoriceClient {
                         }
                     }
                 };
-                last_error = Some(RFQError::FatalError(format!(
-                    "Failed to send Liquorice quote request: {err_msg}",
+                // The venue answering a quote request at all means the request reached it,
+                // so a status it refuses with is about this attempt: a rate limit, a gateway
+                // between us and it, or a key to be fixed at the venue while the feed runs on.
+                last_error = Some(RFQError::ConnectionError(format!(
+                    "Liquorice quote request failed with {status}: {err_msg}",
                 )));
                 if attempt < MAX_RETRIES - 1 {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
@@ -629,6 +633,24 @@ mod tests {
 
         let quote = LiquoriceClient::process_quote_response(response, &params).unwrap();
         assert_eq!(quote.amount_out, BigUint::from(3_500_000u64));
+    }
+
+    /// A status the venue refuses a quote with says the request reached it and this attempt
+    /// failed — a rate limit, a gateway in between, a key to be fixed at the venue — so the
+    /// state asks again instead of being retired.
+    #[tokio::test]
+    async fn a_refused_status_leaves_the_component_quotable() {
+        let server =
+            spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RFQError::ConnectionError(_)), "{error}");
+        assert!(error.to_string().contains("429"), "{error}");
     }
 
     fn create_test_quote_params() -> GetAmountOutParams {

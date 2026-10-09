@@ -310,10 +310,19 @@ impl BebopClient {
 
                 Ok(signed_quote)
             }
-            BebopQuoteResponse::Error(err) => Err(RFQError::FatalError(format!(
-                "Bebop API error: code {} - {} (requestId: {})",
-                err.error.error_code, err.error.message, err.error.request_id
-            ))),
+            BebopQuoteResponse::Error(err) => {
+                let message = format!(
+                    "Bebop API error: code {} - {} (requestId: {})",
+                    err.error.error_code, err.error.message, err.error.request_id
+                );
+                // A code the venue has not been seen to decline a trade with is taken to be
+                // the request itself being wrong.
+                Err(if err.error.declines_the_trade() {
+                    RFQError::QuoteNotFound(message)
+                } else {
+                    RFQError::FatalError(message)
+                })
+            }
         }
     }
 }
@@ -325,11 +334,12 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use rstest::rstest;
     use tokio::net::TcpListener;
     use tycho_common::models::protocol::GetAmountOutParams;
 
     use super::*;
-    use crate::rfq::errors::RFQError;
+    use crate::{rfq::errors::RFQError, snapshot_feed::http::test_support::spawn_http_server};
 
     /// Quote responses recorded from Bebop's API.
     const AGGREGATE_ORDER: &str = include_str!("test_responses/aggregate_order.json");
@@ -522,6 +532,51 @@ mod tests {
                 None,
             )
         }
+    }
+
+    /// Bebop names the trade it will not do in an error body under HTTP 200; the two codes and
+    /// their wording are what the production error log records. A size past its depth or below
+    /// its minimum leaves the route to be priced elsewhere, where a code it has not been seen to
+    /// decline with is the request being wrong.
+    #[rstest]
+    #[case::insufficient_liquidity(
+        102,
+        "InsufficientLiquidity: Insufficient liquidity for pair",
+        true
+    )]
+    #[case::min_size(104, "MinSize: Request quotes over $1.", true)]
+    #[case::a_code_it_has_not_declined_with(1, "Something else went wrong", false)]
+    #[tokio::test]
+    async fn only_a_code_that_is_not_a_decline_is_fatal(
+        #[case] code: u32,
+        #[case] says: &'static str,
+        #[case] declined: bool,
+    ) {
+        let server = spawn_http_server(move |_| {
+            Some((
+                "200 OK",
+                format!(
+                    r#"{{"error":{{"errorCode":{code},"message":"{says}","requestId":"abc"}}}}"#
+                ),
+            ))
+        })
+        .await;
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params())
+            .await
+            .unwrap_err();
+
+        assert!(
+            if declined {
+                matches!(error, RFQError::QuoteNotFound(_))
+            } else {
+                matches!(error, RFQError::FatalError(_))
+            },
+            "{error}"
+        );
+        assert!(error.to_string().contains(says), "{error}");
     }
 
     /// Helper function to create test quote params matching aggregate_order.json

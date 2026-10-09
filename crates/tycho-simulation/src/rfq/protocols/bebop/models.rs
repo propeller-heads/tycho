@@ -144,6 +144,26 @@ pub struct BebopErrorDetail {
     pub request_id: String,
 }
 
+/// The codes below are the ones Bebop has been seen to answer with, taken from its messages,
+/// which carry a name beside the number. Bebop's published API reference documents an HTTP 422
+/// for the quote endpoint and no catalogue of these
+/// (<https://docs.bebop.xyz/rfq-api/api-reference/quote>), so what a code not listed here means
+/// is unknown, and the list grows by observing the venue.
+impl BebopErrorDetail {
+    /// The book has less depth than the trade asks for.
+    const INSUFFICIENT_LIQUIDITY: u32 = 102;
+
+    /// The trade is below the smallest size the venue quotes.
+    const MIN_SIZE: u32 = 104;
+
+    /// Whether this is Bebop declining the trade rather than the request being wrong: the size
+    /// asked for is past its depth or below its minimum. Both are answers about one trade at one
+    /// moment, which the same book quotes at another size.
+    pub fn declines_the_trade(&self) -> bool {
+        matches!(self.error_code, Self::INSUFFICIENT_LIQUIDITY | Self::MIN_SIZE)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BebopQuotePartial {
