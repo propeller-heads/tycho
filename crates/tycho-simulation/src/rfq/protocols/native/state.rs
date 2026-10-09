@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::{
     book::{
+        component::PairState,
         levels::Levels,
         sim::{self, SwapDirection},
     },
@@ -40,16 +41,6 @@ pub struct NativeState {
 }
 
 impl NativeState {
-    /// The pair's base token (the token whose amounts the price levels are quoted in).
-    pub fn base_token(&self) -> &Token {
-        &self.base_token
-    }
-
-    /// The pair's quote token.
-    pub fn quote_token(&self) -> &Token {
-        &self.quote_token
-    }
-
     fn enforce_minimum(
         amount: &BigUint,
         minimum: f64,
@@ -89,6 +80,16 @@ impl NativeState {
             SwapDirection::BaseToQuote => Cow::Borrowed(&self.book.bids.levels),
             SwapDirection::QuoteToBase => Cow::Owned(self.book.asks.levels.invert()),
         }
+    }
+}
+
+impl PairState for NativeState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 }
 

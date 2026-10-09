@@ -16,6 +16,7 @@ use tycho_common::{
 
 use crate::{
     book::{
+        component::PairState,
         levels::Levels,
         sim::{self, SwapDirection},
     },
@@ -46,16 +47,6 @@ pub struct BebopState {
 }
 
 impl BebopState {
-    /// The pair's base token (the token whose amounts the price levels are quoted in).
-    pub fn base_token(&self) -> &Token {
-        &self.base_token
-    }
-
-    /// The pair's quote token.
-    pub fn quote_token(&self) -> &Token {
-        &self.quote_token
-    }
-
     /// The ladder a swap in `direction` consumes, in the units of the token sold: the bids as
     /// published for selling base, the asks re-expressed per quote unit for selling quote.
     fn ladder(&self, direction: SwapDirection) -> Cow<'_, Levels> {
@@ -63,6 +54,16 @@ impl BebopState {
             SwapDirection::BaseToQuote => Cow::Borrowed(&self.book.bids),
             SwapDirection::QuoteToBase => Cow::Owned(self.book.asks.invert()),
         }
+    }
+}
+
+impl PairState for BebopState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 }
 

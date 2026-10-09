@@ -13,6 +13,9 @@ pub const PROTOCOL_SYSTEM: &str = "rfq:metric";
 /// given `with_fallback_router()`.
 pub const FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 
+/// Component type stamped on every pair this integration emits.
+pub(crate) const PROTOCOL_TYPE: &str = "metric_pool";
+
 #[cfg(test)]
 mod tests {
     use super::*;

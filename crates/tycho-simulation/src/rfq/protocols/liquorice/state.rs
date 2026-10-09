@@ -15,7 +15,10 @@ use tycho_common::{
 };
 
 use crate::{
-    book::sim::{self, SwapDirection},
+    book::{
+        component::PairState,
+        sim::{self, SwapDirection},
+    },
     rfq::protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
 };
 
@@ -34,15 +37,6 @@ pub struct LiquoriceState {
 }
 
 impl LiquoriceState {
-    /// The pair's base token (the token whose amounts the price levels are quoted in).
-    pub fn base_token(&self) -> &Token {
-        &self.base_token
-    }
-
-    /// The pair's quote token.
-    pub fn quote_token(&self) -> &Token {
-        &self.quote_token
-    }
     /// The levels price one direction only: selling base for quote.
     fn valid_direction_guard(
         &self,
@@ -73,6 +67,16 @@ impl LiquoriceState {
         self.prices_by_mm
             .values()
             .filter(|price| !price.levels.is_empty())
+    }
+}
+
+impl PairState for LiquoriceState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 }
 

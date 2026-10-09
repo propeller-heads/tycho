@@ -14,7 +14,7 @@ use tycho_common::{
 };
 
 use crate::{
-    book::sim,
+    book::{component::PairState, sim},
     pamm::protocols::metric::models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
 };
 
@@ -33,16 +33,6 @@ pub struct MetricState {
 }
 
 impl MetricState {
-    /// The pool's token0, whose amounts the depth is quoted in.
-    pub fn base_token(&self) -> &Token {
-        &self.base_token
-    }
-
-    /// The pool's token1.
-    pub fn quote_token(&self) -> &Token {
-        &self.quote_token
-    }
-
     fn direction(
         &self,
         token_in: &Bytes,
@@ -118,6 +108,16 @@ struct DepthQuote {
 struct DepthFill {
     output: BigUint,
     exhausted: bool,
+}
+
+impl PairState for MetricState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
+    }
 }
 
 #[typetag::serde]

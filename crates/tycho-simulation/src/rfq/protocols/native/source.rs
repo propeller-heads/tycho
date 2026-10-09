@@ -4,19 +4,18 @@ use std::{
 };
 
 use tracing::{debug, warn};
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
     book::{
-        component::{pair_component, pair_component_id},
-        Book, BookFeedConfig, BookSnapshot, ReceivedAt,
+        component::{pair_book, pair_component_id},
+        BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
-    protocol::models::ProtocolComponent,
     rfq::protocols::native::{
         client::NativeClient,
         models::{NativeBookSide, NativeOrderbookEntry, NativeOrderbookSide, NativePriceData},
         state::NativeState,
-        PROTOCOL_SYSTEM,
+        PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -85,77 +84,6 @@ impl NativeBookSource {
             Some(self.select_tvl_conversion_book(&book.quote_address, grouped)?)
         };
         book.calculate_tvl(conversion_book)
-    }
-
-    /// Builds the simulation component and state for one grouped book. The state shares this
-    /// source's client, so binding quotes carry the feed's full configuration.
-    fn build_book(
-        &self,
-        component_id: Bytes,
-        base_token: Token,
-        quote_token: Token,
-        book: NativePriceData,
-    ) -> (ProtocolComponent, NativeState) {
-        let state = NativeState {
-            base_token: base_token.clone(),
-            quote_token: quote_token.clone(),
-            book,
-            client: Arc::clone(&self.client),
-        };
-        let component = pair_component(
-            component_id,
-            PROTOCOL_SYSTEM,
-            "native_relay_pool",
-            self.book_config.chain,
-            base_token,
-            quote_token,
-        );
-        (component, state)
-    }
-}
-
-impl NativeBookSource {
-    /// Native Relay publishes its complete aggregated orderbook in one request; every poll
-    /// rebuilds the whole set of books from it.
-    async fn fetch_books(&self) -> Result<HashMap<String, Book>, FeedError> {
-        let grouped = group_orderbook(self.client.fetch_orderbook().await?);
-        // TVL normalization looks across all grouped books (unrequested ones included, as
-        // conversion books), so it runs before the books are consumed.
-        let tvls: HashMap<Bytes, Option<f64>> = grouped
-            .iter()
-            .map(|(component_id, book)| (component_id.clone(), self.normalized_tvl(book, &grouped)))
-            .collect();
-
-        let mut books = HashMap::new();
-        for (component_id, book) in grouped {
-            // Only requested markets become components.
-            let Some((base_token, quote_token)) = self
-                .book_config
-                .pair_tokens(&book.base_address, &book.quote_address)
-            else {
-                continue;
-            };
-            let Some(tvl) = tvls[&component_id] else {
-                debug!(
-                    %component_id,
-                    "skipping pair, no book prices its quote token in a USD quote token"
-                );
-                continue;
-            };
-            if !self
-                .book_config
-                .clears_min_tvl(tvl, &component_id)
-            {
-                continue;
-            }
-
-            let book_key = component_id.to_string();
-            let (component, state) =
-                self.build_book(component_id, base_token.clone(), quote_token.clone(), book);
-            // Native's orderbook carries no per-book timestamp.
-            books.insert(book_key, Book { component, state: Arc::new(state), updated_at: None });
-        }
-        Ok(books)
     }
 }
 
@@ -249,10 +177,57 @@ fn usd_liquidity(book: &NativePriceData, usd_token: &Bytes) -> Option<f64> {
 impl HttpSource for NativeBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
+    /// Native Relay publishes its complete aggregated orderbook in one request; every poll
+    /// rebuilds the whole set of books from it.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
-        self.fetch_books()
-            .await
-            .map(BookSnapshot::received_now)
+        let grouped = group_orderbook(self.client.fetch_orderbook().await?);
+        // TVL normalization looks across all grouped books (unrequested ones included, as
+        // conversion books), so it runs before the books are consumed.
+        let tvls: HashMap<Bytes, Option<f64>> = grouped
+            .iter()
+            .map(|(component_id, book)| (component_id.clone(), self.normalized_tvl(book, &grouped)))
+            .collect();
+
+        let mut books = Books::new();
+        for (component_id, book) in grouped {
+            // Only requested markets become components.
+            let Some((base_token, quote_token)) = self
+                .book_config
+                .pair_tokens(&book.base_address, &book.quote_address)
+            else {
+                continue;
+            };
+            let Some(tvl) = tvls[&component_id] else {
+                debug!(
+                    %component_id,
+                    "skipping pair, no book prices its quote token in a USD quote token"
+                );
+                continue;
+            };
+            if !self
+                .book_config
+                .clears_min_tvl(tvl, &component_id)
+            {
+                continue;
+            }
+
+            let state = NativeState {
+                base_token: base_token.clone(),
+                quote_token: quote_token.clone(),
+                book,
+                client: Arc::clone(&self.client),
+            };
+            // Native's orderbook carries no per-book timestamp.
+            books.insert(pair_book(
+                PROTOCOL_SYSTEM,
+                PROTOCOL_TYPE,
+                self.book_config.chain,
+                component_id,
+                state,
+                None,
+            ));
+        }
+        Ok(BookSnapshot::received_now(books))
     }
 }
 
@@ -262,7 +237,7 @@ mod tests {
 
     use rstest::rstest;
     use tokio::time::{timeout, Duration};
-    use tycho_common::{models::Chain, simulation::protocol_sim::ProtocolSim};
+    use tycho_common::models::Chain;
 
     use super::*;
     use crate::{
@@ -459,12 +434,21 @@ mod tests {
         let base_token = source.book_config.tokens[&weth].clone();
         let quote_token = source.book_config.tokens[&usdt].clone();
 
-        let (component, state) = source.build_book(
+        let state = NativeState {
+            base_token: base_token.clone(),
+            quote_token: quote_token.clone(),
+            book: book.clone(),
+            client: Arc::clone(&source.client),
+        };
+        let published = pair_book(
+            PROTOCOL_SYSTEM,
+            PROTOCOL_TYPE,
+            source.book_config.chain,
             component_id.clone(),
-            base_token.clone(),
-            quote_token.clone(),
-            book.clone(),
+            state,
+            None,
         );
+        let component = published.component;
 
         assert_eq!(component.id, component_id);
         assert_eq!(component.protocol_system, PROTOCOL_SYSTEM);
@@ -478,7 +462,7 @@ mod tests {
         assert_eq!(book.asks.levels.len(), 1);
         let expected =
             NativeState { base_token, quote_token, book, client: Arc::clone(&source.client) };
-        assert!(state.eq(&expected), "state should carry the grouped book");
+        assert!(published.state.eq(&expected), "the published book should carry the grouped book");
     }
 
     #[test]
@@ -824,10 +808,11 @@ mod tests {
         let source =
             test_source(server.url(), &[&weth, &usdt], HashSet::from([usdc]), tvl_threshold);
 
-        let books = timeout(Duration::from_secs(5), source.fetch_books())
+        let books = timeout(Duration::from_secs(5), source.fetch())
             .await
             .expect("orderbook poll timed out")
-            .expect("orderbook poll failed");
+            .expect("orderbook poll failed")
+            .books;
 
         if expect_market {
             assert_eq!(books.len(), 1, "helper must not be emitted");

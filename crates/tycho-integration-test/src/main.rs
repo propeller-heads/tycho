@@ -39,7 +39,7 @@ use tycho_simulation::{
     protocol::models::ProtocolComponent,
     rfq::protocols::{
         hashflow::{self, state::HashflowState},
-        liquorice::{self, state::LiquoriceState},
+        liquorice,
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
@@ -1674,9 +1674,8 @@ async fn process_state(
     // Get all the possible swap directions
     let swap_directions = match component.protocol_system.as_str() {
         hashflow::PROTOCOL_SYSTEM => {
-            // Hashflow only supports swaps between the requested base and quote tokens
-            // WARN: we read from state because the component.tokens original order
-            // is modified here: src/protocol/models.rs: ProtocolComponent::from_with_tokens
+            // Hashflow prices one direction, which a book's component carries as the order of
+            // its two tokens.
             let Some(state) = state
                 .as_any()
                 .downcast_ref::<HashflowState>()
@@ -1687,17 +1686,10 @@ async fn process_state(
             // Hashflow rejects quote requests below the first level's quantity; the amount in is
             // raised to this value.
             min_amount = state.min_amount_in();
-            vec![(state.base_token().clone(), state.quote_token().clone())]
+            vec![(component.tokens[0].clone(), component.tokens[1].clone())]
         }
         liquorice::PROTOCOL_SYSTEM => {
-            let Some(state) = state
-                .as_any()
-                .downcast_ref::<LiquoriceState>()
-            else {
-                warn!("Failed to downcast state to LiquoriceState");
-                return HashMap::new();
-            };
-            vec![(state.base_token().clone(), state.quote_token().clone())]
+            vec![(component.tokens[0].clone(), component.tokens[1].clone())]
         }
         _ => component
             .tokens

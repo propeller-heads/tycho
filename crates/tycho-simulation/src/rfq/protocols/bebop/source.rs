@@ -1,26 +1,23 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use chrono::DateTime;
 use http::Request;
 use itertools::Itertools;
 use prost::Message as ProstMessage;
 use tracing::{debug, warn};
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
     book::{
-        component::{pair_component, pair_component_id},
+        component::{pair_book, pair_component_id},
         wire::EntryReader,
-        Book, BookFeedConfig, BookSnapshot, ReceivedAt,
+        BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
-    protocol::models::ProtocolComponent,
     rfq::protocols::bebop::{
         client::BebopClient,
         models::{BebopBook, BebopPricingUpdate},
         state::BebopState,
+        PROTOCOL_TYPE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -45,34 +42,6 @@ pub struct BebopBookSource {
 }
 
 impl BebopBookSource {
-    /// Builds the simulation component and state for one streamed pair. The state shares this
-    /// source's client, so binding quotes carry the feed's full configuration.
-    fn build_book(
-        &self,
-        component_id: Bytes,
-        base_token: Token,
-        quote_token: Token,
-        book: BebopBook,
-        usd_per_quote_token: f64,
-    ) -> (ProtocolComponent, BebopState) {
-        let component = pair_component(
-            component_id,
-            self.protocol_system,
-            "bebop_pool",
-            self.book_config.chain,
-            base_token.clone(),
-            quote_token.clone(),
-        );
-        let state = BebopState {
-            base_token,
-            quote_token,
-            book,
-            usd_per_quote_token,
-            client: Arc::clone(&self.client),
-        };
-        (component, state)
-    }
-
     /// What the book is worth in USD and what one of its quote tokens is worth there: its TVL,
     /// and the price the venue's dollar floor is read against. Both rest on the same pair — the
     /// one pricing the book's quote token in a USD quote token, or none at all when the quote
@@ -121,7 +90,7 @@ impl BebopBookSource {
     /// whose TVL (normalized into an approved quote token) clears the threshold. Each pair the
     /// update carries becomes its own component, in the orientation it was published in. Fails
     /// when any pair carries an invalid price level.
-    fn build_books(&self, update: BebopPricingUpdate) -> Result<HashMap<String, Book>, FeedError> {
+    fn build_books(&self, update: BebopPricingUpdate) -> Result<Books, FeedError> {
         let mut reader = EntryReader::new();
         let pairs = reader.read(update.pairs, BebopBook::try_from);
         reader
@@ -147,7 +116,7 @@ impl BebopBookSource {
             })
             .collect_vec();
 
-        let mut books = HashMap::new();
+        let mut books = Books::new();
         for (book, (base_token, quote_token, tvl, usd_per_quote_token)) in pairs
             .into_iter()
             .zip(measured)
@@ -163,15 +132,21 @@ impl BebopBookSource {
             // `last_update_ts` is milliseconds on the wire (Bebop's spec says seconds; 13-digit
             // values observed live).
             let updated_at = DateTime::from_timestamp_millis(book.last_update_ts as i64);
-            let book_key = component_id.to_string();
-            let (component, state) = self.build_book(
-                component_id,
-                base_token.clone(),
-                quote_token.clone(),
+            let state = BebopState {
+                base_token: base_token.clone(),
+                quote_token: quote_token.clone(),
                 book,
                 usd_per_quote_token,
-            );
-            books.insert(book_key, Book { component, state: Arc::new(state), updated_at });
+                client: Arc::clone(&self.client),
+            };
+            books.insert(pair_book(
+                self.protocol_system,
+                PROTOCOL_TYPE,
+                self.book_config.chain,
+                component_id,
+                state,
+                updated_at,
+            ));
         }
         Ok(books)
     }

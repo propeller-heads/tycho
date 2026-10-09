@@ -16,7 +16,10 @@ use tycho_common::{
 };
 
 use crate::{
-    book::sim::{self, SwapDirection},
+    book::{
+        component::PairState,
+        sim::{self, SwapDirection},
+    },
     rfq::protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
 };
 
@@ -37,16 +40,6 @@ pub struct HashflowState {
 }
 
 impl HashflowState {
-    /// The pair's base token (the token whose amounts the price levels are quoted in).
-    pub fn base_token(&self) -> &Token {
-        &self.base_token
-    }
-
-    /// The pair's quote token.
-    pub fn quote_token(&self) -> &Token {
-        &self.quote_token
-    }
-
     /// Smallest `base_token` amount (in base units) Hashflow accepts for a firm quote: the first
     /// price level's quantity. `get_amount_out` fills smaller amounts partially against that
     /// level, but the quote API rejects them, so callers size requests at or above this.
@@ -78,6 +71,16 @@ impl HashflowState {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
         Ok(())
+    }
+}
+
+impl PairState for HashflowState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
     }
 }
 

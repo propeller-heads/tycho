@@ -6,3 +6,6 @@ pub mod state;
 
 /// Protocol system stamped on every component this integration emits.
 pub const PROTOCOL_SYSTEM: &str = "rfq:liquorice";
+
+/// Component type stamped on every pair this integration emits.
+pub(crate) const PROTOCOL_TYPE: &str = "liquorice_pool";

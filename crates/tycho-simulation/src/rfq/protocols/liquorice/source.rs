@@ -5,17 +5,16 @@ use std::{
 
 use chrono::DateTime;
 use tracing::debug;
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
     book::{
-        component::{pair_component, pair_component_id},
-        tvl, Book, BookFeedConfig, BookSnapshot, ReceivedAt,
+        component::{pair_book, pair_component_id},
+        tvl, BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
-    protocol::models::ProtocolComponent,
     rfq::protocols::liquorice::{
         client::LiquoriceClient, models::LiquoriceTokenPairPrice, state::LiquoriceState,
-        PROTOCOL_SYSTEM,
+        PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -51,36 +50,12 @@ impl LiquoriceBookSource {
                 .map(|price| (&price.base_token, &price.quote_token, &price.levels)),
         )
     }
-
-    /// Builds the simulation component and state for one streamed pair. The state shares this
-    /// source's client, so binding quotes carry the feed's full configuration.
-    fn build_book(
-        &self,
-        component_id: Bytes,
-        base_token: Token,
-        quote_token: Token,
-        prices_by_mm: HashMap<String, LiquoriceTokenPairPrice>,
-    ) -> (ProtocolComponent, LiquoriceState) {
-        let state = LiquoriceState {
-            base_token: base_token.clone(),
-            quote_token: quote_token.clone(),
-            prices_by_mm,
-            client: Arc::clone(&self.client),
-        };
-        let component = pair_component(
-            component_id,
-            PROTOCOL_SYSTEM,
-            "liquorice_pool",
-            self.book_config.chain,
-            base_token,
-            quote_token,
-        );
-        (component, state)
-    }
 }
 
-impl LiquoriceBookSource {
-    async fn fetch_books(&self) -> Result<HashMap<String, Book>, FeedError> {
+impl HttpSource for LiquoriceBookSource {
+    type Snapshot = BookSnapshot<ReceivedAt>;
+
+    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let prices_by_mm = self.client.fetch_price_levels().await?;
         debug!(market_makers = prices_by_mm.len(), "fetched price levels");
 
@@ -124,7 +99,7 @@ impl LiquoriceBookSource {
             }
         }
 
-        let mut books = HashMap::new();
+        let mut books = Books::new();
         for ((base_bytes, quote_bytes), mm_prices) in pair_mm_prices {
             let Some((base_token, quote_token)) = self
                 .book_config
@@ -142,22 +117,22 @@ impl LiquoriceBookSource {
                 .filter_map(|price| price.updated_at)
                 .max()
                 .and_then(|millis| DateTime::from_timestamp_millis(millis as i64));
-            let book_key = component_id.to_string();
-            let (component, state) =
-                self.build_book(component_id, base_token.clone(), quote_token.clone(), mm_prices);
-            books.insert(book_key, Book { component, state: Arc::new(state), updated_at });
+            let state = LiquoriceState {
+                base_token: base_token.clone(),
+                quote_token: quote_token.clone(),
+                prices_by_mm: mm_prices,
+                client: Arc::clone(&self.client),
+            };
+            books.insert(pair_book(
+                PROTOCOL_SYSTEM,
+                PROTOCOL_TYPE,
+                self.book_config.chain,
+                component_id,
+                state,
+                updated_at,
+            ));
         }
-        Ok(books)
-    }
-}
-
-impl HttpSource for LiquoriceBookSource {
-    type Snapshot = BookSnapshot<ReceivedAt>;
-
-    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
-        self.fetch_books()
-            .await
-            .map(BookSnapshot::received_now)
+        Ok(BookSnapshot::received_now(books))
     }
 }
 
@@ -276,7 +251,7 @@ mod tests {
         let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
         let source = source_for(&server.url(), &[&weth, &usdc], 1000.0);
 
-        let books = source.fetch_books().await.unwrap();
+        let books = source.fetch().await.unwrap().books;
 
         let component_id = pair_component_id(PROTOCOL_SYSTEM, &weth, &usdc);
         assert_eq!(books.len(), 1, "one book for the one pair: {:?}", books.keys());

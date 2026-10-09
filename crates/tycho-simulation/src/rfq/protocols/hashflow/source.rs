@@ -4,13 +4,13 @@ use std::{
 };
 
 use tracing::debug;
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
-    book::{component::pair_component, tvl, Book, BookFeedConfig, BookSnapshot, ReceivedAt},
-    protocol::models::ProtocolComponent,
+    book::{component::pair_book, tvl, BookFeedConfig, BookSnapshot, Books, ReceivedAt},
     rfq::protocols::hashflow::{
         client::HashflowClient, models::HashflowMarketMakerLevels, state::HashflowState,
+        PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -51,39 +51,26 @@ impl HashflowBookSource {
                 }),
         )
     }
-
-    /// Builds the simulation component and state for one streamed pair. The state shares this
-    /// source's client, so binding quotes carry the feed's full configuration.
-    fn build_book(
-        &self,
-        component_id: Bytes,
-        base_token: Token,
-        quote_token: Token,
-        mm_name: String,
-        mm_level: HashflowMarketMakerLevels,
-    ) -> (ProtocolComponent, HashflowState) {
-        let state = HashflowState {
-            base_token: base_token.clone(),
-            quote_token: quote_token.clone(),
-            levels: mm_level,
-            market_maker: mm_name,
-            client: Arc::clone(&self.client),
-        };
-        let component = pair_component(
-            component_id,
-            self.protocol_system,
-            "hashflow_pool",
-            self.book_config.chain,
-            base_token,
-            quote_token,
-        );
-        (component, state)
-    }
 }
 
-impl HashflowBookSource {
+/// The id of `market_maker`'s book from `base` into `quote`: the pair's id (see
+/// [`pair_component_id`](crate::book::component::pair_component_id)) followed by the maker's
+/// name. Each maker's ladder is its own component because a binding quote comes from the one
+/// maker it is requested from, so a swap can fill against one maker's depth only.
+fn maker_component_id(
+    protocol_system: &str,
+    base: &Bytes,
+    quote: &Bytes,
+    market_maker: &str,
+) -> Bytes {
+    Bytes::from([protocol_system.as_bytes(), base, quote, market_maker.as_bytes()].concat())
+}
+
+impl HttpSource for HashflowBookSource {
+    type Snapshot = BookSnapshot<ReceivedAt>;
+
     /// Both requests (market makers, then their levels) count as one poll.
-    async fn fetch_books(&self) -> Result<HashMap<String, Book>, FeedError> {
+    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let market_makers = self
             .client
             .fetch_market_makers()
@@ -94,7 +81,7 @@ impl HashflowBookSource {
             .await?;
         debug!(market_makers = levels_by_mm.len(), "fetched price levels");
 
-        let mut books = HashMap::new();
+        let mut books = Books::new();
         for (mm_name, mm_levels) in levels_by_mm.iter() {
             for mm_level in mm_levels {
                 let base_bytes = &mm_level.pair.base_token;
@@ -128,42 +115,24 @@ impl HashflowBookSource {
                 }
 
                 // `levels_by_mm` stays borrowed for the TVL normalization lookups above.
-                let book_key = component_id.to_string();
-                let (component, state) = self.build_book(
+                let state = HashflowState {
+                    base_token: base_token.clone(),
+                    quote_token: quote_token.clone(),
+                    levels: mm_level.clone(),
+                    market_maker: mm_name.clone(),
+                    client: Arc::clone(&self.client),
+                };
+                books.insert(pair_book(
+                    self.protocol_system,
+                    PROTOCOL_TYPE,
+                    self.book_config.chain,
                     component_id,
-                    base_token.clone(),
-                    quote_token.clone(),
-                    mm_name.clone(),
-                    mm_level.clone(),
-                );
-                books
-                    .insert(book_key, Book { component, state: Arc::new(state), updated_at: None });
+                    state,
+                    None,
+                ));
             }
         }
-        Ok(books)
-    }
-}
-
-/// The id of `market_maker`'s book from `base` into `quote`: the pair's id (see
-/// [`pair_component_id`](crate::book::component::pair_component_id)) followed by the maker's
-/// name. Each maker's ladder is its own component because a binding quote comes from the one
-/// maker it is requested from, so a swap can fill against one maker's depth only.
-fn maker_component_id(
-    protocol_system: &str,
-    base: &Bytes,
-    quote: &Bytes,
-    market_maker: &str,
-) -> Bytes {
-    Bytes::from([protocol_system.as_bytes(), base, quote, market_maker.as_bytes()].concat())
-}
-
-impl HttpSource for HashflowBookSource {
-    type Snapshot = BookSnapshot<ReceivedAt>;
-
-    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
-        self.fetch_books()
-            .await
-            .map(BookSnapshot::received_now)
+        Ok(BookSnapshot::received_now(books))
     }
 }
 
@@ -177,6 +146,7 @@ mod tests {
     use super::*;
     use crate::{
         book::{
+            component::PairState,
             levels::{Levels, PriceLevel},
             test_token_map,
         },
@@ -280,7 +250,7 @@ mod tests {
         .await;
         let source = source_for(&server.url(), &[&weth, &usdc, &wbtc], 1000.0);
 
-        let books = source.fetch_books().await.unwrap();
+        let books = source.fetch().await.unwrap().books;
 
         let weth_usdc = maker_component_id(PROTOCOL_SYSTEM, &weth, &usdc, "mm1");
         let wbtc_weth = maker_component_id(PROTOCOL_SYSTEM, &wbtc, &weth, "mm2");
@@ -347,7 +317,7 @@ mod tests {
         .await;
         let source = source_for(&server.url(), &[&weth, &usdc], 1.0);
 
-        let books = source.fetch_books().await.unwrap();
+        let books = source.fetch().await.unwrap().books;
 
         let makers_and_ladders: HashMap<_, _> = books
             .values()

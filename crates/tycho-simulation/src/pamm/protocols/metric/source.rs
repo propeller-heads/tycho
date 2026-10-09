@@ -3,20 +3,14 @@
 //!
 //! Endpoint reference: <https://docs.metric.xyz/RSm94m71kqtGICv4iKRj/developers/api>
 
-use std::{collections::HashMap, sync::Arc};
-
 use chrono::DateTime;
 use tracing::{debug, warn};
-use tycho_common::{models::token::Token, Bytes};
 
 use crate::{
-    book::{component::pair_component, Book, BookFeedConfig, BookSnapshot, ReceivedAt},
+    book::{component::pair_book, BookFeedConfig, BookSnapshot, Books, ReceivedAt},
     pamm::protocols::metric::{
-        client::MetricClient,
-        models::{MetricBidAskResponse, MetricMetadata},
-        state::MetricState,
+        client::MetricClient, models::MetricMetadata, state::MetricState, PROTOCOL_TYPE,
     },
-    protocol::models::ProtocolComponent,
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
 
@@ -32,38 +26,12 @@ pub struct MetricBookSource {
     pub client: MetricClient,
 }
 
-impl MetricBookSource {
-    /// Builds the simulation component and state for one pool.
-    fn build_book(
-        &self,
-        component_id: Bytes,
-        token0: Token,
-        token1: Token,
-        metadata: MetricMetadata,
-        bid_ask: MetricBidAskResponse,
-    ) -> (ProtocolComponent, MetricState) {
-        let state = MetricState {
-            base_token: token0.clone(),
-            quote_token: token1.clone(),
-            metadata,
-            bid_ask,
-        };
-        let component = pair_component(
-            component_id,
-            self.protocol_system,
-            "metric_pool",
-            self.book_config.chain,
-            token0,
-            token1,
-        );
-        (component, state)
-    }
-}
+impl HttpSource for MetricBookSource {
+    type Snapshot = BookSnapshot<ReceivedAt>;
 
-impl MetricBookSource {
     /// A metadata failure fails the poll; a single pool's bid/ask failure only drops that pool
     /// from this book.
-    async fn fetch_books(&self) -> Result<HashMap<String, Book>, FeedError> {
+    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let metadata = self.client.fetch_metadata().await?;
 
         let quotable: Vec<MetricMetadata> = metadata
@@ -79,7 +47,7 @@ impl MetricBookSource {
             })
             .collect();
 
-        let mut books = HashMap::new();
+        let mut books = Books::new();
         for (pool, bid_ask) in self
             .client
             .fetch_bid_ask_each(quotable)
@@ -105,31 +73,34 @@ impl MetricBookSource {
 
             let component_id = pool.pool_address.clone();
             let updated_at = DateTime::from_timestamp(bid_ask.server_ts as i64, 0);
-            let book_key = component_id.to_string();
-            let (component, state) =
-                self.build_book(component_id, token0.clone(), token1.clone(), pool, bid_ask);
-            books.insert(book_key, Book { component, state: Arc::new(state), updated_at });
+            let state = MetricState {
+                base_token: token0.clone(),
+                quote_token: token1.clone(),
+                metadata: pool,
+                bid_ask,
+            };
+            books.insert(pair_book(
+                self.protocol_system,
+                PROTOCOL_TYPE,
+                self.book_config.chain,
+                component_id,
+                state,
+                updated_at,
+            ));
         }
-        Ok(books)
-    }
-}
-
-impl HttpSource for MetricBookSource {
-    type Snapshot = BookSnapshot<ReceivedAt>;
-
-    async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
-        self.fetch_books()
-            .await
-            .map(BookSnapshot::received_now)
+        Ok(BookSnapshot::received_now(books))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{collections::HashMap, str::FromStr, sync::Arc};
 
     use num_bigint::BigUint;
-    use tycho_common::{models::Chain, simulation::protocol_sim::ProtocolSim};
+    use tycho_common::{
+        models::{token::Token, Chain},
+        Bytes,
+    };
 
     use super::*;
     use crate::{
@@ -138,7 +109,7 @@ mod tests {
         pamm::protocols::metric::{
             client::DEFAULT_BID_ASK_CONCURRENCY,
             feed::MetricFeedBuilder,
-            models::{MetricDepth, MetricDepthBin},
+            models::{MetricBidAskResponse, MetricDepth, MetricDepthBin},
             PROTOCOL_SYSTEM,
         },
         snapshot_feed::http::test_support::spawn_http_server,
@@ -256,13 +227,21 @@ mod tests {
     fn build_pair_component_and_state() {
         let metadata = metadata();
         let source = source(Chain::Ethereum, "https://metric.example", "key");
-        let (component, state) = source.build_book(
+        let state = MetricState {
+            base_token: weth(),
+            quote_token: usdc(),
+            metadata: metadata.clone(),
+            bid_ask: bid_ask(),
+        };
+        let book = pair_book(
+            source.protocol_system,
+            PROTOCOL_TYPE,
+            source.book_config.chain,
             metadata.pool_address.clone(),
-            weth(),
-            usdc(),
-            metadata.clone(),
-            bid_ask(),
+            state,
+            None,
         );
+        let component = book.component;
 
         assert_eq!(component.protocol_system, PROTOCOL_SYSTEM);
         assert_eq!(component.protocol_type_name, "metric_pool");
@@ -279,7 +258,10 @@ mod tests {
         assert!(component.contract_ids.is_empty());
         let expected =
             MetricState { base_token: weth(), quote_token: usdc(), metadata, bid_ask: bid_ask() };
-        assert!(state.eq(&expected), "state should carry the pool's metadata and bid/ask");
+        assert!(
+            book.state.eq(&expected),
+            "the published book should carry the pool's metadata and bid/ask"
+        );
     }
 
     #[tokio::test]
@@ -326,7 +308,7 @@ mod tests {
         ]));
         source.book_config.min_tvl_usd = 100.0;
 
-        let books = source.fetch_books().await.unwrap();
+        let books = source.fetch().await.unwrap().books;
 
         let healthy_id = Bytes::from_str(HEALTHY)
             .unwrap()
@@ -344,7 +326,7 @@ mod tests {
         let endpoint = server.url();
         let source = source(Chain::Ethereum, &endpoint, "key");
 
-        let result = source.fetch_books().await;
+        let result = source.fetch().await;
 
         assert!(matches!(result, Err(FeedError::Connection(_))), "got {result:?}");
     }
@@ -381,7 +363,7 @@ mod tests {
 
         let budget = MetricFeedBuilder::default_feed_config().request_timeout;
         let started = std::time::Instant::now();
-        let books = source.fetch_books().await.unwrap();
+        let books = source.fetch().await.unwrap().books;
         let elapsed = started.elapsed();
 
         assert!(!books.is_empty(), "no quotable pool among the {} on Base", metadata.len());

@@ -1,9 +1,13 @@
 //! Book feeds: a provider's complete set of priced pairs, republished whenever it changes.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt,
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
@@ -39,6 +43,39 @@ pub struct Book {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// The books a source has decoded out of one answer from its venue, each under the id of the
+/// component it carries.
+#[derive(Debug, Default, derive_more::Deref)]
+pub(crate) struct Books(HashMap<String, Book>);
+
+impl Books {
+    pub fn new() -> Self {
+        Books::default()
+    }
+
+    /// Keeps `book` under its own component's id.
+    ///
+    /// Two books claiming one component leaves the one added last, and says so: they price the
+    /// same pair differently, and which of them a consumer quotes is the order they arrived in.
+    pub fn insert(&mut self, book: Book) {
+        match self
+            .0
+            .entry(book.component.id.to_string())
+        {
+            Entry::Occupied(mut taken) => {
+                warn!(
+                    component = %taken.key(),
+                    "two books price one component, keeping the last"
+                );
+                taken.insert(book);
+            }
+            Entry::Vacant(free) => {
+                free.insert(book);
+            }
+        }
+    }
+}
+
 /// One provider's complete set of books at one instant, so a pair absent from a snapshot is one
 /// the provider has stopped serving. The books are `Arc`'d so cloning the snapshot (e.g. out of a
 /// watch channel) never copies states.
@@ -59,8 +96,8 @@ pub struct BookSnapshot<A> {
 
 impl BookSnapshot<ReceivedAt> {
     /// `books` as the complete set a feed received just now.
-    pub fn received_now(books: HashMap<String, Book>) -> Self {
-        BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books) }
+    pub(crate) fn received_now(books: Books) -> Self {
+        BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books.0) }
     }
 }
 
@@ -171,4 +208,48 @@ pub(crate) fn test_token_map(entries: &[(&Bytes, &str, u32)]) -> HashMap<Bytes, 
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_common::models::Chain;
+
+    use super::*;
+    use crate::{book::component::pair_component, evm::decoder::MockProtocolSim};
+
+    fn book(base: &Bytes, quote: &Bytes) -> Book {
+        let token =
+            |address: &Bytes| Token::new(address, "T", 18, 0, &[Some(0)], Chain::Ethereum, 100);
+        Book {
+            component: pair_component(
+                component::pair_component_id("book:venue", base, quote),
+                "book:venue",
+                "venue_pool",
+                Chain::Ethereum,
+                token(base),
+                token(quote),
+            ),
+            state: Arc::new(MockProtocolSim::new()),
+            updated_at: None,
+        }
+    }
+
+    /// Two answers for one pair are one book, whichever way round the venue sent them.
+    #[test]
+    fn a_book_is_kept_under_its_own_component() {
+        let weth = Bytes::from(vec![0x11; 20]);
+        let usdc = Bytes::from(vec![0x22; 20]);
+        let mut books = Books::new();
+
+        books.insert(book(&weth, &usdc));
+        books.insert(book(&usdc, &weth));
+        books.insert(book(&weth, &usdc));
+
+        assert_eq!(books.len(), 2);
+        let ids: Vec<_> = books.keys().cloned().collect();
+        assert!(
+            ids.contains(&component::pair_component_id("book:venue", &weth, &usdc).to_string()),
+            "{ids:?}"
+        );
+    }
 }

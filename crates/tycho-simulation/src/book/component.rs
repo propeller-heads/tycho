@@ -4,12 +4,16 @@
 //! protocol system: two integrations' books for the same pair are two components, and so are the
 //! same venue's book feed and a future native integration of it.
 
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
 use tycho_common::{
     models::{token::Token, Chain},
+    simulation::protocol_sim::ProtocolSim,
     Bytes,
 };
 
-use crate::protocol::models::ProtocolComponent;
+use crate::{book::Book, protocol::models::ProtocolComponent};
 
 /// The id of a book from `base` into `quote`: the protocol system and the two addresses,
 /// concatenated. The order of the two addresses is part of the id, so a venue whose reverse book
@@ -41,6 +45,29 @@ pub fn pair_component(
         Default::default(),
         Default::default(),
     )
+}
+
+/// A state that prices one pair.
+pub trait PairState: ProtocolSim {
+    fn base_token(&self) -> &Token;
+
+    fn quote_token(&self) -> &Token;
+}
+
+/// The book `state` prices, under `id`: the state, the component it belongs to, and when the
+/// venue last updated it.
+pub fn pair_book<S: PairState + 'static>(
+    protocol_system: &str,
+    protocol_type: &str,
+    chain: Chain,
+    id: Bytes,
+    state: S,
+    updated_at: Option<DateTime<Utc>>,
+) -> Book {
+    let base = state.base_token().clone();
+    let quote = state.quote_token().clone();
+    let component = pair_component(id, protocol_system, protocol_type, chain, base, quote);
+    Book { component, state: Arc::new(state), updated_at }
 }
 
 #[cfg(test)]
