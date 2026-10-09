@@ -933,6 +933,7 @@ mod tests {
             .get(format!("{base_url}/public/v1/evm/8453/metadata"))
             .header("accept", "application/json")
             .query(&[("count", "500")])
+            .bearer_auth(&api_key)
             .send()
             .await
             .unwrap()
