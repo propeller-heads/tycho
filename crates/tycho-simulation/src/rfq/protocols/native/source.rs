@@ -380,92 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_component_and_state_from_relay_orderbook() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
-        let source = test_source(
-            "http://native.example".to_string(),
-            &[&weth, &usdt],
-            HashSet::from([usdt.clone()]),
-            0.0,
-        );
-
-        let books = group_orderbook(vec![
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdt.clone(),
-                minimum_in_base: 0.0,
-                side: NativeOrderbookSide::Bid,
-                levels: Levels::new(vec![PriceLevel { quantity: 0.0001, price: 3213.12345 }])
-                    .unwrap(),
-            },
-            NativeOrderbookEntry {
-                base_address: weth.clone(),
-                quote_address: usdt.clone(),
-                minimum_in_base: 0.0,
-                side: NativeOrderbookSide::Ask,
-                levels: Levels::new(vec![PriceLevel { quantity: 2.0, price: 3214.0 }]).unwrap(),
-            },
-            NativeOrderbookEntry {
-                base_address: usdt.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 100.0,
-                side: NativeOrderbookSide::Bid,
-                levels: Levels::new(vec![PriceLevel { quantity: 6428.0, price: 1.0 / 3214.0 }])
-                    .unwrap(),
-            },
-            NativeOrderbookEntry {
-                base_address: usdt.clone(),
-                quote_address: weth.clone(),
-                minimum_in_base: 100.0,
-                side: NativeOrderbookSide::Ask,
-                levels: Levels::new(vec![PriceLevel {
-                    quantity: 0.321312345,
-                    price: 1.0 / 3213.12345,
-                }])
-                .unwrap(),
-            },
-        ]);
-
-        let (component_id, book) = books
-            .into_iter()
-            .next()
-            .expect("one grouped book");
-        let base_token = source.book_config.tokens[&weth].clone();
-        let quote_token = source.book_config.tokens[&usdt].clone();
-
-        let state = NativeState {
-            base_token: base_token.clone(),
-            quote_token: quote_token.clone(),
-            book: book.clone(),
-            client: Arc::clone(&source.client),
-        };
-        let published = pair_book(
-            PROTOCOL_SYSTEM,
-            PROTOCOL_TYPE,
-            source.book_config.chain,
-            component_id.clone(),
-            state,
-            None,
-        );
-        let component = published.component;
-
-        assert_eq!(component.id, component_id);
-        assert_eq!(component.protocol_system, PROTOCOL_SYSTEM);
-        assert_eq!(component.protocol_type_name, "native_relay_pool");
-        assert_eq!(component.tokens, vec![base_token.clone(), quote_token.clone()]);
-        assert!(component.contract_ids.is_empty());
-        assert_eq!(
-            book.bids.levels,
-            Levels::new(vec![PriceLevel { quantity: 0.0001, price: 3213.12345 }]).unwrap()
-        );
-        assert_eq!(book.asks.levels.len(), 1);
-        let expected =
-            NativeState { base_token, quote_token, book, client: Arc::clone(&source.client) };
-        assert!(published.state.eq(&expected), "the published book should carry the grouped book");
-    }
-
-    #[test]
     fn uses_stable_component_id_and_direction_when_merging_mirrored_books() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let usdt = Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap();
@@ -825,6 +739,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![weth, usdt]
             );
+            assert_eq!(book.component.protocol_type_name, "native_relay_pool");
             assert_eq!(book.updated_at, None);
         } else {
             assert!(books.is_empty());

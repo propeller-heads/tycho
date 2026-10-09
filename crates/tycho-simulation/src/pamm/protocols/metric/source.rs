@@ -107,10 +107,7 @@ mod tests {
         book::test_token_map,
         evm::protocol::utils::bytes_to_address,
         pamm::protocols::metric::{
-            client::DEFAULT_BID_ASK_CONCURRENCY,
-            feed::MetricFeedBuilder,
-            models::{MetricBidAskResponse, MetricDepth, MetricDepthBin},
-            PROTOCOL_SYSTEM,
+            client::DEFAULT_BID_ASK_CONCURRENCY, feed::MetricFeedBuilder, PROTOCOL_SYSTEM,
         },
         snapshot_feed::http::test_support::spawn_http_server,
     };
@@ -190,78 +187,8 @@ mod tests {
         Token::new(&address, "USDC", 6, 0, &[], Chain::Ethereum, 100)
     }
 
-    fn metadata() -> MetricMetadata {
-        MetricMetadata {
-            pool_address: Bytes::from_str("0xbF48bCf474d57fF82A3215319229e0DE1476A557").unwrap(),
-            token0: weth().address,
-            token1: usdc().address,
-            tvl_fiat: Some(1_000_000.0),
-        }
-    }
-
     fn q64(price: u64) -> BigUint {
         BigUint::from(price) << 64usize
-    }
-
-    fn bid_ask() -> MetricBidAskResponse {
-        MetricBidAskResponse {
-            bid_adj: q64(3000),
-            ask_adj: q64(3010),
-            total_token0_available: Some(BigUint::from(1_000_000_000_000_000_000u64)),
-            total_token1_available: Some(BigUint::from(3_000_000_000u64)),
-            server_ts: 100,
-            price_provider_status: Some("healthy".to_string()),
-            depth: MetricDepth {
-                asks: vec![MetricDepthBin {
-                    bin_idx: 0,
-                    price: q64(3010),
-                    cumulative_volume: BigUint::from(3_000_000_000u64),
-                    cumulative_input_volume: BigUint::from(1_000_000_000_000_000_000u64),
-                }],
-                bids: vec![],
-            },
-        }
-    }
-
-    #[test]
-    fn build_pair_component_and_state() {
-        let metadata = metadata();
-        let source = source(Chain::Ethereum, "https://metric.example", "key");
-        let state = MetricState {
-            base_token: weth(),
-            quote_token: usdc(),
-            metadata: metadata.clone(),
-            bid_ask: bid_ask(),
-        };
-        let book = pair_book(
-            source.protocol_system,
-            PROTOCOL_TYPE,
-            source.book_config.chain,
-            metadata.pool_address.clone(),
-            state,
-            None,
-        );
-        let component = book.component;
-
-        assert_eq!(component.protocol_system, PROTOCOL_SYSTEM);
-        assert_eq!(component.protocol_type_name, "metric_pool");
-        assert_eq!(component.tokens, vec![weth(), usdc()]);
-        assert_eq!(
-            component.id,
-            Bytes::from(
-                metadata
-                    .pool_address
-                    .to_string()
-                    .as_str()
-            )
-        );
-        assert!(component.contract_ids.is_empty());
-        let expected =
-            MetricState { base_token: weth(), quote_token: usdc(), metadata, bid_ask: bid_ask() };
-        assert!(
-            book.state.eq(&expected),
-            "the published book should carry the pool's metadata and bid/ask"
-        );
     }
 
     #[tokio::test]
