@@ -16,6 +16,7 @@ import {
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
 import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
+import {BiconomyExecutor} from "../src/executors/BiconomyExecutor.sol";
 import {
     PropAMMFallbackExecutor
 } from "../src/executors/PropAMMFallbackExecutor.sol";
@@ -141,6 +142,7 @@ contract TychoRouterTestSetup is
     RingSwapV2Executor public ringSwapV2Executor;
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
+    BiconomyExecutor public biconomyExecutor;
     SkyExecutor public skyExecutor;
     PropAMMFallbackRouter public propAMMFallbackRouter;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
@@ -304,9 +306,10 @@ contract TychoRouterTestSetup is
         // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
         // Native always deploy, so appending it shifts no address before it.
         lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
+        biconomyExecutor = new BiconomyExecutor();
 
         address[] memory executors = new address[](
-            28 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            29 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -336,7 +339,8 @@ contract TychoRouterTestSetup is
         executors[25] = address(propAMMExecutor);
         executors[26] = address(propAMMFallbackExecutor);
         executors[27] = address(lidoV4Executor);
-        uint256 nextExecutorIndex = 28;
+        executors[28] = address(biconomyExecutor);
+        uint256 nextExecutorIndex = 29;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;

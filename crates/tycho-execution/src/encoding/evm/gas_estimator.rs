@@ -40,8 +40,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 ///
 /// This list is incomplete on its own: whole protocol families can qualify too. Use
 /// [`optimizable_transfer_in`] for the full classification.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
-    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
+    "biconomy",
+    "erc4626",
+    "maverick_v2",
+    "uniswap_v2",
+    "sushiswap_v2",
+    "pancakeswap_v2",
+    "quickswap_v2",
+];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
