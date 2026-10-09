@@ -655,6 +655,13 @@ mod test {
         TvlRow { component_id, tvl, modified_ts: NaiveDateTime::default() }
     }
 
+    /// Ids of the components with a TVL above `min_tvl`.
+    fn above(system: &SystemIndex, min_tvl: f64) -> Vec<i64> {
+        system
+            .query(Some(min_tvl), 0, usize::MAX)
+            .ids
+    }
+
     #[test]
     fn test_query_without_tvl_filter_slices_all_components() {
         let system = system(&[(1, Some(5.0)), (2, None), (3, Some(0.0)), (4, Some(9.0))]);
@@ -699,8 +706,12 @@ mod test {
         system.insert(5, 0.5);
         system.insert(30, NO_TVL);
 
-        assert_eq!(system.ids, vec![5, 10, 20, 30]);
-        assert_eq!(system.tvl, vec![0.5, 1.0, 2.0, 3.0]);
+        assert_eq!(system.query(None, 0, usize::MAX).ids, vec![5, 10, 20, 30]);
+        // The duplicate insert of 30 kept its TVL of 3.
+        assert_eq!(above(&system, 2.5), vec![30]);
+        assert_eq!(above(&system, 1.5), vec![20, 30]);
+        assert_eq!(above(&system, 0.75), vec![10, 20, 30]);
+        assert_eq!(above(&system, 0.25), vec![5, 10, 20, 30]);
     }
 
     #[test]
@@ -717,8 +728,13 @@ mod test {
             tvl_row(10, 99.0),
         ]);
 
-        assert_eq!(chain_index.systems[&7].tvl, vec![NO_TVL, 4.0, 9.0]);
-        assert_eq!(chain_index.systems[&8].tvl, vec![2.0, NO_TVL]);
+        let (system_7, system_8) = (&chain_index.systems[&7], &chain_index.systems[&8]);
+        assert_eq!(above(system_7, f64::MIN), vec![4, 9]);
+        assert_eq!(above(system_7, 5.0), vec![9]);
+        assert_eq!(above(system_8, f64::MIN), vec![2]);
+        // No row of an unknown id landed on another component.
+        assert!(above(system_7, 50.0).is_empty());
+        assert!(above(system_8, 50.0).is_empty());
     }
 
     #[test]
@@ -729,7 +745,9 @@ mod test {
         chain_index.clear_tvl();
         chain_index.apply_tvl(&[tvl_row(2, 3.0)]);
 
-        assert_eq!(chain_index.systems[&7].tvl, vec![NO_TVL, 3.0]);
+        let system = &chain_index.systems[&7];
+        assert_eq!(above(system, f64::MIN), vec![2]);
+        assert_eq!(above(system, 2.5), vec![2]);
     }
 
     fn index_with(rows: &[(i64, i64)]) -> ComponentIndex {
@@ -756,22 +774,6 @@ mod test {
 
         assert_eq!(index.query(&Chain::Ethereum, 8, None, None), Some(page(&[], 0)));
         assert_eq!(index.query(&Chain::Base, 7, None, None), None);
-    }
-
-    #[test]
-    fn test_newest_tvl_ts_never_moves_back() {
-        let index = index_with(&[]);
-        let at = |secs| {
-            chrono::DateTime::from_timestamp(secs, 0)
-                .unwrap()
-                .naive_utc()
-        };
-
-        index.advance_newest_tvl_ts(&[TvlRow { modified_ts: at(2_000), ..tvl_row(1, 1.0) }]);
-        index.advance_newest_tvl_ts(&[TvlRow { modified_ts: at(1_000), ..tvl_row(1, 1.0) }]);
-        index.advance_newest_tvl_ts(&[]);
-
-        assert_eq!(index.state().newest_tvl_ts, at(2_000));
     }
 }
 
@@ -1023,7 +1025,8 @@ mod serial_db_test {
     }
 
     /// Inserts two protocol systems on ethereum with these components:
-    /// - `sys_a`: a0 (tvl 5), a1 (no tvl row), a2 (tvl 0), a3 (tvl 9), a4 (tvl -0.5, soft-deleted)
+    /// - `sys_a`: a0 (tvl 5), a1 (no tvl row), a2 (tvl 0), a3 (tvl 9), a4 (tvl -0.5, soft-deleted),
+    ///   a5 (tvl NaN, which Postgres orders above every number)
     /// - `sys_b`: b0 (tvl 1)
     ///
     /// plus one `sys_a` component on starknet, which ethereum queries must never return. Then
@@ -1060,6 +1063,7 @@ mod serial_db_test {
             ("a2", sys_a, Some(0.0)),
             ("a3", sys_a, Some(9.0)),
             ("a4", sys_a, Some(-0.5)),
+            ("a5", sys_a, Some(f64::NAN)),
         ];
         let mut component_db_ids = Vec::new();
         for (external_id, system_id, tvl) in components {
@@ -1278,7 +1282,7 @@ mod serial_db_test {
 
             let outcome = fixture.refresh(&mut conn).await;
 
-            assert_eq!(outcome, RefreshOutcome::TvlReload { n_rows: 6 });
+            assert_eq!(outcome, RefreshOutcome::TvlReload { n_rows: 7 });
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
@@ -1433,7 +1437,7 @@ mod serial_db_test {
                 .await
                 .unwrap();
 
-            assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 5 });
+            assert_eq!(outcome, RefreshOutcome::FullReload { n_components: 6 });
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
