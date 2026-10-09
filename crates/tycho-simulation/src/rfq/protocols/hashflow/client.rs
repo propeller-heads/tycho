@@ -17,7 +17,7 @@ use crate::{
         protocols::hashflow::models::{
             HashflowChain, HashflowError, HashflowFailure, HashflowMarketMakerLevels,
             HashflowMarketMakersResponse, HashflowPriceLevelsResponse, HashflowQuoteRequest,
-            HashflowQuoteResponse, HashflowRFQ,
+            HashflowQuoteResponse, HashflowRFQ, HashflowRFQOptions,
         },
     },
     snapshot_feed::{errors::FeedError, http::fetch_json},
@@ -141,15 +141,18 @@ impl HashflowClient {
             .ok_or_else(|| FeedError::Parsing("API response missing levels".to_string()))
     }
 
+    /// Requests a signed quote from `market_maker` alone: the API does not fall back to another
+    /// maker when it declines, so a quote always comes from the maker whose levels priced it.
     #[instrument(
         name = "quote_request",
         level = "error",
         skip_all,
-        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in)
+        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in, %market_maker)
     )]
     pub async fn request_binding_quote(
         &self,
         params: &GetAmountOutParams,
+        market_maker: String,
     ) -> Result<SignedQuote, RFQError> {
         let hashflow_chain = HashflowChain::evm(self.chain_id);
         // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
@@ -168,6 +171,8 @@ impl HashflowClient {
                 quote_token_amount: None,
                 trader: params.receiver.to_string(),
                 effective_trader: Some(effective_trader.to_string()),
+                market_makers: vec![market_maker],
+                options: HashflowRFQOptions { do_not_retry_with_other_makers: true },
             }],
             calldata: false,
         };
@@ -387,7 +392,14 @@ impl HashflowClient {
                             "Hashflow API error: request failed without an error".to_string(),
                         ));
                     };
-                    return Err(RFQError::FatalError(format!("Hashflow API error: {error}")));
+                    // A declined trade leaves the route to be priced elsewhere; Hashflow
+                    // publishes no catalogue of its codes, so anything else is taken to be the
+                    // request itself being wrong.
+                    return Err(if error.declines_the_trade() {
+                        RFQError::QuoteNotFound(format!("Hashflow quote: {error}"))
+                    } else {
+                        RFQError::FatalError(format!("Hashflow API error: {error}"))
+                    });
                 }
                 _ => {
                     return Err(RFQError::FatalError(
@@ -558,17 +570,65 @@ mod tests {
         let params = create_test_quote_params();
 
         let err = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap_err();
 
         assert!(format!("{err:?}").contains("Effective trader mismatch"));
     }
 
+    /// A maker declining arrives as `fail` inside an HTTP 200; the first two bodies are recorded
+    /// from the live API. Both say the trade is unavailable now, which leaves the route to be
+    /// priced elsewhere. The third carries the same envelope with the error the API answers an
+    /// unserved chain with, for what becomes of a code that is not a decline.
+    #[rstest]
+    #[case::no_maker_supports_the_request(
+        r#"{"status":"fail","rfqId":"0x225000000000000000000000000000ffffffffffffff00317477065b24ec0000","error":{"code":82,"message":"No maker supports this request"}}"#,
+        true,
+        "No maker supports this request (code 82)"
+    )]
+    #[case::exceeds_supported_amounts(
+        r#"{"status":"fail","rfqId":"0x225000000000000000000000000000ffffffffffffff00317498228a10fe0000","error":{"code":76,"message":"Exceeds supported amounts"}}"#,
+        true,
+        "Exceeds supported amounts (code 76)"
+    )]
+    #[case::a_code_that_is_not_a_decline(
+        r#"{"status":"fail","rfqId":"0x225000000000000000000000000000ffffffffffffff00317477065b24ec0000","error":{"code":42,"message":"Invalid chainId: 130"}}"#,
+        false,
+        "Invalid chainId: 130 (code 42)"
+    )]
+    #[tokio::test]
+    async fn only_a_failure_that_is_not_a_decline_is_fatal(
+        #[case] body: &'static str,
+        #[case] declined: bool,
+        #[case] says: &str,
+    ) {
+        let (addr, _) = create_delayed_response_server(0, body).await;
+        let client = create_test_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(
+            if declined {
+                matches!(error, RFQError::QuoteNotFound(_))
+            } else {
+                matches!(error, RFQError::FatalError(_))
+            },
+            "{error}"
+        );
+        assert!(error.to_string().contains(says), "{error}");
+    }
+
     #[tokio::test]
     async fn test_request_binding_quote_field_mapping() {
-        // The wire request carries the receiver as Hashflow's trader and a fresh random
-        // address as the effectiveTrader — a new one per quote request.
+        // The wire request carries the receiver as Hashflow's trader, a fresh random address as
+        // the effectiveTrader — a new one per quote request — and the one maker it goes to.
         let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
         let client = create_test_client(
             format!("http://127.0.0.1:{}/rfq", addr.port()),
@@ -577,11 +637,11 @@ mod tests {
         let params = create_test_quote_params();
 
         let first_quote = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap();
         client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await
             .unwrap();
 
@@ -591,6 +651,12 @@ mod tests {
             assert!(
                 body.contains(&format!("\"trader\":\"{}\"", params.receiver)),
                 "trader is not the receiver: {body}"
+            );
+            assert!(
+                body.contains(
+                    r#""marketMakers":["mm1"],"options":{"doNotRetryWithOtherMakers":true}"#
+                ),
+                "request is not pinned to the state's maker: {body}"
             );
         }
         let first = effective_trader_of(&requests[0]);
@@ -623,7 +689,7 @@ mod tests {
         // This should timeout after 200ms
         let start = std::time::Instant::now();
         let result = client_short_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
         let elapsed = start.elapsed();
 
@@ -653,7 +719,7 @@ mod tests {
 
         // This should wait for the response (500ms)
         let result = client_long_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
 
         // Should succeed - the server waits 500ms which is within the 1s timeout
@@ -721,7 +787,7 @@ mod tests {
         );
         let params = create_test_quote_params();
         let result = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "mm1".to_string())
             .await;
 
         assert!(result.is_ok(), "Expected success after retries, got: {:?}", result);

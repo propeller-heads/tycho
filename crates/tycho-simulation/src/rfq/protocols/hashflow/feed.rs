@@ -236,10 +236,32 @@ mod tests {
             sender: router.clone(),
             receiver: router.clone(),
         };
-        let quote = feed
-            .source
-            .client
-            .request_binding_quote(&params)
+        let client = &feed.source.client;
+        let market_makers = client
+            .fetch_market_makers()
+            .await
+            .unwrap();
+        // The request goes to one maker and the API substitutes no other, so it has to be a
+        // maker whose own ladder covers the amount; the deepest one leaves the most room for the
+        // book to move between the two calls.
+        let market_maker = client
+            .fetch_price_levels(&market_makers)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|(name, levels)| {
+                let (depth, _) = levels
+                    .iter()
+                    .find(|level| level.pair.base_token == weth && level.pair.quote_token == wbtc)?
+                    .levels
+                    .totals();
+                (depth >= 1.0).then_some((name, depth))
+            })
+            .max_by(|(_, deepest), (_, depth)| deepest.total_cmp(depth))
+            .expect("no market maker quotes one WETH into WBTC")
+            .0;
+        let quote = client
+            .request_binding_quote(&params, market_maker)
             .await
             .unwrap();
 

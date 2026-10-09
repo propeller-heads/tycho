@@ -18,6 +18,20 @@ pub struct HashflowError {
 }
 
 impl HashflowError {
+    /// No maker quotes the request: the one it was addressed to declined it, or is unknown to
+    /// the API.
+    const NO_MAKER_SUPPORTS_REQUEST: u64 = 82;
+
+    /// The amount asked for is outside the range the maker quotes.
+    const EXCEEDS_SUPPORTED_AMOUNTS: u64 = 76;
+
+    /// Whether this is a maker declining the trade rather than the request being wrong: nobody
+    /// quotes it, or the amount is outside what the maker it went to supports. Both are answers
+    /// about one trade at one moment, which the same ladder quotes at another size.
+    pub fn declines_the_trade(&self) -> bool {
+        matches!(self.code, Self::NO_MAKER_SUPPORTS_REQUEST | Self::EXCEEDS_SUPPORTED_AMOUNTS)
+    }
+
     /// Whether this is Hashflow stating it does not price the chain it was asked about.
     ///
     /// The venue publishes no catalogue of these codes, and the one it answers here with covers
@@ -144,6 +158,19 @@ pub struct HashflowRFQ {
     pub quote_token_amount: Option<String>,
     pub trader: String,
     pub effective_trader: Option<String>,
+    /// The makers the RFQ goes to; a quote from any other is only possible as the API's
+    /// fallback, which `options` disables.
+    pub market_makers: Vec<String>,
+    pub options: HashflowRFQOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashflowRFQOptions {
+    /// Without it, the API answers a failed maker with the next best one. That maker's liquidity
+    /// is a component of its own, which the same route may already be filling, so its quote could
+    /// draw on the same depth twice, at a price the requesting state did not simulate.
+    pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
