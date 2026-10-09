@@ -1,0 +1,233 @@
+substreams_yaml_path: ./base-flamm.yaml
+protocol_system: "flamm"
+protocol_type_names:
+  - "flamm_pool"
+module_name: "map_protocol_changes"
+
+# Native integration: the components' state is the attribute set described in README.md (the pool's, hook's,
+# router's, account's, price feed's and factory's storage words, the Morpho Blue market and position words, the
+# IRM rate, and the Chainlink rounds), decoded by the `flamm` ProtocolSim in tycho-simulation. No VM adapter.
+
+# Two grounds, each on its own sufficient. First, the harness reads every component id as a contract address
+# and calls `balanceOf` on it (`validate_token_balances`: `Address::from_str(id).expect("Failed to parse
+# component address")`), and the lever-up component's id is not an address: it is 32 bytes, the pool address
+# followed by a venue discriminator (`lever_up_component_id`). With the check on, that component does not fail
+# it, it panics the harness before any balance is read. Second, component balances are the pool's tradable
+# inventory as the contracts count it (physical cbBTC plus the collateral posted on Morpho; liquid USDC plus
+# the recognized Morpho supply), not the pool contract's ERC-20 balances: a sell borrows USDC on Morpho and
+# posts cbBTC there, so the pool's own balance is not its inventory. What the harness cannot check the package
+# asserts against the contracts' own views instead (`swap_block_updates_the_words_the_fill_moved_and_the_inventory`
+# against `testdata/snapshot_51302915.json`).
+skip_balance_check: true
+
+tests:
+  # The pool's creation transaction (block 51154990) and the hooks / price feed / router / factory deployed just
+  # before it (51154978-51154988), all inside the range so their storage is tracked from creation. The pool is
+  # born paused and stays paused for this whole range, so nothing can be quoted or executed here: simulation
+  # and execution are skipped for both components.
+  - name: test_pool_creation
+    start_block: 51154966
+    stop_block: 51155010
+    expected_components:
+      - id: "0xc0fdcb1799ccc2cebaa1fe247157b0df33d57572"
+        tokens:
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" # cbBTC (pool asset, 8 dp)
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC (loan asset 0, 6 dp)
+        static_attributes:
+          component_kind: "0x0000000000000000000000000000000000000000000000000000000000000000"
+          factory: "0x1bfce014774d0dd7e04bc595d46fa09f7dccf45f"
+          factory_upgrade_delay: "0x000000000000000000000000000000000000000000000000000000000002a300"
+          feed_asset_proxy: "0x07da0e54543a844a80abe69c8a12f22b3aa59f9d"
+          feed_loan0_proxy: "0x7e860098f58bbfc8648a4311b374b1d669a2bc6b"
+          feed_mo0_max_sync_iterations: "0x0000000000000000000000000000000000000000000000000000000000000014"
+          feed_mo0_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_mo0_secondary_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_seq_proxy: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          hook_codehash: "0x63ca81587b713df89dc9a657dae2cb5a70910cbafbe23b9ebbbdedc1bfdc3e1d"
+          hook_genesis_params_hash: "0x7b69d7cbfdeda77c844412cbd9b25c92a335025d239105243defe3d62cdfefe4"
+          hook_genesis_strategy_hash: "0x533d23efc2573bf73577c58cdb4f547eea911233a5c0dc1433baa73282208fd0"
+          hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          implementation: "0xaad580beaa2cbd8ab5f3956a5c56eda1d5ee7184"
+          implementation_codehash: "0x2eb0fb32b59b1cca33e7bd6cad0a214bc6a293dc219d6ff9a5db1c58d0c10cb7"
+          irm_codehash: "0x9978b522abfe0f3b8279800375d833b9d9660ae4f6321a2efb1f1f98850a0cbe"
+          leverage_hook: "0xe0a98d8e60035832b8bad7f7af7b9b0b3a7308f3"
+          leverage_hook_codehash: "0xc6b46f4287cafa36c360234956b22dc635eb725dd17134a668939e731b819756"
+          leverage_hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          leverage_hook_swap_hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          loan_asset_0: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          pool_asset: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          price_feed: "0xbed275459578c87a63f2f50a0b077c720e838816"
+          price_feed_sequencer: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          price_feed_sequencer_grace: "0x0000000000000000000000000000000000000000000000000000000000000e10"
+          router: "0x19a9b39e6710aad109c829294b0841f0851c6bb4"
+          router_codehash: "0x6ca3c38096320c757612b113e543c37862f48bce5a2f19de2375357bc31ddcc8"
+          spread_hook: "0x04988af54ec88d2de77b191025eaef2fe488f93b"
+          spread_hook_codehash: "0x79d826c02ae2d2de5f8fdebfc1207731a04a96c0733e7af7c1f030b69d65a425"
+          venue_0_account: "0x6760e3b032ee2d670cb684d9076b8f48cb066c48"
+          venue_0_account_codehash: "0x7d5828b262882bb77ce568da078e381979429cc8a40d624e90e15a1895eee847"
+          venue_0_irm: "0x46415998764c29ab2a25cbea6254146d50d22687"
+          venue_0_market_id: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"
+          venue_0_morpho: "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
+          venue_0_oracle: "0x663becd10dae6c4a3dcd89f1d76c1174199639b9"
+          venue_0_oracle_base_feed_1: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          venue_0_oracle_scale_factor: "0x00000000000000000000000000000000000000000052b7d2dcc80cd2e4000000"
+        creation_tx: "0x783b464e93692538bde6dc1b53b959087f1e0ba2af3b6bc55ff13a449101d1e0"
+        skip_simulation: true # the pool is born paused (RiskInit.startPaused) and stays so until the curator activates it at 51298416
+        skip_execution: true # nothing to execute while the pool is paused (see skip_simulation)
+      - id: "0xc0fdcb1799ccc2cebaa1fe247157b0df33d57572000000000000000000000001"
+        tokens:
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" # cbBTC (pool asset, 8 dp)
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC (loan asset 0, 6 dp)
+        static_attributes:
+          component_kind: "0x0000000000000000000000000000000000000000000000000000000000000001"
+          factory: "0x1bfce014774d0dd7e04bc595d46fa09f7dccf45f"
+          factory_upgrade_delay: "0x000000000000000000000000000000000000000000000000000000000002a300"
+          feed_asset_proxy: "0x07da0e54543a844a80abe69c8a12f22b3aa59f9d"
+          feed_loan0_proxy: "0x7e860098f58bbfc8648a4311b374b1d669a2bc6b"
+          feed_mo0_max_sync_iterations: "0x0000000000000000000000000000000000000000000000000000000000000014"
+          feed_mo0_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_mo0_secondary_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_seq_proxy: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          hook_codehash: "0x63ca81587b713df89dc9a657dae2cb5a70910cbafbe23b9ebbbdedc1bfdc3e1d"
+          hook_genesis_params_hash: "0x7b69d7cbfdeda77c844412cbd9b25c92a335025d239105243defe3d62cdfefe4"
+          hook_genesis_strategy_hash: "0x533d23efc2573bf73577c58cdb4f547eea911233a5c0dc1433baa73282208fd0"
+          hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          implementation: "0xaad580beaa2cbd8ab5f3956a5c56eda1d5ee7184"
+          implementation_codehash: "0x2eb0fb32b59b1cca33e7bd6cad0a214bc6a293dc219d6ff9a5db1c58d0c10cb7"
+          irm_codehash: "0x9978b522abfe0f3b8279800375d833b9d9660ae4f6321a2efb1f1f98850a0cbe"
+          leverage_hook: "0xe0a98d8e60035832b8bad7f7af7b9b0b3a7308f3"
+          leverage_hook_codehash: "0xc6b46f4287cafa36c360234956b22dc635eb725dd17134a668939e731b819756"
+          leverage_hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          leverage_hook_swap_hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          loan_asset_0: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          pool_asset: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          price_feed: "0xbed275459578c87a63f2f50a0b077c720e838816"
+          price_feed_sequencer: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          price_feed_sequencer_grace: "0x0000000000000000000000000000000000000000000000000000000000000e10"
+          router: "0x19a9b39e6710aad109c829294b0841f0851c6bb4"
+          router_codehash: "0x6ca3c38096320c757612b113e543c37862f48bce5a2f19de2375357bc31ddcc8"
+          spread_hook: "0x04988af54ec88d2de77b191025eaef2fe488f93b"
+          spread_hook_codehash: "0x79d826c02ae2d2de5f8fdebfc1207731a04a96c0733e7af7c1f030b69d65a425"
+          venue_0_account: "0x6760e3b032ee2d670cb684d9076b8f48cb066c48"
+          venue_0_account_codehash: "0x7d5828b262882bb77ce568da078e381979429cc8a40d624e90e15a1895eee847"
+          venue_0_irm: "0x46415998764c29ab2a25cbea6254146d50d22687"
+          venue_0_market_id: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"
+          venue_0_morpho: "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
+          venue_0_oracle: "0x663becd10dae6c4a3dcd89f1d76c1174199639b9"
+          venue_0_oracle_base_feed_1: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          venue_0_oracle_scale_factor: "0x00000000000000000000000000000000000000000052b7d2dcc80cd2e4000000"
+        creation_tx: "0x783b464e93692538bde6dc1b53b959087f1e0ba2af3b6bc55ff13a449101d1e0"
+        skip_simulation: true # no lever-up quote exists at this test's stop block: leverage is paused on chain (levPaused, FLAMMStore.S slot 10 byte 23) from the creation through 51433698, and from the unpause at 51433699 (LevPauseSet(false), the curator Safe calling FLAMM.setLevPaused(false)) every lever-up reverted SpreadUnavailable, the LeverageSpreadHook constructor's 17500 ppm post having aged past maxSpreadAge = 3600 s with no keeper re-post. That is the recorded range only, not the venue today: on 2026-09-22 the curator cleared the age at block 51649706 (MaxSpreadAgeSet(0), tx 0x441839955de1f9bafe77eaaa96a8ba36517ae1c357c218a0f7919e516d22bdd1), so the constructor's post no longer lapses and the venue quotes: at 51670000, previewLever(true, 15000) returns (15000, 12506539, 17500 ppm) and the largest size that fills in full is 4910491 sats -> 3957263752 USDC base units. That block is 515034 past this package's initialBlock, far over the harness's stated ideal of a range below 1,000 blocks, so the fill is pinned in the local replay (crates/tycho-simulation/src/evm/protocol/flamm/tests/e2e.rs over testdata/snapshots/e2e_grids.json.gz at 51649706 and 51670000) rather than in a third hosted range test
+        skip_execution: true # nothing to execute where nothing is quoted at this stop block (see skip_simulation)
+
+  # Creation, the curator's activation (51298416) and the pool's first settled swap (51302916, 15000 sats ->
+  # 11301759 USDC). At the stop block the swap component quotes both directions from the indexed attributes
+  # and the harness executes the quoted sizes through the FLAMMExecutor on a fork of the stop block. The
+  # lever-up component cannot be simulated: leverage is paused on chain at the stop block (until 51433699, and
+  # the spread post that opens the venue lands at 51649706, past this range; the local replay pins the fill).
+  - name: test_activation_and_first_swap
+    start_block: 51154966
+    stop_block: 51302920
+    expected_components:
+      - id: "0xc0fdcb1799ccc2cebaa1fe247157b0df33d57572"
+        tokens:
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" # cbBTC (pool asset, 8 dp)
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC (loan asset 0, 6 dp)
+        static_attributes:
+          component_kind: "0x0000000000000000000000000000000000000000000000000000000000000000"
+          factory: "0x1bfce014774d0dd7e04bc595d46fa09f7dccf45f"
+          factory_upgrade_delay: "0x000000000000000000000000000000000000000000000000000000000002a300"
+          feed_asset_proxy: "0x07da0e54543a844a80abe69c8a12f22b3aa59f9d"
+          feed_loan0_proxy: "0x7e860098f58bbfc8648a4311b374b1d669a2bc6b"
+          feed_mo0_max_sync_iterations: "0x0000000000000000000000000000000000000000000000000000000000000014"
+          feed_mo0_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_mo0_secondary_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_seq_proxy: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          hook_codehash: "0x63ca81587b713df89dc9a657dae2cb5a70910cbafbe23b9ebbbdedc1bfdc3e1d"
+          hook_genesis_params_hash: "0x7b69d7cbfdeda77c844412cbd9b25c92a335025d239105243defe3d62cdfefe4"
+          hook_genesis_strategy_hash: "0x533d23efc2573bf73577c58cdb4f547eea911233a5c0dc1433baa73282208fd0"
+          hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          implementation: "0xaad580beaa2cbd8ab5f3956a5c56eda1d5ee7184"
+          implementation_codehash: "0x2eb0fb32b59b1cca33e7bd6cad0a214bc6a293dc219d6ff9a5db1c58d0c10cb7"
+          irm_codehash: "0x9978b522abfe0f3b8279800375d833b9d9660ae4f6321a2efb1f1f98850a0cbe"
+          leverage_hook: "0xe0a98d8e60035832b8bad7f7af7b9b0b3a7308f3"
+          leverage_hook_codehash: "0xc6b46f4287cafa36c360234956b22dc635eb725dd17134a668939e731b819756"
+          leverage_hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          leverage_hook_swap_hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          loan_asset_0: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          pool_asset: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          price_feed: "0xbed275459578c87a63f2f50a0b077c720e838816"
+          price_feed_sequencer: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          price_feed_sequencer_grace: "0x0000000000000000000000000000000000000000000000000000000000000e10"
+          router: "0x19a9b39e6710aad109c829294b0841f0851c6bb4"
+          router_codehash: "0x6ca3c38096320c757612b113e543c37862f48bce5a2f19de2375357bc31ddcc8"
+          spread_hook: "0x04988af54ec88d2de77b191025eaef2fe488f93b"
+          spread_hook_codehash: "0x79d826c02ae2d2de5f8fdebfc1207731a04a96c0733e7af7c1f030b69d65a425"
+          venue_0_account: "0x6760e3b032ee2d670cb684d9076b8f48cb066c48"
+          venue_0_account_codehash: "0x7d5828b262882bb77ce568da078e381979429cc8a40d624e90e15a1895eee847"
+          venue_0_irm: "0x46415998764c29ab2a25cbea6254146d50d22687"
+          venue_0_market_id: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"
+          venue_0_morpho: "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
+          venue_0_oracle: "0x663becd10dae6c4a3dcd89f1d76c1174199639b9"
+          venue_0_oracle_base_feed_1: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          venue_0_oracle_scale_factor: "0x00000000000000000000000000000000000000000052b7d2dcc80cd2e4000000"
+        creation_tx: "0x783b464e93692538bde6dc1b53b959087f1e0ba2af3b6bc55ff13a449101d1e0"
+        # The pool is active from 51298416 and the swap venue quotes at the stop block. The harness simulates
+        # through `protocols/testing/src/state_registry.rs`, which maps `flamm` to `FlammPoolState` of
+        # tycho-simulation (an unmapped protocol system would fall back to the VM `EVMPoolState`, which has
+        # no adapter here). The harness quotes 0.1%, 1% and 10% of `get_limits`, the largest size the pool
+        # fills in full per direction, at the execution block after the stop block.
+        skip_simulation: false
+        # The harness executes the quoted sizes through the FLAMMExecutor, registered with it by
+        # `protocols/testing/fixtures/FLAMM.runtime.json` and the `flamm` row of `EXECUTOR_MAPPING` in
+        # `protocols/testing/src/execution.rs`.
+        skip_execution: false
+      - id: "0xc0fdcb1799ccc2cebaa1fe247157b0df33d57572000000000000000000000001"
+        tokens:
+          - "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" # cbBTC (pool asset, 8 dp)
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC (loan asset 0, 6 dp)
+        static_attributes:
+          component_kind: "0x0000000000000000000000000000000000000000000000000000000000000001"
+          factory: "0x1bfce014774d0dd7e04bc595d46fa09f7dccf45f"
+          factory_upgrade_delay: "0x000000000000000000000000000000000000000000000000000000000002a300"
+          feed_asset_proxy: "0x07da0e54543a844a80abe69c8a12f22b3aa59f9d"
+          feed_loan0_proxy: "0x7e860098f58bbfc8648a4311b374b1d669a2bc6b"
+          feed_mo0_max_sync_iterations: "0x0000000000000000000000000000000000000000000000000000000000000014"
+          feed_mo0_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_mo0_secondary_proxy: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          feed_seq_proxy: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          hook_codehash: "0x63ca81587b713df89dc9a657dae2cb5a70910cbafbe23b9ebbbdedc1bfdc3e1d"
+          hook_genesis_params_hash: "0x7b69d7cbfdeda77c844412cbd9b25c92a335025d239105243defe3d62cdfefe4"
+          hook_genesis_strategy_hash: "0x533d23efc2573bf73577c58cdb4f547eea911233a5c0dc1433baa73282208fd0"
+          hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          implementation: "0xaad580beaa2cbd8ab5f3956a5c56eda1d5ee7184"
+          implementation_codehash: "0x2eb0fb32b59b1cca33e7bd6cad0a214bc6a293dc219d6ff9a5db1c58d0c10cb7"
+          irm_codehash: "0x9978b522abfe0f3b8279800375d833b9d9660ae4f6321a2efb1f1f98850a0cbe"
+          leverage_hook: "0xe0a98d8e60035832b8bad7f7af7b9b0b3a7308f3"
+          leverage_hook_codehash: "0xc6b46f4287cafa36c360234956b22dc635eb725dd17134a668939e731b819756"
+          leverage_hook_loan_scale: "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+          leverage_hook_swap_hook: "0x65cbd227cbc61248ae77a5fc813a29c54c092134"
+          loan_asset_0: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+          pool_asset: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+          price_feed: "0xbed275459578c87a63f2f50a0b077c720e838816"
+          price_feed_sequencer: "0xbcf85224fc0756b9fa45aa7892530b47e10b6433"
+          price_feed_sequencer_grace: "0x0000000000000000000000000000000000000000000000000000000000000e10"
+          router: "0x19a9b39e6710aad109c829294b0841f0851c6bb4"
+          router_codehash: "0x6ca3c38096320c757612b113e543c37862f48bce5a2f19de2375357bc31ddcc8"
+          spread_hook: "0x04988af54ec88d2de77b191025eaef2fe488f93b"
+          spread_hook_codehash: "0x79d826c02ae2d2de5f8fdebfc1207731a04a96c0733e7af7c1f030b69d65a425"
+          venue_0_account: "0x6760e3b032ee2d670cb684d9076b8f48cb066c48"
+          venue_0_account_codehash: "0x7d5828b262882bb77ce568da078e381979429cc8a40d624e90e15a1895eee847"
+          venue_0_irm: "0x46415998764c29ab2a25cbea6254146d50d22687"
+          venue_0_market_id: "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"
+          venue_0_morpho: "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
+          venue_0_oracle: "0x663becd10dae6c4a3dcd89f1d76c1174199639b9"
+          venue_0_oracle_base_feed_1: "0x64c911996d3c6ac71f9b455b1e8e7266bcbd848f"
+          venue_0_oracle_scale_factor: "0x00000000000000000000000000000000000000000052b7d2dcc80cd2e4000000"
+        creation_tx: "0x783b464e93692538bde6dc1b53b959087f1e0ba2af3b6bc55ff13a449101d1e0"
+        skip_simulation: true # no lever-up quote exists at this test's stop block: leverage is paused on chain (levPaused, FLAMMStore.S slot 10 byte 23) from the creation through 51433698, and from the unpause at 51433699 (LevPauseSet(false), the curator Safe calling FLAMM.setLevPaused(false)) every lever-up reverted SpreadUnavailable, the LeverageSpreadHook constructor's 17500 ppm post having aged past maxSpreadAge = 3600 s with no keeper re-post. That is the recorded range only, not the venue today: on 2026-09-22 the curator cleared the age at block 51649706 (MaxSpreadAgeSet(0), tx 0x441839955de1f9bafe77eaaa96a8ba36517ae1c357c218a0f7919e516d22bdd1), so the constructor's post no longer lapses and the venue quotes: at 51670000, previewLever(true, 15000) returns (15000, 12506539, 17500 ppm) and the largest size that fills in full is 4910491 sats -> 3957263752 USDC base units. That block is 515034 past this package's initialBlock, far over the harness's stated ideal of a range below 1,000 blocks, so the fill is pinned in the local replay (crates/tycho-simulation/src/evm/protocol/flamm/tests/e2e.rs over testdata/snapshots/e2e_grids.json.gz at 51649706 and 51670000) rather than in a third hosted range test
+        skip_execution: true # nothing to execute where nothing is quoted at this stop block (see skip_simulation)
