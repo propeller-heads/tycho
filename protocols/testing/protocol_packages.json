@@ -1,0 +1,21 @@
+{
+  "arbitrum-balancer-v3": "ethereum-balancer-v3",
+  "arc-uniswap-v2": "ethereum-uniswap-v2",
+  "arc-uniswap-v3": "ethereum-uniswap-v3-logs-only",
+  "arc-uniswap-v4-no-hooks": "ethereum-uniswap-v4/no-hooks",
+  "base-alienbase-v3": "ethereum-uniswap-v3-logs-only",
+  "base-balancer-v3": "ethereum-balancer-v3",
+  "base-sushiswap-v2": "ethereum-uniswap-v2",
+  "bsc-ring-swap-v2": "ethereum-ring-swap-v2",
+  "ethereum-pancakeswap-v2": "ethereum-uniswap-v2",
+  "ethereum-sushiswap-v2": "ethereum-uniswap-v2",
+  "gnosis-balancer-v3": "ethereum-balancer-v3",
+  "robinhood-ekubo-v3": "ethereum-ekubo-v3",
+  "robinhood-gigadex-v3": "ethereum-pancakeswap-v3",
+  "robinhood-ramses-v3": "polygon-ramses-v3",
+  "robinhood-robinswap-v3": "ethereum-uniswap-v3-logs-only",
+  "robinhood-sushiswap-v3": "ethereum-uniswap-v3-logs-only",
+  "robinhood-uniswap-v4-with-hooks": "ethereum-uniswap-v4/with-hooks",
+  "robinhood-up-v3": "base-aerodrome-slipstreams",
+  "unichain-curve": "ethereum-curve"
+}

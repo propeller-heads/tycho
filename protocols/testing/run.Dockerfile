@@ -29,41 +29,19 @@ RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
-# resolve_base maps clone protocol names to buildable substreams directories.
-# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
-RUN resolve_base() { \
-        case "$1" in \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
-            *) echo "$1" ;; \
-        esac; \
-    }; \
+# Resolve once in the builder; the filter stage only consumes the directory list.
+RUN if ! command -v python3 >/dev/null 2>&1; then \
+        apt-get update && apt-get install -y --no-install-recommends python3 && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+RUN set -eu; \
+    python3 ../testing/scripts/resolve_package.py build-dirs "$PROTOCOLS" > /build/substreams-build-dirs; \
     if [ -n "$PROTOCOLS" ]; then \
-        echo "Building only specified protocols: $PROTOCOLS"; \
-        for protocol in $PROTOCOLS; do \
-            protocol_clean=${protocol%%=*}; \
-            base_dir=$(resolve_base "$protocol_clean"); \
-            if [ -d "$base_dir" ]; then \
-                echo "Building $base_dir (for protocol $protocol_clean)..."; \
-                cd "$base_dir" && cargo build --target wasm32-unknown-unknown --release && cd ..; \
-            fi; \
-        done; \
+        while IFS= read -r base_dir; do \
+            echo "Building $base_dir..."; \
+            (cd "$base_dir" && cargo build --target wasm32-unknown-unknown --release); \
+        done < /build/substreams-build-dirs; \
     else \
-        echo "Building all protocols..."; \
         cargo build --target wasm32-unknown-unknown --release; \
     fi
 
@@ -79,37 +57,15 @@ RUN cargo build --release
 FROM debian:bookworm-slim AS substreams-filter
 ARG PROTOCOLS=""
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams /source
-# resolve_base maps clone protocol names to buildable substreams directories.
-# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
-RUN resolve_base() { \
-        case "$1" in \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
-            *) echo "$1" ;; \
-        esac; \
-    }; \
-    mkdir -p /filtered/target/wasm32-unknown-unknown/release && \
+COPY --from=protocol-sdk-builder /build/substreams-build-dirs /build-directories
+# Copy the whole workspace for nested manifests such as Uniswap V4 hooks.
+RUN set -eu; \
+    mkdir -p /filtered/target/wasm32-unknown-unknown/release; \
     if [ -n "$PROTOCOLS" ]; then \
         echo "Filtering for protocols: $PROTOCOLS"; \
-        for protocol in $PROTOCOLS; do \
-            protocol_clean=${protocol%%=*}; \
-            base_dir=$(resolve_base "$protocol_clean"); \
+        while IFS= read -r base_dir; do \
             if [ -d "/source/$base_dir" ]; then \
-                echo "Including $base_dir (for protocol $protocol_clean)..."; \
+                echo "Including $base_dir..."; \
                 cp -r "/source/$base_dir" "/filtered/"; \
                 base_wasm=$(echo "$base_dir" | tr '-' '_'); \
                 if [ -f "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" ]; then \
@@ -117,12 +73,12 @@ RUN resolve_base() { \
                        "/filtered/target/wasm32-unknown-unknown/release/"; \
                 fi; \
             fi; \
-        done; \
+        done < /build-directories; \
     else \
         echo "Including all protocols..."; \
         cp -r /source/* /filtered/; \
-    fi && \
-    echo "Filter stage complete. Size:" && du -sh /filtered 2>/dev/null || echo "Filter stage complete"
+    fi; \
+    echo "Filter stage complete. Size:" && du -sh /filtered
 
 # =========== Final Runtime Image ===========
 FROM debian:bookworm-slim
