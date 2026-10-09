@@ -78,14 +78,22 @@ use std::{
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
-use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{
+    pooled_connection::deadpool::{Object, Pool},
+    scoped_futures::ScopedFutureExt,
+    AsyncPgConnection, RunQueryDsl,
+};
 use tracing::{debug, error, info};
 use tycho_common::{
     models::{Chain, PaginationParams},
     storage::StorageError,
 };
 
-use crate::postgres::{schema, PostgresError};
+use crate::postgres::{
+    schema,
+    snapshot::{bound_snapshot_reads, snapshot_transaction},
+    PostgresError,
+};
 
 /// TVL of a component without a `component_tvl` row. It never compares greater than a threshold.
 const NO_TVL: f64 = f64::NEG_INFINITY;
@@ -94,6 +102,10 @@ const NO_TVL: f64 = f64::NEG_INFINITY;
 /// instead: right after a large write, the planner's statistics do not show it yet, and a read
 /// through the `modified_ts` index would visit most of the table in random order.
 const TVL_BULK_ROWS: usize = 10_000;
+
+/// Longest a refresh may run before the task abandons it and its connection. Reads already stop
+/// after the snapshot statement timeout; this also covers a connection that stopped answering.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// One page of a query: the database ids on the page, in ascending order, and the number of
 /// components matching the filters on all pages.
@@ -325,7 +337,8 @@ impl ComponentIndex {
     }
 
     /// Brings the index up to date with the database: a full reload when the last one is older
-    /// than `full_reload_interval`, otherwise the new-component and TVL polls.
+    /// than `full_reload_interval`, otherwise the new-component and TVL polls. Each refresh reads
+    /// in one snapshot, so every TVL row it reads belongs to a component it can see.
     pub async fn refresh(
         &self,
         conn: &mut AsyncPgConnection,
@@ -333,48 +346,53 @@ impl ComponentIndex {
     ) -> Result<RefreshOutcome, StorageError> {
         if self.state().last_full_reload.elapsed() >= full_reload_interval {
             let n_components = self.full_reload(conn).await?;
-            self.load_new_components(conn).await?;
             return Ok(RefreshOutcome::FullReload { n_components });
         }
 
-        self.load_new_components(conn).await?;
+        let chain_db_id = self.chain_db_id;
+        let max_id = self.read_index().max_id;
         let newest = self.state().newest_tvl_ts;
-        let rows = load_tvl(conn, Some((newest, self.tvl_bulk_rows as i64 + 1))).await?;
-        if rows.is_empty() {
-            return Ok(RefreshOutcome::Unchanged);
-        }
-        if rows.len() > self.tvl_bulk_rows {
-            let rows = load_tvl(conn, None).await?;
+        let bulk_rows = self.tvl_bulk_rows;
+        let (new_components, changed_tvl, all_tvl) = snapshot_transaction(conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let new_components = load_components(conn, chain_db_id, max_id).await?;
+                    let changed_tvl = load_tvl(conn, Some((newest, bulk_rows as i64 + 1))).await?;
+                    let all_tvl = if changed_tvl.len() > bulk_rows {
+                        Some(load_tvl(conn, None).await?)
+                    } else {
+                        None
+                    };
+                    Result::<_, PostgresError>::Ok((new_components, changed_tvl, all_tvl))
+                }
+                .scope_boxed()
+            })
+            .await?;
+
+        self.add_components(&new_components);
+        if let Some(rows) = all_tvl {
             self.write_tvl(&rows, true);
             return Ok(RefreshOutcome::TvlReload { n_rows: rows.len() });
         }
-        self.write_tvl(&rows, false);
-        Ok(RefreshOutcome::TvlDelta { n_rows: rows.len() })
+        if changed_tvl.is_empty() {
+            return Ok(RefreshOutcome::Unchanged);
+        }
+        self.write_tvl(&changed_tvl, false);
+        Ok(RefreshOutcome::TvlDelta { n_rows: changed_tvl.len() })
     }
 
-    /// Adds the components with an id above the highest id in the index.
-    async fn load_new_components(&self, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
-        let max_id = self.read_index().max_id;
-        let rows: Vec<(i64, i64)> = schema::protocol_component::table
-            .filter(schema::protocol_component::chain_id.eq(self.chain_db_id))
-            .filter(schema::protocol_component::id.gt(max_id))
-            .select((
-                schema::protocol_component::id,
-                schema::protocol_component::protocol_system_id,
-            ))
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
+    /// Adds `(id, protocol system id)` rows of components the index does not hold yet.
+    fn add_components(&self, rows: &[(i64, i64)]) {
         let Some(max_id) = rows.iter().map(|(id, _)| *id).max() else {
-            return Ok(());
+            return;
         };
         debug!(n_components = rows.len(), "Component index polled new components");
         let mut index = self.write_index();
         for (id, protocol_system_id) in rows {
-            index.insert(protocol_system_id, id, NO_TVL);
+            index.insert(*protocol_system_id, *id, NO_TVL);
         }
         index.max_id = index.max_id.max(max_id);
-        Ok(())
     }
 
     /// Writes `rows`, sorted by component id, into the index. With `replace_all`, all other
@@ -401,20 +419,23 @@ impl ComponentIndex {
         }
     }
 
-    /// Reads components and TVL again and swaps the result in. Returns the number of components.
+    /// Reads components and TVL again, in one snapshot, and swaps the result in. Returns the number
+    /// of components.
     async fn full_reload(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
         let started = Instant::now();
-        let mut rows: Vec<(i64, i64)> = schema::protocol_component::table
-            .filter(schema::protocol_component::chain_id.eq(self.chain_db_id))
-            .select((
-                schema::protocol_component::id,
-                schema::protocol_component::protocol_system_id,
-            ))
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
+        let chain_db_id = self.chain_db_id;
+        let (mut rows, tvl_rows) = snapshot_transaction(conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let rows = load_components(conn, chain_db_id, 0).await?;
+                    let tvl_rows = load_tvl(conn, None).await?;
+                    Result::<_, PostgresError>::Ok((rows, tvl_rows))
+                }
+                .scope_boxed()
+            })
+            .await?;
         rows.sort_unstable();
-        let tvl_rows = load_tvl(conn, None).await?;
 
         let mut rebuilt = ChainIndex::from_sorted_components(&rows);
         rebuilt.apply_tvl(&tvl_rows);
@@ -476,17 +497,22 @@ impl ComponentIndex {
                 match tokio::time::timeout(Duration::from_secs(30), pool.get()).await {
                     Ok(Ok(mut conn)) => {
                         let started = Instant::now();
-                        match index
-                            .refresh(&mut conn, full_reload_interval)
-                            .await
-                        {
-                            Ok(RefreshOutcome::Unchanged) => {}
-                            Ok(outcome) => info!(
+                        let refresh = index.refresh(&mut conn, full_reload_interval);
+                        match tokio::time::timeout(REFRESH_TIMEOUT, refresh).await {
+                            Ok(Ok(RefreshOutcome::Unchanged)) => {}
+                            Ok(Ok(outcome)) => info!(
                                 ?outcome,
                                 elapsed = ?started.elapsed(),
                                 "Component index refreshed"
                             ),
-                            Err(err) => error!(%err, "Component index refresh failed"),
+                            Ok(Err(err)) => error!(%err, "Component index refresh failed"),
+                            Err(_) => {
+                                error!(
+                                    timeout_secs = REFRESH_TIMEOUT.as_secs(),
+                                    "Component index refresh timed out; dropping its connection"
+                                );
+                                drop(Object::take(conn));
+                            }
                         }
                     }
                     Ok(Err(err)) => {
@@ -501,13 +527,29 @@ impl ComponentIndex {
     }
 }
 
+/// Reads the `(id, protocol system id)` rows of the chain's components with an id above `after_id`,
+/// in no particular order.
+async fn load_components(
+    conn: &mut AsyncPgConnection,
+    chain_db_id: i64,
+    after_id: i64,
+) -> Result<Vec<(i64, i64)>, PostgresError> {
+    schema::protocol_component::table
+        .filter(schema::protocol_component::chain_id.eq(chain_db_id))
+        .filter(schema::protocol_component::id.gt(after_id))
+        .select((schema::protocol_component::id, schema::protocol_component::protocol_system_id))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)
+}
+
 /// Reads the `component_tvl` rows, sorted by component id: with `newer_than = (ts, limit)` at most
 /// `limit` rows with a `modified_ts` after `ts`, otherwise all rows. Rows of every chain are
 /// returned; `component_tvl` has no chain column, and matching by id discards the others.
 async fn load_tvl(
     conn: &mut AsyncPgConnection,
     newer_than: Option<(NaiveDateTime, i64)>,
-) -> Result<Vec<TvlRow>, StorageError> {
+) -> Result<Vec<TvlRow>, PostgresError> {
     let mut query = schema::component_tvl::table
         .select((
             schema::component_tvl::protocol_component_id,
@@ -1246,6 +1288,73 @@ mod serial_db_test {
 
             set_tvl(&mut conn, new_component, 3.0).await;
             assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::TvlDelta { n_rows: 1 });
+            fixture
+                .assert_equivalent(&mut conn)
+                .await;
+        })
+        .await;
+    }
+
+    /// A component and its TVL row commit while a full reload is between its component read and
+    /// its TVL read. Reading both in one snapshot hides both, so the next poll reads both; reading
+    /// them separately would see the TVL row without its component, drop it, and move the TVL
+    /// watermark past it.
+    #[tokio::test]
+    async fn test_serial_db_full_reload_reads_components_and_tvl_in_one_snapshot() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let mut writer = pool.get().await.unwrap();
+            let mut observer = pool.get().await.unwrap();
+            let fixture = setup(&mut conn).await;
+            let reload_pid: i32 =
+                diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("pg_backend_pid()"))
+                    .get_result(&mut conn)
+                    .await
+                    .unwrap();
+
+            // The writer holds the TVL table until the reload waits on it, then commits a component
+            // and its TVL row.
+            diesel::sql_query("BEGIN")
+                .execute(&mut writer)
+                .await
+                .unwrap();
+            diesel::sql_query("LOCK TABLE component_tvl IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut writer)
+                .await
+                .unwrap();
+            let new_component = fixture
+                .insert_component_elsewhere(&mut writer, "b9")
+                .await;
+            set_tvl(&mut writer, new_component, 4.0).await;
+
+            let reload = fixture
+                .index()
+                .refresh(&mut conn, Duration::ZERO);
+            let commit_when_reload_waits = async {
+                let wait_event = format!(
+                    "(SELECT wait_event_type FROM pg_stat_activity WHERE pid = {reload_pid})"
+                );
+                loop {
+                    let waiting: Option<String> = diesel::select(diesel::dsl::sql::<
+                        diesel::sql_types::Nullable<diesel::sql_types::Text>,
+                    >(&wait_event))
+                    .get_result(&mut observer)
+                    .await
+                    .unwrap();
+                    if waiting.as_deref() == Some("Lock") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                diesel::sql_query("COMMIT")
+                    .execute(&mut writer)
+                    .await
+                    .unwrap();
+            };
+            let (outcome, ()) = tokio::join!(reload, commit_when_reload_waits);
+            assert!(matches!(outcome.unwrap(), RefreshOutcome::FullReload { .. }));
+
+            fixture.refresh(&mut conn).await;
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
