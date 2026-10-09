@@ -142,8 +142,8 @@ use crate::{
     utils::default_blocklist,
 };
 
-const EXCHANGES_REQUIRING_FILTER: [&str; 5] =
-    ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3", "vm:curve"];
+const EXCHANGES_REQUIRING_FILTER: [&str; 6] =
+    ["vm:balancer_v2", "fluid_v1", "erc4626", "ekubo_v3", "vm:curve", "flamm"];
 
 /// The client-side filter exchange `name` always gets, in addition to any filter the caller
 /// provides.

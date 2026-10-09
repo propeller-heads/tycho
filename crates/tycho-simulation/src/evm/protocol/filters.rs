@@ -4,9 +4,12 @@ use tracing::{debug, info};
 use tycho_client::feed::synchronizer::ComponentWithState;
 use tycho_common::Bytes;
 
-pub use crate::evm::protocol::ekubo_v3::{
-    filter_fn as ekubo_v3_extension_filter,
-    filter_fn_with_signed_exclusive_swap as ekubo_v3_extension_filter_with_signed_exclusive_swap,
+pub use crate::evm::protocol::{
+    ekubo_v3::{
+        filter_fn as ekubo_v3_extension_filter,
+        filter_fn_with_signed_exclusive_swap as ekubo_v3_extension_filter_with_signed_exclusive_swap,
+    },
+    flamm::flamm_filter,
 };
 
 /// Filters out pools that DCI currently fails to find some accounts for
