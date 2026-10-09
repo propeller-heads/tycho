@@ -622,12 +622,17 @@ impl PostgresGateway {
 ///   successfully.
 /// - `Err`: Contains a `StorageError` if there was an issue creating the connection pool.
 async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
-    let pool = Pool::builder(config)
-        .build()
-        .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+    let pool = new_pool(db_url)?;
     run_migrations(db_url);
     Ok(pool)
+}
+
+/// Creates a connection pool without running migrations.
+fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    Pool::builder(config)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.
