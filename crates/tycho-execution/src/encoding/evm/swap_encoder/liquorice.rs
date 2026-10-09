@@ -78,6 +78,7 @@ impl SwapEncoder for LiquoriceSwapEncoder {
             token_out: swap.token_out().address.clone(),
             sender: router_address.clone(),
             receiver: router_address.clone(),
+            origin: None,
         };
 
         let signed_quote = on_blocking_thread(|| {

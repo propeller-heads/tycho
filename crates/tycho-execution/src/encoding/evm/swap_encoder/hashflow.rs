@@ -67,6 +67,7 @@ impl SwapEncoder for HashflowSwapEncoder {
                         token_out: swap.token_out().address.clone(),
                         sender: router_address.clone(),
                         receiver: router_address,
+                        origin: None,
                     })
                     .await
             })
