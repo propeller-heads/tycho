@@ -47,9 +47,26 @@ impl<V: DeepSizeOf + Send + Sync> ValueWithSize<V> {
     }
 }
 
+/// The response caches of the RPC handler, one per endpoint. Set the ones to turn off per
+/// deployment with `DISABLED_RPC_CACHES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "snake_case")]
+pub enum RpcCacheKind {
+    /// `/contract_state` responses.
+    ContractStorage,
+    /// `/protocol_state` responses.
+    ProtocolState,
+    /// `/protocol_components` responses.
+    ProtocolComponents,
+    /// `/traced_entry_points` responses.
+    TracedEntryPoints,
+}
+
 pub struct RpcCache<R, V> {
     name: String,
     cache: Cache<R, Arc<ValueWithSize<V>>>,
+    /// When `false`, every `get` runs the fallback and stores nothing.
+    enabled: bool,
 }
 
 impl<R, V> RpcCache<R, V>
@@ -71,7 +88,12 @@ where
             .weigher(weigher)
             .build();
 
-        Self { name: name.to_string(), cache }
+        Self { name: name.to_string(), cache, enabled: true }
+    }
+
+    /// Turns the cache off: every `get` runs the fallback and stores nothing.
+    pub fn disable(&mut self) {
+        self.enabled = false;
     }
 
     #[instrument(
@@ -90,6 +112,11 @@ where
         request: R,
         fallback: F,
     ) -> Result<Arc<V>, E> {
+        if !self.enabled {
+            trace!("CacheDisabled");
+            let (response, _) = (fallback)(request).await?;
+            return Ok(Arc::new(response));
+        }
         tracing::Span::current().record("size", self.cache.entry_count());
         // Check the cache for a cached response
         if let Some(inflight_val) = self.cache.get(&request) {
@@ -189,6 +216,25 @@ mod test {
         let mut guard = access_counter.lock().await;
         *guard += 1;
         Ok((1, true))
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_disabled_cache_runs_fallback_every_time() {
+        let access_counter = Arc::new(Mutex::new(0));
+        let mut cache = RpcCache::<String, i32>::new("test", 100, 3600);
+        cache.disable();
+
+        for _ in 0..2 {
+            cache
+                .get("k0".to_string(), |_| async {
+                    increment_counter(access_counter.clone()).await
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(*access_counter.lock().await, 2);
+        assert_eq!(cache.cache.entry_count(), 0);
     }
 
     #[test_log::test(tokio::test)]
