@@ -65,6 +65,14 @@
 //! fetched values. A full reload builds a new index without the lock, then swaps it in; components
 //! committed while it ran come back with the new-component poll that follows it.
 //!
+//! # Metrics
+//!
+//! `component_index_last_refresh_timestamp_seconds` and
+//! `component_index_last_full_reload_timestamp_seconds` hold the time of the last successful
+//! refresh and full reload, so a stopped refresh task shows as a timestamp that stops moving.
+//! `component_index_refreshes_total{outcome}` counts refreshes by outcome, errors and timeouts
+//! included, and `component_index_components` holds the number of indexed components.
+//!
 //! # Cost
 //!
 //! 16 bytes per component plus a small per-system overhead: ~85 MB for 5.25M components. A full TVL
@@ -83,6 +91,7 @@ use diesel_async::{
     scoped_futures::ScopedFutureExt,
     AsyncPgConnection, RunQueryDsl,
 };
+use metrics::{counter, gauge};
 use tracing::{debug, error, info};
 use tycho_common::{
     models::{Chain, PaginationParams},
@@ -126,6 +135,25 @@ pub enum RefreshOutcome {
     TvlReload { n_rows: usize },
     /// Read components and TVL again.
     FullReload { n_components: usize },
+}
+
+impl RefreshOutcome {
+    /// The `outcome` label of `component_index_refreshes_total`.
+    fn label(&self) -> &'static str {
+        match self {
+            RefreshOutcome::Unchanged => "tvl_unchanged",
+            RefreshOutcome::TvlDelta { .. } => "tvl_delta",
+            RefreshOutcome::TvlReload { .. } => "tvl_reload",
+            RefreshOutcome::FullReload { .. } => "full_reload",
+        }
+    }
+}
+
+/// Seconds since the Unix epoch, for the timestamp gauges.
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64())
 }
 
 /// Components of one protocol system, in ascending id order.
@@ -371,15 +399,17 @@ impl ComponentIndex {
             .await?;
 
         self.add_components(&new_components);
-        if let Some(rows) = all_tvl {
+        let outcome = if let Some(rows) = all_tvl {
             self.write_tvl(&rows, true);
-            return Ok(RefreshOutcome::TvlReload { n_rows: rows.len() });
-        }
-        if changed_tvl.is_empty() {
-            return Ok(RefreshOutcome::Unchanged);
-        }
-        self.write_tvl(&changed_tvl, false);
-        Ok(RefreshOutcome::TvlDelta { n_rows: changed_tvl.len() })
+            RefreshOutcome::TvlReload { n_rows: rows.len() }
+        } else if changed_tvl.is_empty() {
+            RefreshOutcome::Unchanged
+        } else {
+            self.write_tvl(&changed_tvl, false);
+            RefreshOutcome::TvlDelta { n_rows: changed_tvl.len() }
+        };
+        gauge!("component_index_last_refresh_timestamp_seconds").set(unix_now());
+        Ok(outcome)
     }
 
     /// Adds `(id, protocol system id)` rows of components the index does not hold yet.
@@ -393,6 +423,7 @@ impl ComponentIndex {
             index.insert(*protocol_system_id, *id, NO_TVL);
         }
         index.max_id = index.max_id.max(max_id);
+        gauge!("component_index_components").set(index.n_components() as f64);
     }
 
     /// Writes `rows`, sorted by component id, into the index. With `replace_all`, all other
@@ -451,6 +482,10 @@ impl ComponentIndex {
         *self.write_index() = rebuilt;
         self.advance_newest_tvl_ts(&tvl_rows);
         self.state().last_full_reload = Instant::now();
+        let now = unix_now();
+        gauge!("component_index_last_full_reload_timestamp_seconds").set(now);
+        gauge!("component_index_last_refresh_timestamp_seconds").set(now);
+        gauge!("component_index_components").set(n_components as f64);
         Ok(n_components)
     }
 
@@ -499,14 +534,25 @@ impl ComponentIndex {
                         let started = Instant::now();
                         let refresh = index.refresh(&mut conn, full_reload_interval);
                         match tokio::time::timeout(REFRESH_TIMEOUT, refresh).await {
-                            Ok(Ok(RefreshOutcome::Unchanged)) => {}
-                            Ok(Ok(outcome)) => info!(
-                                ?outcome,
-                                elapsed = ?started.elapsed(),
-                                "Component index refreshed"
-                            ),
-                            Ok(Err(err)) => error!(%err, "Component index refresh failed"),
+                            Ok(Ok(outcome)) => {
+                                counter!("component_index_refreshes_total", "outcome" => outcome.label())
+                                    .increment(1);
+                                if outcome != RefreshOutcome::Unchanged {
+                                    info!(
+                                        ?outcome,
+                                        elapsed = ?started.elapsed(),
+                                        "Component index refreshed"
+                                    );
+                                }
+                            }
+                            Ok(Err(err)) => {
+                                counter!("component_index_refreshes_total", "outcome" => "error")
+                                    .increment(1);
+                                error!(%err, "Component index refresh failed");
+                            }
                             Err(_) => {
+                                counter!("component_index_refreshes_total", "outcome" => "timeout")
+                                    .increment(1);
                                 error!(
                                     timeout_secs = REFRESH_TIMEOUT.as_secs(),
                                     "Component index refresh timed out; dropping its connection"
