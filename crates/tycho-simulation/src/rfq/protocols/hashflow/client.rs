@@ -609,6 +609,11 @@ mod tests {
         true,
         "No maker supports this request (code 82)"
     )]
+    #[case::below_minimum_amount(
+        r#"{"status":"fail","rfqId":"0x225000000000000000000000000000ffffffffffffff00317477065b24ec0000","error":{"code":79,"message":"Below minimum amount"}}"#,
+        true,
+        "Below minimum amount (code 79)"
+    )]
     #[case::exceeds_supported_amounts(
         r#"{"status":"fail","rfqId":"0x225000000000000000000000000000ffffffffffffff00317498228a10fe0000","error":{"code":76,"message":"Exceeds supported amounts"}}"#,
         true,

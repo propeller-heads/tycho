@@ -27,14 +27,22 @@ impl HashflowError {
     /// the API.
     const NO_MAKER_SUPPORTS_REQUEST: u64 = 82;
 
-    /// The amount asked for is outside the range the maker quotes.
+    /// The amount asked for is above what the maker quotes.
     const EXCEEDS_SUPPORTED_AMOUNTS: u64 = 76;
 
+    /// The amount asked for is below the maker's first level.
+    const BELOW_MINIMUM_AMOUNT: u64 = 79;
+
     /// Whether this is a maker declining the trade rather than the request being wrong: nobody
-    /// quotes it, or the amount is outside what the maker it went to supports. Both are answers
-    /// about one trade at one moment, which the same ladder quotes at another size.
+    /// quotes it, or the amount is outside the range the maker it went to supports. All three are
+    /// answers about one trade at one moment, which the same ladder quotes at another size.
     pub fn declines_the_trade(&self) -> bool {
-        matches!(self.code, Self::NO_MAKER_SUPPORTS_REQUEST | Self::EXCEEDS_SUPPORTED_AMOUNTS)
+        matches!(
+            self.code,
+            Self::NO_MAKER_SUPPORTS_REQUEST |
+                Self::EXCEEDS_SUPPORTED_AMOUNTS |
+                Self::BELOW_MINIMUM_AMOUNT
+        )
     }
 
     /// Whether this is Hashflow stating it does not price the chain it was asked about.
