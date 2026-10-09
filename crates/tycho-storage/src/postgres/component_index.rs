@@ -802,7 +802,8 @@ mod benchmark {
     /// Long enough that the benchmark never triggers the periodic full reload.
     const NO_PERIODIC_RELOAD: Duration = Duration::from_secs(24 * 3600);
 
-    fn rss_mib() -> f64 {
+    /// Resident memory of this process, from `/proc` (Linux only).
+    fn rss() -> String {
         std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|status| {
@@ -817,7 +818,7 @@ mod benchmark {
                         })
                 })
             })
-            .map_or(0.0, |kib| kib / 1024.0)
+            .map_or("n/a".to_string(), |kib| format!("{:.0} MiB", kib / 1024.0))
     }
 
     fn time_queries(index: &ComponentIndex, chain: Chain, system_id: i64, min_tvl: Option<f64>) {
@@ -826,7 +827,7 @@ mod benchmark {
             .unwrap()
             .total;
         let page_size = 2550;
-        let deep_page = (total / page_size / 2).max(0);
+        let deep_page = total / page_size / 2;
         for page in [0, deep_page] {
             let iterations = 20;
             let started = Instant::now();
@@ -847,7 +848,7 @@ mod benchmark {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "benchmark; needs DATABASE_URL"]
     async fn component_index_benchmark() {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let chain = std::env::var("BENCH_CHAIN")
@@ -864,7 +865,7 @@ mod benchmark {
                 .unwrap();
         }
 
-        let rss_before = rss_mib();
+        let rss_before = rss();
         let started = Instant::now();
         let chain_db_id: i64 = schema::chain::table
             .filter(schema::chain::name.eq(chain.to_string()))
@@ -887,8 +888,8 @@ mod benchmark {
             (chain_index.n_components(), systems)
         };
         println!(
-            "startup load: {load_elapsed:?}, {n_components} components, RSS {rss_before:.0} -> {:.0} MiB",
-            rss_mib()
+            "startup load: {load_elapsed:?}, {n_components} components, RSS {rss_before} -> {}",
+            rss()
         );
         println!("systems (id, components): {systems:?}");
 
@@ -910,10 +911,10 @@ mod benchmark {
         let started = Instant::now();
         index.write_tvl(&rows, true);
         println!(
-            "full TVL read: fetch+sort {fetch_elapsed:?} ({} rows), write under lock {:?}, RSS {:.0} MiB",
+            "full TVL read: fetch+sort {fetch_elapsed:?} ({} rows), write under lock {:?}, RSS {}",
             rows.len(),
             started.elapsed(),
-            rss_mib()
+            rss()
         );
         drop(rows);
 
