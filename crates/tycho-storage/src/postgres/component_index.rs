@@ -72,8 +72,9 @@
 //! `component_index_last_refresh_timestamp_seconds` and
 //! `component_index_last_full_reload_timestamp_seconds` hold the time of the last successful
 //! refresh and full reload, so a stopped refresh task shows as a timestamp that stops moving.
-//! `component_index_refreshes_total{outcome}` counts refreshes by outcome, errors and timeouts
-//! included, and `component_index_components` holds the number of indexed components.
+//! `component_index_refreshes_total{outcome}` counts refreshes by outcome, failures included, and
+//! `component_index_components` holds the number of indexed components. Every failed refresh logs
+//! an error, and the task backs off linearly, up to 5 minutes, until a refresh succeeds again.
 //!
 //! # Cost
 //!
@@ -534,46 +535,45 @@ impl ComponentIndex {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // The first tick fires immediately; skip it, the index was just loaded.
             interval.tick().await;
+            let mut failures: u32 = 0;
             loop {
                 interval.tick().await;
+                let started = Instant::now();
                 // A bounded wait so pool starvation is visible instead of a silently stalled task.
-                match tokio::time::timeout(Duration::from_secs(30), pool.get()).await {
+                let result = match tokio::time::timeout(Duration::from_secs(30), pool.get()).await {
                     Ok(Ok(mut conn)) => {
-                        let started = Instant::now();
                         let refresh = index.refresh(&mut conn, full_reload_interval);
                         match tokio::time::timeout(REFRESH_TIMEOUT, refresh).await {
-                            Ok(Ok(outcome)) => {
-                                counter!("component_index_refreshes_total", "outcome" => outcome.label())
-                                    .increment(1);
-                                if outcome != RefreshOutcome::TvlUnchanged {
-                                    info!(
-                                        ?outcome,
-                                        elapsed = ?started.elapsed(),
-                                        "Component index refreshed"
-                                    );
-                                }
-                            }
-                            Ok(Err(err)) => {
-                                counter!("component_index_refreshes_total", "outcome" => "error")
-                                    .increment(1);
-                                error!(%err, "Component index refresh failed");
-                            }
+                            Ok(result) => result.map_err(|err| err.to_string()),
                             Err(_) => {
-                                counter!("component_index_refreshes_total", "outcome" => "timeout")
-                                    .increment(1);
-                                error!(
-                                    timeout_secs = REFRESH_TIMEOUT.as_secs(),
-                                    "Component index refresh timed out; dropping its connection"
-                                );
                                 drop(Object::take(conn));
+                                Err(format!("timed out after {REFRESH_TIMEOUT:?}"))
                             }
                         }
                     }
-                    Ok(Err(err)) => {
-                        error!(%err, "Component index refresh could not get a connection")
+                    Ok(Err(err)) => Err(format!("no DB connection: {err}")),
+                    Err(_) => Err("timed out waiting for a DB connection".to_string()),
+                };
+                match result {
+                    Ok(outcome) => {
+                        if failures > 0 {
+                            info!(failures, "Component index refresh recovered");
+                        }
+                        failures = 0;
+                        counter!("component_index_refreshes_total", "outcome" => outcome.label())
+                            .increment(1);
+                        if outcome != RefreshOutcome::TvlUnchanged {
+                            info!(?outcome, elapsed = ?started.elapsed(), "Component index refreshed");
+                        }
                     }
-                    Err(_) => {
-                        error!("Component index refresh timed out waiting for a DB connection")
+                    Err(err) => {
+                        failures += 1;
+                        counter!("component_index_refreshes_total", "outcome" => "error")
+                            .increment(1);
+                        error!(%err, failures, "Component index refresh failed; the index is getting stale");
+                        // Back off linearly, up to 5 minutes, so a failing full reload does not
+                        // rerun every tick.
+                        tokio::time::sleep(period * failures.min(60)).await;
                     }
                 }
             }
