@@ -1956,6 +1956,30 @@ mod tests {
     }
 
     #[test]
+    fn bsc_ring_swap_v2_uses_shared_package_config() {
+        let runner = get_mocked_runner_for(
+            Chain::Bsc,
+            "bsc-ring-swap-v2",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("substreams/ethereum-ring-swap-v2"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_bsc_ring_swap_v2.tycho.yaml")
+        );
+    }
+
+    #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();
         // Setup mock data

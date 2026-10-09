@@ -1,3 +1,11 @@
+## [0.450.0](https://github.com/propeller-heads/tycho/compare/0.449.0...0.450.0) (2026-10-09)
+
+
+### Features
+
+* add Ring Swap v2 support on BSC ([02e5b56](https://github.com/propeller-heads/tycho/commit/02e5b56c075578ac29399eef38e60d77630fd184))
+* add Ring Swap v2 support on BSC ([#1263](https://github.com/propeller-heads/tycho/issues/1263)) ([a24756b](https://github.com/propeller-heads/tycho/commit/a24756b1c6ad9e8d0d1bd45d39177ae0daed7384))
+
 ## [0.449.0](https://github.com/propeller-heads/tycho/compare/0.448.1...0.449.0) (2026-10-08)
 
 

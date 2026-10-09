@@ -89,6 +89,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("LunarBase", "base", "lunarbase");
         _executor("MaverickV2", "ethereum", "vm:maverick_v2");
         _executor("RingSwapV2", "ethereum", "ring_swap_v2");
+        _executor("RingSwapV2Bsc", "bsc", "ring_swap_v2");
         _executor("Sky", "ethereum", "sky");
         _executor("Slipstreams", "base", "aerodrome_slipstreams");
         _executor("UniswapV2", "ethereum", "uniswap_v2");
@@ -118,9 +119,10 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // Past block 22090400, where the EtherFi redemption manager went live, so constructors
         // that check it for code can run.
         if (chain.eq(ETHEREUM)) return 23_000_000;
-        // No Base or Robinhood constructor reads chain state yet; these only pin the fork.
-        // Both are past every address the deployment config names on the chain.
+        // No Base, BSC or Robinhood constructor reads chain state yet; these only pin the fork.
+        // All are past every address the deployment config names on the chain.
         if (chain.eq("base")) return 46_500_000;
+        if (chain.eq("bsc")) return 46_793_446;
         if (chain.eq("robinhood")) return 80_000_000;
         revert(
             string.concat(chain, " has no fork block; add one to _forkBlock")

@@ -6,6 +6,7 @@
   "base-alienbase-v3": "ethereum-uniswap-v3-logs-only",
   "base-balancer-v3": "ethereum-balancer-v3",
   "base-sushiswap-v2": "ethereum-uniswap-v2",
+  "bsc-ring-swap-v2": "ethereum-ring-swap-v2",
   "ethereum-pancakeswap-v2": "ethereum-uniswap-v2",
   "ethereum-sushiswap-v2": "ethereum-uniswap-v2",
   "gnosis-balancer-v3": "ethereum-balancer-v3",
