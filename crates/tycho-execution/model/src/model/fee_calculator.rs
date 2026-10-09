@@ -15,6 +15,7 @@ struct FeeInfo {
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
     positive_slippage_exempt: bool,
+    positive_slippage_share_bps: i64,
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -56,11 +57,18 @@ fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
         false
     };
 
+    let positive_slippage_share_bps = if positive_slippage_enabled && !positive_slippage_exempt {
+        params.request("positive_slippage_share_bps", vec![0, MAX_BPS / 2, MAX_BPS])?
+    } else {
+        MAX_BPS
+    };
+
     Ok(FeeInfo {
         router_fee_on_output_bps,
         router_fee_on_client_fee_bps,
         positive_slippage_enabled,
         positive_slippage_exempt,
+        positive_slippage_share_bps,
     })
 }
 
@@ -102,7 +110,10 @@ pub fn calculate_fee(
 pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
-    if fee_info.positive_slippage_enabled && !fee_info.positive_slippage_exempt {
+    if fee_info.positive_slippage_enabled &&
+        fee_info.positive_slippage_share_bps > 0 &&
+        !fee_info.positive_slippage_exempt
+    {
         return Ok(true);
     }
     if client_fee_bps > 0 {
@@ -158,7 +169,7 @@ fn _calculate_fee(
 
 /// Mirrors `FeeCalculator._calculatePositiveSlippage` in Solidity.
 ///
-/// Returns the positive slippage surplus, all of which goes to the router;
+/// Returns the router's share of the positive slippage surplus;
 /// zero if disabled, the client is exempt, or there is no surplus.
 fn _calculate_positive_slippage(
     actual_amount_out: i64,
@@ -172,5 +183,7 @@ fn _calculate_positive_slippage(
         return 0;
     }
 
-    actual_amount_out - expected_amount_out
+    ((actual_amount_out - expected_amount_out) as i128 *
+        fee_info.positive_slippage_share_bps as i128 /
+        MAX_BPS as i128) as i64
 }
