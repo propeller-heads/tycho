@@ -16,6 +16,7 @@ const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculat
 // Include all executor bytecode files at compile time
 const UNISWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV2.runtime.json");
 const RING_SWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2.runtime.json");
+const RING_SWAP_V2_BSC_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2Bsc.runtime.json");
 const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runtime.json");
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
@@ -71,6 +72,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
 static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'static str>> =
     LazyLock::new(|| {
         HashMap::from([
+            ((Chain::Bsc, "ring_swap_v2"), RING_SWAP_V2_BSC_BYTECODE_JSON),
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
@@ -185,5 +187,21 @@ mod tests {
             decode_runtime_bytecode(UNISWAP_V4_ANGSTROM_BYTECODE_JSON, "executor").unwrap();
         let actual = load_executor_bytecode(Chain::Ethereum, "uniswap_v4_hooks").unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ring_swap_v2_uses_chain_specific_runtime_bytecode() {
+        let ethereum = load_executor_bytecode(Chain::Ethereum, "ring_swap_v2").unwrap();
+        let bsc = load_executor_bytecode(Chain::Bsc, "ring_swap_v2").unwrap();
+
+        assert_ne!(ethereum, bsc);
+    }
+
+    #[test]
+    fn chain_agnostic_executor_uses_default_runtime_bytecode() {
+        let ethereum = load_executor_bytecode(Chain::Ethereum, "uniswap_v2").unwrap();
+        let bsc = load_executor_bytecode(Chain::Bsc, "uniswap_v2").unwrap();
+
+        assert_eq!(ethereum, bsc);
     }
 }

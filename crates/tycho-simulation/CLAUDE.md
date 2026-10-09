@@ -33,10 +33,23 @@ for any protocol indexed by Tycho.
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
-  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP.
+  `liquorice`, `metric`, `native`). Only Bebop streams over WebSocket; the rest poll over HTTP.
   `with_fallback_router()` on the Bebop, Hashflow and Metric builders labels components
   `fallback:rfq:bebop` / `fallback:rfq:hashflow` / `fallback:rfq:metric`, so they execute through
-  those venues' fallback routers. Off by default: those routers are not deployed yet
+  those venues' fallback routers. Off by default: those routers are not deployed yet.
+  Hashflow, Liquorice, Bebop and Native stream in one of two `rfq::models::ComponentLayout`s,
+  set on the client builder. `PerPair` (default) streams one component per token pair, decoded
+  by the per-pair state (`state.rs`, `decoder.rs`). `AllPairs` streams one component for all
+  token pairs under a `<venue>_all_pairs` stream name, decoded by the all-pairs state
+  (`all_pairs_state.rs`, `all_pairs_decoder.rs`). The all-pairs format is the one
+  `rfq/protocols/component.rs` defines: the `books` state attribute and the `swap_directions`
+  static attribute. `rfq/protocols/maker_price_levels.rs` picks the market maker for
+  Hashflow and Liquorice. The Bebop and Native all-pairs states delegate pricing to their per-pair
+  states. `rfq::models::QuoteRule` says how often one route may quote
+  the venue, carried as the `quote_rule` static attribute of an all-pairs component: Hashflow
+  and Liquorice builders set it (`quote_rule`, every maker once by default); Bebop and Native
+  name no maker and always quote once. Metric stays one component per pool: its executor takes
+  the pool from the component id
 - **`snapshot_feed/`**: the latest-value feed layer, both ends. `SnapshotFeed` is the contract a
   feed implements: `run(self, publisher)` drives it, and the `Publisher` it is handed — which
   nothing outside the crate can construct — owns the `watch` channel, so reading a feed is the only

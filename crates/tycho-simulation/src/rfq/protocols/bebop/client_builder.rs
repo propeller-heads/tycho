@@ -4,7 +4,9 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::BebopClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError, models::ComponentLayout, protocols::utils::default_quote_tokens_for_chain,
+};
 
 /// `BebopClientBuilder` is a builder pattern implementation for creating instances of
 /// `BebopClient`.
@@ -48,6 +50,7 @@ pub struct BebopClientBuilder {
     origin_target: Option<Bytes>,
     origin_source: Option<String>,
     via_fallback_router: bool,
+    component_layout: ComponentLayout,
 }
 
 impl BebopClientBuilder {
@@ -63,7 +66,15 @@ impl BebopClientBuilder {
             origin_target: None,
             origin_source: None,
             via_fallback_router: false,
+            component_layout: ComponentLayout::PerPair,
         }
+    }
+
+    /// The components the client streams. One per pair, by default. Register a `PerPair` client
+    /// with `BebopState` and a `AllPairs` client with `BebopAllPairsState`.
+    pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
     }
 
     /// Set the tokens for which to monitor prices
@@ -135,7 +146,8 @@ impl BebopClientBuilder {
             self.origin_address,
             self.origin_target,
             self.origin_source,
-        )?;
+        )?
+        .with_component_layout(self.component_layout);
         Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

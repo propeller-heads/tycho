@@ -82,6 +82,7 @@ const deploy_protocols = {
         "rfq:metric",
     ],
     "bsc": [
+        "ring_swap_v2",
         "uniswap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
