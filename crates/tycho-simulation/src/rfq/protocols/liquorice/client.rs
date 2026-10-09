@@ -1,10 +1,7 @@
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
 
@@ -68,7 +65,7 @@ pub struct LiquoriceClient {
     /// beside `authorization`. Every client starts on Basic and switches to the legacy pair for
     /// good once the venue answers 401.
     #[serde(skip)]
-    use_legacy_auth: Arc<AtomicBool>,
+    use_legacy_auth: AtomicBool,
 }
 
 impl LiquoriceClient {
@@ -90,7 +87,7 @@ impl LiquoriceClient {
             quote_timeout,
             quote_expiry_secs,
             http: Client::new(),
-            use_legacy_auth: Arc::new(AtomicBool::new(false)),
+            use_legacy_auth: AtomicBool::new(false),
         }
     }
 
@@ -402,7 +399,7 @@ impl LiquoriceClient {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use dotenv::dotenv;
     use rstest::rstest;

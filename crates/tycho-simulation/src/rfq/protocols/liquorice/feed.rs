@@ -3,10 +3,12 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 use tokio::time::Duration;
 use tycho_common::Bytes;
 
-use super::source::LiquoriceBookSource;
 use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
-    rfq::{constants::DEFAULT_QUOTE_TIMEOUT, protocols::liquorice::client::LiquoriceClient},
+    rfq::{
+        constants::DEFAULT_QUOTE_TIMEOUT,
+        protocols::liquorice::{client::LiquoriceClient, source::LiquoriceBookSource},
+    },
     snapshot_feed::{
         errors::FeedError,
         http::{default_http_feed_config, run_http_poll_feed, HttpFeedConfig},

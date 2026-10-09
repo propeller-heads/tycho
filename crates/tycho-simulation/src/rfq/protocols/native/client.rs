@@ -69,14 +69,6 @@ impl NativeClient {
         NativeClient { chain, endpoint, api_key, quote_timeout, http: Client::new() }
     }
 
-    /// Every failure Native reports in an error envelope, including a refused key: a credential
-    /// can be fixed at the venue while the feed keeps polling, and the poll that then succeeds
-    /// restores the book without a restart. Codes are documented at
-    /// <https://docs.native.org/native-dev/build-with-native/swap-aggregators/firmquote-swap-apis/miscellaneous/error-handling#error-codes>.
-    fn orderbook_api_error(error: &NativeApiErrorResponse) -> FeedError {
-        FeedError::Connection(format!("Native API error {}: {}", error.code, error.message))
-    }
-
     /// The venue's aggregated orderbook: one entry per pair, side and orientation its makers
     /// quote.
     pub async fn fetch_orderbook(&self) -> Result<Vec<NativeOrderbookEntry>, FeedError> {
@@ -99,7 +91,13 @@ impl NativeClient {
             .map(|orderbook| orderbook.0)
             .map_err(|orderbook_error| {
                 match serde_json::from_slice::<NativeApiErrorResponse>(&body) {
-                    Ok(api_error) => Self::orderbook_api_error(&api_error),
+                    // No failure the venue reports here is fatal, a refused key included: that
+                    // is fixed at the venue while the feed polls, and the next poll serves the
+                    // book again.
+                    Ok(api_error) => FeedError::Connection(format!(
+                        "Native API error {}: {}",
+                        api_error.code, api_error.message
+                    )),
                     Err(_) => FeedError::Parsing(format!(
                         "Failed to parse Native Relay orderbook: {orderbook_error}"
                     )),
