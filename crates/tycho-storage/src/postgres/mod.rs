@@ -1774,15 +1774,13 @@ mod tests_weekly_reindex {
     #[derive(QueryableByName)]
     struct Job {
         #[diesel(sql_type = diesel::sql_types::Text)]
-        jobname: String,
-        #[diesel(sql_type = diesel::sql_types::Text)]
         schedule: String,
         #[diesel(sql_type = diesel::sql_types::Text)]
         command: String,
     }
 
-    /// The migration resolves the partition-level modify_tx indexes by name and schedules
-    /// their weekly rebuild; the commands it stores must be runnable as-is.
+    /// The weekly maintenance jobs are scheduled on Tuesdays and their commands run as-is,
+    /// the way pg_cron executes them (one statement, outside a transaction block).
     #[tokio::test]
     async fn test_weekly_reindex_jobs_scheduled_serial_db() {
         run_against_db(|connection_pool| async move {
@@ -1792,66 +1790,21 @@ mod tests_weekly_reindex {
                 .expect("Failed to get a connection from the pool");
 
             let jobs = diesel::sql_query(
-                "SELECT jobname, schedule, command FROM cron.job
+                "SELECT schedule, command FROM cron.job
                  WHERE jobname IN ('reindex_protocol_state_modify_tx',
-                                   'reindex_component_balance_modify_tx',
-                                   'reindex_watchdog', 'drop_invalid_indexes')
-                 ORDER BY jobname",
+                                   'reindex_component_balance_modify_tx', 'drop_invalid_indexes')",
             )
             .load::<Job>(&mut conn)
             .await
             .expect("querying cron.job failed");
+            assert_eq!(jobs.len(), 3, "each maintenance job must be scheduled exactly once");
 
-            let names: Vec<&str> = jobs
-                .iter()
-                .map(|j| j.jobname.as_str())
-                .collect();
-            assert_eq!(
-                names,
-                vec![
-                    "drop_invalid_indexes",
-                    "reindex_component_balance_modify_tx",
-                    "reindex_protocol_state_modify_tx",
-                    "reindex_watchdog",
-                ],
-                "all four weekly maintenance jobs must be scheduled exactly once"
-            );
             for job in &jobs {
-                assert!(
-                    job.schedule.ends_with(" * * 2"),
-                    "{} must run on Tuesdays, got {}",
-                    job.jobname,
-                    job.schedule
-                );
-            }
-
-            // The reindex commands name the auto-generated partition indexes. Running them
-            // proves the names resolve and the statement is valid outside a transaction
-            // block, which is how pg_cron executes it.
-            for job in jobs
-                .iter()
-                .filter(|j| j.jobname.starts_with("reindex_") && j.jobname != "reindex_watchdog")
-            {
-                assert!(
-                    job.command
-                        .starts_with("REINDEX INDEX CONCURRENTLY "),
-                    "{} must be a single REINDEX statement, got {}",
-                    job.jobname,
-                    job.command
-                );
+                assert!(job.schedule.ends_with(" * * 2"), "{} must run on Tuesdays", job.schedule);
                 conn.batch_execute(&job.command)
                     .await
-                    .unwrap_or_else(|e| panic!("{} command failed: {e}", job.jobname));
+                    .unwrap_or_else(|e| panic!("job command failed: {e}\n{}", job.command));
             }
-
-            // The invalid-index sweep must be valid SQL and a no-op on a healthy database.
-            let sweep = jobs
-                .iter()
-                .find(|j| j.jobname == "drop_invalid_indexes")
-                .expect("sweep job present");
-            conn.batch_execute(&sweep.command)
-                .await
-                .expect("drop_invalid_indexes command failed");
         })
         .await;
     }

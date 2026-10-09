@@ -76,5 +76,4 @@ drops expired partitions of `protocol_state`, `component_balance` and `contract_
 The live-row partitions (`protocol_state_default`, `component_balance_default`) are updated in place
 on every change, which bloats their `modify_tx` indexes without bound. Weekly pg_cron jobs rebuild
 them online with `REINDEX INDEX CONCURRENTLY` (Tuesday 09:20 UTC, a watchdog cancels after 30 min,
-invalid leftovers are dropped). The partition-level index names are resolved at migration time by
-`live_partition_index()`.
+invalid leftovers are dropped).
