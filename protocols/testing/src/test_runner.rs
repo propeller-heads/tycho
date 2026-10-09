@@ -64,26 +64,8 @@ use crate::{
 };
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
-    HashMap::from([
-        ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
-        ("base-sushiswap-v2", "ethereum-uniswap-v2"),
-        ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
-        ("arc-uniswap-v2", "ethereum-uniswap-v2"),
-        ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
-        ("base-balancer-v3", "ethereum-balancer-v3"),
-        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
-        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
-        ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
-        ("unichain-curve", "ethereum-curve"),
-        ("robinhood-ramses-v3", "polygon-ramses-v3"),
-        ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
-        ("robinhood-up-v3", "base-aerodrome-slipstreams"),
-        ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
-    ])
+    serde_json::from_str(include_str!("../protocol_packages.json"))
+        .expect("protocol_packages.json must map protocol names to package directories")
 });
 
 /// Largest relative difference tolerated between the simulated and the executed amount out.
@@ -1680,6 +1662,18 @@ mod tests {
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
+
+    #[test]
+    fn shared_protocol_packages_point_to_existing_directories() {
+        let substreams = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../substreams");
+        assert!(!CLONE_TO_BASE_PROTOCOL.is_empty());
+        for (protocol, directory) in CLONE_TO_BASE_PROTOCOL.iter() {
+            assert!(
+                substreams.join(directory).is_dir(),
+                "{protocol} maps to missing package directory {directory}"
+            );
+        }
+    }
 
     #[test]
     fn snapshot_block_reads_at_the_last_committed_block() {

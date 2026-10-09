@@ -24,3 +24,13 @@ alongside another Tycho stack, isolate both the database and the port — see `R
 (default 5431).
 
 Docker Compose is available for isolated runs — see `README.md`.
+
+## Package aliases and CI
+
+`protocol_packages.json` is the shared fork-to-package mapping used by the Rust runner, Docker
+build/filter stages and CI. Add aliases there rather than editing Dockerfile cases or Rust tables.
+Nested values name the runtime directory; builds/copies use its top-level workspace.
+
+`scripts/select_protocols.py` compares the PR head with its merge base. Mapping-only changes select
+affected aliases; package changes include all aliases of that workspace; shared infrastructure
+changes select all eligible packages. Its regression tests run in the workflow's detection job.

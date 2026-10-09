@@ -1,10 +1,5 @@
 name: Substreams Integration Tests
 
-env:
-  # Secrets are intentionally NOT defined here to keep them out of detect-changes scope.
-  # They are set at job level in test-protocols, the only job that needs them.
-  EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid
-
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +12,10 @@ on:
     paths:
       - 'protocols/substreams/**'
       - 'protocols/testing/**'
+      - '.github/workflows/ci-substreams-integration.yaml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
 
 permissions:
   contents: read
@@ -25,12 +24,8 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      protocol-testing-changed: ${{ steps.protocol-testing-files-changed.outputs.any_changed }}
-      substreams-changed: ${{ steps.substreams-files-changed.outputs.any_changed }}
-      all-substreams: ${{ steps.all_substreams.outputs.all_substreams }}
-      changed-substreams: ${{ steps.changes.outputs.changed_substreams }}
-      target-protocols: ${{ steps.target-protocols.outputs.protocols }}
-      protocols-matrix: ${{ steps.protocols-matrix.outputs.matrix }}
+      target-protocols: ${{ steps.selection.outputs.protocols }}
+      protocols-matrix: ${{ steps.selection.outputs.matrix }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -38,150 +33,27 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Check if any files changed under protocol-testing
-        id: protocol-testing-files-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
-        with:
-          files: protocols/testing/**
+      - name: Test package resolution and protocol selection
+        run: python3 -m unittest discover -s protocols/testing/scripts -p 'test_*.py'
 
-      - name: Check if any files changed under substreams
-        id: substreams-files-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
-        with:
-          files: protocols/substreams/**
-
-      - name: Check if Dockerfile changed
-        id: dockerfile-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
-        with:
-          files: protocols/testing/run.Dockerfile
-
-      - name: Check if Cargo.toml changed
-        id: cargo-toml-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
-        with:
-          files: protocols/testing/Cargo.toml
-
-      - name: Parse clone protocol mappings from test_runner.rs
-        id: clone_mappings
-        run: |
-          # Extract CLONE_TO_BASE_PROTOCOL from Rust source (single source of truth).
-          MAPPINGS=$(awk '/static CLONE_TO_BASE_PROTOCOL/,/}\);/' \
-            protocols/testing/src/test_runner.rs | \
-            grep '("' | grep -oP '"[^"]*"' | paste - - | tr -d '"')
-          CLONE_NAMES=$(echo "$MAPPINGS" | awk '{print $1}' | tr '\n' ' ' | sed 's/ *$//')
-          echo "clone_names=$CLONE_NAMES" >> "$GITHUB_OUTPUT"
-          echo "Clone protocols: $CLONE_NAMES"
-          # Store full mappings for the changes step (clone=base format).
-          echo "$MAPPINGS" | awk '{print $1 "=" $2}' > /tmp/clone_mappings.txt
-
-      - name: Get all substreams folders
-        id: all_substreams
-        env:
-          CLONE_NAMES: ${{ steps.clone_mappings.outputs.clone_names }}
-        run: |
-          FOLDERS=$(find protocols/substreams -mindepth 1 -maxdepth 1 -type d \
-            -exec basename {} \; | sort | \
-            grep -v -E "^(${EXCLUDED_SUBSTREAMS})$" | \
-            tr '\n' ' ')
-          ALL="$FOLDERS $CLONE_NAMES"
-          ALL=$(echo $ALL | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ *$//')
-          if [ -z "$ALL" ]; then
-            echo "No substreams folders found"
-          else
-            echo "Substreams folders (including clones): $ALL"
-          fi
-          echo "all_substreams=$ALL" >> "$GITHUB_OUTPUT"
-
-      - name: Get changed substreams folders
-        id: changes
-        if: steps.substreams-files-changed.outputs.any_changed == 'true'
-        env:
-          VALID: ${{ steps.all_substreams.outputs.all_substreams }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          # Read clone-to-base mappings parsed from test_runner.rs.
-          declare -A CLONE_TO_BASE
-          while IFS='=' read -r clone base; do
-            CLONE_TO_BASE["$clone"]="$base"
-          done < /tmp/clone_mappings.txt
-
-          # Detect changed top-level substreams directories from git diff.
-          CHANGED_DIRS=$(git diff --name-only --diff-filter=d origin/main \
-            "$HEAD_SHA" | \
-            grep '^protocols/substreams/' | awk -F'/' '{print $3}' | sort -u)
-
-          # Match against known protocols (base dirs and clone names).
-          CHANGED=$(echo "$CHANGED_DIRS" | \
-            grep -Fx "$(printf '%s\n' ${VALID})" | \
-            tr '\n' ' ' | sed 's/ *$//')
-
-          # When a base directory changes, also add any clone protocols that use it.
-          for clone in "${!CLONE_TO_BASE[@]}"; do
-            base="${CLONE_TO_BASE[$clone]}"
-            # CHANGED_DIRS contains only top-level directories; nested base paths map to their
-            # workspace directory while flat paths are unchanged.
-            base_top=${base%%/*}
-            if echo "$CHANGED_DIRS" | grep -qx "$base_top"; then
-              CHANGED="$CHANGED $clone"
-            fi
-          done
-
-          CHANGED=$(echo $CHANGED | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ *$//')
-          echo "changed_substreams=$CHANGED" >> "$GITHUB_OUTPUT"
-          echo "Changed substreams: $CHANGED"
-
-      - name: Determine target protocols
-        id: target-protocols
+      - name: Select protocol tests
+        id: selection
         env:
           EVENT_NAME: ${{ github.event_name }}
-          INPUT_PROTOCOLS: ${{ github.event.inputs.protocols }}
-          ALL_SUBSTREAMS: ${{ steps.all_substreams.outputs.all_substreams }}
-          CHANGED_SUBSTREAMS: ${{ steps.changes.outputs.changed_substreams }}
-          DOCKERFILE_CHANGED: ${{ steps.dockerfile-changed.outputs.any_changed }}
-          CARGO_TOML_CHANGED: ${{ steps.cargo-toml-changed.outputs.any_changed }}
-          SUBSTREAMS_CHANGED: ${{ steps.substreams-files-changed.outputs.any_changed }}
+          INPUT_PROTOCOLS: ${{ inputs.protocols }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             if [[ -n "$INPUT_PROTOCOLS" ]]; then
-              PROTOCOLS="$INPUT_PROTOCOLS"
+              MODE=(--protocols "$INPUT_PROTOCOLS")
             else
-              PROTOCOLS="$ALL_SUBSTREAMS"
+              MODE=(--all)
             fi
-          elif [[ "$DOCKERFILE_CHANGED" == "true" ]]; then
-            PROTOCOLS="$ALL_SUBSTREAMS"
-          elif [[ "$CARGO_TOML_CHANGED" == "true" ]]; then
-            PROTOCOLS="$ALL_SUBSTREAMS"
-          elif [[ "$SUBSTREAMS_CHANGED" == "true" ]]; then
-            PROTOCOLS="$CHANGED_SUBSTREAMS"
           else
-            PROTOCOLS=""
+            MODE=(--base "$BASE_SHA")
           fi
-          echo "protocols=$PROTOCOLS" >> "$GITHUB_OUTPUT"
-          echo "Target protocols: $PROTOCOLS"
-
-      - name: Create protocols matrix
-        id: protocols-matrix
-        env:
-          PROTOCOLS: ${{ steps.target-protocols.outputs.protocols }}
-        run: |
-          if [[ -z "$PROTOCOLS" ]]; then
-            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
-          else
-            MATRIX_JSON="{\"include\":["
-            FIRST=true
-            for protocol in $PROTOCOLS; do
-              if [[ "$FIRST" == "true" ]]; then
-                FIRST=false
-              else
-                MATRIX_JSON+=","
-              fi
-              MATRIX_JSON+="{\"protocol\":\"$protocol\"}"
-            done
-            MATRIX_JSON+="]}"
-            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-            echo "Generated matrix: $MATRIX_JSON"
-          fi
+          python3 protocols/testing/scripts/select_protocols.py "${MODE[@]}" \
+            --github-output "$GITHUB_OUTPUT"
 
   build-images:
     runs-on: ubuntu-latest

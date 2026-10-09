@@ -21,7 +21,7 @@ COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
 RUN chmod +x /usr/local/bin/forge
 # Fetch forge lib submodules (not present in Docker context due to .dockerignore
 # excluding .git/ and CI checkout not always fetching submodules).
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
+RUN apt-get update && apt-get install -y --no-install-recommends git python3 && \
     git init && \
     forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
@@ -29,33 +29,13 @@ RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
-# resolve_base maps clone protocol names to buildable substreams directories.
-# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
-RUN resolve_base() { \
-        case "$1" in \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
-            *) echo "$1" ;; \
-        esac; \
-    }; \
+# Fork aliases share the same package map as the Rust runner and CI.
+RUN set -eu; \
     if [ -n "$PROTOCOLS" ]; then \
         echo "Building only specified protocols: $PROTOCOLS"; \
         for protocol in $PROTOCOLS; do \
             protocol_clean=${protocol%%=*}; \
-            base_dir=$(resolve_base "$protocol_clean"); \
+            base_dir=$(python3 /build/tycho-protocol-sdk/protocols/testing/scripts/resolve_package.py build-dir "$protocol_clean"); \
             if [ -d "$base_dir" ]; then \
                 echo "Building $base_dir (for protocol $protocol_clean)..."; \
                 cd "$base_dir" && cargo build --target wasm32-unknown-unknown --release && cd ..; \
@@ -78,34 +58,17 @@ RUN cargo build --release
 FROM debian:bookworm-slim AS substreams-filter
 ARG PROTOCOLS=""
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams /source
-# resolve_base maps clone protocol names to buildable substreams directories.
-# This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
-RUN resolve_base() { \
-        case "$1" in \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
-            *) echo "$1" ;; \
-        esac; \
-    }; \
-    mkdir -p /filtered/target/wasm32-unknown-unknown/release && \
+COPY protocols/testing/protocol_packages.json protocols/testing/scripts/resolve_package.py /config/
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && \
+    rm -rf /var/lib/apt/lists/*
+# Copy the whole workspace for nested manifests such as Uniswap V4 hooks.
+RUN set -eu; \
+    mkdir -p /filtered/target/wasm32-unknown-unknown/release; \
     if [ -n "$PROTOCOLS" ]; then \
         echo "Filtering for protocols: $PROTOCOLS"; \
         for protocol in $PROTOCOLS; do \
             protocol_clean=${protocol%%=*}; \
-            base_dir=$(resolve_base "$protocol_clean"); \
+            base_dir=$(python3 /config/resolve_package.py --mapping /config/protocol_packages.json build-dir "$protocol_clean"); \
             if [ -d "/source/$base_dir" ]; then \
                 echo "Including $base_dir (for protocol $protocol_clean)..."; \
                 cp -r "/source/$base_dir" "/filtered/"; \
@@ -120,7 +83,7 @@ RUN resolve_base() { \
         echo "Including all protocols..."; \
         cp -r /source/* /filtered/; \
     fi && \
-    echo "Filter stage complete. Size:" && du -sh /filtered 2>/dev/null || echo "Filter stage complete"
+    echo "Filter stage complete. Size:" && du -sh /filtered
 
 # =========== Final Runtime Image ===========
 FROM debian:bookworm-slim

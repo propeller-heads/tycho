@@ -106,3 +106,32 @@ The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op
 
 `UniswapV4Robinhood.runtime.json` builds like the others, from `(robinhood, uniswap_v4)` on a
 Robinhood fork, so `forge test` catches drift if the Robinhood executor changes.
+
+## Shared packages and fork aliases
+
+`protocol_packages.json` maps fork names to their Substreams package directories. The Rust runner,
+Docker build/filter stages and integration CI read this same file. To register a fork of an existing
+package, add its alias here and add its chain manifest and `integration_test_<alias>.tycho.yaml`
+(with hyphens replaced by underscores) under the shared package. No Dockerfile or Rust mapping edit
+is needed.
+
+Values are runtime directories: `ethereum-uniswap-v4/no-hooks`, for example. Docker builds and
+copies the top-level workspace (`ethereum-uniswap-v4`) so its nested manifests and local `target`
+directory remain available. Unmapped protocol names resolve to their own directory.
+
+Integration CI compares the PR head with its merge base:
+
+- Mapping-only additions or changes test those aliases; removal tests the former package and its
+  remaining aliases, without scheduling the removed alias.
+- Package changes test that package and all its aliases, including nested manifest variants.
+- Shared Substreams crates/dependencies, runner code, runtime fixtures, resolution/selection
+  scripts, Dockerfiles and workflow changes test all eligible protocols.
+- Lockfile changes that only bump local package versions do not expand the test scope.
+- Documentation-only changes do not schedule integration tests. Manual dispatch can still select
+  specific protocols or run all of them.
+
+Run the resolution and selection regression tests with Python 3.11 or newer:
+
+```sh
+python3 -m unittest discover -s protocols/testing/scripts -p 'test_*.py'
+```
