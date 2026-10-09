@@ -58,6 +58,9 @@ pub enum RpcError {
     #[error("Page size must be less than or equal to {0}.")]
     Pagination(usize),
 
+    #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
+    InvalidPagination { page: i64, page_size: i64 },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 
@@ -79,6 +82,7 @@ impl ResponseError for RpcError {
             RpcError::Connection(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::DeltasError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::Pagination(_) => StatusCode::BAD_REQUEST,
+            RpcError::InvalidPagination { .. } => StatusCode::BAD_REQUEST,
             RpcError::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::PlanRestrictionViolation(_) => StatusCode::BAD_REQUEST,
         }
@@ -92,6 +96,7 @@ impl ResponseError for RpcError {
             RpcError::DeltasError(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::Pagination(e) => HttpResponse::BadRequest()
                 .body(format!("Page size must be less than or equal to {e}.")),
+            RpcError::InvalidPagination { .. } => HttpResponse::BadRequest().body(self.to_string()),
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
         }

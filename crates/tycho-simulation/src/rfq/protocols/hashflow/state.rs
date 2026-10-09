@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::fill_levels,
     protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
 };
 
@@ -115,9 +116,7 @@ impl ProtocolSim for HashflowState {
         }
 
         // Calculate amount out
-        let (amount_out, remaining_amount_in) = self
-            .levels
-            .get_amount_out_from_levels(amount_in);
+        let (amount_out, remaining_amount_in) = fill_levels(&self.levels.levels, amount_in);
 
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))

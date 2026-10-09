@@ -1,6 +1,6 @@
 specVersion: v0.1.0
 package:
-  name: "ethereum_ring_swap_v2"
+  name: "bsc_ring_swap_v2"
   version: v0.1.1
 
 protobuf:
@@ -19,7 +19,7 @@ binaries:
 modules:
   - name: map_pools_created
     kind: map
-    initialBlock: 20231667
+    initialBlock: 46793445
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -28,7 +28,7 @@ modules:
 
   - name: store_pools
     kind: store
-    initialBlock: 20231667
+    initialBlock: 46793445
     updatePolicy: set_if_not_exists
     valueType: proto:tycho.evm.v1.ProtocolComponent
     inputs:
@@ -36,7 +36,7 @@ modules:
 
   - name: store_few_wrappers
     kind: store
-    initialBlock: 20231667
+    initialBlock: 46793445
     updatePolicy: set_if_not_exists
     valueType: bytes
     inputs:
@@ -44,7 +44,7 @@ modules:
 
   - name: store_token_pools
     kind: store
-    initialBlock: 20231667
+    initialBlock: 46793445
     updatePolicy: append
     valueType: string
     inputs:
@@ -52,7 +52,7 @@ modules:
 
   - name: map_wrapper_backing_deltas
     kind: map
-    initialBlock: 20231667
+    initialBlock: 46793445
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_few_wrappers
@@ -64,7 +64,7 @@ modules:
 
   - name: store_wrapper_backings
     kind: store
-    initialBlock: 20231667
+    initialBlock: 46793445
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -72,7 +72,7 @@ modules:
 
   - name: store_pool_reserves
     kind: store
-    initialBlock: 20231667
+    initialBlock: 46793445
     updatePolicy: set
     valueType: bigint
     inputs:
@@ -81,7 +81,7 @@ modules:
 
   - name: map_pool_events
     kind: map
-    initialBlock: 20231667
+    initialBlock: 46793445
     inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
@@ -97,4 +97,4 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_pools_created: factory_address=eb2A625B704d73e82946D8d026E1F588Eed06416&few_factory_address=7D86394139bf1122E82FDF45Bb4e3b038A4464DD
+  map_pools_created: factory_address=4De602A30Ad7fEf8223dcf67A9fB704324C4dd9B&few_factory_address=EeE400Eabfba8F60f4e6B351D8577394BeB972CD
