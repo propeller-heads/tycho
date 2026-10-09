@@ -35,6 +35,7 @@ WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 # copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
@@ -85,6 +86,7 @@ COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams 
 # copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
+            bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \

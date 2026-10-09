@@ -1,0 +1,18 @@
+substreams_yaml_path: ./bsc-lunarbase.yaml
+protocol_system: "lunarbase"
+protocol_type_names:
+  - "lunarbase_pool"
+module_name: "map_protocol_changes"
+# Component balances represent active reserves, not raw balances with fee/escrow buckets.
+skip_balance_check: true
+tests:
+  - name: test_bsc_v04_snapshot_replay
+    start_block: 121835899
+    stop_block: 121835909
+    expected_components:
+      - id: "0x00007904d186680c709519e71f4dc3e2df8f1b99"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x55d398326f99059ff775485246999027b3197955"
+        # First pool-log transaction at replay start, not original deployment.
+        creation_tx: "0x8cc377be7958278c637c45419c2754c5ed953914cb375294bb9fa4fbcdefcc97"
