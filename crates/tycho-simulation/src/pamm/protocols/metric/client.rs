@@ -13,11 +13,15 @@ use tycho_common::Bytes;
 use crate::{
     evm::protocol::utils::bytes_to_address,
     pamm::protocols::metric::models::{
-        MetricBidAskResponse, MetricMetadata, PaginatedMetadataResponse,
+        MetricApiError, MetricBidAskResponse, MetricMetadata, PaginatedMetadataResponse,
     },
     snapshot_feed::{errors::FeedError, http::fetch_json},
 };
 
+/// Whether Metric refused the request because it does not serve the chain.
+fn refuses_the_chain(body: &str) -> bool {
+    serde_json::from_str::<MetricApiError>(body).is_ok_and(|error| error.refuses_the_chain())
+}
 /// Page size for the paginated metadata endpoint. The API clamps `count` to `[1, 500]`.
 const METADATA_PAGE_SIZE: u32 = 500;
 
@@ -92,7 +96,8 @@ impl MetricClient {
                     ("fiat", TVL_FIAT_CURRENCY.to_string()),
                 ])
                 .bearer_auth(&self.api_key);
-            let page: PaginatedMetadataResponse = fetch_json(request, "Metric metadata").await?;
+            let page: PaginatedMetadataResponse =
+                fetch_json(request, "Metric metadata", refuses_the_chain).await?;
             let page_len = page.data.len();
             pools.extend(page.data);
             pages += 1;
@@ -141,7 +146,7 @@ impl MetricClient {
             .get(format!("{}/{pool}/bid_ask", self.chain_endpoint))
             .header("accept", "application/json")
             .bearer_auth(&self.api_key);
-        timeout(BID_ASK_TIMEOUT, fetch_json(request, "Metric bid/ask"))
+        timeout(BID_ASK_TIMEOUT, fetch_json(request, "Metric bid/ask", refuses_the_chain))
             .await
             .map_err(|_| {
                 FeedError::Connection(format!(
@@ -154,6 +159,7 @@ impl MetricClient {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use tycho_common::models::Chain;
 
     use super::*;
     use crate::snapshot_feed::http::test_support::spawn_http_server;
@@ -222,13 +228,17 @@ mod tests {
         assert_eq!(pools.len(), expected_pools);
     }
 
-    // Polygon is omitted: Metric lists it in `/public/v1/chains` but publishes no pools there yet.
+    // MegaETH (4326) is omitted: Metric answers for its chain id but lists no pools on it.
     #[rstest]
     #[case::ethereum(1)]
     #[case::bsc(56)]
+    #[case::polygon(137)]
+    #[case::monad(143)]
+    #[case::hyperevm(999)]
     #[case::robinhood(4663)]
     #[case::base(8453)]
     #[case::arbitrum(42161)]
+    #[case::avalanche(43114)]
     #[tokio::test]
     #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
     async fn live_metric_api_serves_quotable_pools(#[case] chain_id: u64) {
@@ -270,5 +280,46 @@ mod tests {
             .expect("the selected pool quotes an ask");
         assert!(bid > 0.0);
         assert!(ask >= bid);
+    }
+
+    /// Metric answers a pool it does not know with the same 404 as a chain it does not serve, so
+    /// only the refusal that names the chain ends the feed.
+    #[rstest]
+    #[case::an_unserved_chain(r#"{"error": "Unknown chainId: 130"}"#, true)]
+    #[case::a_404_about_something_else(
+        r#"{"error": "Pair metadata not found for 0x0000000000000000000000000000000000000001"}"#,
+        false
+    )]
+    #[tokio::test]
+    async fn only_the_refusal_naming_the_chain_is_fatal(
+        #[case] body: &'static str,
+        #[case] fatal: bool,
+    ) {
+        let server = spawn_http_server(move |_| Some(("404 Not Found", body.to_string()))).await;
+        let client = client(&server.url(), "key");
+
+        let error = client
+            .fetch_metadata()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
+    }
+
+    /// Unichain (130) is a chain Metric does not serve, and the words it refuses one with are
+    /// what this client reads to stop the feed instead of polling on.
+    #[tokio::test]
+    #[ignore = "hits Metric's public API; requires METRIC_API_KEY"]
+    async fn live_metric_api_refuses_a_chain_it_does_not_serve() {
+        let api_key = std::env::var("METRIC_API_KEY").expect("METRIC_API_KEY not set");
+        let chain_id = Chain::Unichain.id();
+        let client = client(&format!("https://api.metric.xyz/public/v1/evm/{chain_id}"), &api_key);
+
+        let error = client
+            .fetch_metadata()
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
     }
 }

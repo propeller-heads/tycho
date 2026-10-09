@@ -86,10 +86,15 @@ for any protocol indexed by Tycho.
     binding-quote request the states make), `source.rs` (what to make of the answers — decoding,
     orientation, TVL normalization, building components and states), `state.rs`, `models.rs` and
     a module-level `PROTOCOL_SYSTEM` constant. No source holds a credential or builds a request:
-    it asks its client. Feeds that price book TVL off their own levels also take the USD
-    quote-token set (`book::quote_tokens::usd_stablecoins_for_chain` is the curated default); how
-    a venue's books are oriented and deduplicated is that provider's business, decided in its
-    `source.rs`
+    it asks its client. A venue whose API paths name the chain lists the ones it serves as a
+    `<Venue>SupportedChain` in its `models.rs`, which `build()` resolves the configured `Chain`
+    into, failing `Fatal` when it is not one of them; a venue addressed by a chain id alone keeps
+    no such list, and its client instead recognises that venue's own refusal in the body of a
+    failing response (`snapshot_feed::http::RefusalCheck`, passed to the fetch), which makes it
+    the `Fatal` that ends the feed rather than a failure worth retrying. Feeds that price book TVL
+    off their own levels also take the USD quote-token set
+    (`book::quote_tokens::usd_stablecoins_for_chain` is the curated default); how a venue's books
+    are oriented and deduplicated is that provider's business, decided in its `source.rs`
 - **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Hashflow,
   Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
   signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting

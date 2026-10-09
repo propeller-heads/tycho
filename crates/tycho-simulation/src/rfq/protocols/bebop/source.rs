@@ -193,10 +193,10 @@ mod tests {
         rfq::protocols::bebop::{models::BebopPriceData, PROTOCOL_SYSTEM},
     };
 
-    fn test_client(pricing_ws_endpoint: String) -> Arc<BebopClient> {
+    fn test_client() -> Arc<BebopClient> {
         Arc::new(BebopClient::new(
-            "".to_string(),
-            pricing_ws_endpoint,
+            "https://bebop.example/quote".to_string(),
+            "wss://bebop.example/pricing".to_string(),
             "test_key".to_string(),
             std::time::Duration::from_secs(5),
             None,
@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// A WETH/USDC source with USDC as the only USD quote token.
-    fn test_source(price_ws: String, tvl: f64) -> BebopBookSource {
+    fn test_source(tvl: f64) -> BebopBookSource {
         let weth: Bytes = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
             .parse()
             .unwrap();
@@ -222,7 +222,7 @@ mod tests {
                 min_tvl_usd: tvl,
             },
             usd_quote_tokens: Arc::new(HashSet::from([usdc])),
-            client: test_client(price_ws),
+            client: test_client(),
         }
     }
 
@@ -249,7 +249,7 @@ mod tests {
         #[case] bid_price: f32,
         #[case] expect_included: bool,
     ) {
-        let source = test_source("ws://unused".to_string(), tvl_threshold);
+        let source = test_source(tvl_threshold);
 
         let update = BebopPricingUpdate { pairs: vec![weth_usdc_price_data(bid_price)] };
         let books = source.build_books(update).unwrap();
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn build_books_skips_unknown_tokens() {
-        let source = test_source("ws://unused".to_string(), 0.0);
+        let source = test_source(0.0);
 
         let mut price_data = weth_usdc_price_data(3000.0);
         price_data.base = hex::decode("1111111111111111111111111111111111111111").unwrap();
@@ -279,7 +279,7 @@ mod tests {
     /// pair and no other — including when the bad pair is one nobody asked for.
     #[test]
     fn build_books_drops_the_pair_whose_level_is_invalid() {
-        let source = test_source("ws://unused".to_string(), 0.0);
+        let source = test_source(0.0);
 
         let mut unconfigured = weth_usdc_price_data(3000.0);
         unconfigured.base = hex::decode("1111111111111111111111111111111111111111").unwrap();
@@ -301,7 +301,7 @@ mod tests {
     /// one carrying no books withdraws every pair Bebop was serving.
     #[test]
     fn build_books_rejects_an_update_with_nothing_valid_in_it() {
-        let source = test_source("ws://unused".to_string(), 0.0);
+        let source = test_source(0.0);
 
         let mut price_data = weth_usdc_price_data(3000.0);
         price_data.bids = vec![0.0f32, 1.0f32];
@@ -314,7 +314,7 @@ mod tests {
     fn build_books_emits_each_published_orientation_as_its_own_component() {
         // Bebop streams some pairs from both sides. Each orientation is its own component,
         // identified by the pair in the order it was published.
-        let source = test_source("ws://unused".to_string(), 0.0);
+        let source = test_source(0.0);
         let weth_usdc = weth_usdc_price_data(3000.0);
         let usdc_weth = BebopPriceData {
             base: weth_usdc.quote.clone(),
@@ -354,7 +354,7 @@ mod tests {
                 min_tvl_usd: 0.0,
             },
             usd_quote_tokens: Arc::new(HashSet::from([usdc])),
-            client: test_client("ws://unused".to_string()),
+            client: test_client(),
         };
 
         let weth_wbtc = BebopPriceData {

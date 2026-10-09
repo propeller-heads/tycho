@@ -19,7 +19,10 @@ use crate::{
             NativeOrderbookEntry, NativeSupportedChain,
         },
     },
-    snapshot_feed::{errors::FeedError, http::fetch_bytes},
+    snapshot_feed::{
+        errors::FeedError,
+        http::{fetch_bytes, nothing_refused},
+    },
 };
 
 const MAX_QUOTE_ATTEMPTS: u32 = 3;
@@ -86,7 +89,7 @@ impl NativeClient {
             .header("accept", "application/json")
             .header("apikey", &self.api_key);
 
-        let body = fetch_bytes(request, "Native Relay orderbook").await?;
+        let body = fetch_bytes(request, "Native Relay orderbook", nothing_refused).await?;
 
         // Native reports an authentication or request failure as an error envelope under HTTP
         // 200, so a successful response still has two possible shapes. The orderbook is tried
@@ -514,6 +517,7 @@ mod tests {
     };
 
     use rstest::rstest;
+    use tycho_common::models::Chain;
 
     use super::*;
     use crate::snapshot_feed::http::test_support::{
@@ -1108,5 +1112,29 @@ mod tests {
 
         assert!(matches!(result, Err(RFQError::FatalError(_))));
         assert_eq!(server.request_count(), 1);
+    }
+
+    /// Native refuses a chain it does not serve with `131005 chain parameters invalid`, so an
+    /// orderbook that comes back is the venue confirming the chain. Nothing else keeps this
+    /// enum in step with it.
+    #[rstest]
+    #[case::ethereum(Chain::Ethereum)]
+    #[case::bsc(Chain::Bsc)]
+    #[case::robinhood(Chain::Robinhood)]
+    #[case::base(Chain::Base)]
+    #[case::arbitrum(Chain::Arbitrum)]
+    #[tokio::test]
+    #[ignore = "hits Native's live API; requires NATIVE_API_KEY"]
+    async fn live_native_api_serves_every_chain_the_enum_names(#[case] chain: Chain) {
+        dotenv::dotenv().ok();
+        let api_key = std::env::var("NATIVE_API_KEY").expect("NATIVE_API_KEY not set");
+        let client = NativeClient::new(
+            NativeSupportedChain::try_from(chain).unwrap(),
+            "https://v2.api.native.org/swap-api-v2/v1".to_string(),
+            api_key,
+            Duration::from_secs(10),
+        );
+
+        client.fetch_orderbook().await.unwrap();
     }
 }

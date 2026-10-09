@@ -2,10 +2,7 @@ use std::{collections::HashMap, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    Bytes,
-};
+use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
 
 use crate::{
     book::{levels::Levels, wire::SkipInvalidEntries},
@@ -18,6 +15,25 @@ use crate::{
 pub struct HashflowError {
     pub code: u64,
     pub message: String,
+}
+
+impl HashflowError {
+    /// Whether this is Hashflow stating it does not price the chain it was asked about.
+    ///
+    /// The venue publishes no catalogue of these codes, and the one it answers here with covers
+    /// an unknown market maker and an unknown chain type too, so what it refused is in the
+    /// message alone.
+    pub fn refuses_the_chain(&self) -> bool {
+        self.message
+            .starts_with("Invalid chainId")
+    }
+}
+
+/// The envelope Hashflow answers a request it would not serve with, on either book endpoint.
+/// A body it does serve carries no `error` at all, so parsing one is what tells the two apart.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HashflowFailure {
+    pub error: HashflowError,
 }
 
 impl fmt::Display for HashflowError {
@@ -108,9 +124,10 @@ pub struct HashflowChain {
     chain_id: u64,
 }
 
-impl From<Chain> for HashflowChain {
-    fn from(value: Chain) -> Self {
-        HashflowChain { chain_type: "evm".to_string(), chain_id: value.id() }
+impl HashflowChain {
+    /// The chain as Hashflow's quote requests name it: an EVM chain id.
+    pub fn evm(chain_id: u64) -> Self {
+        HashflowChain { chain_type: "evm".to_string(), chain_id }
     }
 }
 

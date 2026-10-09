@@ -238,7 +238,7 @@ mod tests {
 
     fn empty_client() -> Arc<LiquoriceClient> {
         Arc::new(LiquoriceClient::new(
-            Chain::Ethereum,
+            Chain::Ethereum.id(),
             "https://api.liquorice.tech/v1/solver/rfq".to_string(),
             "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
             "".to_string(),

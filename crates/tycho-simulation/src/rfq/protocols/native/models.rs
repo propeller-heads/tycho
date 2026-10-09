@@ -215,6 +215,8 @@ pub struct NativeApiErrorResponse {
     pub message: String,
 }
 
+/// A chain Native Relay's swap API serves, resolved from the configured [`Chain`] when a feed is
+/// built. Its orderbook and firm-quote paths carry the chain by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeSupportedChain {
@@ -235,13 +237,14 @@ impl TryFrom<Chain> for NativeSupportedChain {
             Chain::Arbitrum => Ok(NativeSupportedChain::Arbitrum),
             Chain::Base => Ok(NativeSupportedChain::Base),
             Chain::Robinhood => Ok(NativeSupportedChain::Robinhood),
-            unsupported => Err(format!("Chain {unsupported:?} not supported by Native API")),
+            unserved => Err(format!("Native does not serve {unserved}")),
         }
     }
 }
 
 impl NativeSupportedChain {
-    pub fn as_str(&self) -> &'static str {
+    /// The segment Native's per-chain API paths carry.
+    pub fn as_str(self) -> &'static str {
         match self {
             NativeSupportedChain::Ethereum => "ethereum",
             NativeSupportedChain::Bsc => "bsc",
@@ -256,35 +259,10 @@ impl NativeSupportedChain {
 mod tests {
     use std::str::FromStr;
 
-    use rstest::rstest;
-
     use super::*;
 
     fn addr(address: &str) -> Bytes {
         Bytes::from_str(address).unwrap()
-    }
-
-    #[rstest]
-    #[case::ethereum(Chain::Ethereum, "ethereum")]
-    #[case::bsc(Chain::Bsc, "bsc")]
-    #[case::arbitrum(Chain::Arbitrum, "arbitrum")]
-    #[case::base(Chain::Base, "base")]
-    #[case::robinhood(Chain::Robinhood, "robinhood")]
-    fn every_chain_native_serves_maps_to_its_api_name(
-        #[case] chain: Chain,
-        #[case] native_name: &str,
-    ) {
-        assert_eq!(
-            NativeSupportedChain::try_from(chain)
-                .unwrap()
-                .as_str(),
-            native_name
-        );
-    }
-
-    #[test]
-    fn a_chain_native_does_not_serve_is_rejected() {
-        assert!(NativeSupportedChain::try_from(Chain::Polygon).is_err());
     }
 
     /// A book side priced by `levels` and open to any trade size: valuing and pricing a book

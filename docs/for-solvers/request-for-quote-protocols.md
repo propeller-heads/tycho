@@ -7,13 +7,15 @@ Two kinds share that shape, and the difference shows at execution:
 * **RFQ market makers** — Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
 * **Off-chain-priced pAMMs** — Metric. The book prices a pool you execute against directly: there is no quote to request and nothing to sign.
 
-| Protocol    | Kind | Simulation Time | Credentials | Chains                                   | Protocol system  |
-|-------------|------|-----------------|-------------|------------------------------------------|------------------|
-| `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, Base                           | `rfq:bebop`      |
-| `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `rfq:hashflow`   |
-| `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum                                 | `rfq:liquorice`  |
-| `native`    | RFQ  | 0.4 µs          | Required    | Ethereum, Base, Arbitrum, BSC, Robinhood | `rfq:native`     |
-| `metric`    | pAMM | -               | Required    | Any chain with an EVM chain id           | `rfq:metric`     |
+| Protocol    | Kind | Simulation Time | Credentials | Chains                                            | Protocol system  |
+|-------------|------|-----------------|-------------|---------------------------------------------------|------------------|
+| `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:bebop`      |
+| `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum            | `rfq:hashflow`   |
+| `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum, Arbitrum                                | `rfq:liquorice`  |
+| `native`    | RFQ  | 0.4 µs          | Required    | Ethereum, Base, Arbitrum, BSC, Robinhood          | `rfq:native`     |
+| `metric`    | pAMM | -               | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:metric`     |
+
+A feed runs wherever its venue prices, which is what the table lists. Settling a swap against one additionally needs a Tycho executor for that venue on that chain: today Ethereum and Base for Bebop, Ethereum for Hashflow and Liquorice, every listed chain for Native, and Base, Arbitrum and Robinhood for Metric.
 
 On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
 

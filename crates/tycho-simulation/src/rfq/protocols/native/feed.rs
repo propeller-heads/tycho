@@ -113,3 +113,27 @@ impl SnapshotFeed for NativeFeed {
         run_http_poll_feed(self.feed_config, publisher, self.source)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use tycho_common::models::Chain;
+
+    use super::*;
+
+    #[test]
+    fn building_for_a_chain_native_does_not_serve_is_fatal() {
+        let config = BookFeedConfig {
+            chain: Chain::Polygon,
+            tokens: Arc::new(HashMap::new()),
+            min_tvl_usd: 0.0,
+        };
+
+        let error = NativeFeedBuilder::new(config, HashSet::new(), "key".to_string())
+            .build()
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+}

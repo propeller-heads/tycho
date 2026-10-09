@@ -240,7 +240,7 @@ mod tests {
         Arc::new(BebopClient::new(
             "https://api.bebop.xyz/pmm/ethereum/v3/quote".to_string(),
             "wss://api.bebop.xyz/pmm/ethereum/v3/pricing?format=protobuf".to_string(),
-            "".to_string(),
+            String::new(),
             Duration::from_secs(30),
             None,
             None,

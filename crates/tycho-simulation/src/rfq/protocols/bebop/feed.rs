@@ -1,14 +1,15 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use tokio::time::Duration;
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::Bytes;
 
 use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
         protocols::bebop::{
-            client::BebopClient, source::BebopBookSource, FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
+            client::BebopClient, models::BebopSupportedChain, source::BebopBookSource,
+            FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
         },
     },
     snapshot_feed::{
@@ -123,7 +124,9 @@ impl BebopFeedBuilder {
 
     /// Fails for chains Bebop does not serve.
     pub fn build(self) -> Result<BebopFeed, FeedError> {
-        let url = chain_to_bebop_url(self.book_config.chain)?;
+        let chain =
+            BebopSupportedChain::try_from(self.book_config.chain).map_err(FeedError::Fatal)?;
+        let url = format!("api.bebop.xyz/pmm/{}/v3", chain.as_str());
         Ok(BebopFeed {
             feed_config: self.feed_config,
             source: BebopBookSource {
@@ -156,16 +159,6 @@ impl SnapshotFeed for BebopFeed {
     }
 }
 
-/// Maps a Chain to its Bebop API host path (shared by the pricing WebSocket and the quote API)
-fn chain_to_bebop_url(chain: Chain) -> Result<String, FeedError> {
-    let chain_path = match chain {
-        Chain::Ethereum => "ethereum",
-        Chain::Base => "base",
-        _ => return Err(FeedError::Fatal(format!("Unsupported chain: {chain:?}"))),
-    };
-    Ok(format!("api.bebop.xyz/pmm/{chain_path}/v3"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, str::FromStr, time::Duration};
@@ -173,7 +166,7 @@ mod tests {
     use dotenv::dotenv;
     use num_bigint::BigUint;
     use tokio::time::timeout;
-    use tycho_common::models::protocol::GetAmountOutParams;
+    use tycho_common::models::{protocol::GetAmountOutParams, Chain};
 
     use super::*;
     use crate::{
@@ -399,5 +392,20 @@ mod tests {
         } else {
             assert_eq!(selector, ROUTER_SWAP_SELECTOR);
         }
+    }
+
+    #[test]
+    fn building_for_a_chain_bebop_does_not_serve_is_fatal() {
+        let config = BookFeedConfig {
+            chain: Chain::ZkSync,
+            tokens: Arc::new(HashMap::new()),
+            min_tvl_usd: 0.0,
+        };
+
+        let error = BebopFeedBuilder::new(config, HashSet::new(), "key".to_string())
+            .build()
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
     }
 }

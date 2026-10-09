@@ -2,7 +2,10 @@ use std::borrow::Cow;
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
+use tycho_common::{
+    models::{protocol::GetAmountOutParams, Chain},
+    Bytes,
+};
 
 use crate::{
     book::levels::{InvalidLevel, Levels, PriceLevel},
@@ -271,8 +274,64 @@ pub struct AggregateOrderToSign {
     pub receiver: Bytes,
 }
 
+/// A chain Bebop prices books on, resolved from the configured [`Chain`] when a feed is built.
+/// `https://api.bebop.xyz/pmm/chains` is the venue's own list of them, and gives the segment
+/// each one's endpoints carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BebopSupportedChain {
+    Ethereum,
+    Optimism,
+    Bsc,
+    Polygon,
+    HyperEvm,
+    Robinhood,
+    Base,
+    Arbitrum,
+}
+
+impl TryFrom<Chain> for BebopSupportedChain {
+    type Error = String;
+
+    fn try_from(chain: Chain) -> Result<Self, Self::Error> {
+        match chain {
+            Chain::Ethereum => Ok(BebopSupportedChain::Ethereum),
+            Chain::Bsc => Ok(BebopSupportedChain::Bsc),
+            Chain::Polygon => Ok(BebopSupportedChain::Polygon),
+            Chain::Robinhood => Ok(BebopSupportedChain::Robinhood),
+            Chain::Base => Ok(BebopSupportedChain::Base),
+            Chain::Arbitrum => Ok(BebopSupportedChain::Arbitrum),
+            // Optimism and HyperEVM answer to their chain id alone, since Tycho has no name
+            // for either.
+            other => match other.try_id() {
+                Ok(10) => Ok(BebopSupportedChain::Optimism),
+                Ok(999) => Ok(BebopSupportedChain::HyperEvm),
+                Ok(chain_id) => Err(format!("Bebop does not serve {chain} (chain id {chain_id})")),
+                Err(error) => Err(format!("Bebop: no chain id for {chain}: {error}")),
+            },
+        }
+    }
+}
+
+impl BebopSupportedChain {
+    /// The segment Bebop's per-chain API paths carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BebopSupportedChain::Ethereum => "ethereum",
+            BebopSupportedChain::Optimism => "optimism",
+            BebopSupportedChain::Bsc => "bsc",
+            BebopSupportedChain::Polygon => "polygon",
+            BebopSupportedChain::HyperEvm => "hyperevm",
+            BebopSupportedChain::Robinhood => "robinhood",
+            BebopSupportedChain::Base => "base",
+            BebopSupportedChain::Arbitrum => "arbitrum",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -696,5 +755,47 @@ mod tests {
             let err = quote.validate(&params).unwrap_err();
             assert!(format!("{err:?}").contains("Taker address mismatch"));
         }
+    }
+
+    /// Bebop publishes the chains it prices, with the id and the path segment of each. Taking
+    /// out the ones this enum names leaves that list empty, so the test speaks up both for a
+    /// chain the venue has dropped and for one it has added.
+    #[tokio::test]
+    #[ignore = "hits Bebop's public API"]
+    async fn live_bebop_api_prices_every_chain_the_enum_names() {
+        let mut served: HashMap<String, u64> = reqwest::get("https://api.bebop.xyz/pmm/chains")
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        for chain in [
+            Chain::Ethereum,
+            Chain::Bsc,
+            Chain::Polygon,
+            Chain::Robinhood,
+            Chain::Base,
+            Chain::Arbitrum,
+        ] {
+            let bebop = BebopSupportedChain::try_from(chain).unwrap();
+            let served_id = served
+                .remove(bebop.as_str())
+                .unwrap_or_else(|| panic!("Bebop no longer prices {chain}"));
+
+            assert_eq!(served_id, chain.id());
+        }
+        // The two Tycho has no `Chain` for, so their ids are all this test can ask by.
+        let optimism = served
+            .remove(BebopSupportedChain::Optimism.as_str())
+            .expect("Bebop prices Optimism");
+        let hyperevm = served
+            .remove(BebopSupportedChain::HyperEvm.as_str())
+            .expect("Bebop prices HyperEVM");
+
+        assert_eq!(optimism, 10);
+        assert_eq!(hyperevm, 999);
+
+        assert!(served.is_empty(), "Bebop prices chains this enum does not name: {served:?}");
     }
 }

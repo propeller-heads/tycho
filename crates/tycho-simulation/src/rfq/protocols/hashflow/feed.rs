@@ -94,13 +94,17 @@ impl HashflowFeedBuilder {
         self
     }
 
+    /// Fails for a chain with no numeric chain id, which is all Hashflow's API is addressed by.
+    /// Whether the venue prices that chain is Hashflow's own answer, and the first poll carries
+    /// it.
     pub fn build(self) -> Result<HashflowFeed, FeedError> {
+        let chain_id = self.book_config.chain_id()?;
         Ok(HashflowFeed {
             feed_config: self.feed_config,
             source: HashflowBookSource {
                 protocol_system: self.protocol_system,
                 client: Arc::new(HashflowClient::new(
-                    self.book_config.chain,
+                    chain_id,
                     "https://api.hashflow.com/taker/v3/rfq".to_string(),
                     "https://api.hashflow.com/taker/v3/price-levels".to_string(),
                     "https://api.hashflow.com/taker/v3/market-makers".to_string(),

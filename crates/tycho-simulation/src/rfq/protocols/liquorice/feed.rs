@@ -87,12 +87,16 @@ impl LiquoriceFeedBuilder {
         self
     }
 
+    /// Fails for a chain with no numeric chain id, which is all Liquorice's API is addressed by.
+    /// Whether the venue prices that chain is Liquorice's own answer, and the first poll carries
+    /// it.
     pub fn build(self) -> Result<LiquoriceFeed, FeedError> {
+        let chain_id = self.book_config.chain_id()?;
         Ok(LiquoriceFeed {
             feed_config: self.feed_config,
             source: LiquoriceBookSource {
                 client: Arc::new(LiquoriceClient::new(
-                    self.book_config.chain,
+                    chain_id,
                     "https://api.liquorice.tech/v1/solver/rfq".to_string(),
                     "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
                     self.auth_solver,

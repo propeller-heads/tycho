@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, instrument, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
+    models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote, Bytes,
 };
 
 use crate::{
@@ -32,6 +30,12 @@ use crate::{
     snapshot_feed::{errors::FeedError, http::read_json},
 };
 
+/// Whether Liquorice refused the request because it does not price the chain. It rejects the
+/// query parameter in plain text, naming the field and then the chain ids it does take.
+fn refuses_the_chain(body: &str) -> bool {
+    body.contains("chainId: invalid value")
+}
+
 /// Requests binding Liquorice quotes. One instance is shared (via `Arc`) by every state a
 /// [`LiquoriceFeed`](super::feed::LiquoriceFeed) emits, so all of them reuse the same HTTP
 /// connection pool.
@@ -44,7 +48,7 @@ use crate::{
 /// fail at call time until re-configured. `Debug` output omits the credentials as well.
 #[derive(derive_more::Debug, Serialize, Deserialize)]
 pub struct LiquoriceClient {
-    chain: Chain,
+    chain_id: u64,
     quote_endpoint: String,
     price_levels_endpoint: String,
     // solver header for authentication
@@ -69,7 +73,7 @@ pub struct LiquoriceClient {
 
 impl LiquoriceClient {
     pub fn new(
-        chain: Chain,
+        chain_id: u64,
         quote_endpoint: String,
         price_levels_endpoint: String,
         auth_solver: String,
@@ -78,7 +82,7 @@ impl LiquoriceClient {
         quote_expiry_secs: u64,
     ) -> Self {
         LiquoriceClient {
-            chain,
+            chain_id,
             quote_endpoint,
             price_levels_endpoint,
             auth_solver,
@@ -98,7 +102,7 @@ impl LiquoriceClient {
             .send_authed(|| {
                 self.http
                     .get(&self.price_levels_endpoint)
-                    .query(&[("chainId", self.chain.id().to_string())])
+                    .query(&[("chainId", self.chain_id.to_string())])
                     .header("accept", "application/json")
             })
             .await
@@ -106,7 +110,7 @@ impl LiquoriceClient {
                 FeedError::Connection(format!("Failed to fetch Liquorice price levels: {e}"))
             })?;
         let price_response: LiquoricePriceLevelsResponse =
-            read_json(response, "Liquorice price levels").await?;
+            read_json(response, "Liquorice price levels", refuses_the_chain).await?;
         Ok(price_response.prices)
     }
 
@@ -129,7 +133,7 @@ impl LiquoriceClient {
         let rfq_id = uuid::Uuid::new_v4().to_string();
 
         let quote_request = LiquoriceQuoteRequest {
-            chain_id: self.chain.id(),
+            chain_id: self.chain_id,
             rfq_id: rfq_id.clone(),
             expiry,
             base_token: params.token_in.to_string(),
@@ -394,7 +398,14 @@ impl LiquoriceClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use dotenv::dotenv;
+    use rstest::rstest;
+    use tycho_common::models::Chain;
+
     use super::*;
+    use crate::snapshot_feed::http::test_support::spawn_http_server;
 
     async fn create_delayed_response_server(delay_ms: u64) -> std::net::SocketAddr {
         use tokio::{io::AsyncWriteExt, net::TcpListener};
@@ -431,7 +442,7 @@ mod tests {
 
     fn create_test_client(quote_endpoint: String, quote_timeout: Duration) -> LiquoriceClient {
         LiquoriceClient::new(
-            Chain::Ethereum,
+            Chain::Ethereum.id(),
             quote_endpoint,
             "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
             "test_solver".to_string(),
@@ -462,7 +473,7 @@ mod tests {
         })
         .await;
         let client = LiquoriceClient::new(
-            Chain::Ethereum,
+            Chain::Ethereum.id(),
             "https://liquorice.example/quote".to_string(),
             format!("{}/price-levels", server.url()),
             "test_solver".to_string(),
@@ -746,5 +757,100 @@ mod tests {
 
         let final_count = *request_count.lock().unwrap();
         assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
+    }
+
+    /// The book request asks about the chain under the parameter Liquorice reads it from.
+    #[tokio::test]
+    async fn the_book_request_carries_the_chain_id() {
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&targets);
+        let server = spawn_http_server(move |target| {
+            recorded
+                .lock()
+                .unwrap()
+                .push(target.to_string());
+            Some(("200 OK", r#"{"prices":{}}"#.to_string()))
+        })
+        .await;
+        let chain_id = Chain::Arbitrum.id();
+        let client = LiquoriceClient::new(
+            chain_id,
+            "https://liquorice.example/rfq".to_string(),
+            format!("{}/price-levels", server.url()),
+            "solver".to_string(),
+            "key".to_string(),
+            Duration::from_secs(5),
+            60,
+        );
+
+        client
+            .fetch_price_levels()
+            .await
+            .unwrap();
+
+        let targets = targets.lock().unwrap();
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert!(targets[0].contains(&format!("chainId={chain_id}")), "{targets:?}");
+    }
+
+    /// Optimism (10) is a chain Liquorice does not price, and the words it refuses one with are
+    /// what this client reads to stop the feed instead of polling on.
+    #[tokio::test]
+    #[ignore = "hits Liquorice's live API; requires LIQUORICE_USER and LIQUORICE_KEY"]
+    async fn live_liquorice_api_refuses_a_chain_it_does_not_price() {
+        dotenv().ok();
+        let auth_solver = std::env::var("LIQUORICE_USER").expect("LIQUORICE_USER not set");
+        let auth_key = std::env::var("LIQUORICE_KEY").expect("LIQUORICE_KEY not set");
+        let client = LiquoriceClient::new(
+            10,
+            "https://api.liquorice.tech/v1/solver/rfq".to_string(),
+            "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
+            auth_solver,
+            auth_key,
+            Duration::from_secs(10),
+            60,
+        );
+
+        let error = client
+            .fetch_price_levels()
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    /// A bad request is ordinarily worth another poll, so only the refusal that names the chain
+    /// ends the feed.
+    #[rstest]
+    #[case::an_unserved_chain(
+        "Failed to deserialize query string: chainId: invalid value: 10, expected one of: 1, 11155111, 42161",
+        true
+    )]
+    #[case::a_missing_parameter(
+        "Failed to deserialize query string: missing field `chainId`",
+        false
+    )]
+    #[tokio::test]
+    async fn only_the_refusal_naming_the_chain_is_fatal(
+        #[case] body: &'static str,
+        #[case] fatal: bool,
+    ) {
+        let server = spawn_http_server(move |_| Some(("400 Bad Request", body.to_string()))).await;
+        let client = LiquoriceClient::new(
+            10,
+            "https://liquorice.example/rfq".to_string(),
+            format!("{}/price-levels", server.url()),
+            "solver".to_string(),
+            "key".to_string(),
+            Duration::from_secs(5),
+            60,
+        );
+
+        let error = client
+            .fetch_price_levels()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
     }
 }

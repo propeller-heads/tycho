@@ -197,7 +197,7 @@ mod tests {
             },
             usd_quote_tokens: Arc::new(quote_tokens),
             client: Arc::new(HashflowClient::new(
-                Chain::Ethereum,
+                1,
                 "https://hashflow.example/rfq".to_string(),
                 format!("{endpoint}/price-levels"),
                 format!("{endpoint}/market-makers"),

@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, instrument, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
+    models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote, Bytes,
 };
 
 use crate::{
@@ -17,12 +15,19 @@ use crate::{
     rfq::{
         errors::RFQError,
         protocols::hashflow::models::{
-            HashflowChain, HashflowMarketMakerLevels, HashflowMarketMakersResponse,
-            HashflowPriceLevelsResponse, HashflowQuoteRequest, HashflowQuoteResponse, HashflowRFQ,
+            HashflowChain, HashflowError, HashflowFailure, HashflowMarketMakerLevels,
+            HashflowMarketMakersResponse, HashflowPriceLevelsResponse, HashflowQuoteRequest,
+            HashflowQuoteResponse, HashflowRFQ,
         },
     },
     snapshot_feed::{errors::FeedError, http::fetch_json},
 };
+
+/// Whether Hashflow refused the request because it does not price the chain.
+fn refuses_the_chain(body: &str) -> bool {
+    serde_json::from_str::<HashflowFailure>(body)
+        .is_ok_and(|failure| failure.error.refuses_the_chain())
+}
 
 /// Requests binding Hashflow quotes. One instance is shared (via `Arc`) by every state a
 /// [`HashflowFeed`](super::feed::HashflowFeed) emits, so all of them reuse the same HTTP
@@ -33,7 +38,7 @@ use crate::{
 /// fail at call time until re-configured. `Debug` output omits the credentials as well.
 #[derive(derive_more::Debug, Serialize, Deserialize)]
 pub struct HashflowClient {
-    chain: Chain,
+    chain_id: u64,
     quote_endpoint: String,
     price_levels_endpoint: String,
     market_makers_endpoint: String,
@@ -50,7 +55,7 @@ pub struct HashflowClient {
 
 impl HashflowClient {
     pub fn new(
-        chain: Chain,
+        chain_id: u64,
         quote_endpoint: String,
         price_levels_endpoint: String,
         market_makers_endpoint: String,
@@ -59,7 +64,7 @@ impl HashflowClient {
         quote_timeout: Duration,
     ) -> Self {
         HashflowClient {
-            chain,
+            chain_id,
             quote_endpoint,
             price_levels_endpoint,
             market_makers_endpoint,
@@ -75,7 +80,7 @@ impl HashflowClient {
         vec![
             ("source", self.source.clone()),
             ("baseChainType", "evm".to_string()),
-            ("baseChainId", self.chain.id().to_string()),
+            ("baseChainId", self.chain_id.to_string()),
         ]
     }
 
@@ -88,7 +93,7 @@ impl HashflowClient {
             .header("accept", "application/json")
             .header("Authorization", &self.auth_key);
         let mm_response: HashflowMarketMakersResponse =
-            fetch_json(request, "Hashflow market makers").await?;
+            fetch_json(request, "Hashflow market makers", refuses_the_chain).await?;
         debug!(
             count = mm_response.market_makers.len(),
             market_makers = ?mm_response.market_makers,
@@ -114,13 +119,22 @@ impl HashflowClient {
             .header("accept", "application/json")
             .header("Authorization", &self.auth_key);
         let price_response: HashflowPriceLevelsResponse =
-            fetch_json(request, "Hashflow price levels").await?;
+            fetch_json(request, "Hashflow price levels", refuses_the_chain).await?;
         if price_response.status != "success" {
+            let refuses_the_chain = price_response
+                .error
+                .as_ref()
+                .is_some_and(HashflowError::refuses_the_chain);
             let error = match price_response.error {
                 Some(error) => error.to_string(),
                 None => "no error details".to_string(),
             };
-            return Err(FeedError::Connection(format!("API returned error status: {error}")));
+            let message = format!("API returned error status: {error}");
+            return Err(if refuses_the_chain {
+                FeedError::Fatal(message)
+            } else {
+                FeedError::Connection(message)
+            });
         }
         price_response
             .levels
@@ -137,7 +151,7 @@ impl HashflowClient {
         &self,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
-        let hashflow_chain = HashflowChain::from(self.chain);
+        let hashflow_chain = HashflowChain::evm(self.chain_id);
         // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
         // scopes its strictly increasing quote nonces to — so quotes never invalidate each
         // other, at the cost of a cold nonce storage slot on Hashflow's router (~17k gas per
@@ -391,9 +405,17 @@ impl HashflowClient {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{
+        str::FromStr,
+        sync::{Arc, Mutex},
+    };
+
+    use dotenv::dotenv;
+    use rstest::rstest;
+    use tycho_common::models::Chain;
 
     use super::*;
+    use crate::snapshot_feed::http::test_support::spawn_http_server;
 
     /// Response template; the mock server replaces `{{EFFECTIVE_TRADER}}` with the address the
     /// request carried, echoing it like the real API.
@@ -487,7 +509,7 @@ mod tests {
 
     fn create_test_client(quote_endpoint: String, quote_timeout: Duration) -> HashflowClient {
         HashflowClient::new(
-            Chain::Ethereum,
+            Chain::Ethereum.id(),
             quote_endpoint,
             "https://api.hashflow.com/taker/v3/price-levels".to_string(),
             "https://api.hashflow.com/taker/v3/market-makers".to_string(),
@@ -712,5 +734,151 @@ mod tests {
         // Verify exactly 3 requests were made (2 failures + 1 success)
         let final_count = *request_count.lock().unwrap();
         assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
+    }
+
+    /// Both book endpoints ask about the chain under the parameter Hashflow reads it from.
+    #[tokio::test]
+    async fn the_book_requests_carry_the_chain_id() {
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&targets);
+        let server = spawn_http_server(move |target| {
+            recorded
+                .lock()
+                .unwrap()
+                .push(target.to_string());
+            if target.starts_with("/market-makers") {
+                Some(("200 OK", r#"{"marketMakers":["mm1"]}"#.to_string()))
+            } else {
+                Some(("200 OK", r#"{"status":"success","levels":{"mm1":[]}}"#.to_string()))
+            }
+        })
+        .await;
+        let url = server.url();
+        let chain_id = Chain::Arbitrum.id();
+        let client = HashflowClient::new(
+            chain_id,
+            format!("{url}/rfq"),
+            format!("{url}/price-levels"),
+            format!("{url}/market-makers"),
+            "test_user".to_string(),
+            "test_key".to_string(),
+            Duration::from_secs(5),
+        );
+
+        let makers = client
+            .fetch_market_makers()
+            .await
+            .unwrap();
+        client
+            .fetch_price_levels(&makers)
+            .await
+            .unwrap();
+
+        let targets = targets.lock().unwrap();
+        assert_eq!(targets.len(), 2, "{targets:?}");
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.contains(&format!("baseChainId={chain_id}"))),
+            "{targets:?}"
+        );
+    }
+
+    /// Unichain (130) is a chain Hashflow does not price, and the words it refuses one with are
+    /// what this client reads to stop the feed instead of polling on.
+    #[tokio::test]
+    #[ignore = "hits Hashflow's live API; requires HASHFLOW_USER and HASHFLOW_KEY"]
+    async fn live_hashflow_api_refuses_a_chain_it_does_not_price() {
+        dotenv().ok();
+        let source = std::env::var("HASHFLOW_USER").expect("HASHFLOW_USER not set");
+        let auth_key = std::env::var("HASHFLOW_KEY").expect("HASHFLOW_KEY not set");
+        let client = HashflowClient::new(
+            Chain::Unichain.id(),
+            "https://api.hashflow.com/taker/v3/rfq".to_string(),
+            "https://api.hashflow.com/taker/v3/price-levels".to_string(),
+            "https://api.hashflow.com/taker/v3/market-makers".to_string(),
+            source,
+            auth_key,
+            Duration::from_secs(10),
+        );
+
+        let error = client
+            .fetch_market_makers()
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    /// A bad request is ordinarily worth another poll — a maker can vanish between two calls —
+    /// so only the refusal that names the chain ends the feed.
+    #[rstest]
+    #[case::an_unserved_chain(
+        r#"{"status":"fail","error":{"code":42,"message":"Invalid chainId: 130"}}"#,
+        true
+    )]
+    #[case::an_unknown_market_maker(
+        r#"{"status":"fail","error":{"code":42,"message":"Unknown market maker: mm1"}}"#,
+        false
+    )]
+    #[tokio::test]
+    async fn only_the_refusal_naming_the_chain_is_fatal(
+        #[case] body: &'static str,
+        #[case] fatal: bool,
+    ) {
+        let server = spawn_http_server(move |_| Some(("400 Bad Request", body.to_string()))).await;
+        let url = server.url();
+        let client = HashflowClient::new(
+            Chain::Unichain.id(),
+            format!("{url}/rfq"),
+            format!("{url}/price-levels"),
+            format!("{url}/market-makers"),
+            "test_user".to_string(),
+            "test_key".to_string(),
+            Duration::from_secs(5),
+        );
+
+        let error = client
+            .fetch_market_makers()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
+    }
+
+    /// Hashflow also carries a failure in the body of a 200, where the same words mean the same
+    /// thing.
+    #[rstest]
+    #[case::an_unserved_chain(
+        r#"{"status":"fail","error":{"code":42,"message":"Invalid chainId: 130"}}"#,
+        true
+    )]
+    #[case::an_unknown_market_maker(
+        r#"{"status":"fail","error":{"code":42,"message":"Unknown market maker: mm1"}}"#,
+        false
+    )]
+    #[tokio::test]
+    async fn a_failure_inside_a_successful_response_is_judged_the_same_way(
+        #[case] body: &'static str,
+        #[case] fatal: bool,
+    ) {
+        let server = spawn_http_server(move |_| Some(("200 OK", body.to_string()))).await;
+        let url = server.url();
+        let client = HashflowClient::new(
+            Chain::Unichain.id(),
+            format!("{url}/rfq"),
+            format!("{url}/price-levels"),
+            format!("{url}/market-makers"),
+            "test_user".to_string(),
+            "test_key".to_string(),
+            Duration::from_secs(5),
+        );
+
+        let error = client
+            .fetch_price_levels(&["mm1".to_string()])
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
     }
 }

@@ -8,6 +8,21 @@ use crate::{serde_helpers::evm_address, snapshot_feed::errors::FeedError};
 
 const Q64_FLOAT: f64 = 18_446_744_073_709_551_616.0;
 
+/// The body Metric answers a request it will not serve with.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MetricApiError {
+    pub error: String,
+}
+
+impl MetricApiError {
+    /// Whether this is Metric stating it does not serve the chain its path named. A pool it
+    /// does not know answers with the same status, so the chain is named in the message.
+    pub fn refuses_the_chain(&self) -> bool {
+        self.error
+            .starts_with("Unknown chainId")
+    }
+}
+
 /// The `PaginatedMetadataResponse` envelope returned by `GET /public/v1/evm/{chain_id}/metadata`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -4,8 +4,6 @@
 
 use std::{future::Future, num::NonZeroUsize, time::Duration};
 
-use tycho_common::models::Chain;
-
 use crate::{
     book::{BookFeedConfig, BookSnapshot, ReceivedAt},
     pamm::protocols::metric::{
@@ -115,9 +113,17 @@ impl MetricFeedBuilder {
         self
     }
 
-    /// Fails for chains Metric does not serve.
+    /// Fails for an empty trading key, and for a chain with no numeric chain id, which is all
+    /// Metric's API is addressed by. Whether the venue serves that chain is Metric's own
+    /// answer, and the first poll carries it.
     pub fn build(self) -> Result<MetricFeed, FeedError> {
-        let chain_id = chain_to_chain_id(self.book_config.chain)?;
+        // Metric answers an empty bearer token with the same `Unknown chainId` it refuses an
+        // unserved chain with, where a key it rejects is a plain 401. A key that authenticates
+        // nothing would therefore read as a refusal and end the feed, so it stops here.
+        if self.api_key.is_empty() {
+            return Err(FeedError::InvalidInput("Metric trading key is empty".to_string()));
+        }
+        let chain_id = self.book_config.chain_id()?;
         let base_url = self.base_url.trim_end_matches('/');
         let chain_endpoint = format!("{base_url}/public/v1/evm/{chain_id}");
         Ok(MetricFeed {
@@ -148,20 +154,11 @@ impl SnapshotFeed for MetricFeed {
     }
 }
 
-/// Resolves the EVM chain id Metric expects in its `/public/v1/evm/{chain_id}` paths.
-///
-/// Metric also serves Monad (143), HyperEVM (999), MegaETH (4326) and Avalanche (43114), but Tycho
-/// has no built-in `Chain` variant for them yet, so they are unsupported unless registered as a
-/// `Chain::Custom` with the matching chain id.
-fn chain_to_chain_id(chain: Chain) -> Result<u64, FeedError> {
-    chain.try_id().map_err(|e| {
-        FeedError::Fatal(format!("Cannot resolve chain id for Metric on {chain}: {e}"))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
+
+    use tycho_common::models::Chain;
 
     use super::*;
 
@@ -184,13 +181,20 @@ mod tests {
         assert!(rendered.contains("metric.example"));
     }
 
+    /// Metric answers an empty bearer token the way it refuses a chain, which no retry would
+    /// recover from, so the feed does not start without a key.
     #[test]
-    fn the_chain_id_is_the_evm_one() {
-        assert_eq!(chain_to_chain_id(Chain::Ethereum).unwrap(), 1);
-        assert_eq!(chain_to_chain_id(Chain::Bsc).unwrap(), 56);
-        assert_eq!(chain_to_chain_id(Chain::Polygon).unwrap(), 137);
-        assert_eq!(chain_to_chain_id(Chain::Robinhood).unwrap(), 4663);
-        assert_eq!(chain_to_chain_id(Chain::Base).unwrap(), 8453);
-        assert_eq!(chain_to_chain_id(Chain::Arbitrum).unwrap(), 42161);
+    fn an_empty_trading_key_is_rejected() {
+        let config = BookFeedConfig {
+            chain: Chain::Ethereum,
+            tokens: Arc::new(HashMap::new()),
+            min_tvl_usd: 0.0,
+        };
+
+        let error = MetricFeedBuilder::new(config, String::new())
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(error, FeedError::InvalidInput(_)), "{error}");
     }
 }
