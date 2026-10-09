@@ -14,7 +14,10 @@ use tycho_common::{
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{bytes_to_address, create_encoding_runtime, on_blocking_thread, SafeRuntime},
+    evm::utils::{
+        bytes_to_address, check_signed_quote, create_encoding_runtime, on_blocking_thread,
+        SafeRuntime,
+    },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -110,6 +113,7 @@ impl SwapEncoder for NativeSwapEncoder {
                     .await
             })
         })??;
+        check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
         // NativeClient already bound response.amountIn and order.sellerTokenAmount to the requested
         // amount. Store that validated quote baseline in the executor header so it can detect
         // under- or over-delivery at execution time.

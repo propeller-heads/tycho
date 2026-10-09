@@ -23,8 +23,8 @@ use tycho_common::{
     models::{
         self,
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -37,13 +37,17 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StorageError, Version,
-        WithTotal,
+        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
+        StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
 
-use super::{is_transaction_conflict, PostgresError, PostgresGateway};
+use super::{
+    is_transaction_conflict,
+    snapshot::{bound_snapshot_reads, snapshot_transaction},
+    PostgresError, PostgresGateway,
+};
 
 /// Represents different types of database write operations.
 #[derive(PartialEq, Clone, Debug)]
@@ -1313,9 +1317,55 @@ impl EntryPointGateway for CachedGateway {
             .get_tracing_results(entry_points, &mut conn)
             .await
     }
+
+    #[instrument(skip_all)]
+    async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
+            })?;
+        self.state_gateway
+            .get_traced_entry_points_by_component(filter, pagination_params, &mut conn)
+            .await
+    }
 }
 
 impl Gateway for CachedGateway {}
+
+#[async_trait]
+impl StateSnapshotGateway for CachedGateway {
+    /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
+    /// result comes from the same database snapshot. The reads are bounded by
+    /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
+    /// by Postgres.
+    async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
+        let mut conn = self.pool.get().await.map_err(|e| {
+            StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
+        })?;
+        snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots(chain, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, conn)
+                        .await?;
+                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
+    }
+}
 
 #[cfg(test)]
 mod test_serial_db {

@@ -49,13 +49,14 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-        "uniswap_v3" | "pancakeswap_v3" => stream_builder
-            .exchange_with_decoder_context::<UniswapV3State>(
+        "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" | "gigadex_v3" => {
+            stream_builder.exchange_with_decoder_context::<UniswapV3State>(
                 protocol_system,
                 tvl_filter,
                 None,
                 decoder_context,
-            ),
+            )
+        }
         "ramses_v3" => stream_builder.exchange_with_decoder_context::<RamsesV3State>(
             protocol_system,
             tvl_filter,

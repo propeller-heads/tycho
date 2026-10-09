@@ -2,6 +2,7 @@
 name = "tycho-test"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 alloy = { workspace = true, features = [
@@ -9,10 +10,11 @@ alloy = { workspace = true, features = [
     "sol-types",
     "contract",
 ] }
-alloy-chains = "0.2.37"
+alloy-chains = "0.2.39"
 alloy-rpc-types-trace = "1.0.38"
 async-trait = { workspace = true }
 colored = "3.0.0"
+futures = { workspace = true }
 hex = { workspace = true }
 miette = { version = "7.6.0" }
 num-bigint = { workspace = true }
@@ -29,3 +31,7 @@ tycho-ethereum = { workspace = true }
 tycho-execution = { workspace = true }
 tycho-simulation = { workspace = true, features = ["evm"] }
 urlencoding = "2.1.3"
+
+[dev-dependencies]
+mockito = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

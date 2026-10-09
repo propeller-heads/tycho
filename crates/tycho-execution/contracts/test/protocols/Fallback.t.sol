@@ -8,10 +8,12 @@ import {AerodromeV1TestBase} from "./AerodromeV1.t.sol";
 import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {
-    FallbackExecutor,
     FallbackExecutor__AddressZero,
     FallbackExecutor__InvalidDataLength
 } from "../../src/executors/FallbackExecutor.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../../src/executors/PropAMMFallbackExecutor.sol";
 import {
     TychoFallbackRouter,
     TychoFallbackRouter__CallbackTokenMismatch,
@@ -23,6 +25,9 @@ import {
     TychoFallbackRouter__UnknownProtocol,
     TychoFallbackRouter__NotSelf
 } from "../../src/fallback/TychoFallbackRouter.sol";
+import {
+    PropAMMFallbackRouter
+} from "../../src/fallback/PropAMMFallbackRouter.sol";
 import {UniswapV2Math__ZeroReserves} from "../../lib/UniswapV2Math.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 
@@ -236,18 +241,62 @@ contract UnquotablePropAMM {
     }
 }
 
-/// @notice Deploys a `TychoFallbackRouter` on a fork and holds the assertions every fallback
-/// test repeats. Subclasses name the fork block, since the protocols are not all live at the
-/// same one.
-abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
-    TychoFallbackRouter router;
+/// @notice The assertions every fallback router test repeats.
+abstract contract FallbackRouterAssertions is Constants {
+    /// Requires `router` to emit `FallbackSwap` for `protocol` and `reason` on the next call.
+    function _expectFallbackSwap(
+        address router,
+        address primary,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        TychoFallbackRouter.FallbackProtocol protocol,
+        TychoFallbackRouter.FallbackReason reason
+    ) internal {
+        vm.expectEmit(router);
+        emit TychoFallbackRouter.FallbackSwap(
+            primary, tokenIn, tokenOut, amountIn, protocol, reason
+        );
+    }
+
+    function _assertNoFallbackSwap(address router, Vm.Log[] memory logs)
+        internal
+        pure
+    {
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertFalse(
+                logs[i].emitter == router
+                    && logs[i].topics[0]
+                        == TychoFallbackRouter.FallbackSwap.selector
+            );
+        }
+    }
+
+    /// Holds no funds once a swap is done.
+    function _assertRouterDrained(
+        address router,
+        address tokenIn,
+        address tokenOut
+    ) internal view {
+        assertEq(IERC20(tokenIn).balanceOf(router), 0);
+        assertEq(IERC20(tokenOut).balanceOf(router), 0);
+    }
+}
+
+/// @notice Deploys a `PropAMMFallbackRouter` on a fork. Subclasses name the fork block, since the
+/// protocols are not all live at the same one.
+abstract contract PropAMMFallbackRouterTestBase is
+    FallbackRouterAssertions,
+    TestUtils
+{
+    PropAMMFallbackRouter router;
     MockPropAMM pamm;
 
     function getForkBlock() internal pure virtual returns (uint256);
 
     function setUp() public virtual {
         vm.createSelectFork(vm.rpcUrl("mainnet"), getForkBlock());
-        router = new TychoFallbackRouter(
+        router = new PropAMMFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -264,7 +313,6 @@ abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
         return router.quoteFallback(swap_, fallbackSwap);
     }
 
-    /// Requires `swap` to emit `FallbackSwap` for `protocol` and `reason` on the next call.
     function _expectFallbackSwap(
         address tokenIn,
         address tokenOut,
@@ -272,26 +320,29 @@ abstract contract TychoFallbackRouterTestBase is Constants, TestUtils {
         TychoFallbackRouter.FallbackProtocol protocol,
         TychoFallbackRouter.FallbackReason reason
     ) internal {
-        vm.expectEmit(address(router));
-        emit TychoFallbackRouter.FallbackSwap(
-            address(pamm), tokenIn, tokenOut, amountIn, protocol, reason
+        _expectFallbackSwap(
+            address(router),
+            address(pamm),
+            tokenIn,
+            tokenOut,
+            amountIn,
+            protocol,
+            reason
         );
     }
 
-    /// Holds no funds once a swap is done.
     function _assertRouterDrained(address tokenIn, address tokenOut)
         internal
         view
     {
-        assertEq(IERC20(tokenIn).balanceOf(address(router)), 0);
-        assertEq(IERC20(tokenOut).balanceOf(address(router)), 0);
+        _assertRouterDrained(address(router), tokenIn, tokenOut);
     }
 }
 
 /// @notice The claim the contract exists for: a reverting pAMM still delivers `tokenOut`,
 /// because the input is still here to fund the retry -- which is what an executor cannot do,
 /// since the Dispatcher has already paid the pAMM by the time it reverts.
-contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
+contract PropAMMFallbackRouterTest is PropAMMFallbackRouterTestBase {
     /// The USDC/WETH, DAI/USDC and USDE/USDT pools this contract quotes all
     /// hold enough liquidity to fill `USDC_IN` here. Moving the block moves
     /// every expected output with it.
@@ -507,7 +558,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMFailed
+            TychoFallbackRouter.FallbackReason.PrimaryFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -857,7 +908,7 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
             WETH_ADDR,
             USDC_IN,
             TychoFallbackRouter.FallbackProtocol.UniswapV3,
-            TychoFallbackRouter.FallbackReason.PropAMMFailed
+            TychoFallbackRouter.FallbackReason.PrimaryFailed
         );
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
@@ -914,12 +965,13 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
         );
     }
 
-    /// `executePropAMM` is external only so `swap` can wrap it in try/catch.
-    function testExecutePropAMMRejectsExternalCaller() public {
+    /// `executePrimary` is external only so `_swap` can wrap it in try/catch.
+    function testExecutePrimaryRejectsExternalCaller() public {
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
-        router.executePropAMM(
+        router.executePrimary(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, USDC_IN, BOB),
-            address(pamm)
+            address(pamm),
+            bytes("")
         );
     }
 
@@ -972,10 +1024,10 @@ contract TychoFallbackRouterTest is TychoFallbackRouterTestBase {
 }
 
 /// @notice The deployment shapes a chain missing a singleton gets, on the mainnet fork so the
-/// zeroed slot is the only difference from `TychoFallbackRouterTest`. Split out from it because
-/// the extra `new TychoFallbackRouter` sites pushed that contract past a solc assembler limit.
-contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
-    /// `TychoFallbackRouterTest`'s block and USDC/WETH figures, so the two contracts assert the
+/// zeroed slot is the only difference from `PropAMMFallbackRouterTest`. Split out from it because
+/// the extra `new PropAMMFallbackRouter` sites pushed that contract past a solc assembler limit.
+contract PropAMMFallbackRouterMultichainTest is PropAMMFallbackRouterTestBase {
+    /// `PropAMMFallbackRouterTest`'s block and USDC/WETH figures, so the two contracts assert the
     /// same numbers.
     uint256 constant FORK_BLOCK = 22_689_128;
     uint256 constant USDC_IN = 10_000e6;
@@ -989,7 +1041,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
     /// byte then quotes by reverting with its name, which `swap` counts as zero,
     /// and running it reverts the same way instead of calling `address(0)`.
     function testUniswapV4UnavailableWithoutPoolManager() public {
-        TychoFallbackRouter noV4 = new TychoFallbackRouter(
+        PropAMMFallbackRouter noV4 = new PropAMMFallbackRouter(
             IPoolManager(address(0)),
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -1013,7 +1065,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
 
     /// Same for a chain without Fluid.
     function testFluidV1UnavailableWithoutLiquidity() public {
-        TychoFallbackRouter noFluid = new TychoFallbackRouter(
+        PropAMMFallbackRouter noFluid = new PropAMMFallbackRouter(
             IPoolManager(POOL_MANAGER),
             address(0),
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
@@ -1037,7 +1089,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
     /// the quote is the fill, the simulation rolls back, and a pAMM quoting
     /// below the pool is displaced exactly as it is on a quoted deployment.
     function testUniswapV3QuotedBySimulationWithoutStaticQuoter() public {
-        TychoFallbackRouter simulated = new TychoFallbackRouter(
+        PropAMMFallbackRouter simulated = new PropAMMFallbackRouter(
             IPoolManager(address(0)),
             address(0),
             IUniswapV3StaticQuoter(address(0))
@@ -1074,7 +1126,7 @@ contract TychoFallbackRouterMultichainTest is TychoFallbackRouterTestBase {
 }
 
 /// @notice Fluid pulls `tokenIn` through `dexCallback`.
-contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
+contract PropAMMFallbackRouterFluidTest is PropAMMFallbackRouterTestBase {
     address constant FLUID_DEX = 0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b;
     address constant SUSDE_ADDR = 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497;
 
@@ -1186,8 +1238,8 @@ contract TychoFallbackRouterFluidTest is TychoFallbackRouterTestBase {
 
 /// @notice Aerodrome V1 lives on Base. Base has no Fluid, so this is also a deployment with
 /// that slot zeroed.
-contract TychoFallbackRouterAerodromeTest is
-    TychoFallbackRouterTestBase,
+contract PropAMMFallbackRouterAerodromeTest is
+    PropAMMFallbackRouterTestBase,
     AerodromeV1TestBase
 {
     /// Uniswap V4's PoolManager on Base, from `executor_deployments.json`.
@@ -1206,7 +1258,7 @@ contract TychoFallbackRouterAerodromeTest is
 
     function setUp() public override {
         vm.createSelectFork(vm.rpcUrl("base"), getForkBlock());
-        router = new TychoFallbackRouter(
+        router = new PropAMMFallbackRouter(
             IPoolManager(BASE_POOL_MANAGER),
             address(0),
             IUniswapV3StaticQuoter(BASE_STATIC_QUOTER)
@@ -1323,7 +1375,7 @@ contract TychoFallbackRouterAerodromeTest is
 
 /// @notice The same claim through the whole TychoRouter: the swap's input lands at the fallback
 /// router, not at a pool, which is what makes the retry fundable.
-contract FallbackExecutorTest is TychoRouterTestSetup {
+contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
     MockPropAMM pamm;
 
     /// Measured at getForkBlock() against the pools each test names, so the
@@ -1360,7 +1412,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertTrue(success, "Call Failed");
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SINGLE_WETH_OUT);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// The `sushiswap_v2` fork name, encoded in Rust, fills through the Uniswap V2 fallback path
@@ -1380,7 +1432,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertTrue(success, "Call Failed");
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), SUSHI_WETH_OUT);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     function testGetTransferData() public view {
@@ -1390,12 +1442,12 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             address tokenIn,
             address tokenOut,
             bool outputToRouter
-        ) = fallbackExecutor.getTransferData(_swapData());
+        ) = propAMMFallbackExecutor.getTransferData(_swapData());
 
         assertEq(
             uint8(transferType), uint8(TransferManager.TransferType.Transfer)
         );
-        assertEq(receiver, address(fallbackRouter));
+        assertEq(receiver, address(propAMMFallbackRouter));
         assertEq(tokenIn, USDC_ADDR);
         assertEq(tokenOut, WETH_ADDR);
         assertFalse(outputToRouter);
@@ -1403,8 +1455,8 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
     function testFundsExpectedAddress() public view {
         assertEq(
-            fallbackExecutor.fundsExpectedAddress(_swapData()),
-            address(fallbackRouter)
+            propAMMFallbackExecutor.fundsExpectedAddress(_swapData()),
+            address(propAMMFallbackRouter)
         );
     }
 
@@ -1414,12 +1466,14 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
                 FallbackExecutor__InvalidDataLength.selector, 40
             )
         );
-        fallbackExecutor.getTransferData(abi.encodePacked(USDC_ADDR, WETH_ADDR));
+        propAMMFallbackExecutor.getTransferData(
+            abi.encodePacked(USDC_ADDR, WETH_ADDR)
+        );
     }
 
     function testConstructorRejectsZeroAddress() public {
         vm.expectRevert(FallbackExecutor__AddressZero.selector);
-        new FallbackExecutor(address(0));
+        new PropAMMFallbackExecutor(address(0));
     }
 
     /// The whole swap: a dead pAMM still settles, at the Uniswap V3 price.
@@ -1437,14 +1491,14 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(fallbackExecutor), _swapData())
+            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
         );
         vm.stopPrank();
 
         assertEq(amountOut, SINGLE_WETH_OUT);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), amountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// The whole swap when the pAMM quotes above the pool: the pAMM fills, measured by the
@@ -1465,14 +1519,14 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             5 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(fallbackExecutor), _swapData())
+            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
         );
         vm.stopPrank();
 
         assertEq(amountOut, 5 ether);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), 5 ether);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), amountIn);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// The TychoRouter's `minAmountOut` is the swap's only price check.
@@ -1491,7 +1545,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             1000 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(fallbackExecutor), _swapData())
+            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
         );
         vm.stopPrank();
     }
@@ -1502,7 +1556,8 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         deal(USDC_ADDR, ALICE, amountIn);
 
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSequentialSwap(address(fallbackExecutor), _swapData());
+        swaps[0] =
+            encodeSequentialSwap(address(propAMMFallbackExecutor), _swapData());
         swaps[1] = encodeSequentialSwap(
             address(usv2Executor),
             encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
@@ -1524,7 +1579,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
         assertEq(amountOut, SEQUENTIAL_DAI_OUT);
         assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
-        assertEq(IERC20(WETH_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// The fallback as the second hop, which `TransferManager._transfer` funds
@@ -1540,7 +1595,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             encodeUniswapV2Swap(USDC_WETH_USV2, USDC_ADDR, WETH_ADDR)
         );
         swaps[1] = encodeSequentialSwap(
-            address(fallbackExecutor),
+            address(propAMMFallbackExecutor),
             abi.encodePacked(
                 WETH_ADDR,
                 DAI_ADDR,
@@ -1565,8 +1620,8 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
 
         assertEq(amountOut, SEQUENTIAL_FALLBACK_SECOND_DAI_OUT);
         assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), amountOut);
-        assertEq(IERC20(WETH_ADDR).balanceOf(address(fallbackRouter)), 0);
-        assertEq(IERC20(DAI_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
+        assertEq(IERC20(DAI_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// With fees active the swap's receiver is redirected to the router itself,
@@ -1590,7 +1645,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(fallbackExecutor), _swapData())
+            encodeSingleSwap(address(propAMMFallbackExecutor), _swapData())
         );
         vm.stopPrank();
 
@@ -1603,7 +1658,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertEq(fee, (amountOut + fee) / 100);
         // The fee stays in the router as the vault balance's backing.
         assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), fee);
-        assertEq(IERC20(WETH_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(WETH_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// A split swap sends a fraction of the input, the one place a
@@ -1619,7 +1674,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             uint8(0),
             uint8(1),
             (0xffffff * 60) / 100, // 60%
-            address(fallbackExecutor),
+            address(propAMMFallbackExecutor),
             _swapData()
         );
         swaps[1] = encodeSplitSwap(
@@ -1648,7 +1703,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
         assertEq(amountOut, SPLIT_WETH_OUT);
         assertEq(IERC20(WETH_ADDR).balanceOf(ALICE), amountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC_ADDR).balanceOf(address(fallbackRouter)), 0);
+        assertEq(IERC20(USDC_ADDR).balanceOf(address(propAMMFallbackRouter)), 0);
     }
 
     /// A fallback protocol that reports success but pays nothing is caught by the
@@ -1677,7 +1732,7 @@ contract FallbackExecutorTest is TychoRouterTestSetup {
             1 ether,
             ALICE,
             noClientFee(),
-            encodeSingleSwap(address(fallbackExecutor), swapData)
+            encodeSingleSwap(address(propAMMFallbackExecutor), swapData)
         );
         vm.stopPrank();
     }

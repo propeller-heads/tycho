@@ -1,32 +1,31 @@
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
-    time::Duration,
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::Utc;
+use async_stream::stream;
 use num_bigint::BigUint;
 use tokio_stream::{Stream, StreamExt};
-use tycho_common::{
-    models::{token::Token, Chain},
-    simulation::protocol_sim::ProtocolSim,
-    Bytes,
-};
+use tycho_common::{models::token::Token, Bytes};
 
 use super::{
     config::{
         default_denied_pamms, default_served_pamms, PriceLevelStreamConfig,
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
-    state::{PriceLevelStreamQuote, PriceLevelStreamState},
-    titan::{
-        self, ConnectionSettings, TitanPairLevels, TitanPammLevels, TitanPriceLevel,
-        TitanPriceLevelMessage, TITAN_PRICE_LEVEL_URL,
-    },
+    titan::{self, ConnectionSettings, TITAN_PRICE_LEVEL_URL, TITAN_PRICE_LEVEL_URL_ENV},
+    tracker::{FreshnessTracker, Now, TrackerSettings, DEFAULT_STALE_AFTER},
 };
-use crate::protocol::models::{ProtocolComponent, Update};
+use crate::protocol::models::Update;
 
 /// Static attribute under which each emitted component carries its pAMM venue address.
 pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
+
+/// The longest [`stale_after`](PriceLevelStreamBuilder::stale_after) the builder accepts;
+/// longer values are capped to it. Quotes target the block being built, so serving a ladder for
+/// longer than this is never intended, and deadlines this far ahead stay representable on the
+/// monotonic clock.
+pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
 
 /// Builds a stream of [`Update`]s from the Titan pAMM price level WebSocket.
 ///
@@ -52,6 +51,10 @@ pub struct PriceLevelStreamBuilder {
     /// Whether components are emitted under the `fallback:` family, executed through
     /// `TychoFallbackRouter`, instead of the direct `pricelevelstream:` family.
     fallback_router: bool,
+    /// See [`stale_after`](Self::stale_after).
+    stale_after: Duration,
+    /// See [`without_quote_guard`](Self::without_quote_guard).
+    quote_guard: bool,
 }
 
 impl Default for PriceLevelStreamBuilder {
@@ -65,6 +68,8 @@ impl Default for PriceLevelStreamBuilder {
             auto_detected_gas_cost: None,
             connection: ConnectionSettings::default(),
             fallback_router: true,
+            stale_after: DEFAULT_STALE_AFTER,
+            quote_guard: true,
         }
     }
 }
@@ -100,7 +105,9 @@ impl PriceLevelStreamBuilder {
     }
 
     /// Overrides the stream endpoint, e.g. to connect to a closer Titan region than the default
-    /// (see <https://docs.titanbuilder.xyz/propamms/takers>).
+    /// (see <https://docs.titanbuilder.xyz/propamms/takers>). Without it, the
+    /// `TITAN_PAMM_PRICE_LEVEL_URL` environment variable is used when set, else the built-in
+    /// default.
     pub fn endpoint(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -113,9 +120,12 @@ impl PriceLevelStreamBuilder {
         self
     }
 
-    /// Overrides the longest gap between Titan messages tolerated before the connection is
-    /// treated as dead and re-established (default: 30s). Titan pushes several updates per
-    /// second, so a multi-second silence means a stalled or half-open connection.
+    /// Overrides the longest gap between parsed Titan frames tolerated before the connection is
+    /// treated as dead and re-established (default: 10s). Titan pushes one frame per second and
+    /// sends no keepalives, so a multi-second silence means a stalled or half-open connection.
+    /// Control frames and unparsable text do not reset this timeout, and neither does the time
+    /// the consumer spends between polls: the gap is measured while the stream waits on the
+    /// socket.
     pub fn read_idle_timeout(mut self, timeout: Duration) -> Self {
         self.connection.read_idle_timeout = timeout;
         self
@@ -197,6 +207,36 @@ impl PriceLevelStreamBuilder {
         self
     }
 
+    /// Overrides how long a component stays served after the last accepted frame that carried
+    /// it (default: 24s, two slots). A component no accepted frame has carried for this long
+    /// turns stale and is emitted in `removed_pairs`; the next accepted frame carrying it
+    /// re-adds it in `new_pairs`. Frames whose `timestamp` is this old or older are rejected.
+    /// Independent of this setting, a state refuses to quote once its frame is one slot old
+    /// (see [`without_quote_guard`](Self::without_quote_guard)).
+    ///
+    /// Values above [`MAX_STALE_AFTER`] are capped to it. A value shorter than the age frames
+    /// arrive with rejects every frame as `too_old`, which the
+    /// `price_level_stream_frames_rejected_total` counter and a WARN log show.
+    pub fn stale_after(mut self, duration: Duration) -> Self {
+        self.stale_after = duration.min(MAX_STALE_AFTER);
+        self
+    }
+
+    /// Emits states that never refuse to quote.
+    ///
+    /// By default every emitted state refuses `spot_price`, `get_amount_out` and `get_limits`
+    /// once its frame is one slot ([`QUOTE_TTL`](super::state::QUOTE_TTL)) old: Titan quotes
+    /// the block being built, and a venue rejects a fill against an older ladder as stale, so
+    /// such a quote is not executable. Opt out only for a consumer that quotes a state more
+    /// than one slot after it arrived by design — a batch simulator, a validation harness — and
+    /// that accepts a quote the venue may no longer fill. The component still turns stale and
+    /// is removed after [`stale_after`](Self::stale_after), which then becomes the only bound
+    /// on how old a quoted ladder can be. Never disable it on a live router.
+    pub fn without_quote_guard(mut self) -> Self {
+        self.quote_guard = false;
+        self
+    }
+
     /// Consumes the builder and opens the stream.
     ///
     /// Components are emitted under `fallback:{name}`, so tycho-execution routes their swaps
@@ -207,14 +247,24 @@ impl PriceLevelStreamBuilder {
     ///
     /// The connection is established lazily on first poll and maintained (with reconnects) for as
     /// long as the stream is polled; it never terminates on its own, and dropping the stream
-    /// closes the connection. Frames that contain no served pAMM produce no update.
+    /// closes the connection.
     ///
-    /// Each streamed frame is a complete snapshot of everything Titan currently streams, so
-    /// every update carries the full set of the frame's pair states, with `new_pairs` /
-    /// `removed_pairs` derived by diffing against the previous frame — a pair (or a whole
-    /// venue) the stream stops serving is removed. Frames older than an already processed one
-    /// are skipped, so updates never move backwards in block number. Pairs whose tokens are
-    /// missing from the provided token metadata are skipped.
+    /// Every accepted frame yields an update with the states of the served pairs it carries,
+    /// with `new_pairs` for pairs not currently served. The update does not mention pairs the
+    /// frame does not carry, so consumers keep their previous state. A component no accepted
+    /// frame has carried for [`stale_after`](Self::stale_after) turns stale and is emitted in
+    /// `removed_pairs`, together with every other component turning stale at that instant, and
+    /// re-added by the next accepted frame carrying it. Frames that are too old, from the
+    /// future, out of order, or whose block regresses or jumps more than one block per elapsed
+    /// slot plus 2 are rejected without effect. Frames that contain no served pAMM produce no
+    /// update. Pairs whose tokens are missing from the provided token metadata are skipped.
+    ///
+    /// Every update is stamped with the block its frame targets, a removal with the newest
+    /// accepted block. Block numbers never decrease while something is served. Once every
+    /// component has turned stale, the next accepted frame is judged as a first frame and may
+    /// carry a lower block than the removal did: that is how the stream recovers from a frame
+    /// with an implausible block, so consumers must not rely on the block number to order
+    /// updates across such a gap. See the [module documentation](super) for the full contract.
     pub fn build(self) -> impl Stream<Item = Update> + Send {
         let Self {
             registry,
@@ -225,6 +275,8 @@ impl PriceLevelStreamBuilder {
             auto_detected_gas_cost,
             connection,
             fallback_router,
+            stale_after,
+            quote_guard,
         } = self;
         if registry.is_empty() && !auto_detect {
             tracing::warn!(
@@ -238,466 +290,110 @@ impl PriceLevelStreamBuilder {
                  will never produce an update"
             );
         }
-        let url = url.unwrap_or_else(|| TITAN_PRICE_LEVEL_URL.to_string());
+        let url = url.unwrap_or_else(|| {
+            std::env::var(TITAN_PRICE_LEVEL_URL_ENV)
+                .unwrap_or_else(|_| TITAN_PRICE_LEVEL_URL.to_string())
+        });
         let auto_detected_gas_cost =
             auto_detected_gas_cost.unwrap_or_else(|| BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
-
-        let mut tracker = SnapshotTracker::new(
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
             registry,
             denied,
             tokens,
             auto_detect,
             auto_detected_gas_cost,
-            fallback_router,
-        );
-        titan::messages(url, connection).filter_map(move |message| tracker.process(message))
-    }
-}
+            stale_after,
+            via_fallback_router: fallback_router,
+            quote_guard,
+        });
 
-/// Turns Titan frames into [`Update`]s, tracking the previously emitted components so pair
-/// additions and removals can be diffed against the last snapshot.
-struct SnapshotTracker {
-    registry: HashMap<Bytes, PriceLevelStreamConfig>,
-    /// Venues excluded from auto-detection. The builder keeps this disjoint from the registry:
-    /// denying removes any registration and registering removes any denial.
-    denied: HashSet<Bytes>,
-    tokens: HashMap<Bytes, Token>,
-    /// Whether frames from pAMMs absent from the registry get an address-named configuration
-    /// synthesized (and cached in the registry) instead of being skipped.
-    auto_detect: bool,
-    /// The per-swap gas cost synthesized auto-detected configurations are served with.
-    auto_detected_gas_cost: BigUint,
-    /// Whether components are emitted under the `fallback:` family, so their swaps execute
-    /// through `TychoFallbackRouter` instead of the venue directly.
-    via_fallback_router: bool,
-    /// Components of the last emitted snapshot, across all pAMMs. A frame is a complete
-    /// snapshot of everything Titan currently streams, so removals are diffed globally: a
-    /// known component a frame does not re-emit is gone — including when its venue vanishes
-    /// from the stream entirely.
-    components: HashMap<String, ProtocolComponent>,
-    /// The newest block number processed so far. Frames targeting an older block (e.g.
-    /// delivered around a reconnect) are stale and skipped wholesale — processing one would
-    /// emit superseded states and churn the global diff.
-    newest_block: u64,
-}
-
-impl SnapshotTracker {
-    fn new(
-        registry: HashMap<Bytes, PriceLevelStreamConfig>,
-        denied: HashSet<Bytes>,
-        tokens: HashMap<Bytes, Token>,
-        auto_detect: bool,
-        auto_detected_gas_cost: BigUint,
-        via_fallback_router: bool,
-    ) -> Self {
-        Self {
-            registry,
-            denied,
-            tokens,
-            auto_detect,
-            auto_detected_gas_cost,
-            via_fallback_router,
-            components: HashMap::new(),
-            newest_block: 0,
-        }
-    }
-
-    /// Processes one frame into an [`Update`], or `None` if the frame targets an older block
-    /// than an already processed one or contains nothing relevant (no registered pAMM with at
-    /// least one known pair or a pair removal).
-    fn process(&mut self, message: TitanPriceLevelMessage) -> Option<Update> {
-        if message.block_number < self.newest_block {
-            tracing::warn!(
-                block_number = message.block_number,
-                newest_block = self.newest_block,
-                "Skipping out-of-order price level frame"
-            );
-            return None;
-        }
-        self.newest_block = message.block_number;
-
-        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
-        let mut new_pairs = HashMap::new();
-        // The frame is a complete snapshot: every known component is presumed gone until the
-        // frame re-emits it below.
-        let mut previous = std::mem::take(&mut self.components);
-
-        for TitanPammLevels { pamm, pairs } in message.pamms {
-            let config = match self.registry.entry(pamm.clone()) {
-                Entry::Occupied(entry) => &*entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    if !self.auto_detect {
-                        tracing::debug!(%pamm, "Skipping unregistered pAMM");
-                        continue;
-                    }
-                    if self.denied.contains(&pamm) {
-                        tracing::debug!(%pamm, "Skipping denied pAMM");
-                        continue;
-                    }
-                    tracing::info!(%pamm, "Serving auto-detected pAMM");
-                    &*entry.insert(PriceLevelStreamConfig::auto_detected(
-                        pamm.clone(),
-                        self.auto_detected_gas_cost.clone(),
-                    ))
-                }
-            };
-
-            // Merge the frame's per-direction ladders into one entry per unordered token pair.
-            let mut merged_pairs: HashMap<(Bytes, Bytes), (Vec<_>, Vec<_>)> = HashMap::new();
-            for TitanPairLevels { token_in, token_out, order_book } in pairs {
-                if !self.tokens.contains_key(&token_in) || !self.tokens.contains_key(&token_out) {
-                    tracing::debug!(%token_in, %token_out, "Skipping pair with unknown token");
-                    continue;
-                }
-                let sells_token0 = token_in < token_out;
-                let key = if sells_token0 {
-                    (token_in.clone(), token_out.clone())
-                } else {
-                    (token_out.clone(), token_in.clone())
-                };
-                let quotes = order_book
-                    .into_iter()
-                    .map(|TitanPriceLevel { amount_in, amount_out }| {
-                        PriceLevelStreamQuote::new(amount_in, amount_out)
-                    })
-                    .collect();
-                let entry = merged_pairs.entry(key).or_default();
-                if sells_token0 {
-                    entry.0 = quotes;
-                } else {
-                    entry.1 = quotes;
-                }
-            }
-
-            for ((token0, token1), (quotes_0_to_1, quotes_1_to_0)) in merged_pairs {
-                let id = component_id(&config.address, &token0, &token1);
-                let id_string = id.to_string();
-                let component = previous
-                    .remove(&id_string)
-                    .unwrap_or_else(|| {
-                        let component = build_component(
-                            &self.tokens,
-                            config,
-                            id,
-                            &token0,
-                            &token1,
-                            self.via_fallback_router,
-                        );
-                        new_pairs.insert(id_string.clone(), component.clone());
-                        component
-                    });
-
-                let state = PriceLevelStreamState::new(
-                    token0,
-                    token1,
-                    quotes_0_to_1,
-                    quotes_1_to_0,
-                    config.gas_cost.clone(),
+        stream! {
+            let frames = titan::messages(url, connection);
+            tokio::pin!(frames);
+            loop {
+                let deadline = tracker.stale_deadline();
+                let sleep_until_deadline = tokio::time::sleep_until(
+                    deadline.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                 );
-
-                states.insert(id_string.clone(), Box::new(state));
-                self.components
-                    .insert(id_string, component);
+                let update = tokio::select! {
+                    Some(frame) = frames.next() => tracker.on_frame(frame, now()),
+                    () = sleep_until_deadline, if deadline.is_some() => {
+                        tracker.on_stale_deadline(timer_now())
+                    }
+                };
+                if let Some(update) = update {
+                    yield update;
+                }
             }
         }
-
-        // Every re-emitted pair was moved back into `self.components` above — whatever remains
-        // is gone: the pair, or its whole venue, is no longer streamed.
-        let removed_pairs = previous;
-
-        if states.is_empty() && new_pairs.is_empty() && removed_pairs.is_empty() {
-            return None;
-        }
-
-        Some(
-            // Quotes target the block currently being built, hence partial. Sync states stay
-            // empty (like the RFQ path) because no full block header is available.
-            Update::new(message.block_number, states, new_pairs)
-                .set_is_partial(true)
-                .set_removed_pairs(removed_pairs),
-        )
     }
 }
 
-fn build_component(
-    tokens: &HashMap<Bytes, Token>,
-    config: &PriceLevelStreamConfig,
-    id: Bytes,
-    token0: &Bytes,
-    token1: &Bytes,
-    via_router: bool,
-) -> ProtocolComponent {
-    let protocol_system =
-        if via_router { config.fallback_protocol_system() } else { config.protocol_system() };
-    ProtocolComponent::new(
-        id,
-        protocol_system.clone(),
-        protocol_system,
-        // Titan builds Ethereum L1 blocks; the stream carries no other chains.
-        Chain::Ethereum,
-        vec![tokens[token0].clone(), tokens[token1].clone()],
-        vec![config.address.clone()],
-        HashMap::from([(PAMM_ADDRESS_ATTRIBUTE.to_string(), config.address.clone())]),
-        Bytes::default(),
-        Utc::now().naive_utc(),
-    )
+/// The clocks a frame is judged against: the wall clock for Titan's `timestamp`, and the
+/// timer's clock for every deadline. This is the only place the stream reads a clock; the
+/// tracker only ever sees the values it is handed.
+fn now() -> Now {
+    Now { wall_nanos: wall_clock_nanos(), monotonic: timer_now() }
 }
 
-/// The component identity of a (pAMM, pair) combination: `pamm ++ token0 ++ token1`.
-fn component_id(pamm: &Bytes, token0: &Bytes, token1: &Bytes) -> Bytes {
-    Bytes::from([pamm.as_ref(), token0.as_ref(), token1.as_ref()].concat())
+/// Nanoseconds since the Unix epoch. A system clock unrepresentable as unix nanoseconds yields
+/// 0, which rejects every frame as `in_future`.
+fn wall_clock_nanos() -> u64 {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since_epoch| u64::try_from(since_epoch.as_nanos()).ok());
+    match since_epoch {
+        Some(wall_nanos) => wall_nanos,
+        None => {
+            tracing::error!(
+                "System clock unrepresentable as unix nanoseconds; every price level frame will \
+                 be rejected as in_future"
+            );
+            0
+        }
+    }
+}
+
+/// The clock the deadline timer runs on. Deadlines are set and swept with it so that a sweep
+/// fired by the timer finds the component due, also under `tokio::time::pause()`, where the
+/// runtime's virtual time and `std::time::Instant` diverge.
+fn timer_now() -> Instant {
+    tokio::time::Instant::now().into_std()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{
+        pin::Pin,
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
+    use futures::{future::BoxFuture, SinkExt};
     use num_bigint::BigUint;
+    use rstest::rstest;
+    use tokio_tungstenite::tungstenite::Message;
 
-    use super::*;
-
-    const PAMM: &str = "0x5979458912f80b96d30d4220af8e2e4925a33320";
-    const WBTC: &str = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
-    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
-    const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-
-    fn token(address: &str, symbol: &str, decimals: u32) -> Token {
-        Token::new(
-            &Bytes::from_str(address).unwrap(),
-            symbol,
-            decimals,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
-    }
-
-    fn tokens() -> HashMap<Bytes, Token> {
-        [token(WBTC, "WBTC", 8), token(USDC, "USDC", 6), token(WETH, "WETH", 18)]
-            .into_iter()
-            .map(|token| (token.address.clone(), token))
-            .collect()
-    }
-
-    fn tracker() -> SnapshotTracker {
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        SnapshotTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            false,
-        )
-    }
-
-    fn level(amount_in: u64, amount_out: u64) -> TitanPriceLevel {
-        TitanPriceLevel {
-            amount_in: BigUint::from(amount_in),
-            amount_out: BigUint::from(amount_out),
-        }
-    }
-
-    fn pair_levels(
-        token_in: &str,
-        token_out: &str,
-        order_book: Vec<TitanPriceLevel>,
-    ) -> TitanPairLevels {
-        TitanPairLevels {
-            token_in: Bytes::from_str(token_in).unwrap(),
-            token_out: Bytes::from_str(token_out).unwrap(),
-            order_book,
-        }
-    }
-
-    fn message(block_number: u64, pairs: Vec<TitanPairLevels>) -> TitanPriceLevelMessage {
-        TitanPriceLevelMessage {
-            block_number,
-            pamms: vec![TitanPammLevels { pamm: Bytes::from_str(PAMM).unwrap(), pairs }],
-        }
-    }
-
-    fn wbtc_usdc_pairs() -> Vec<TitanPairLevels> {
-        vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-            pair_levels(USDC, WBTC, vec![level(100_000_000_000, 99_000_000)]),
-        ]
-    }
-
-    fn expected_id() -> String {
-        // pamm ++ token0 ++ token1 with WBTC < USDC.
-        format!("{PAMM}{}{}", &WBTC[2..], &USDC[2..])
-    }
-
-    #[test]
-    fn first_snapshot_emits_new_pair_with_both_directions() {
-        let mut tracker = tracker();
-        let Update {
-            block_number_or_timestamp,
-            is_partial,
-            sync_states,
-            states,
-            new_pairs,
-            removed_pairs,
-        } = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        assert_eq!(block_number_or_timestamp, 100);
-        assert!(is_partial);
-        assert!(sync_states.is_empty());
-        assert!(removed_pairs.is_empty());
-
-        let id = expected_id();
-        let component = &new_pairs[&id];
-        assert_eq!(component.protocol_system, "pricelevelstream:fermiswap");
-        assert_eq!(
-            component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
-            Bytes::from_str(PAMM).unwrap()
-        );
-
-        let PriceLevelStreamState { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost } =
-            states[&id]
-                .as_any()
-                .downcast_ref::<PriceLevelStreamState>()
-                .expect("price level state");
-        assert_eq!(token0, &Bytes::from_str(WBTC).unwrap());
-        assert_eq!(token1, &Bytes::from_str(USDC).unwrap());
-        assert_eq!(quotes_0_to_1.len(), 1);
-        assert_eq!(quotes_1_to_0.len(), 1);
-        assert_eq!(quotes_0_to_1[0].amount_in, BigUint::from(100_000_000u64));
-        assert_eq!(gas_cost, &BigUint::from(120_000u64));
-    }
-
-    #[test]
-    fn repeated_snapshot_is_not_a_new_pair() {
-        let mut tracker = tracker();
-        tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-        let update = tracker
-            .process(message(101, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        assert!(update.new_pairs.is_empty());
-        assert!(update.removed_pairs.is_empty());
-        assert!(update
-            .states
-            .contains_key(&expected_id()));
-    }
-
-    #[test]
-    fn dropped_pair_is_removed() {
-        let mut tracker = tracker();
-        tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-        let weth_usdc =
-            vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
-        let update = tracker
-            .process(message(101, weth_usdc))
-            .expect("update expected");
-
-        assert_eq!(update.removed_pairs.len(), 1);
-        assert!(update
-            .removed_pairs
-            .contains_key(&expected_id()));
-        assert_eq!(update.new_pairs.len(), 1);
-        assert_eq!(update.states.len(), 1);
-    }
-
-    #[test]
-    fn out_of_order_frame_is_skipped() {
-        let mut tracker = tracker();
-        tracker
-            .process(message(101, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        // A frame for an older block is stale: no update, and the caches stay untouched even
-        // though the frame's snapshot differs completely.
-        let stale =
-            vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
-        assert!(tracker
-            .process(message(100, stale))
-            .is_none());
-
-        // The next current frame diffs against the pre-stale state: nothing was added or
-        // removed in between.
-        let update = tracker
-            .process(message(102, wbtc_usdc_pairs()))
-            .expect("update expected");
-        assert!(update.new_pairs.is_empty());
-        assert!(update.removed_pairs.is_empty());
-    }
-
-    #[test]
-    fn vanished_pamm_has_its_pairs_removed() {
-        let mut tracker = tracker();
-        tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        // The next frame no longer contains the pAMM at all: a complete snapshot without a
-        // venue means the venue is gone, pairs and all.
-        let update = tracker
-            .process(TitanPriceLevelMessage { block_number: 101, pamms: vec![] })
-            .expect("update expected");
-        assert!(update.states.is_empty());
-        assert!(update.new_pairs.is_empty());
-        assert_eq!(update.removed_pairs.len(), 1);
-        assert!(update
-            .removed_pairs
-            .contains_key(&expected_id()));
-
-        // Nothing served and nothing changed: no update.
-        assert!(tracker
-            .process(TitanPriceLevelMessage { block_number: 102, pamms: vec![] })
-            .is_none());
-
-        // A venue that reappears is a new pair again.
-        let update = tracker
-            .process(message(103, wbtc_usdc_pairs()))
-            .expect("update expected");
-        assert!(update
-            .new_pairs
-            .contains_key(&expected_id()));
-    }
-
-    #[test]
-    fn unregistered_pamm_produces_no_update_without_auto_detection() {
-        let mut tracker = SnapshotTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            false,
-        );
-        assert!(tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .is_none());
-    }
-
-    #[test]
-    fn denied_pamm_is_not_auto_detected() {
-        let denied = HashSet::from([Bytes::from_str(PAMM).unwrap()]);
-        let mut tracker = SnapshotTracker::new(
-            HashMap::new(),
-            denied,
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            false,
-        );
-        assert!(tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .is_none());
-    }
+    use super::{
+        super::{
+            config::{default_denied_pamms, PriceLevelStreamConfig},
+            state::PriceLevelStreamState,
+            telemetry::{
+                recorded::{counter_value, record_async},
+                RECONNECTS,
+            },
+            test_support::{
+                fermiswap, frame_text, frame_then_repeat, tokens, wall_nanos_now, FakeConnection,
+                FakeTitan, PAMM,
+            },
+        },
+        *,
+    };
 
     #[test]
     fn explicit_add_and_deny_are_last_wins() {
@@ -716,6 +412,344 @@ mod tests {
             .add_pamm(custom());
         assert_eq!(builder.registry[&address].protocol, "custom");
         assert!(builder.denied.is_empty());
+    }
+
+    #[test]
+    fn quote_guard_is_on_unless_opted_out() {
+        assert!(PriceLevelStreamBuilder::new().quote_guard);
+        assert!(
+            !PriceLevelStreamBuilder::new()
+                .without_quote_guard()
+                .quote_guard
+        );
+    }
+
+    /// A builder with short timings: `stale_after` 2 s, `read_idle_timeout` 100 ms,
+    /// `max_backoff` 20 ms.
+    fn fast_builder(fake: &FakeTitan) -> PriceLevelStreamBuilder {
+        PriceLevelStreamBuilder::new()
+            .endpoint(fake.url())
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
+            .stale_after(STALE_AFTER)
+            .connect_timeout(Duration::from_secs(1))
+            .read_idle_timeout(Duration::from_millis(100))
+            .max_backoff(Duration::from_millis(20))
+    }
+
+    /// The `stale_after` of [`fast_builder`]: long enough that a loaded runner does not reject
+    /// the first frame as too old, short enough that a removal arrives within [`WAIT`].
+    const STALE_AFTER: Duration = Duration::from_secs(2);
+
+    /// How long a test waits for one update.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    async fn next_within(
+        stream: &mut Pin<&mut impl Stream<Item = Update>>,
+        limit: Duration,
+    ) -> Option<Update> {
+        tokio::time::timeout(limit, stream.next())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Waits for the first update and checks that it adds the one served component.
+    async fn expect_first_update(stream: &mut Pin<&mut impl Stream<Item = Update>>) -> Update {
+        let first = next_within(stream, WAIT)
+            .await
+            .expect("first update");
+        assert_eq!(first.new_pairs.len(), 1);
+        assert!(first.removed_pairs.is_empty());
+        first
+    }
+
+    /// Waits up to [`WAIT`] for an update that removes components, skipping the updates that
+    /// only refresh served ones; an update that re-adds a component before the removal fails.
+    async fn expect_removal(stream: &mut Pin<&mut impl Stream<Item = Update>>) -> Update {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let update = stream
+                    .next()
+                    .await
+                    .expect("stream ended");
+                if !update.removed_pairs.is_empty() {
+                    return update;
+                }
+                assert!(update.new_pairs.is_empty(), "component re-added before the removal");
+            }
+        })
+        .await
+        .expect("removal")
+    }
+
+    fn assert_removal_only(update: &Update, expected_removed: usize) {
+        assert!(update.states.is_empty());
+        assert!(update.new_pairs.is_empty());
+        assert!(update.sync_states.is_empty());
+        assert!(update.is_partial);
+        assert_eq!(update.removed_pairs.len(), expected_removed);
+    }
+
+    fn fresh_frame() -> Message {
+        Message::Text(frame_text(100, wall_nanos_now()).into())
+    }
+
+    /// Sends one fresh frame on the first connection only; later connections stay silent.
+    async fn first_connection_sends_one_frame(index: usize, mut socket: FakeConnection) {
+        if index == 0 {
+            let _ = socket.send(fresh_frame()).await;
+        }
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test]
+    async fn silence_past_stale_after_removes_every_served_component() {
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake).build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        // The stream reconnects on idle timeout, but the later connections send no frame, so no
+        // component deadline moves.
+        let removal = next_within(&mut stream, WAIT)
+            .await
+            .expect("removal");
+
+        assert_removal_only(&removal, 1);
+        assert_eq!(removal.block_number_or_timestamp, 100);
+        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on idle timeout");
+    }
+
+    #[tokio::test]
+    async fn repeated_immediate_closes_remove_within_stale_after() {
+        let fake = FakeTitan::spawn(|index, mut socket| async move {
+            if index == 0 {
+                let _ = socket.send(fresh_frame()).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let _ = socket.close(None).await;
+        })
+        .await;
+        let stream = fast_builder(&fake).build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = next_within(&mut stream, WAIT)
+            .await
+            .expect("removal");
+
+        assert_removal_only(&removal, 1);
+    }
+
+    #[test]
+    fn refused_reconnects_remove_within_stale_after() {
+        let (removal, snapshot) = record_async(async {
+            let mut fake = FakeTitan::spawn(|_, mut socket| async move {
+                let _ = socket.send(fresh_frame()).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = socket.close(None).await;
+            })
+            .await;
+            let stream = fast_builder(&fake).build();
+            tokio::pin!(stream);
+
+            expect_first_update(&mut stream).await;
+            // From here every connect is refused at TCP level. The fake closes 20 ms in and the
+            // backoff is capped at 20 ms, so one reconnect can be accepted before `shutdown`
+            // drops the listener; its fresh frame refreshes the component without re-adding it.
+            fake.shutdown();
+            expect_removal(&mut stream).await
+        });
+
+        assert_removal_only(&removal, 1);
+        assert!(
+            counter_value(&snapshot, RECONNECTS, &[("reason", "connect_failed")]) >= 1,
+            "no connect was refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_frames_remove_within_stale_after_and_never_re_add() {
+        // One frame, stamped once, replayed every 50 ms forever.
+        let replay = fresh_frame();
+        let fake =
+            FakeTitan::spawn(frame_then_repeat(replay.clone(), replay, Duration::from_millis(50)))
+                .await;
+        let stream = fast_builder(&fake)
+            .read_idle_timeout(Duration::from_secs(5))
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        // Replays are accepted while fresh but cannot extend the deadline; the deadline fires
+        // even though a frame is ready on every poll.
+        let removal = expect_removal(&mut stream).await;
+
+        assert_removal_only(&removal, 1);
+        // Every later replay is too old to be accepted: nothing comes back.
+        assert!(next_within(&mut stream, Duration::from_millis(500))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_frame_after_removal_re_adds_the_component() {
+        let fake = FakeTitan::spawn(|_, mut socket| async move {
+            let _ = socket.send(fresh_frame()).await;
+            tokio::time::sleep(STALE_AFTER + Duration::from_millis(500)).await;
+            let _ = socket
+                .send(Message::Text(frame_text(101, wall_nanos_now()).into()))
+                .await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let stream = fast_builder(&fake)
+            .read_idle_timeout(Duration::from_secs(5))
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = next_within(&mut stream, WAIT)
+            .await
+            .expect("removal");
+        let re_added = next_within(&mut stream, WAIT)
+            .await
+            .expect("re-add");
+
+        assert_removal_only(&removal, 1);
+        assert_eq!(re_added.new_pairs.len(), 1);
+        assert!(re_added.removed_pairs.is_empty());
+        assert_eq!(re_added.block_number_or_timestamp, 101);
+    }
+
+    #[tokio::test]
+    async fn frames_are_forwarded_without_waiting_on_timers() {
+        let fake = FakeTitan::spawn(fresh_frame_every(Duration::from_millis(50))).await;
+        let stream = fast_builder(&fake)
+            .stale_after(Duration::from_secs(24))
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        for _ in 0..5 {
+            let update = next_within(&mut stream, Duration::from_secs(1))
+                .await
+                .expect("steady-state frame");
+            assert!(update.removed_pairs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_connection_before_first_poll() {
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake).build();
+        tokio::pin!(stream);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(fake.connections.load(Ordering::SeqCst), 0, "connected before first poll");
+    }
+
+    #[tokio::test]
+    async fn drop_closes_the_socket() {
+        let server_saw_close = Arc::new(AtomicBool::new(false));
+        let fake = {
+            let server_saw_close = server_saw_close.clone();
+            FakeTitan::spawn(move |_, mut socket| {
+                let server_saw_close = server_saw_close.clone();
+                async move {
+                    let _ = socket.send(fresh_frame()).await;
+                    // Read until the client goes away.
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(message, Message::Close(_)) {
+                            break;
+                        }
+                    }
+                    server_saw_close.store(true, Ordering::SeqCst);
+                }
+            })
+            .await
+        };
+        // `Box::pin` rather than `tokio::pin!`, so that `drop` below drops the stream itself
+        // rather than a `Pin<&mut _>` pointing at a value that outlives the assertion.
+        let mut stream = Box::pin(
+            fast_builder(&fake)
+                .read_idle_timeout(Duration::from_secs(5))
+                .build(),
+        );
+        expect_first_update(&mut stream.as_mut()).await;
+
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(server_saw_close.load(Ordering::SeqCst), "socket not closed on drop");
+        assert_eq!(fake.connections.load(Ordering::SeqCst), 1, "reconnected after drop");
+    }
+
+    /// `Instant + Duration` panics on overflow, so an absurd `stale_after` must be capped before
+    /// the first accepted frame computes a deadline from it.
+    #[tokio::test]
+    async fn stale_after_above_the_cap_still_serves() {
+        assert_eq!(
+            PriceLevelStreamBuilder::new()
+                .stale_after(Duration::MAX)
+                .stale_after,
+            MAX_STALE_AFTER
+        );
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake)
+            .stale_after(Duration::MAX)
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+    }
+
+    #[tokio::test]
+    async fn without_quote_guard_emits_states_that_never_expire() {
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake)
+            .without_quote_guard()
+            .build();
+        tokio::pin!(stream);
+
+        let first = expect_first_update(&mut stream).await;
+
+        let state = first
+            .states
+            .values()
+            .next()
+            .expect("one state")
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert!(state.quotable_until().is_none());
+    }
+
+    /// A [`FakeTitan`] handler that sends a freshly stamped frame every `interval` until the
+    /// socket closes.
+    fn fresh_frame_every(
+        interval: Duration,
+    ) -> impl Fn(usize, FakeConnection) -> BoxFuture<'static, ()> + Send + Sync + 'static {
+        move |_, mut socket| {
+            Box::pin(async move {
+                while socket.send(fresh_frame()).await.is_ok() {
+                    tokio::time::sleep(interval).await;
+                }
+            })
+        }
+    }
+
+    /// The fallback router path is the default; `without_fallback_router` is the way off it.
+    #[test]
+    fn fallback_router_is_on_unless_opted_out() {
+        assert!(PriceLevelStreamBuilder::new().fallback_router);
+        assert!(
+            !PriceLevelStreamBuilder::new()
+                .without_fallback_router()
+                .fallback_router
+        );
     }
 
     #[test]
@@ -755,56 +789,6 @@ mod tests {
             assert_eq!(builder.registry[&denied_venue].protocol, "custom");
             assert!(!builder.denied.contains(&denied_venue));
         }
-    }
-
-    #[test]
-    fn auto_detected_pamm_is_served_under_its_address() {
-        let mut tracker = SnapshotTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            false,
-        );
-        let update = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, format!("pricelevelstream:{PAMM}"));
-        let state = update.states[&expected_id()]
-            .as_any()
-            .downcast_ref::<PriceLevelStreamState>()
-            .expect("price level state");
-        assert_eq!(state.gas_cost, BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
-
-        // The synthesized config is cached: the next snapshot is not a new pair again.
-        let update = tracker
-            .process(message(101, wbtc_usdc_pairs()))
-            .expect("update expected");
-        assert!(update.new_pairs.is_empty());
-    }
-
-    #[test]
-    fn auto_detected_gas_cost_override_applies() {
-        let mut tracker = SnapshotTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(42_000u64),
-            false,
-        );
-        let update = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        let state = update.states[&expected_id()]
-            .as_any()
-            .downcast_ref::<PriceLevelStreamState>()
-            .expect("price level state");
-        assert_eq!(state.gas_cost, BigUint::from(42_000u64));
     }
 
     #[test]
@@ -849,79 +833,6 @@ mod tests {
         }
     }
 
-    /// Components are emitted under `fallback:{name}`, so their swaps execute through
-    /// `TychoFallbackRouter`; identity and attributes are the same as on the direct path.
-    #[test]
-    fn venues_are_served_under_the_fallback_family() {
-        let config = PriceLevelStreamConfig::new(
-            "fermiswap",
-            Bytes::from_str(PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        let mut tracker = SnapshotTracker::new(
-            HashMap::from([(config.address.clone(), config)]),
-            HashSet::new(),
-            tokens(),
-            false,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            true,
-        );
-
-        let update = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, "fallback:fermiswap");
-        assert_eq!(
-            component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
-            Bytes::from_str(PAMM).unwrap()
-        );
-    }
-
-    /// Auto-detected, address-named venues take the fallback family too.
-    #[test]
-    fn auto_detected_venue_is_served_under_the_fallback_family() {
-        let mut tracker = SnapshotTracker::new(
-            HashMap::new(),
-            HashSet::new(),
-            tokens(),
-            true,
-            BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
-            true,
-        );
-
-        let update = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, format!("fallback:{PAMM}"));
-    }
-
-    /// Off the fallback router, a venue keeps the direct `pricelevelstream:{name}` family.
-    #[test]
-    fn without_fallback_router_keeps_the_direct_family() {
-        let mut tracker = tracker();
-
-        let update = tracker
-            .process(message(100, wbtc_usdc_pairs()))
-            .expect("update expected");
-
-        assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
-    }
-
-    /// The fallback router path is the default; `without_fallback_router` is the way off it.
-    #[test]
-    fn fallback_router_is_on_unless_opted_out() {
-        assert!(PriceLevelStreamBuilder::new().fallback_router);
-        assert!(
-            !PriceLevelStreamBuilder::new()
-                .without_fallback_router()
-                .fallback_router
-        );
-    }
-
     /// The families this stream emits are the ones tycho-execution resolves an encoder for. A
     /// drift between the two makes every route through a pAMM fail to encode.
     #[test]
@@ -934,16 +845,24 @@ mod tests {
         assert_eq!(format!("{FALLBACK_FAMILY}:"), FALLBACK_PREFIX);
     }
 
-    #[test]
-    fn unknown_tokens_are_skipped() {
-        let mut tracker = tracker();
-        let unknown = vec![pair_levels(
-            "0x1111111111111111111111111111111111111111",
-            USDC,
-            vec![level(1, 1)],
-        )];
-        assert!(tracker
-            .process(message(100, unknown))
-            .is_none());
+    /// Traffic that is not a parsed frame keeps neither the socket nor the component alive: the
+    /// idle timeout reconnects, every reconnect resends the same frame, which refreshes the
+    /// component but cannot move its deadline, and the removal follows.
+    #[rstest]
+    #[case::ping_only(Message::Ping(Vec::new().into()))]
+    #[case::malformed_text(Message::Text("nonsense".into()))]
+    #[tokio::test]
+    async fn non_frame_traffic_removes_within_stale_after(#[case] filler: Message) {
+        let fake =
+            FakeTitan::spawn(frame_then_repeat(fresh_frame(), filler, Duration::from_millis(10)))
+                .await;
+        let stream = fast_builder(&fake).build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = expect_removal(&mut stream).await;
+
+        assert_removal_only(&removal, 1);
+        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on idle timeout");
     }
 }

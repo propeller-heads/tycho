@@ -88,8 +88,10 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
         // The Metric router (unverified; identified via its pools' pricing reads of the Metric
         // oracle 0x28d9cced…). Measured ~225k (2026-08-18).
         ("metric", "0xe715dc29d2c273d0fc5a03e5cca9ccb0abb1dcdb", 230_000u64),
-        // The BopAMM (Bebop) router, per Titan's venue docs. Measured ~133k-136k (2026-08-18).
-        ("bebop", "0xb09aaa5614916d7aeb59c295c52c92ca82addd76", 140_000u64),
+        // The BopAMM (Bebop) router. It replaced 0xb09aaa56… on 2026-09-15, which has had no
+        // activity since. The bytecode is the same except for one embedded address, so the
+        // earlier measurement (~133k-136k, 2026-08-18) still applies.
+        ("bebop", "0xb09aaa8933626d7e4c48d65dad2d77021cfbca9a", 140_000u64),
         // The TaurusFi router, per Titan's venue docs. Measured ~105k (2026-08-18).
         ("taurusfi", "0x217d58931a8549ca539426aa8152e33dafc3d95a", 110_000u64),
         // The Tempest router (unverified), per Titan's venue docs. Measured ~120k-155k

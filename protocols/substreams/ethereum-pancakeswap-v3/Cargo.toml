@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-pancakeswap-v3"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 
 [lib]
@@ -18,6 +18,8 @@ tycho-substreams = { git = "https://github.com/propeller-heads/tycho-protocol-sd
 num-bigint = "0.4.4"
 hex = "0.4.3"
 itertools = "0.13.0"
+serde = { version = "1.0.204", features = ["derive"] }
+serde_qs = "0.13.0"
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }

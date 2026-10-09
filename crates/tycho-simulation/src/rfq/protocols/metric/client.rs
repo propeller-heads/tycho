@@ -53,10 +53,23 @@ pub struct MetricClient {
     api_key: Option<String>,
     poll_time: Duration,
     quote_timeout: Duration,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    MetricClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl MetricClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:metric";
+    /// Components executed through Tycho's `MetricFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:metric";
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
+    }
 
     pub fn new(
         chain: Chain,
@@ -79,6 +92,7 @@ impl MetricClient {
             api_key,
             poll_time,
             quote_timeout,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
     }
 
@@ -95,7 +109,7 @@ impl MetricClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "metric_pool".to_string(),
             chain: self.chain,
             tokens: vec![metadata.token0.clone(), metadata.token1.clone()],
@@ -159,7 +173,7 @@ impl MetricClient {
         let mut offset: u64 = 0;
 
         loop {
-            let response = self
+            let mut request = self
                 .http_client()
                 .get(&self.metadata_endpoint)
                 .header("accept", "application/json")
@@ -169,12 +183,15 @@ impl MetricClient {
                     ("count", METADATA_PAGE_SIZE.to_string()),
                     ("offset", offset.to_string()),
                     ("include24h", "true".to_string()),
-                ])
-                .send()
-                .await
-                .map_err(|e| {
-                    RFQError::ConnectionError(format!("Failed to fetch Metric metadata: {e}"))
-                })?;
+                ]);
+
+            if let Some(api_key) = &self.api_key {
+                request = request.bearer_auth(api_key);
+            }
+
+            let response = request.send().await.map_err(|e| {
+                RFQError::ConnectionError(format!("Failed to fetch Metric metadata: {e}"))
+            })?;
 
             if !response.status().is_success() {
                 return Err(RFQError::ConnectionError(format!(
@@ -367,15 +384,15 @@ impl RFQClient for MetricClient {
     }
 }
 
+/// Resolves the EVM chain id Metric expects in its `/public/v1/evm/{chain_id}` paths.
+///
+/// Metric also serves Monad (143), HyperEVM (999), MegaETH (4326) and Avalanche (43114), but Tycho
+/// has no built-in `Chain` variant for them yet, so they are unsupported unless registered as a
+/// `Chain::Custom` with the matching chain id.
 fn chain_to_chain_id(chain: Chain) -> Result<u64, RFQError> {
-    match chain {
-        Chain::Ethereum => Ok(1),
-        Chain::Base => Ok(8453),
-        Chain::Robinhood => Ok(4663),
-        unsupported => Err(RFQError::FatalError(format!(
-            "Metric does not support chain in this integration: {unsupported:?}"
-        ))),
-    }
+    chain.try_id().map_err(|e| {
+        RFQError::FatalError(format!("Cannot resolve chain id for Metric on {chain}: {e}"))
+    })
 }
 
 fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
@@ -388,6 +405,8 @@ fn bytes_to_address_string(address: &Bytes) -> Result<String, RFQError> {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use rstest::rstest;
 
     use super::*;
     use crate::rfq::protocols::metric::{
@@ -412,11 +431,10 @@ mod tests {
         .unwrap()
     }
 
-    // Base: the only supported chain with pools published on the live API so far.
-    fn live_client() -> MetricClient {
+    fn live_client(chain: Chain) -> MetricClient {
         let config = crate::rfq::constants::get_metric_config();
         MetricClient::new(
-            Chain::Base,
+            chain,
             HashSet::new(),
             0.0,
             config.base_url,
@@ -451,10 +469,11 @@ mod tests {
     #[test]
     fn test_chain_to_chain_id() {
         assert_eq!(chain_to_chain_id(Chain::Ethereum).unwrap(), 1);
-        assert_eq!(chain_to_chain_id(Chain::Base).unwrap(), 8453);
+        assert_eq!(chain_to_chain_id(Chain::Bsc).unwrap(), 56);
+        assert_eq!(chain_to_chain_id(Chain::Polygon).unwrap(), 137);
         assert_eq!(chain_to_chain_id(Chain::Robinhood).unwrap(), 4663);
-        // Metric lists Arbitrum, but it carries no price-provider layer yet.
-        assert!(chain_to_chain_id(Chain::Arbitrum).is_err());
+        assert_eq!(chain_to_chain_id(Chain::Base).unwrap(), 8453);
+        assert_eq!(chain_to_chain_id(Chain::Arbitrum).unwrap(), 42161);
     }
 
     #[test]
@@ -481,6 +500,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.metadata_endpoint, "https://api.metric.xyz/public/v1/evm/1/metadata");
+    }
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let metadata = metadata();
+        let client = MetricClientBuilder::new(Chain::Ethereum)
+            .with_fallback_router()
+            .build()
+            .unwrap();
+
+        let component = client.create_component_with_state(
+            metadata.pool_address.to_string(),
+            &metadata,
+            &bid_ask(),
+            3000.0,
+        );
+
+        assert_eq!(component.component.protocol_system, MetricClient::FALLBACK_PROTOCOL_SYSTEM);
+        assert_eq!(
+            MetricClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::METRIC_FALLBACK_PROTOCOL_SYSTEM
+        );
     }
 
     #[test]
@@ -517,10 +558,17 @@ mod tests {
         );
     }
 
+    // Polygon is omitted: Metric lists it in `/public/v1/chains` but publishes no pools there yet.
+    #[rstest]
+    #[case::ethereum(Chain::Ethereum)]
+    #[case::bsc(Chain::Bsc)]
+    #[case::robinhood(Chain::Robinhood)]
+    #[case::base(Chain::Base)]
+    #[case::arbitrum(Chain::Arbitrum)]
     #[tokio::test]
     #[ignore = "hits Metric's public API"]
-    async fn test_live_metric_api_fetch_bid_ask_latest_fields() {
-        let client = live_client();
+    async fn test_live_metric_api_fetch_bid_ask_latest_fields(#[case] chain: Chain) {
+        let client = live_client(chain);
         let metadata = client.fetch_metadata().await.unwrap();
         assert!(!metadata.is_empty());
 
@@ -546,14 +594,20 @@ mod tests {
 
         let Some((_pool, bid_ask)) = selected else {
             panic!(
-                "Metric live API returned no quotable bid_ask response with ask and bid depth across {} pools; last error: {:?}",
+                "Metric live API on {chain} returned no quotable bid_ask response with ask and bid depth across {} pools; last error: {:?}",
                 metadata.len(),
                 last_error
             );
         };
 
-        let bid_price = bid_ask.bid_price().unwrap();
-        let ask_price = bid_ask.ask_price().unwrap();
+        let bid_price = bid_ask
+            .bid_price()
+            .unwrap()
+            .expect("the selected pool quotes a bid");
+        let ask_price = bid_ask
+            .ask_price()
+            .unwrap()
+            .expect("the selected pool quotes an ask");
         assert!(bid_price.is_finite() && bid_price > 0.0);
         assert!(ask_price.is_finite() && ask_price >= bid_price);
         assert!(bid_ask.total_token0_available().is_ok());

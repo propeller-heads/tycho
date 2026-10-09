@@ -80,6 +80,11 @@ module.exports = {
             url: process.env.RPC_URL,
             accounts: [process.env.PRIVATE_KEY],
             chainId: 4663
+        },
+        arc: {
+            url: process.env.RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 5042
         }
     },
 

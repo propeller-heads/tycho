@@ -7,6 +7,7 @@ pub mod cowamm;
 mod cpmm;
 pub mod curve;
 pub mod ekubo;
+mod ekubo_common;
 pub mod ekubo_v3;
 pub mod erc4626;
 pub mod etherfi;

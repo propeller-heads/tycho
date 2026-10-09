@@ -4,13 +4,13 @@
 
 ![Tycho](./assets/tycho.png)
 
-Tycho is an open-source interface to on-chain liquidity.
+Tycho is a source-available interface to on-chain liquidity.
 
 For comprehensive documentation about Tycho, visit our [GitBook](https://docs.propellerheads.xyz/tycho/overview).
 
 ## How to Contribute
 
-We warmly welcome open-source contributions!
+We warmly welcome contributions!
 
 **No contribution is too small and all contributions are valued.**
 
@@ -31,6 +31,8 @@ You can contribute in three ways:
 participate in reviewing PRs.
 
 ### Opening a Pull Request
+
+Before we can merge your first pull request, you need to sign our [Contributor License Agreement](CLA.md). The CLA bot explains how when you open the PR; signing takes one comment.
 
 Please submit pull requests (PRs) targeting the main branch. Ensure all PR and commits titles follow the [Conventional Commit format](https://www.conventionalcommits.org/en/v1.0.0/) using a prefix like `fix: bug XXX`. This prefix is essential for automatically incrementing the version number.
 
@@ -74,5 +76,9 @@ Tycho consists of several crates, each responsible for different aspects of the 
 - `tycho-client`: A rust client to simplify the start-up and managing of data from a Tycho connection. More detailed docs [here](./tycho-client/README.md).
 - `tycho-client-py`: A python interface for the rust client and RPC service. More detailed docs [here](./tycho-client-py/README.md).
 - `tycho-ethereum`: A module that integrates Ethereum-specific blockchain functionalities into Tycho. More detailed docs [here](./tycho-ethereum/README.md).
+
+## License
+
+Tycho 0.435.0 and later are licensed under the [Fynd License 1.1](LICENSE.md). Tycho releases before 0.435.0 were released under the MIT License. See [LICENSING.md](LICENSING.md) for exceptions and third-party code.
 
 [tg-url]: https://t.me/+B4CNQwv7dgIyYTJl

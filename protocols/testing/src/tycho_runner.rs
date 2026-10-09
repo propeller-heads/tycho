@@ -74,9 +74,12 @@ impl TychoRunner {
             "--start-block",
             &start_block.to_string(),
             "--stop-block",
-            &(end_block + 3).to_string(), /* +3 is to force our the stop block to be indexed and
-                                           * saved into the db. stop block +1 and +2 will not be
-                                           * included in the db */
+            // The substreams stop block is exclusive and the indexer leaves the newest streamed
+            // block uncommitted, so `+3` commits through `end_block`. It commits `end_block + 1`
+            // only when the stream ends slowly: that last commit runs in a task the process does
+            // not wait for on exit. The test runner reads the snapshot at the last committed
+            // block.
+            &(end_block + 3).to_string(),
             "--dci-plugin",
             "rpc",
         ]);
@@ -336,6 +339,7 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Arbitrum => Some("https://arb-one.streamingfast.io:443".to_string()),
         Chain::Robinhood => Some("https://mainnet.robinhood.streamingfast.io:443".to_string()),
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
+        Chain::Bsc => Some("https://bnb.streamingfast.io:443".to_string()),
         _ => None,
     }
 }
@@ -349,6 +353,14 @@ mod tests {
         assert_eq!(
             get_default_endpoint(&Chain::Arc).as_deref(),
             Some("https://arc.substreams.pinax.network:443")
+        );
+    }
+
+    #[test]
+    fn bsc_uses_streamingfast_substreams_endpoint() {
+        assert_eq!(
+            get_default_endpoint(&Chain::Bsc).as_deref(),
+            Some("https://bnb.streamingfast.io:443")
         );
     }
 }

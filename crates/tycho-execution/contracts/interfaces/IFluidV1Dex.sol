@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 /// @notice Fluid's own `FluidDexSwapResult(uint256)`, declared here so the selector matches: a

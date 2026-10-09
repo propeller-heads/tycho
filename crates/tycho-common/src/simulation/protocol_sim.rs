@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use num_bigint::BigUint;
 
@@ -433,6 +433,22 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// from: it describes the future, not the observed past.
     fn apply_block(&mut self, _block: &BlockContext) -> bool {
         false
+    }
+
+    /// Runs every later quote from this state under a pending block's state, held in
+    /// `overrides`.
+    ///
+    /// The payload type belongs to the simulation crate that builds it. The default ignores it,
+    /// for protocols that do not simulate pending state.
+    ///
+    /// # Errors
+    /// Returns an error when the protocol simulates pending state but `overrides` is not the
+    /// type it expects.
+    fn set_pending_overrides(
+        &mut self,
+        _overrides: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), SimulationError> {
+        Ok(())
     }
 }
 

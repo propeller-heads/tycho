@@ -25,7 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -891,12 +891,20 @@ impl DeltasClient for WsDeltasClient {
         let jh = tokio::spawn(async move {
             let mut retry_count = 0;
             let mut result = Err(DeltasError::NotConnected);
+            let mut last_attempt = Instant::now();
 
             'retry: while retry_count < this.max_reconnects {
                 info!(?ws_uri, retry_count, "Connecting to WebSocket server");
+                // The cooldown limits attempts to one per `retry_cooldown`. After a connection
+                // that outlived it, reconnect at once.
                 if retry_count > 0 {
-                    sleep(this.retry_cooldown).await;
+                    sleep(
+                        this.retry_cooldown
+                            .saturating_sub(last_attempt.elapsed()),
+                    )
+                    .await;
                 }
+                last_attempt = Instant::now();
 
                 let request = build_ws_handshake_request(
                     &ws_uri,
@@ -1644,6 +1652,40 @@ mod tests {
             }
         });
         (addr, jh)
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_reconnect_skips_cooldown_after_long_connection() {
+        let hold = Duration::from_secs(1);
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                let _ = accepted_tx.send(std::time::Instant::now());
+                sleep(hold).await;
+                drop(stream);
+            }
+        });
+        let client =
+            WsDeltasClient::new_with_reconnects(&format!("ws://{addr}"), None, 3, hold * 4 / 5)
+                .unwrap();
+
+        let _jh = client.connect().await.unwrap();
+
+        let first = accepted_rx.recv().await.unwrap();
+        let second = timeout(Duration::from_secs(5), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // The connection outlived the cooldown, so the reconnect does not wait for it.
+        let gap = second - first;
+        assert!(gap < hold + hold / 2, "reconnect waited {:?}", gap - hold);
     }
 
     #[test_log::test(tokio::test)]

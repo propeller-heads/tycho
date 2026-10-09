@@ -119,7 +119,10 @@ jobs:
           # When a base directory changes, also add any clone protocols that use it.
           for clone in "${!CLONE_TO_BASE[@]}"; do
             base="${CLONE_TO_BASE[$clone]}"
-            if echo "$CHANGED_DIRS" | grep -qx "$base"; then
+            # CHANGED_DIRS contains only top-level directories; nested base paths map to their
+            # workspace directory while flat paths are unchanged.
+            base_top=${base%%/*}
+            if echo "$CHANGED_DIRS" | grep -qx "$base_top"; then
               CHANGED="$CHANGED $clone"
             fi
           done

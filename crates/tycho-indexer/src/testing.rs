@@ -10,7 +10,7 @@ use tycho_common::{
     models::{
         blockchain::{
             Block, BlockAggregatedChanges, EntryPoint, EntryPointWithTracingParams,
-            TracedEntryPoint, TracingParams, TracingResult, Transaction,
+            TracedEntryPoint, TracedEntryPoints, TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -151,6 +151,24 @@ mock! {
                             HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>,
                             StorageError,
                         >,
+                    > + ::core::marker::Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait;
+
+        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+        fn get_traced_entry_points_by_component<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            filter: EntryPointFilter,
+            pagination_params: Option<&'life1 PaginationParams>,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = Result<WithTotal<TracedEntryPoints>, StorageError>,
                     > + ::core::marker::Send
                     + 'async_trait,
             >,
@@ -705,6 +723,18 @@ pub fn state_delta(component_id: &str, value: u64) -> ProtocolComponentStateDelt
         deleted_attributes: HashSet::new(),
         ..Default::default()
     }
+}
+
+/// `m` with a state delta setting attribute `x` of `component_id` to `value`.
+#[cfg(test)]
+pub fn with_state_delta(
+    mut m: BlockAggregatedChanges,
+    component_id: &str,
+    value: u64,
+) -> BlockAggregatedChanges {
+    m.state_deltas
+        .insert(component_id.to_string(), state_delta(component_id, value));
+    m
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
-license.workspace = true
+license-file.workspace = true
 categories.workspace = true
 readme = "README.md"
 rust-version = "1.91.0"
@@ -20,8 +20,10 @@ exclude = [
 ignored = ["ruint"]
 
 [dependencies]
+base64 = { workspace = true }
 # Serialization/Deserialization
 chrono = { workspace = true }
+derive_more = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -84,10 +86,12 @@ evm_ekubo_sdk = { version = "0.6.5", features = ["serde"] }
 # Balancer V3 — Balancer's own reference maths (MIT), used by the native decoder.
 balancer-maths-rust = "0.5.0"
 
-# rfq
-alloy-chains = "0.2.37"
+# book feeds
+alloy-chains = "0.2.39"
+bytes = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+metrics = { version = "0.24", optional = true }
 hex-literal = { workspace = true }
 http = { version = "1.0", optional = true }
 prost = { version = "0.13", optional = true }
@@ -101,6 +105,7 @@ tokio-tungstenite = { version = "0.28.0", features = [
 [dev-dependencies]
 tycho-execution = { workspace = true }
 tokio-test = "0.4.4"
+metrics-util = { version = "0.20", features = ["debugging"] }
 approx = "0.5.1"
 rstest = "0.23.0"
 rstest_reuse = "0.7.0"
@@ -117,9 +122,9 @@ dialoguer = "0.10.4"
 criterion = "0.8.2"
 
 [features]
-default = ["evm", "rfq", "price-level-stream"]
+default = ["evm", "rfq", "book-feeds", "price-level-stream"]
 network_tests = []
-price-level-stream = ["dep:async-stream", "dep:tokio-tungstenite"]
+price-level-stream = ["dep:async-stream", "dep:metrics", "dep:tokio-tungstenite"]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",
@@ -127,6 +132,15 @@ evm = [
     "dep:alloy",
     "dep:reqwest",
     "dep:alloy-primitives",
+    "dep:tokio-tungstenite",
+]
+book-feeds = [
+    # `bytes_to_address` and the providers' `alloy` address types.
+    "evm",
+    "dep:async-stream",
+    "dep:bytes",
+    "dep:http",
+    "dep:reqwest",
     "dep:tokio-tungstenite",
 ]
 rfq = [

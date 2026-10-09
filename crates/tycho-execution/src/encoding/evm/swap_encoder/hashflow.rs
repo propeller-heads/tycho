@@ -9,7 +9,7 @@ use tycho_common::{
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{create_encoding_runtime, on_blocking_thread, SafeRuntime},
+    evm::utils::{check_signed_quote, create_encoding_runtime, on_blocking_thread, SafeRuntime},
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
@@ -71,6 +71,7 @@ impl SwapEncoder for HashflowSwapEncoder {
                     .await
             })
         })??;
+        check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
 
         // Encode packed data for the executor
         // Format: approval_needed | hashflow_calldata[..]
@@ -174,6 +175,83 @@ mod test {
         encoder
             .encode_swap(&swap, &encoding_context)
             .expect_err("Should returned an error if the swap has no protocol state");
+    }
+
+    fn shortfall_test_swap(max_shortfall_bps: Option<u32>) -> Swap {
+        let state = MockRFQState {
+            quote_amount_out: BigUint::from(990_u64),
+            level_amount_out: Some(BigUint::from(1_000_u64)),
+            ..Default::default()
+        };
+        let swap = Swap::new(
+            ProtocolComponent {
+                id: String::from("hashflow-rfq"),
+                protocol_system: String::from("rfq:hashflow"),
+                ..Default::default()
+            },
+            default_token(Bytes::from("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")),
+            default_token(Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(BigUint::from(3_000_u64))
+        .with_protocol_state(Arc::new(state));
+        match max_shortfall_bps {
+            Some(max_shortfall_bps) => swap.with_max_signed_quote_shortfall_bps(max_shortfall_bps),
+            None => swap,
+        }
+    }
+
+    fn encode_shortfall_test_swap(swap: &Swap) -> Result<Vec<u8>, EncodingError> {
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: swap.token_in().address.clone(),
+            group_token_out: swap.token_out().address.clone(),
+        };
+        HashflowSwapEncoder::new(
+            Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
+            Chain::Ethereum,
+            hashflow_config(),
+        )
+        .unwrap()
+        .encode_swap(swap, &encoding_context)
+    }
+
+    #[test]
+    fn test_encode_hashflow_signed_quote_shortfall() {
+        let error = encode_shortfall_test_swap(&shortfall_test_swap(Some(50))).unwrap_err();
+
+        assert_eq!(
+            error,
+            EncodingError::RecoverableError(
+                "rfq:hashflow signed 100 bps below its price levels; the swap allows 50 bps"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_encode_hashflow_signed_quote_shortfall_within_limit() {
+        let error = encode_shortfall_test_swap(&shortfall_test_swap(Some(100))).unwrap_err();
+
+        // The shortfall passes; encoding then stops on the mock quote's missing attributes.
+        assert!(
+            !error
+                .to_string()
+                .contains("below its price levels"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn test_encode_hashflow_signed_quote_shortfall_without_limit() {
+        let error = encode_shortfall_test_swap(&shortfall_test_swap(None)).unwrap_err();
+
+        assert!(
+            !error
+                .to_string()
+                .contains("below its price levels"),
+            "{error:?}"
+        );
     }
 
     #[test]

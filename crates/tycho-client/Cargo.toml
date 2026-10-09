@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
-license.workspace = true
+license-file.workspace = true
 categories.workspace = true
 readme = "README.md"
 
@@ -53,3 +53,4 @@ mockall.workspace = true
 mockito.workspace = true
 tracing-subscriber = "0.3.17"
 test-log = { version = "0.2.14", features = ["trace"] }
+tokio = { workspace = true, features = ["test-util"] }

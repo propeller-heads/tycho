@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use diesel::{prelude::*, upsert::excluded};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use tracing::warn;
 use tycho_common::{
     models::{
         blockchain::{
-            EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams, TracingResult,
+            EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult,
         },
         Chain, ComponentId, EntryPointId, PaginationParams,
     },
@@ -718,6 +720,115 @@ impl PostgresGateway {
 
         Ok(results_by_entry_point)
     }
+
+    /// Get the traced entry points of a set of components from the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - The filter to apply to the query.
+    /// * `pagination_params` - The pagination parameters to apply to the query, if None, all
+    ///   results are returned.
+    /// * `conn` - The database connection to use.
+    ///
+    /// Each component maps to the entry points with the tracing params linked to it, and their
+    /// tracing results. Params without a tracing result are skipped, so a component with only
+    /// untraced params maps to an empty list.
+    ///
+    /// Note: to avoid getting partial results, the pagination is applied to components, not
+    /// entry points.
+    pub(crate) async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
+        use schema::{
+            entry_point as ep, entry_point_tracing_params as eptp,
+            entry_point_tracing_result as eptr, protocol_component as pc,
+            protocol_component_has_entry_point_tracing_params as pcheptp,
+        };
+
+        let ps_id = self.get_protocol_system_id(&filter.protocol_system)?;
+        let mut component_query = schema::protocol_component::table
+            .filter(pc::protocol_system_id.eq(ps_id))
+            .select(pc::id)
+            .into_boxed();
+
+        if let Some(component_ids) = filter.component_ids {
+            component_query = component_query.filter(pc::external_id.eq_any(component_ids));
+        }
+
+        // Apply pagination and fetch total count
+        let count: Option<i64> = if let Some(pagination_params) = pagination_params {
+            component_query = component_query
+                .order_by(pc::id)
+                .limit(pagination_params.page_size)
+                .offset(pagination_params.offset());
+
+            Some(
+                schema::protocol_component::table
+                    .filter(pc::protocol_system_id.eq(ps_id))
+                    .count()
+                    .get_result::<i64>(conn)
+                    .await
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
+
+        // Start from the component -> params link table, so that only the params of the requested
+        // components are loaded. Entry points can be shared by many components (e.g. one hook
+        // used by thousands of pools), so loading results by entry point would load the results
+        // of all those components too.
+        let results = pcheptp::table
+            .inner_join(pc::table.on(pcheptp::protocol_component_id.eq(pc::id)))
+            .inner_join(eptp::table.on(pcheptp::entry_point_tracing_params_id.eq(eptp::id)))
+            .inner_join(ep::table.on(eptp::entry_point_id.eq(ep::id)))
+            .left_join(eptr::table.on(eptr::entry_point_tracing_params_id.eq(eptp::id)))
+            .filter(pc::id.eq_any(component_query))
+            .select((
+                pc::external_id,
+                orm::EntryPoint::as_select(),
+                orm::EntryPointTracingParams::as_select(),
+                eptr::detection_data.nullable(),
+            ))
+            .load::<(String, orm::EntryPoint, orm::EntryPointTracingParams, Option<serde_json::Value>)>(
+                conn,
+            )
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(
+                    err,
+                    "TracedEntryPoint",
+                    "None",
+                    Some(format!("protocol: {:?}", filter.protocol_system)),
+                )
+            })?;
+
+        let mut traced_entry_points: TracedEntryPoints = HashMap::new();
+        for (pc_ext_id, ep, params, detection_data) in results {
+            let component_traces = traced_entry_points
+                .entry(pc_ext_id)
+                .or_default();
+            let entry_point_with_params =
+                EntryPointWithTracingParams::new(ep.into(), (&params).into());
+            let Some(detection_data) = detection_data else {
+                warn!(
+                    entry_point_id = %entry_point_with_params.entry_point.external_id,
+                    tracing_param = %entry_point_with_params.params,
+                    "No tracing results found for entry point with params."
+                );
+                continue;
+            };
+            let tracing_result = serde_json::from_value(detection_data).map_err(|e| {
+                StorageError::DecodeError(format!("Failed to deserialize TracingResult: {e}"))
+            })?;
+            component_traces.push((entry_point_with_params, tracing_result));
+        }
+
+        Ok(WithTotal { entity: traced_entry_points, total: count })
+    }
 }
 
 #[cfg(test)]
@@ -1121,6 +1232,113 @@ mod test {
             HashMap::from([(
                 entry_point.external_id.clone(),
                 HashMap::from([(tracing_params(0), traced_entry_point.tracing_result)])
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_traced_entry_points_by_component() {
+        let mut conn = setup_db().await;
+        let _chain_id = setup_data(&mut conn).await;
+        let gw = PostgresGateway::from_connection(&mut conn).await;
+
+        // pc_0 and pc_1 share entry point 0 with different params, pc_2 has untraced params and
+        // unknown_pc belongs to another protocol system.
+        gw.insert_entry_points(
+            &HashMap::from([
+                ("pc_0".to_string(), HashSet::from([rpc_tracer_entry_point(0)])),
+                ("pc_1".to_string(), HashSet::from([rpc_tracer_entry_point(0)])),
+                ("pc_2".to_string(), HashSet::from([rpc_tracer_entry_point(1)])),
+                ("unknown_pc".to_string(), HashSet::from([rpc_tracer_entry_point(0)])),
+            ]),
+            &Chain::Ethereum,
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        gw.insert_entry_point_tracing_params(
+            &HashMap::from([
+                (
+                    rpc_tracer_entry_point(0).external_id,
+                    HashSet::from([
+                        (tracing_params(0), "pc_0".to_string()),
+                        (tracing_params(1), "pc_1".to_string()),
+                        (tracing_params(0), "unknown_pc".to_string()),
+                    ]),
+                ),
+                (
+                    rpc_tracer_entry_point(1).external_id,
+                    HashSet::from([(tracing_params(0), "pc_2".to_string())]),
+                ),
+            ]),
+            &Chain::Ethereum,
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let traced_pc_0 = traced_entry_point();
+        let traced_pc_1 = TracedEntryPoint::new(
+            EntryPointWithTracingParams::new(rpc_tracer_entry_point(0), tracing_params(1)),
+            traced_pc_0.detection_block_hash.clone(),
+            TracingResult::new(
+                HashSet::new(),
+                HashMap::from([(
+                    Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
+                    HashSet::from([Bytes::from_str(
+                        "0x0000000000000000000000000000000000000000000000000000000000000002",
+                    )
+                    .unwrap()]),
+                )]),
+            ),
+        );
+        gw.upsert_traced_entry_points(&[traced_pc_0.clone(), traced_pc_1.clone()], &mut conn)
+            .await
+            .unwrap();
+
+        let filter = EntryPointFilter::new("test_protocol".to_string())
+            .with_component_ids(vec!["pc_0".to_string(), "pc_2".to_string()]);
+        let retrieved = gw
+            .get_traced_entry_points_by_component(filter, None, &mut conn)
+            .await
+            .unwrap();
+
+        // pc_0 only gets the result of its own params, not the one of pc_1 on the same entry
+        // point. pc_2 is present with no results.
+        assert_eq!(retrieved.total, None);
+        assert_eq!(
+            retrieved.entity,
+            HashMap::from([
+                (
+                    "pc_0".to_string(),
+                    vec![(
+                        traced_pc_0
+                            .entry_point_with_params
+                            .clone(),
+                        traced_pc_0.tracing_result.clone()
+                    )]
+                ),
+                ("pc_2".to_string(), vec![]),
+            ])
+        );
+
+        let filter = EntryPointFilter::new("test_protocol".to_string());
+        let retrieved = gw
+            .get_traced_entry_points_by_component(
+                filter,
+                Some(&PaginationParams::new(1, 1)),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(retrieved.total, Some(3));
+        assert_eq!(
+            retrieved.entity,
+            HashMap::from([(
+                "pc_1".to_string(),
+                vec![(traced_pc_1.entry_point_with_params, traced_pc_1.tracing_result)]
             )])
         );
     }

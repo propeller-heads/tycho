@@ -64,7 +64,9 @@ use tycho_indexer::{
         token_analysis_cron::analyze_tokens,
         ExtractionError,
     },
-    services::{PlansConfig, ServicesBuilder, WindowConfig},
+    services::{
+        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
+    },
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
 
@@ -494,13 +496,10 @@ async fn create_indexing_tasks(
         .enable_token_cache()
         .build()
         .await?;
-    let token_processor = EthereumTokenPreProcessor::new(
-        &rpc_client,
-        *chains
-            .first()
-            .expect("No chain provided"), //TODO: handle multichain?
-        settlement_contract,
-    );
+    let chain = *chains
+        .first()
+        .expect("No chain provided"); //TODO: handle multichain?
+    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -524,6 +523,24 @@ async fn create_indexing_tasks(
     })?;
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
+    // The load runs after the extractors are built and before the server and the pump start:
+    // the snapshot sees the initialized accounts, nothing writes during the build, and no
+    // request or fold can reach a half-built cache.
+    let entity_cache = match global_args.entity_cache_mode {
+        EntityCacheMode::Off => EntityCacheSetup::Off,
+        mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
+            info!(?mode, "Loading the entity cache");
+            let cache = EntityCache::load(&cached_gw, &chain)
+                .await
+                .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
+            if mode == EntityCacheMode::Shadow {
+                EntityCacheSetup::Shadow(cache)
+            } else {
+                EntityCacheSetup::Serve(cache)
+            }
+        }
+    };
+
     let (server_handle, server_task) =
         ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
             .prefix(&global_args.server_version_prefix)
@@ -538,6 +555,8 @@ async fn create_indexing_tasks(
                 depth: global_args.delta_window_depth,
                 min_fold_batch: global_args.delta_window_fold_batch,
             })
+            .entity_cache(entity_cache)
+            .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
             .run()?;
     info!(server_url, "Http and Ws server started");
 

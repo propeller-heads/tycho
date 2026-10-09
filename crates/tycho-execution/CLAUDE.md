@@ -4,7 +4,7 @@ DeFi swap execution framework: Solidity smart contracts (TychoRouterV3) + Rust e
 swaps with fee-taking, vault-based accounting, and 20+ DEX integrations.
 
 **Docs**: https://docs.propellerheads.xyz/tycho
-**License**: BUSL-1.1 (Solidity), MIT (Rust)
+**License**: Fynd License 1.1 (Solidity and Rust). See [LICENSING.md](../../LICENSING.md).
 
 ## Solidity Architecture
 
@@ -45,7 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `fallback/TychoFallbackRouter.sol` | Standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a pAMM against the caller's chosen fallback protocol and runs whichever quotes more; a pAMM that wins the quote but fails still falls through. See "Protocol fallback" below. |
+| `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
@@ -150,7 +150,7 @@ PropAMM (a single generic executor shared by all pAMMs implementing the standard
 address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback").
 
-### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `executors/FallbackExecutor.sol`)
+### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
 `swap()`, and `getTransferData()` fixes the transfer type per executor. A pAMM leg therefore has its tokens sitting at
@@ -164,11 +164,51 @@ TychoRouterV3 --TransferType.Transfer--> TychoFallbackRouter --> pAMM     (rever
                                                              --> fallback (fills, pays receiver)
 ```
 
-`FallbackExecutor` declares `TransferType.Transfer` with the fallback router as receiver and `outputToRouter = false`,
-then calls `TychoFallbackRouter.swap()`.
+`TychoFallbackRouter` is abstract. It holds the fallback protocols, their callbacks and the internal `_swap`, which
+runs the quote-then-fallback sequence below. A concrete router names the primary venue: it implements
+`_quotePrimary` (zero means the primary cannot fill) and `_swapPrimary` (pays the primary and delivers to the
+receiver), and exposes an external `swap` that calls `_swap(swap_, primary, primaryData, fallbackSwap)`.
+Each concrete router has its own executor, and each executor holds one router address:
+
+| Router | Executor | Primary quote | Executor swap data |
+|---|---|---|---|
+| `PropAMMFallbackRouter` | `PropAMMFallbackExecutor` | `IPropAMM.quote` | `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]` |
+| `MetricFallbackRouter` | `MetricFallbackExecutor` | Simulated swap through `simulatePrimary` | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
+| `BebopFallbackRouter` | `BebopFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
+| `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
+
+A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
+quoted, and the fallback runs only when the primary fails.
+
+`MetricFallbackRouter` quotes the pool by simulation: `simulatePrimary` runs the pool's swap and reverts with the
+amount the receiver got. A pool revert (a stale oracle, say) quotes zero. Metric's quoters do not fit: the v1
+`MetricOmmSwapQuoter` reverts inside a transaction, because the v1 oracle returns a price only to a pool in a swap or
+to an `eth_call` from `address(0)`. The previous-version quoter still quotes the v1 pools, but Metric lists it as
+retired. The router pays the pool's `metricOmmSwapCallback` through the
+catch-all `fallback`, which sends the full `amountIn` to the pool the swap called, as the Dispatcher does for
+`MetricExecutor`.
+
+`BebopFallbackRouter` runs a signed Bebop order. `bebopData` is `[partialFillOffset: 1][originalFilledTakerAmount: 32]
+[calldata]`, the same fields `BebopExecutor` takes. The order MUST name the fallback router as taker and receiver.
+`swap` checks the target and selector against the immutable `bebopSettlement` and `bebopRouter` before anything runs.
+The router approves the target for the fill amount, calls it, revokes the approval, and forwards the output to the
+receiver. The order fills at most `originalFilledTakerAmount`; the rest of `amountIn` goes back to the caller, as
+`BebopExecutor` leaves it in the TychoRouter.
+
+`HashflowFallbackRouter` runs a signed Hashflow RFQ-T quote through the immutable `hashflowRouter`. The quote is the
+345 bytes `HashflowExecutor` takes, and it MUST name the fallback router as trader. The router fills at most the quote's
+`baseTokenAmount`, approves the Hashflow router for the fill, calls `tradeRFQT`, revokes the approval, and forwards the
+output to the receiver. The rest of `amountIn` goes back to the caller, as for Bebop. The quote's pool is the primary
+in `FallbackSwap`.
+
+The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
+
+`FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
+fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
+calls `PropAMMFallbackRouter.swap()`.
 
 **One pAMM and one caller-chosen fallback.** `swap` quotes both first and runs the fallback directly when it quotes
-more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePropAMM`, an external self-call wrapped in
+more `tokenOut` than the pAMM. Otherwise the pAMM runs inside `executePrimary`, an external self-call wrapped in
 try/catch, so its transfer reverts with it and the fallback starts from the same balance. The fallback then runs in
 the outer frame: it gets no try/catch, so its revert is the swap's revert and there is no third attempt. The contract
 never picks a protocol itself -- the encoder decides which fallback to use and supplies its pool address.
@@ -188,9 +228,9 @@ fallback quote costs gas on every other leg, including the ones the pAMM fills: 
 simulation, about 44k for Fluid, about 39k for Curve, about 31k for Uniswap V3, about 11k for Uniswap V2 (router
 call, cold state, mainnet fork).
 
-`FallbackSwap(pamm, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
+`FallbackSwap(primary, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
-`PropAMMFailed` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
+`PrimaryFailed` (the pAMM won the quote, then reverted or delivered nothing). A filled leg without the event was
 served by the pAMM, so counting the event against filled legs gives the pAMM fill rate. The pAMM's revert reason is
 not carried: reading caller-controlled returndata of any size costs gas.
 
@@ -201,7 +241,7 @@ single source of truth there, and a fallback that pays nothing fails the route-l
 **The fallback can never be a pAMM.** A pAMM is the thing the pAMM slot exists to retry, so retrying it with another
 one defeats the purpose. This needs no runtime check: pAMM is not one of the enumerated fallback protocols.
 
-Swap encoding -- `FallbackExecutor` swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`. The pAMM is a
+Swap encoding -- `PropAMMFallbackExecutor` swap data is `[tokenIn: 20][tokenOut: 20][pamm: 20][fallback]`. The pAMM is a
 bare address, so no length prefix is needed to find where the fallback starts. The fallback is
 `[protocol: uint8][protocol data]`:
 
@@ -251,14 +291,22 @@ Constraints:
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
-- `scripts/deploy-fallback-router.js` deploys the contract through the CREATE2 factory, reading `poolManager` and
-  `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the
-  static quoter from the script's own `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is
-  missing. The `FallbackExecutor` then goes through `deploy-executors.js` like any executor: add a
-  `fallback` entry with the printed router address to `executor_deployments.json` and list `fallback` under the
-  chain. Deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`, executor
-  `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router `0xd38142E88f3d1011D8258737f257c709Dd0e2204`,
-  executor `0x08f22285d13533d68aA8bE5949536322DB3538De`).
+- `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`
+  or `bebop`) through the CREATE2 factory, reading `poolManager` and `fluidLiquidity` from the chain's `uniswap_v4`
+  and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
+  `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
+  the `rfq:hashflow` router.
+- The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
+  to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
+  `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
+  `fallback:rfq:hashflow` for `HashflowFallbackExecutor`). The Metric, Bebop and Hashflow entries hold the zero
+  address until their router is deployed; the executor constructor rejects it. A Bebop or Hashflow router also needs
+  its address as `fallback_router` under its protocol in `protocol_specific_addresses.json`.
+- The pAMM router and executor are deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`,
+  executor `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router
+  `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
+  built before the base-router split, so their verified sources are named `TychoFallbackRouter` and
+  `FallbackExecutor`. A redeploy from `executor_deployments.json` builds `PropAMMFallbackExecutor` at a new address.
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
@@ -385,18 +433,38 @@ resolve generically: a single `pricelevelstream` config entry serves the whole f
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
 `pricelevelstream:{protocol}` entries overriding per protocol.
 
-`fallback:{protocol}` is the same liquidity executed through `TychoFallbackRouter` (see "protocol
+`fallback:{protocol}` is the same liquidity executed through `PropAMMFallbackRouter` (see "protocol
 fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It
-resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `FallbackExecutor`). The fallback protocol —
+resolves the same way (family key `fallback`, `FallbackSwapEncoder`, `PropAMMFallbackExecutor`). The fallback protocol —
 one of Uniswap V2/V3/V4, Curve, Fluid V1 or Aerodrome V1 with its pool parameters — travels as JSON in the
 swap's `user_data` and is required; the pAMM address comes from the component's `pamm_address`
 static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackProtocol`) is the
 list other projects import: `from_protocol_system` maps a Tycho protocol name to the variant it
 encodes as (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS` and the Slipstreams deployments resolve to
 their base variant, `vm:curve` to Curve), `supported_on(chain)` says whether the chain's
-`TychoFallbackRouter` runs it, and `user_data_name` is the tag to write. The
-encoder rejects a protocol the chain's router does not run with an `InvalidInput` error instead
-of letting it revert on chain.
+`TychoFallbackRouter` runs it, and `user_data_name` is the tag to write. `FallbackSwapData`
+(`swap_encoder::FallbackSwapData`) is public too, one variant per protocol with the pool
+parameters the contract decodes: a solver builds the variant for the pool it picked and
+`serde_json` serializes it into the `user_data` the encoder reads back, so the JSON shape is
+defined once. The encoder rejects a protocol the chain's router does not run with an
+`InvalidInput` error instead of letting it revert on chain.
+
+`fallback:rfq:metric`, `fallback:rfq:bebop` and `fallback:rfq:hashflow` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
+`BEBOP_FALLBACK_PROTOCOL_SYSTEM`, `HASHFLOW_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
+exact executor-config entry, which `get_encoder` matches before the `fallback` family. They read the
+same `FallbackSwapData` `user_data`:
+
+- `MetricFallbackSwapEncoder` appends the fallback to the `rfq:metric` swap data.
+- `BebopFallbackSwapEncoder` requests the signed quote with the chain's `BebopFallbackRouter` as
+  taker and receiver. It reads that address from `fallback_router` under `fallback:rfq:bebop` in
+  `protocol_specific_addresses.json` and fails to build without it. It then inserts the
+  `bebopDataLength` prefix and appends the fallback.
+- `HashflowFallbackSwapEncoder` requests the signed quote with the chain's `HashflowFallbackRouter` as trader, read
+  from `fallback_router` under `fallback:rfq:hashflow`, and wraps the 345-byte quote in the tokens and the fallback.
+
+None of these routers is deployed, so no chain lists these entries yet. The gas estimator charges a
+Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop or Hashflow leg the router's approval
+and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
@@ -502,10 +570,14 @@ Line length 80.
 
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
 
-Contract changes can alter the deployed runtime bytecode used by `protocol-testing`. From the
-repository root, run `./protocols/testing/scripts/update_runtime_bytecode.sh` and commit any changed
-`protocols/testing/fixtures/*.runtime.json`; CI runs the same script with `--check`. Foundry pins
-the compiler and omits the metadata hash to keep these fixtures reproducible.
+Contract changes can alter the runtime bytecode fixtures `protocol-testing` plants
+(`protocols/testing/fixtures/*.runtime.json`). `test/RuntimeBytecodeFixtures.sol` lists them,
+`test/RuntimeBytecodeFixtures.t.sol` checks them as part of `forge test`, and
+`forge script script/WriteRuntimeBytecodeFixtures.s.sol` regenerates them for you to commit. Foundry
+pins the compiler and omits the metadata hash to keep these fixtures reproducible.
+Executor fixtures deploy at `tycho-test`'s `EXECUTOR_ADDRESS` so immutable self-calls still reach
+their code after planting. `test/RuntimeBytecodeFixturesExecution.t.sol` checks both Uniswap V4
+self-call paths against the committed fixtures at that address.
 
 ### Rust
 
@@ -522,7 +594,7 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 ### CI
 
 - **`.github/workflows/ci-foundry.yaml`**: per-project `forge fmt --check` + `forge test` + gas
-  snapshot, a Slither static-analysis job, and a runtime-bytecode-fixtures freshness check
+  snapshot (`forge test` includes the runtime bytecode fixture check), and a Slither static-analysis job
 - **`.github/workflows/ci-router-trades.yaml`**: the `substreams/` router-trades workspace
 
 ## Adding a New Executor
@@ -545,8 +617,12 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
-9. Regenerate and commit runtime-bytecode fixtures with
-   `./protocols/testing/scripts/update_runtime_bytecode.sh`.
+9. List the executor in `contracts/test/RuntimeBytecodeFixtures.sol`, regenerate the
+   protocol-testing fixtures with `forge script script/WriteRuntimeBytecodeFixtures.s.sol` (from
+   `contracts/`) and commit `protocols/testing/fixtures/<Name>.runtime.json`.
+10. After deploying, add the address to `substreams/executors.sql` as well as
+    `config/executor_addresses.json`, or router-trades dashboards show its hops without a protocol name.
+    `make check-executors` (run by Router Trades CI) fails until it is there.
 
 ## Security
 

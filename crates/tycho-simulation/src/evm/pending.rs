@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, watch};
 use tycho_client::feed::{synchronizer::Snapshot, BlockHeader, FeedMessage};
 use tycho_common::{
     models::{
-        blockchain::{Block, BlockAggregatedChanges, PendingBlock},
+        blockchain::{Block, BlockAggregatedChanges, DCIUpdate, PendingBlock},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
         Chain,
     },
@@ -223,6 +223,9 @@ impl PendingBlockProcessor {
 
 /// Converts a startup snapshot into a `BlockAggregatedChanges` suitable for
 /// [`TxDeltaIndexer::apply_block`].
+///
+/// Each component's traced entrypoints are folded into `dci_update`, so an indexer sees the
+/// contracts a component reads through DCI the same way it does on the delta path.
 fn snapshot_to_block_changes(
     extractor: &str,
     snapshot: &Snapshot,
@@ -243,9 +246,32 @@ fn snapshot_to_block_changes(
     let mut new_protocol_components: HashMap<String, ProtocolComponent> = HashMap::new();
     let mut state_deltas: HashMap<String, ProtocolComponentStateDelta> = HashMap::new();
     let mut component_balances: HashMap<String, HashMap<Bytes, ComponentBalance>> = HashMap::new();
+    let mut dci_update = DCIUpdate::default();
 
     for (id, comp_with_state) in &snapshot.states {
         new_protocol_components.insert(id.clone(), comp_with_state.component.clone());
+
+        for (entrypoint, trace) in &comp_with_state.entrypoints {
+            let ep_id = entrypoint
+                .entry_point
+                .external_id
+                .clone();
+            dci_update
+                .new_entrypoints
+                .entry(id.clone())
+                .or_default()
+                .insert(entrypoint.entry_point.clone());
+            dci_update
+                .new_entrypoint_params
+                .entry(ep_id.clone())
+                .or_default()
+                .insert((entrypoint.params.clone(), id.clone()));
+            dci_update
+                .trace_results
+                .entry(ep_id)
+                .or_default()
+                .merge(trace.clone());
+        }
 
         state_deltas.insert(
             id.clone(),
@@ -285,6 +311,7 @@ fn snapshot_to_block_changes(
         new_protocol_components,
         state_deltas,
         component_balances,
+        dci_update,
         ..Default::default()
     }
 }
@@ -338,6 +365,64 @@ mod tests {
             Chain::Ethereum,
             rx,
         )
+    }
+
+    #[test]
+    fn test_snapshot_entrypoints_land_in_dci_update() {
+        use tycho_client::feed::synchronizer::ComponentWithState;
+        use tycho_common::models::{
+            blockchain::{
+                EntryPoint, EntryPointWithTracingParams, RPCTracerParams, TracingParams,
+                TracingResult,
+            },
+            protocol::ProtocolComponentState,
+        };
+
+        let component_id = "0xpool".to_string();
+        let entry_point = EntryPoint {
+            external_id: "0xpool:get_virtual_price()".to_string(),
+            target: Bytes::from([0xaa; 20]),
+            signature: "get_virtual_price()".to_string(),
+        };
+        let params =
+            TracingParams::RPCTracer(RPCTracerParams::new(None, Bytes::from([0x12, 0x34])));
+        let oracle = Bytes::from([0xbb; 20]);
+        let trace = TracingResult::new(
+            HashSet::new(),
+            HashMap::from([(oracle.clone(), HashSet::from([Bytes::from([0u8; 32])]))]),
+        );
+        let snapshot = Snapshot {
+            states: HashMap::from([(
+                component_id.clone(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        &component_id,
+                        HashMap::new(),
+                        HashMap::new(),
+                    ),
+                    component: ProtocolComponent::default(),
+                    component_tvl: None,
+                    entrypoints: vec![(
+                        EntryPointWithTracingParams::new(entry_point.clone(), params.clone()),
+                        trace,
+                    )],
+                },
+            )]),
+            vm_storage: HashMap::new(),
+        };
+        let header = BlockHeader { number: 7, ..Default::default() };
+
+        let changes = snapshot_to_block_changes("vm:curve", &snapshot, &header, Chain::Ethereum);
+
+        let dci = &changes.dci_update;
+        assert_eq!(dci.new_entrypoints[&component_id], HashSet::from([entry_point.clone()]));
+        assert_eq!(
+            dci.new_entrypoint_params[&entry_point.external_id],
+            HashSet::from([(params, component_id)])
+        );
+        assert!(dci.trace_results[&entry_point.external_id]
+            .accessed_slots
+            .contains_key(&oracle));
     }
 
     #[tokio::test]

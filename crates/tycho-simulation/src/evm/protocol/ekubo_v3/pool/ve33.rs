@@ -111,10 +111,14 @@ impl EkuboPool for Ve33Pool {
             .finish_transition(updated_attributes, deleted_attributes)
     }
 
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let quote = self
             .underlying_pool
-            .quote(token_amount)?;
+            .quote(token_amount, sqrt_ratio_limit)?;
         let calculated_amount = if self.swap_fee == 0 {
             quote.calculated_amount
         } else if token_amount.amount >= 0 {
@@ -189,9 +193,9 @@ mod tests {
         let token_amount = EvmTokenAmount { token: TOKEN1, amount: -100 };
         let underlying_quote = pool
             .underlying_pool
-            .quote(token_amount)
+            .quote(token_amount, None)
             .unwrap();
-        let quote = pool.quote(token_amount).unwrap();
+        let quote = pool.quote(token_amount, None).unwrap();
 
         assert_eq!(quote.consumed_amount, underlying_quote.consumed_amount);
         assert_eq!(

@@ -26,7 +26,7 @@ use crate::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{DeltaWindow, DiscardSink, FoldSink, WindowConfig},
+    services::state::window::{DeltaWindow, FoldSink},
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -101,25 +101,22 @@ pub trait PendingDeltasBuffer {
 }
 
 impl PendingDeltas {
-    /// Windows at the default depth, folding into a [`DiscardSink`].
-    #[allow(dead_code)] // production builds the facade through `with_config`
+    /// Windows at the default depth, folding into a `DiscardSink`.
+    // Test-only shorthand for `from_windows`.
+    // TODO: remove it with the rest of `PendingDeltas` once `DeltaWindow` takes over its jobs.
+    #[cfg(test)]
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
-        Self::with_config(extractors, WindowConfig::default(), Arc::new(DiscardSink))
+        use crate::services::state::window::{new_windows, DiscardSink, WindowConfig};
+
+        Self::from_windows(new_windows(extractors, WindowConfig::default()), Arc::new(DiscardSink))
     }
 
-    /// One empty window per extractor, all with the same `config`, folding into `sink`.
-    pub fn with_config<'a>(
-        extractors: impl IntoIterator<Item = &'a str>,
-        config: WindowConfig,
+    /// A facade over existing windows, keyed by extractor name, folding into `sink`. The
+    /// windows stay shared with every other holder of the map.
+    pub(crate) fn from_windows(
+        windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
         sink: Arc<dyn FoldSink>,
     ) -> Self {
-        let windows = extractors
-            .into_iter()
-            .map(|e| {
-                debug!("Creating new DeltaWindow for {}", e);
-                (e.to_string(), Arc::new(Mutex::new(DeltaWindow::new(e.to_string(), config))))
-            })
-            .collect();
         Self { windows, sink }
     }
 
@@ -136,6 +133,7 @@ impl PendingDeltas {
             .map_err(|e| PendingDeltasError::LockError(extractor.to_string(), e.to_string()))?;
         guard.fold_committed(self.sink.as_ref())?;
         guard.clear();
+        guard.report_metrics();
         debug!(extractor, "PendingDeltas window cleared");
         Ok(())
     }
@@ -159,6 +157,7 @@ impl PendingDeltas {
         );
         guard.insert(message)?;
         guard.fold_evictable(self.sink.as_ref())?;
+        guard.report_metrics();
         Ok(())
     }
 
@@ -422,23 +421,18 @@ impl PendingDeltasBuffer for PendingDeltas {
         version: Option<BlockNumberOrTimestamp>,
         protocol_system: &str,
     ) -> Result<()> {
-        let mut missing_addresses: HashSet<Bytes> = addresses
-            .unwrap_or_default()
-            .iter()
-            .cloned()
-            .collect();
-
-        // update db states with buffered deltas
+        let mut found: HashSet<Bytes> = HashSet::new();
         for state in db_states.iter_mut() {
             self.update_vm_state(state, version, protocol_system)?;
-            missing_addresses.remove(&state.address);
+            found.insert(state.address.clone());
         }
 
-        // for new accounts (not in the db yet), build a new state from the buffered deltas
-        // and add it to the db states
-        for address in missing_addresses {
-            let account = self.get_account(address, version)?;
-            db_states.push(account);
+        // For new accounts (not in the db yet), build a new state from the buffered deltas. Walk
+        // the request in order, so a missing account fails with the first missing address.
+        for address in addresses.unwrap_or_default() {
+            if found.insert(address.clone()) {
+                db_states.push(self.get_account(address.clone(), version)?);
+            }
         }
 
         Ok(())
@@ -576,7 +570,12 @@ mod test {
     };
 
     use super::*;
-    use crate::{extractor::models::fixtures, testing, testing::block};
+    use crate::{
+        extractor::models::fixtures,
+        services::state::window::{new_windows, DiscardSink, WindowConfig},
+        testing,
+        testing::block,
+    };
 
     fn vm_state() -> Account {
         Account::new(
@@ -902,11 +901,30 @@ mod test {
         }
     }
 
+    #[test]
+    fn from_windows_shares_the_windows_with_the_caller() {
+        let windows = new_windows(["native:extractor"], WindowConfig::default());
+        let buffer = PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
+
+        buffer
+            .insert(&native_msg(1, None, 1))
+            .unwrap();
+
+        let tip = windows["native:extractor"]
+            .lock()
+            .unwrap()
+            .tip()
+            .map(|block| block.number);
+        assert_eq!(tip, Some(1));
+    }
+
     #[tokio::test]
     async fn run_folds_committed_blocks_and_clears_the_window_when_the_extractor_restarts() {
         let sink = Arc::new(RecordingSink::default());
-        let buffer =
-            PendingDeltas::with_config(["native:extractor"], WindowConfig::default(), sink.clone());
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig::default()),
+            sink.clone(),
+        );
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         // `run` sends the start signal into this buffered channel; nothing needs to receive it.
         let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
@@ -974,9 +992,8 @@ mod test {
 
     #[test]
     fn depth_one_retains_only_the_tip() {
-        let buffer = PendingDeltas::with_config(
-            ["native:extractor"],
-            WindowConfig { depth: 1, min_fold_batch: 1 },
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
             Arc::new(DiscardSink),
         );
         for n in 1..=5 {
@@ -988,6 +1005,72 @@ mod test {
         // bound = min(finalized 5, committed 4, tip 5 - 1) = 4
         assert!(!has_block(&buffer, 4));
         assert!(has_block(&buffer, 5));
+    }
+
+    /// Gauge values recorded for `native:extractor`, by metric name.
+    fn native_gauges(snapshotter: &metrics_util::debugging::Snapshotter) -> HashMap<String, f64> {
+        use metrics_util::debugging::DebugValue;
+
+        let mut gauges = HashMap::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let ours = key
+                .key()
+                .labels()
+                .any(|l| l.key() == "extractor" && l.value() == "native:extractor");
+            if let (true, DebugValue::Gauge(v)) = (ours, value) {
+                gauges.insert(key.key().name().to_string(), v.0);
+            }
+        }
+        gauges
+    }
+
+    #[test]
+    fn insert_reports_the_window_block_count_and_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["native:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
+            Arc::new(DiscardSink),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=5 {
+                buffer
+                    .insert(&native_msg(n, Some(4), n))
+                    .unwrap();
+            }
+        });
+
+        // bound = min(finalized 5, committed 4, tip 5 - 1) = 4, so only block 5 stays
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&1.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&5.0));
+    }
+
+    #[test]
+    fn a_restart_clear_reports_an_empty_window_and_keeps_the_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let buffer = PendingDeltas::new(["native:extractor"]);
+
+        metrics::with_local_recorder(&recorder, || {
+            for n in 1..=3 {
+                buffer
+                    .insert(&native_msg(n, Some(2), n))
+                    .unwrap();
+            }
+            buffer
+                .fold_committed_and_clear("native:extractor")
+                .unwrap();
+        });
+
+        let gauges = native_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&0.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&3.0));
     }
 
     #[test]
@@ -1226,6 +1309,30 @@ mod test {
     }
 
     #[test]
+    fn test_update_vm_states_names_the_first_missing_address() {
+        let buffer = PendingDeltas::new(["vm:extractor"]);
+        buffer
+            .insert(&Arc::new(vm_block_deltas()))
+            .unwrap();
+        let unknown: Vec<Bytes> = (1..=8u64)
+            .map(|n| Bytes::from(n).lpad(20, 0))
+            .collect();
+
+        let err = buffer
+            .update_vm_states(Some(&unknown), &mut vec![], None, "vm:extractor")
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                PendingDeltasError::ReorgBufferError(StorageError::NotFound(kind, id))
+                    if kind == "Contract" && id == &unknown[0].to_string()
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn test_get_new_components() {
         let exp = [
             ProtocolComponent::new(
@@ -1308,9 +1415,8 @@ mod test {
     #[test]
     fn test_insert_respects_db_committed_height() {
         // depth 1 alone would allow evicting up to block 2; the commit height must hold it back
-        let buffer = PendingDeltas::with_config(
-            ["vm:extractor"],
-            WindowConfig { depth: 1, min_fold_batch: 1 },
+        let buffer = PendingDeltas::from_windows(
+            new_windows(["vm:extractor"], WindowConfig { depth: 1, min_fold_batch: 1 }),
             Arc::new(DiscardSink),
         );
 

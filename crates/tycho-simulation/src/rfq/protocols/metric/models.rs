@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use alloy::primitives::Address;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_common::Bytes;
 
@@ -144,12 +144,21 @@ pub struct MetricDepthBin {
 }
 
 impl MetricBidAskResponse {
-    pub fn bid_price(&self) -> Result<f64, RFQError> {
-        q64_to_f64(&self.bid_adj)
+    /// The bid price, or `None` when the pool quotes no bid: the API then sends `bidAdj = 0`.
+    pub fn bid_price(&self) -> Result<Option<f64>, RFQError> {
+        if self.bid_adj.is_zero() {
+            return Ok(None);
+        }
+        q64_to_f64(&self.bid_adj).map(Some)
     }
 
-    pub fn ask_price(&self) -> Result<f64, RFQError> {
-        q64_to_f64(&self.ask_adj)
+    /// The ask price, or `None` when the pool quotes no ask: the API then sends
+    /// `askAdj = 2^128 - 1`.
+    pub fn ask_price(&self) -> Result<Option<f64>, RFQError> {
+        if self.ask_adj == BigUint::from(u128::MAX) {
+            return Ok(None);
+        }
+        q64_to_f64(&self.ask_adj).map(Some)
     }
 
     pub fn total_token0_available(&self) -> Result<BigUint, RFQError> {
@@ -195,6 +204,28 @@ pub fn q64_to_f64(value: &BigUint) -> Result<f64, RFQError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sentinel_sides_have_no_price() {
+        let quote = |bid: String, ask: String| MetricBidAskResponse {
+            bid_adj: bid.parse().unwrap(),
+            ask_adj: ask.parse().unwrap(),
+            total_token0_available: None,
+            total_token1_available: None,
+            server_ts: 0,
+            price_provider_status: None,
+            depth: MetricDepth::default(),
+        };
+
+        let unquoted = quote("0".to_string(), u128::MAX.to_string());
+        assert_eq!(unquoted.bid_price().unwrap(), None);
+        assert_eq!(unquoted.ask_price().unwrap(), None);
+
+        // One below the no-ask sentinel is still a price.
+        let quoted = quote("1".to_string(), (u128::MAX - 1).to_string());
+        assert!(quoted.bid_price().unwrap().is_some());
+        assert!(quoted.ask_price().unwrap().is_some());
+    }
 
     #[test]
     fn test_q64_to_f64() {

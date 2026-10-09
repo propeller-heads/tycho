@@ -39,6 +39,9 @@ const deploy_protocols = {
         "lido_v4",
         "etherfi",
         "fallback",
+        "fallback:rfq:metric",
+        "fallback:rfq:bebop",
+        "fallback:rfq:hashflow",
     ],
     "base": [
         "uniswap_v2",
@@ -52,6 +55,8 @@ const deploy_protocols = {
         "rfq:metric",
         "rfq:native",
         "fallback",
+        "fallback:rfq:metric",
+        "fallback:rfq:bebop",
     ],
     "unichain": [
         "uniswap_v2",
@@ -77,6 +82,7 @@ const deploy_protocols = {
         "rfq:metric",
     ],
     "bsc": [
+        "ring_swap_v2",
         "uniswap_v2",
         "pancakeswap_v2",
         "uniswap_v3",
@@ -98,6 +104,13 @@ const deploy_protocols = {
         "ekubo_v3",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native",
+        "fallback:rfq:metric",
+    ],
+    "arc": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
     ],
 };
 
@@ -158,9 +171,16 @@ async function main() {
             console.log(`${contractName} already deployed, skipping deployment`);
         } else {
             const deploymentData = ethers.utils.concat([salt, bytecode]);
+            // Some RPC nodes estimate the exact gas the CREATE2 factory call
+            // used in simulation, and that limit runs out of gas on chain.
+            const gasEstimate = await deployer.estimateGas({
+                to: create2FactoryAddress,
+                data: deploymentData,
+            });
             const tx = await deployer.sendTransaction({
                 to: create2FactoryAddress,
                 data: deploymentData,
+                gasLimit: gasEstimate.mul(120).div(100),
             });
             await tx.wait();
             console.log(`${contractName} deployed to: ${computedAddress}`);

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 /// @notice An Aerodrome V1 (Solidly-style) pool. `getAmountOut` prices the trade, fee and

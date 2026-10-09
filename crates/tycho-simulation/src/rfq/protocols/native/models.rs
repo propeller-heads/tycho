@@ -287,6 +287,7 @@ pub enum NativeSupportedChain {
     Bsc,
     Arbitrum,
     Base,
+    Robinhood,
 }
 
 impl TryFrom<Chain> for NativeSupportedChain {
@@ -298,6 +299,7 @@ impl TryFrom<Chain> for NativeSupportedChain {
             Chain::Bsc => Ok(NativeSupportedChain::Bsc),
             Chain::Arbitrum => Ok(NativeSupportedChain::Arbitrum),
             Chain::Base => Ok(NativeSupportedChain::Base),
+            Chain::Robinhood => Ok(NativeSupportedChain::Robinhood),
             unsupported => Err(format!("Chain {unsupported:?} not supported by Native API")),
         }
     }
@@ -310,6 +312,7 @@ impl NativeSupportedChain {
             NativeSupportedChain::Bsc => "bsc",
             NativeSupportedChain::Arbitrum => "arbitrum",
             NativeSupportedChain::Base => "base",
+            NativeSupportedChain::Robinhood => "robinhood",
         }
     }
 }

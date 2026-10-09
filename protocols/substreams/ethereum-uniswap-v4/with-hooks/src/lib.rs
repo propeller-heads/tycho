@@ -2,6 +2,8 @@
 
 pub mod abi;
 pub mod pb;
+pub mod pons;
+pub mod storage;
 mod variant_modules;
 
 // Re-export all modules from shared library

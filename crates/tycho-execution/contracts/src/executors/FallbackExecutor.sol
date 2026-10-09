@@ -1,15 +1,14 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
-import {TychoFallbackRouter} from "../fallback/TychoFallbackRouter.sol";
 import {TransferManager} from "../TransferManager.sol";
 
 error FallbackExecutor__AddressZero();
 error FallbackExecutor__InvalidDataLength(uint256 length);
 
 /// @title FallbackExecutor
-/// @notice Runs one swap through `TychoFallbackRouter`.
+/// @notice Runs one swap through a `TychoFallbackRouter`.
 /// @dev `TransferType.Transfer` sends `amountIn` to the fallback router, which then owns the
 /// tokens and pays each protocol itself. The router address is immutable, so the executor only
 /// ever calls this one contract. Every address inside the swap data is called by the router, not
@@ -18,14 +17,14 @@ error FallbackExecutor__InvalidDataLength(uint256 length);
 /// Every protocol gets `minAmountOut = 0`, since a binding value would revert the trades the
 /// fallback exists to rescue. The TychoRouter's route-level `minAmountOut` must clear the price
 /// the fallback fills at.
-contract FallbackExecutor is IExecutor {
-    TychoFallbackRouter public immutable fallbackRouter;
+abstract contract FallbackExecutor is IExecutor {
+    address public immutable fallbackRouter;
 
     constructor(address fallbackRouter_) {
         if (fallbackRouter_ == address(0)) {
             revert FallbackExecutor__AddressZero();
         }
-        fallbackRouter = TychoFallbackRouter(fallbackRouter_);
+        fallbackRouter = fallbackRouter_;
     }
 
     function fundsExpectedAddress(
@@ -35,31 +34,7 @@ contract FallbackExecutor is IExecutor {
         view
         returns (address receiver)
     {
-        return address(fallbackRouter);
-    }
-
-    // slither-disable-next-line locked-ether
-    function swap(uint256 amountIn, bytes calldata data, address receiver)
-        external
-        payable
-    {
-        (
-            address tokenIn,
-            address tokenOut,
-            address pamm,
-            bytes calldata fallbackSwap
-        ) = _decodeData(data);
-
-        fallbackRouter.swap(
-            TychoFallbackRouter.Swap({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                amountIn: amountIn,
-                receiver: receiver
-            }),
-            pamm,
-            fallbackSwap
-        );
+        return fallbackRouter;
     }
 
     function getTransferData(bytes calldata data)
@@ -73,29 +48,20 @@ contract FallbackExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        (tokenIn, tokenOut,,) = _decodeData(data);
+        // slither-disable-next-line unused-return
+        _fallbackOffset(data);
+        tokenIn = address(bytes20(data[0:20]));
+        tokenOut = address(bytes20(data[20:40]));
         transferType = TransferManager.TransferType.Transfer;
-        receiver = address(fallbackRouter);
+        receiver = fallbackRouter;
         outputToRouter = false;
     }
 
-    function _decodeData(bytes calldata data)
+    /// @notice Where the fallback starts in `data`. Reverts `FallbackExecutor__InvalidDataLength`
+    /// on data it cannot decode.
+    function _fallbackOffset(bytes calldata data)
         internal
         pure
-        returns (
-            address tokenIn,
-            address tokenOut,
-            address pamm,
-            bytes calldata fallbackSwap
-        )
-    {
-        if (data.length <= 60) {
-            revert FallbackExecutor__InvalidDataLength(data.length);
-        }
-
-        tokenIn = address(bytes20(data[0:20]));
-        tokenOut = address(bytes20(data[20:40]));
-        pamm = address(bytes20(data[40:60]));
-        fallbackSwap = data[60:];
-    }
+        virtual
+        returns (uint256);
 }

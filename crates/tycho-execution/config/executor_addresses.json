@@ -12,7 +12,8 @@
     "vm:maverick_v2": "0xeCD7D651C0D5E477018c0949a01a46350461c8ED",
     "vm:balancer_v3": "0xf9AE8127E35612DA9d750058fCf61f326E00cA10",
     "rfq:bebop": "0x69eae6eb2C924567912fBC435b915663c9D3D11e",
-    "rfq:hashflow": "0xBc7C1E078865bb81938aDDDf24582EeDD17324c7",
+    "rfq:hashflow": "0x67336209a32e14F52Ea3466A2064C49885CD5A0b",
+    "rfq:native": "0x4bC907e3e487F1C7b5C5414D1ac828bc0eCdA522",
     "fluid_v1": "0xAB081CBB3c88219A030928Ece277feAd99cAB742",
     "rocketpool": "0xDa551e2AA856101ea172F0F6eFE25bF27DfdF9e0",
     "erc4626": "0xeE2452ce461EA71e15F06aF8055FFAAd4B7B90ae",
@@ -27,7 +28,10 @@
     "sky": "0x03AD6010948Ac034c0BbF7E449217798B4504E1D",
     "lido_v4": "0xbf33aa159aF2d96f4A10937B83Da8409264A760f",
     "etherfi": "0xA96354Bb15c3914d33332C6b898f801BabE7B814",
-    "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9"
+    "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9",
+    "fallback:rfq:metric": "0x3067880b419209FC6e961F08E0cDFfC1F21d2873",
+    "fallback:rfq:bebop": "0x4dC7b66A563cEB85D3cD5998294c72ce7026894a",
+    "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -41,7 +45,10 @@
     "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
     "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
     "rfq:metric": "0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2",
-    "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De"
+    "rfq:native": "0x4Ee002261A676D351705934c1bE26667d3f027bc",
+    "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De",
+    "fallback:rfq:metric": "0x8e0d294fC45fdFb6De21ae533132872E37F22B5b",
+    "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -57,7 +64,9 @@
     "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "camelot_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
     "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
-    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab"
+    "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
+    "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
+    "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -65,7 +74,8 @@
     "uniswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "pancakeswap_v3": "0x067fBaf88ee89DC2A4368c6DfF7237FF84522577",
     "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
-    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef"
+    "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
+    "rfq:native": "0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -86,11 +96,19 @@
     "uniswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "sushiswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "robinswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
+    "gigadex_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "ramses_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "up_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
-    "ekubo_v3": "0xBd7B2A90C550f4F620F6A64C5a39e8265Afa39F1",
+    "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
-    "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E"
+    "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
+    "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D",
+    "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C"
+  },
+  "arc": {
+    "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
+    "uniswap_v3": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
+    "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D"
   }
 }
