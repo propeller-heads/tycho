@@ -74,9 +74,9 @@ impl MetricState {
             MetricDirection::OneForZero => &self.bid_ask.depth.asks,
         };
 
-        // `is_quotable` only requires one side of the book to be populated, so the traded side may
-        // still have no bins (one-sided depth, or a state rebuilt from a snapshot without a depth
-        // attribute). The top-of-book quote is then the best signal we have.
+        // `is_quotable` only requires one side of the book to be populated, so the traded side
+        // may still have no bins when the depth is one-sided. The top-of-book quote is then the
+        // best signal we have.
         let Some(depth_max_output) = depth_max_output(bins) else {
             return Ok(None);
         };

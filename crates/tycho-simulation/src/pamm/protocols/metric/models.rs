@@ -41,9 +41,8 @@ pub struct MetricMetadata {
     pub token0: Bytes,
     #[serde(deserialize_with = "evm_address::deserialize")]
     pub token1: Bytes,
-    /// Total value locked in the requested fiat currency. Absent when Metric has no price for the
-    /// pool; used directly as the component TVL. Not carried through the component attributes, so
-    /// it is `None` once a state is reconstructed by the decoder.
+    /// Total value locked in the requested fiat currency, used directly as the component TVL.
+    /// Absent when Metric has no price for the pool.
     pub tvl_fiat: Option<f64>,
 }
 
@@ -68,8 +67,7 @@ pub struct MetricBidAskResponse {
     /// Server Unix timestamp (seconds) when the quote was produced.
     pub server_ts: u64,
     /// Price-provider health for this quote: `healthy`, `feed_down` (no valid price right now),
-    /// or `internal_error`. `None` when the field is absent (older responses, or states rebuilt
-    /// from component attributes).
+    /// or `internal_error`. `None` when the response omits the field.
     pub price_provider_status: Option<String>,
     /// Per-side depth bins. Absent on older responses and explicitly `null` when the endpoint is
     /// queried with `depth=false`; both decode to an empty book.
@@ -322,7 +320,7 @@ mod tests {
             assert_eq!(response.is_quotable(), expected, "status {status}");
         }
 
-        // Absent status (older responses, attribute round-trips): structural checks decide.
+        // Absent status (older responses): structural checks decide.
         let response: MetricBidAskResponse = serde_json::from_value(quotable).unwrap();
         assert_eq!(response.price_provider_status, None);
         assert!(response.is_quotable());
