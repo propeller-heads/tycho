@@ -14,16 +14,17 @@ use crate::encoding::{
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
-            bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
-            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
-            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
-            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
-            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            bebop_fallback::BebopFallbackSwapEncoder, biconomy::BiconomySwapEncoder,
+            bopamm::BopAMMSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
+            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
+            etherfi::EtherfiSwapEncoder, fallback::FallbackSwapEncoder,
+            fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
+            hashflow::HashflowSwapEncoder, hashflow_fallback::HashflowFallbackSwapEncoder,
+            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
+            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
+            native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
             uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
@@ -228,6 +229,9 @@ impl SwapEncoderRegistry {
             }
             "lunarbase" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "biconomy" => {
+                Ok(Box::new(BiconomySwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
