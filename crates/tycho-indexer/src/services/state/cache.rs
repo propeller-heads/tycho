@@ -26,6 +26,14 @@
 //! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
 //! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
 //! so that copy happens at most once per fold instead of once per read.
+//!
+//! # Memory
+//!
+//! There is no cap and no eviction, so the protection is visibility. A reporter publishes entry
+//! counts every 10 seconds and measures the bytes every 5 minutes, per family and, for components,
+//! per protocol system. Accounts have no protocol system: several extractors can share one.
+//! Nothing on the fold path counts bytes. The measurement holds the read lock only for short
+//! steps; see [`EntityCache::measure`].
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -34,9 +42,10 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use deepsize::DeepSizeOf;
 use metrics::gauge;
 use tracing::{info, warn};
 use tycho_common::{
@@ -72,7 +81,7 @@ enum WriteOutcome {
 }
 
 /// A cached value together with the timestamp of the write that set it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub(crate) struct Timestamped<T> {
     value: T,
     written_at: WriteTimestamp,
@@ -130,7 +139,7 @@ fn write_timestamped<K: Eq + Hash, V: PartialEq>(
 }
 
 /// Contract code with its hash, so a code write replaces both or neither.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub(crate) struct CachedCode {
     pub(crate) code: Code,
     pub(crate) hash: CodeHash,
@@ -147,7 +156,7 @@ impl CachedCode {
 /// Every value carries the timestamp of the write that set it, so writes from different extractors
 /// (which run at different points of the chain) can never regress a value: only a strictly newer
 /// block replaces one. The getters return each value with its timestamp.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub(crate) struct CachedAccount {
     chain: Chain,
     address: Address,
@@ -348,7 +357,7 @@ impl From<CachedAccount> for Account {
 }
 
 /// Cached state of one protocol component.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub(crate) struct CachedComponentState {
     component_id: ComponentId,
     attributes: HashMap<AttrStoreKey, StoreVal>,
@@ -505,8 +514,6 @@ impl EntityCache {
         let cache = Self::from_snapshot(snapshot);
         let elapsed = started.elapsed();
         gauge!("entity_cache_load_duration_seconds").set(elapsed.as_secs_f64());
-        gauge!("entity_cache_accounts").set(accounts as f64);
-        gauge!("entity_cache_components").set(components as f64);
         info!(accounts, components, ?elapsed, "Entity cache loaded");
         Ok(cache)
     }
@@ -556,6 +563,123 @@ impl EntityCache {
         self.state
             .write()
             .expect("entity cache lock poisoned")
+    }
+}
+
+/// How often the reporter publishes entry counts.
+const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Reports between size walks, counting the first report as a walk: one walk every 5 minutes.
+const MEASURE_EVERY: u32 = 30;
+
+/// Bytes each entity family holds, as [`EntityCache::measure`] counted them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheSize {
+    pub(crate) accounts: usize,
+    pub(crate) components: usize,
+}
+
+/// Heap bytes `value` owns. A map entry adds these on top of its slot in the map's table.
+fn heap_size<T: DeepSizeOf>(value: &T) -> usize {
+    value.deep_size_of() - size_of_val(value)
+}
+
+/// Bytes of a map's own struct and table, with the same formula as `deepsize`'s `HashMap` impl.
+fn table_size<K, V>(map: &HashMap<K, V>) -> usize {
+    size_of_val(map) + map.capacity() * size_of::<(K, V)>()
+}
+
+impl EntityCache {
+    /// Publishes the entry counts every [`REPORT_INTERVAL`], starting at once, and runs
+    /// [`Self::measure`] on the first report and every [`MEASURE_EVERY`] reports after it. The
+    /// walk runs on the blocking pool, because it can take seconds of CPU. Never returns.
+    pub(crate) async fn run_reporter(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(REPORT_INTERVAL);
+        let mut reports = 0u32;
+        loop {
+            tick.tick().await;
+            self.report();
+            if reports.is_multiple_of(MEASURE_EVERY) {
+                let cache = Arc::clone(&self);
+                if let Err(error) = tokio::task::spawn_blocking(move || cache.measure()).await {
+                    warn!(%error, "Entity cache size walk failed");
+                }
+            }
+            reports = reports.wrapping_add(1);
+        }
+    }
+
+    /// Publishes the entry count per entity family and per component protocol system. Reads only
+    /// map lengths under the read lock.
+    pub(crate) fn report(&self) {
+        let state = self.read();
+        let accounts = state.accounts.len();
+        let systems: Vec<(ProtocolSystem, usize)> = state
+            .components
+            .iter()
+            .map(|(system, components)| (system.clone(), components.len()))
+            .collect();
+        drop(state);
+        let mut components = 0;
+        for (system, count) in systems {
+            components += count;
+            gauge!("entity_cache_component_entries", "extractor" => system).set(count as f64);
+        }
+        gauge!("entity_cache_entries", "family" => "accounts").set(accounts as f64);
+        gauge!("entity_cache_entries", "family" => "components").set(components as f64);
+    }
+
+    /// Measures the bytes per entity family and per component protocol system, publishes them
+    /// with the walk duration, and returns the family totals. Each total equals one
+    /// `deep_size_of` over its map.
+    ///
+    /// The walk holds the read lock only for short steps, so folds and reads do not wait for the
+    /// whole walk. Under one read lock it copies the account `Arc`s; it measures each account
+    /// outside the lock and drops its `Arc` at once. A fold that changes an account the walk
+    /// still holds copies that account once, as it does for a reader. Components are not behind
+    /// an `Arc`, so it measures them under one read lock per protocol system.
+    pub(crate) fn measure(&self) -> CacheSize {
+        let started = Instant::now();
+        let mut locked = Duration::ZERO;
+
+        let lock_started = Instant::now();
+        let state = self.read();
+        let mut accounts = table_size(&state.accounts);
+        let mut entries = Vec::with_capacity(state.accounts.len());
+        for (address, entry) in &state.accounts {
+            accounts += heap_size(address);
+            entries.push(Arc::clone(entry));
+        }
+        let mut components = table_size(&state.components);
+        let mut systems = Vec::with_capacity(state.components.len());
+        for system in state.components.keys() {
+            components += heap_size(system);
+            systems.push(system.clone());
+        }
+        drop(state);
+        locked += lock_started.elapsed();
+
+        for entry in entries {
+            accounts += entry.as_ref().deep_size_of();
+        }
+
+        for system in systems {
+            let lock_started = Instant::now();
+            let state = self.read();
+            let Some(map) = state.components.get(&system) else { continue };
+            let bytes = heap_size(map);
+            drop(state);
+            locked += lock_started.elapsed();
+            components += bytes;
+            gauge!("entity_cache_component_size_bytes", "extractor" => system).set(bytes as f64);
+        }
+
+        let elapsed = started.elapsed();
+        gauge!("entity_cache_size_bytes", "family" => "accounts").set(accounts as f64);
+        gauge!("entity_cache_size_bytes", "family" => "components").set(components as f64);
+        gauge!("entity_cache_measure_duration_seconds").set(elapsed.as_secs_f64());
+        info!(accounts, components, ?elapsed, ?locked, "Entity cache measured");
+        CacheSize { accounts, components }
     }
 }
 
@@ -1707,5 +1831,113 @@ mod test {
             .expect("the load must fail");
 
         assert_eq!(err, StorageError::Unexpected("boom".to_string()));
+    }
+
+    /// Recorded gauges by name and the value of their one label (`family` or `extractor`), if
+    /// any.
+    fn recorded_gauges(
+        snapshotter: &metrics_util::debugging::Snapshotter,
+    ) -> HashMap<(String, Option<String>), f64> {
+        use metrics_util::debugging::DebugValue;
+
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let label = key
+                    .key()
+                    .labels()
+                    .next()
+                    .map(|l| l.value().to_string());
+                let DebugValue::Gauge(v) = value else { return None };
+                Some(((key.key().name().to_string(), label), v.into_inner()))
+            })
+            .collect()
+    }
+
+    fn gauge(name: &str, label: Option<&str>) -> (String, Option<String>) {
+        (name.to_string(), label.map(str::to_string))
+    }
+
+    /// A cache with two accounts and components in two protocol systems.
+    fn populated_cache() -> EntityCache {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_account_delta(
+                with_account_delta(
+                    with_component_balance(with_component(msg(1), "c1"), "c1", &addr(9), 7),
+                    creation(&addr(1), [(1, 1), (2, 2)], 10, "0x6000"),
+                ),
+                creation(&addr(2), [(3, 3)], 0, "0x"),
+            ))
+            .unwrap();
+        cache
+            .fold(&with_component(testing::aggregated_changes("other_system", 2, 2, Some(2)), "c2"))
+            .unwrap();
+        cache
+    }
+
+    // The walk measures piece by piece; the reference is one `deep_size_of` per map.
+    #[rstest]
+    #[case::empty(EntityCache::new())]
+    #[case::populated(populated_cache())]
+    fn measure_equals_one_walk_over_each_map(#[case] cache: EntityCache) {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let size = metrics::with_local_recorder(&recorder, || cache.measure());
+
+        let state = cache.read();
+        assert_eq!(size.accounts, state.accounts.deep_size_of());
+        assert_eq!(size.components, state.components.deep_size_of());
+        let gauges = recorded_gauges(&snapshotter);
+        assert_eq!(
+            gauges[&gauge("entity_cache_size_bytes", Some("accounts"))],
+            size.accounts as f64
+        );
+        assert_eq!(
+            gauges[&gauge("entity_cache_size_bytes", Some("components"))],
+            size.components as f64
+        );
+        assert!(gauges.contains_key(&gauge("entity_cache_measure_duration_seconds", None)));
+        for (system, components) in &state.components {
+            assert_eq!(
+                gauges[&gauge("entity_cache_component_size_bytes", Some(system))],
+                heap_size(components) as f64
+            );
+        }
+    }
+
+    // A fold after the walk must change the account in place, not copy it.
+    #[test]
+    fn measure_releases_every_account_it_walked() {
+        let cache = populated_cache();
+
+        cache.measure();
+
+        let state = cache.read();
+        for entry in state.accounts.values() {
+            assert_eq!(Arc::strong_count(entry), 1);
+        }
+    }
+
+    #[test]
+    fn report_publishes_entry_counts_per_family() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let cache = populated_cache();
+
+        metrics::with_local_recorder(&recorder, || cache.report());
+
+        let gauges = recorded_gauges(&snapshotter);
+        assert_eq!(gauges[&gauge("entity_cache_entries", Some("accounts"))], 2.0);
+        assert_eq!(gauges[&gauge("entity_cache_entries", Some("components"))], 2.0);
+        assert_eq!(gauges[&gauge("entity_cache_component_entries", Some(EXTRACTOR))], 1.0);
+        assert_eq!(gauges[&gauge("entity_cache_component_entries", Some("other_system"))], 1.0);
+        assert!(
+            !gauges.contains_key(&gauge("entity_cache_size_bytes", Some("accounts"))),
+            "report does not walk"
+        );
     }
 }
