@@ -134,6 +134,10 @@ impl PostgresGateway {
         }
     }
 
+    /// With the component index enabled, requests with a protocol system and without `ids` are
+    /// counted and paged by `ComponentIndex::query`, a second implementation of this filter: the
+    /// missing-TVL, NaN, soft-delete, order and offset semantics must stay the same in both.
+    /// `test_serial_db_index_matches_sql` compares the two.
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_protocol_components(
         &self,
@@ -279,7 +283,7 @@ impl PostgresGateway {
             warn!(
                 n_requested = db_ids.len(),
                 n_found = rows.len(),
-                "Component index returned ids without a component row"
+                "Requested component ids without a component row"
             );
         }
         let rows = rows

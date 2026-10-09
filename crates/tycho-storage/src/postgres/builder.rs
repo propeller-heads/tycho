@@ -23,10 +23,8 @@ const TOKEN_CACHE_REFRESH_PERIOD: std::time::Duration = std::time::Duration::fro
 /// How often the component index polls for new components and changed TVL.
 const COMPONENT_INDEX_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// How often the component index reads all components and TVL again. This corrects what the polls
-/// cannot see: rows deleted from the database, writes that do not move `modified_ts`, rows
-/// committed late by a second concurrent TVL writer, and component ids committed out of order by
-/// another process. None of these happens in normal operation.
+/// How often the component index reads all components and TVL again, to correct what the polls
+/// cannot see (see the `component_index` module docs).
 const COMPONENT_INDEX_FULL_RELOAD_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
@@ -60,8 +58,8 @@ impl GatewayBuilder {
 
     /// Counts and pages `get_protocol_components` requests by protocol system from an in-memory
     /// index instead of SQL; Postgres only loads the components on the requested page. Costs a
-    /// full component load at startup, two index lookups every 5 s, a read of the TVL rows that
-    /// changed, and a full reload every hour.
+    /// full component load at startup, two queries on Postgres indexes every 5 s, a read of the
+    /// TVL rows that changed, and a full reload every hour.
     pub fn set_component_index(mut self, enabled: bool) -> Self {
         self.component_index = enabled;
         self

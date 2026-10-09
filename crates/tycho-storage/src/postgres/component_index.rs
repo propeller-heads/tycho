@@ -34,8 +34,9 @@
 //!    until the extractor reports its commit.
 //! 2. **TVL poll** — every refresh reads the `component_tvl` rows whose `modified_ts` is newer than
 //!    the newest one read so far. The update trigger and the column default set `modified_ts` on
-//!    every write. When a write changed more than [`TVL_BULK_ROWS`] rows, such as a cron rewriting
-//!    the whole table, the poll stops and all TVL is read in one sequential scan instead.
+//!    every write. When more than [`TVL_POLL_MAX_ROWS`] rows changed since the last poll, such as
+//!    after a cron rewrote the whole table, the poll stops and all TVL is read in one sequential
+//!    scan instead.
 //! 3. **Full reload** — at startup and at a fixed interval, components and TVL are read again and
 //!    swapped in.
 //!
@@ -48,8 +49,9 @@
 //! The polls cannot see the cases below. None happens in normal operation; the next full reload
 //! corrects each of them.
 //!
-//! - **Deleted rows.** A component or TVL row deleted from the database stays in the index: a
-//!   deleted component like a phantom id, a deleted TVL row with its last value.
+//! - **Deleted rows.** A deleted component stays in the index with its last TVL: every request that
+//!   matches it counts it in `total` and returns its page one row short. A deleted TVL row stays in
+//!   the index with its last value.
 //! - **Writes that do not move `modified_ts`.** An insert that sets `modified_ts` explicitly, or a
 //!   write with triggers disabled, as restore tooling does.
 //! - **Concurrent TVL writers.** `modified_ts` is the start time of the writing transaction, not
@@ -60,10 +62,10 @@
 //!
 //! # Concurrency
 //!
-//! Each chain's index sits behind one `RwLock`, never held across an `await`. A query holds the
-//! read lock for one scan of one protocol system. TVL reads take the write lock only to write the
-//! fetched values. A full reload builds a new index without the lock, then swaps it in; components
-//! committed while it ran come back with the new-component poll that follows it.
+//! The index sits behind one `RwLock`, never held across an `await`. A query holds the read lock
+//! for one scan of one protocol system. TVL reads take the write lock only to write the fetched
+//! values. A full reload builds a new index without the lock, then swaps it in; components
+//! committed after its snapshot arrive with the next poll.
 //!
 //! # Metrics
 //!
@@ -76,7 +78,7 @@
 //! # Cost
 //!
 //! 16 bytes per component plus a small per-system overhead: ~85 MB for 5.25M components. A full TVL
-//! read holds the fetched rows, ~24 bytes each, until they are applied; a full reload also holds a
+//! read holds the fetched rows, 32 bytes each, until they are applied; a full reload also holds a
 //! second index until the swap.
 use std::{
     collections::HashMap,
@@ -110,7 +112,7 @@ const NO_TVL: f64 = f64::NEG_INFINITY;
 /// Most rows a TVL poll applies. A poll that finds more reads all TVL in one sequential scan
 /// instead: right after a large write, the planner's statistics do not show it yet, and a read
 /// through the `modified_ts` index would visit most of the table in random order.
-const TVL_BULK_ROWS: usize = 10_000;
+const TVL_POLL_MAX_ROWS: usize = 10_000;
 
 /// Longest a refresh may run before the task abandons it and its connection. Reads already stop
 /// after the snapshot statement timeout; this also covers a connection that stopped answering.
@@ -126,9 +128,9 @@ pub(crate) struct ComponentPage {
 
 /// What a [`ComponentIndex::refresh`] did with TVL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshOutcome {
+pub(crate) enum RefreshOutcome {
     /// No TVL row changed.
-    Unchanged,
+    TvlUnchanged,
     /// Applied the TVL rows that changed.
     TvlDelta { n_rows: usize },
     /// Too many TVL rows changed; read all TVL.
@@ -141,7 +143,7 @@ impl RefreshOutcome {
     /// The `outcome` label of `component_index_refreshes_total`.
     fn label(&self) -> &'static str {
         match self {
-            RefreshOutcome::Unchanged => "tvl_unchanged",
+            RefreshOutcome::TvlUnchanged => "tvl_unchanged",
             RefreshOutcome::TvlDelta { .. } => "tvl_delta",
             RefreshOutcome::TvlReload { .. } => "tvl_reload",
             RefreshOutcome::FullReload { .. } => "full_reload",
@@ -297,18 +299,18 @@ struct RefreshState {
 /// Holds only the database id and the TVL of each component of one chain, grouped by protocol
 /// system in ascending id order. Answers which components match a request and how many there are;
 /// the component contents stay in Postgres. See the module docs for the design.
-pub struct ComponentIndex {
+pub(crate) struct ComponentIndex {
     chain: Chain,
     chain_db_id: i64,
     index: RwLock<ChainIndex>,
     refresh_state: Mutex<RefreshState>,
-    /// [`TVL_BULK_ROWS`], lowered by tests.
-    tvl_bulk_rows: usize,
+    /// [`TVL_POLL_MAX_ROWS`], lowered by tests.
+    tvl_poll_max_rows: usize,
 }
 
 impl ComponentIndex {
     /// Like [`Self::from_connection`], with a connection from `pool`.
-    pub async fn from_pool(
+    pub(crate) async fn from_pool(
         pool: Pool<AsyncPgConnection>,
         chain: Chain,
         chain_db_id: i64,
@@ -321,7 +323,7 @@ impl ComponentIndex {
     }
 
     /// Loads the components of `chain`, whose id in the `chain` table is `chain_db_id`.
-    pub async fn from_connection(
+    pub(crate) async fn from_connection(
         conn: &mut AsyncPgConnection,
         chain: Chain,
         chain_db_id: i64,
@@ -334,7 +336,7 @@ impl ComponentIndex {
                 newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
             }),
-            tvl_bulk_rows: TVL_BULK_ROWS,
+            tvl_poll_max_rows: TVL_POLL_MAX_ROWS,
         };
         index.full_reload(conn).await?;
         Ok(index)
@@ -367,27 +369,33 @@ impl ComponentIndex {
     /// Brings the index up to date with the database: a full reload when the last one is older
     /// than `full_reload_interval`, otherwise the new-component and TVL polls. Each refresh reads
     /// in one snapshot, so every TVL row it reads belongs to a component it can see.
-    pub async fn refresh(
+    pub(crate) async fn refresh(
         &self,
         conn: &mut AsyncPgConnection,
         full_reload_interval: Duration,
     ) -> Result<RefreshOutcome, StorageError> {
-        if self.state().last_full_reload.elapsed() >= full_reload_interval {
+        if self
+            .refresh_state()
+            .last_full_reload
+            .elapsed() >=
+            full_reload_interval
+        {
             let n_components = self.full_reload(conn).await?;
             return Ok(RefreshOutcome::FullReload { n_components });
         }
 
         let chain_db_id = self.chain_db_id;
         let max_id = self.read_index().max_id;
-        let newest = self.state().newest_tvl_ts;
-        let bulk_rows = self.tvl_bulk_rows;
+        let newest = self.refresh_state().newest_tvl_ts;
+        let poll_max_rows = self.tvl_poll_max_rows;
         let (new_components, changed_tvl, all_tvl) = snapshot_transaction(conn)
             .run(|conn| {
                 async move {
                     bound_snapshot_reads(conn).await?;
                     let new_components = load_components(conn, chain_db_id, max_id).await?;
-                    let changed_tvl = load_tvl(conn, Some((newest, bulk_rows as i64 + 1))).await?;
-                    let all_tvl = if changed_tvl.len() > bulk_rows {
+                    let changed_tvl =
+                        load_tvl(conn, Some((newest, poll_max_rows as i64 + 1))).await?;
+                    let all_tvl = if changed_tvl.len() > poll_max_rows {
                         Some(load_tvl(conn, None).await?)
                     } else {
                         None
@@ -403,7 +411,7 @@ impl ComponentIndex {
             self.write_tvl(&rows, true);
             RefreshOutcome::TvlReload { n_rows: rows.len() }
         } else if changed_tvl.is_empty() {
-            RefreshOutcome::Unchanged
+            RefreshOutcome::TvlUnchanged
         } else {
             self.write_tvl(&changed_tvl, false);
             RefreshOutcome::TvlDelta { n_rows: changed_tvl.len() }
@@ -445,7 +453,7 @@ impl ComponentIndex {
             .map(|row| row.modified_ts)
             .max()
         {
-            let mut state = self.state();
+            let mut state = self.refresh_state();
             state.newest_tvl_ts = state.newest_tvl_ts.max(newest);
         }
     }
@@ -481,7 +489,7 @@ impl ComponentIndex {
         );
         *self.write_index() = rebuilt;
         self.advance_newest_tvl_ts(&tvl_rows);
-        self.state().last_full_reload = Instant::now();
+        self.refresh_state().last_full_reload = Instant::now();
         let now = unix_now();
         gauge!("component_index_last_full_reload_timestamp_seconds").set(now);
         gauge!("component_index_last_refresh_timestamp_seconds").set(now);
@@ -501,7 +509,7 @@ impl ComponentIndex {
             .expect("component index lock poisoned")
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, RefreshState> {
+    fn refresh_state(&self) -> std::sync::MutexGuard<'_, RefreshState> {
         self.refresh_state
             .lock()
             .expect("component index lock poisoned")
@@ -509,7 +517,7 @@ impl ComponentIndex {
 
     /// Spawns a detached task that calls [`Self::refresh`] every `period`, with a full reload at
     /// least every `full_reload_interval`.
-    pub fn spawn_refresh_task(
+    pub(crate) fn spawn_refresh_task(
         self: &Arc<Self>,
         pool: Pool<AsyncPgConnection>,
         period: Duration,
@@ -537,7 +545,7 @@ impl ComponentIndex {
                             Ok(Ok(outcome)) => {
                                 counter!("component_index_refreshes_total", "outcome" => outcome.label())
                                     .increment(1);
-                                if outcome != RefreshOutcome::Unchanged {
+                                if outcome != RefreshOutcome::TvlUnchanged {
                                     info!(
                                         ?outcome,
                                         elapsed = ?started.elapsed(),
@@ -764,7 +772,7 @@ mod test {
                 newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
             }),
-            tvl_bulk_rows: TVL_BULK_ROWS,
+            tvl_poll_max_rows: TVL_POLL_MAX_ROWS,
         }
     }
 
@@ -1236,7 +1244,7 @@ mod serial_db_test {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
 
-            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::TvlUnchanged);
         })
         .await;
     }
@@ -1273,8 +1281,8 @@ mod serial_db_test {
                     .unwrap(),
             )
             .unwrap();
-            index.tvl_bulk_rows = 1;
-            // Three changed rows: more than the poll fetches (bulk rows + 1), so only the full
+            index.tvl_poll_max_rows = 1;
+            // Three changed rows: more than the poll fetches (its row limit + 1), so only the full
             // read sees all of them.
             set_tvl(&mut conn, fixture.component_db_ids[0], 0.5).await;
             set_tvl(&mut conn, fixture.component_db_ids[1], 50.0).await;
@@ -1314,7 +1322,7 @@ mod serial_db_test {
                 .await
                 .unwrap();
 
-            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::TvlUnchanged);
             fixture
                 .assert_equivalent(&mut conn)
                 .await;
@@ -1331,7 +1339,7 @@ mod serial_db_test {
                 .insert_component_elsewhere(&mut conn, "b1")
                 .await;
 
-            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::TvlUnchanged);
             fixture
                 .assert_equivalent(&mut conn)
                 .await;

@@ -147,7 +147,7 @@ use unicode_segmentation::UnicodeSegmentation;
 pub mod builder;
 pub mod cache;
 mod chain;
-pub mod component_index;
+mod component_index;
 mod contract;
 pub mod direct;
 mod entry_point;
