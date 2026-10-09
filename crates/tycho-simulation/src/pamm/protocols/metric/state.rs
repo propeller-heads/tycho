@@ -156,9 +156,19 @@ impl ProtocolSim for MetricState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // The pool a Metric swap settles against reverts `InvalidAmount()` on a zero input, and
+        // the venue's routing API answers one with `400 amountIn must be positive`.
+        sim::require_positive_amount(&amount_in)?;
+
         let direction = self.direction(&token_in.address, &token_out.address)?;
         let Some(price) = self.quoted_price(direction)? else {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
+            return Err(SimulationError::InvalidInput(
+                format!(
+                    "Metric pool quotes no price in this direction. Input {amount_in} cannot be \
+                     filled"
+                ),
+                None,
+            ));
         };
         let max_output = match direction {
             MetricDirection::ZeroForOne => self.bid_ask.total_token1_available()?,
@@ -221,7 +231,8 @@ impl ProtocolSim for MetricState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let direction = self.direction(&sell_token, &buy_token)?;
         let Some(price) = self.quoted_price(direction)? else {
-            return Ok((BigUint::zero(), BigUint::zero()));
+            // Nothing on this side is no swap at any size, so there is no limit to report.
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
         };
         // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap, depth
         // side, and token decimals.
@@ -505,18 +516,16 @@ mod tests {
                 .unwrap(),
             ask
         );
-        assert_eq!(
-            state
-                .get_limits(weth().address, usdc().address)
-                .unwrap(),
-            (BigUint::zero(), BigUint::zero())
-        );
-        let Err(SimulationError::RecoverableError(msg)) =
+        assert!(matches!(
+            state.get_limits(weth().address, usdc().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        let Err(SimulationError::InvalidInput(msg, None)) =
             state.get_amount_out(big("100000000000000000"), &weth(), &usdc())
         else {
             panic!("selling WETH into a book without a bid must fail");
         };
-        assert_eq!(msg, "No liquidity");
+        assert!(msg.contains("quotes no price in this direction"), "{msg}");
         assert_eq!(
             state
                 .get_limits(usdc().address, weth().address)
@@ -541,18 +550,16 @@ mod tests {
                 .unwrap(),
             bid
         );
-        assert_eq!(
-            state
-                .get_limits(usdc().address, weth().address)
-                .unwrap(),
-            (BigUint::zero(), BigUint::zero())
-        );
-        let Err(SimulationError::RecoverableError(msg)) =
+        assert!(matches!(
+            state.get_limits(usdc().address, weth().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        let Err(SimulationError::InvalidInput(msg, None)) =
             state.get_amount_out(big("300000000"), &usdc(), &weth())
         else {
             panic!("buying WETH from a book without an ask must fail");
         };
-        assert_eq!(msg, "No liquidity");
+        assert!(msg.contains("quotes no price in this direction"), "{msg}");
         assert_eq!(
             state
                 .get_limits(weth().address, usdc().address)
@@ -983,5 +990,16 @@ mod tests {
             .unwrap();
 
         assert!(quote.amount > BigUint::from(0u8));
+    }
+
+    /// The pool a Metric swap settles against reverts on a zero input, so simulating one must
+    /// not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = state();
+
+        let result = state.get_amount_out(BigUint::ZERO, &weth(), &usdc());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }

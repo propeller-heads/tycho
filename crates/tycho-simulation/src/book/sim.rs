@@ -3,7 +3,7 @@
 //! fill against a ladder turns into.
 
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use tycho_common::{
     models::token::Token,
     simulation::{
@@ -109,12 +109,20 @@ pub fn fill_result(
     amount_in: f64,
     out_decimals: u32,
     gas: u64,
-    new_state: Box<dyn ProtocolSim>,
+    state: &dyn ProtocolSim,
 ) -> Result<GetAmountOutResult, SimulationError> {
+    // A ladder that took none of the amount has nothing on this side to take it with: no
+    // amount is servable, and there is no part of one to hand back.
+    if fill.remaining_in == amount_in {
+        return Err(SimulationError::InvalidInput(
+            format!("Pool has no liquidity on this side, so {amount_in} cannot be filled"),
+            None,
+        ));
+    }
     let result = GetAmountOutResult {
         amount: to_atomic(fill.amount_out, out_decimals)?,
         gas: BigUint::from(gas),
-        new_state,
+        new_state: state.clone_box(),
     };
     if fill.is_complete() {
         Ok(result)
@@ -127,6 +135,18 @@ pub fn fill_result(
             Some(result),
         ))
     }
+}
+
+/// Refuses a swap of nothing, which a ladder would otherwise report as an amount fully
+/// consumed — a fill of zero that reads as a swap that worked.
+pub fn require_positive_amount(amount_in: &BigUint) -> Result<(), SimulationError> {
+    if amount_in.is_zero() {
+        return Err(SimulationError::InvalidInput(
+            "Swap amount must be greater than zero".to_string(),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// The swap limits of a ladder: the input it absorbs in total and the output that buys, in atomic
@@ -209,18 +229,23 @@ mod tests {
     }
 
     fn new_state() -> Box<dyn ProtocolSim> {
-        Box::new(MockProtocolSim::new())
+        let mut state = MockProtocolSim::new();
+        state
+            .expect_clone_box()
+            .returning(|| Box::new(MockProtocolSim::new()));
+        Box::new(state)
     }
 
     #[test]
     fn fill_result_attaches_the_partial_result_when_the_ladder_runs_out() {
         let ladder = ladder();
 
-        let complete = fill_result(ladder.fill(2.0), 2.0, 6, 100, new_state()).unwrap();
+        let state = new_state();
+        let complete = fill_result(ladder.fill(2.0), 2.0, 6, 100, state.as_ref()).unwrap();
         assert_eq!(complete.amount, BigUint::from(4_000_000_000u64));
         assert_eq!(complete.gas, BigUint::from(100u64));
 
-        let partial = fill_result(ladder.fill(3.0), 3.0, 6, 100, new_state());
+        let partial = fill_result(ladder.fill(3.0), 3.0, 6, 100, state.as_ref());
         match partial {
             Err(SimulationError::InvalidInput(message, Some(result))) => {
                 assert!(message.contains("consumed amount: 2"));

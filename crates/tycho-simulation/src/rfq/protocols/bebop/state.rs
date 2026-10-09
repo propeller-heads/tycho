@@ -113,6 +113,10 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // Bebop refuses a zero amount with `101 InvalidApiRequest: Sell amounts must be
+        // higher than 0.`, before the dollar floor below has anything to say.
+        sim::require_positive_amount(&amount_in)?;
+
         let direction = SwapDirection::require(
             &self.base_token,
             &self.quote_token,
@@ -120,9 +124,6 @@ impl ProtocolSim for BebopState {
             &token_out.address,
         )?;
         let ladder = self.ladder(direction);
-        if ladder.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
         let amount_in = sim::to_human(&amount_in, token_in.decimals);
         let fill = ladder.fill(amount_in);
         // The trade's worth is read on the quote side, which the swap already expresses: the
@@ -138,7 +139,7 @@ impl ProtocolSim for BebopState {
             )));
         }
         // The state doesn't change after a swap.
-        sim::fill_result(fill, amount_in, token_out.decimals, BEBOP_SWAP_GAS, self.clone_box())
+        sim::fill_result(fill, amount_in, token_out.decimals, BEBOP_SWAP_GAS, self)
     }
 
     fn get_limits(
@@ -149,9 +150,9 @@ impl ProtocolSim for BebopState {
         let direction =
             SwapDirection::require(&self.base_token, &self.quote_token, &sell_token, &buy_token)?;
         let ladder = self.ladder(direction);
-        // If there are no price levels, return 0 for both limits
+        // Nothing on this side is no swap at any size, so there is no limit to report.
         if ladder.is_empty() {
-            return Ok((BigUint::from(0u64), BigUint::from(0u64)));
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
         let (sell_decimals, buy_decimals) = direction.decimals(&self.base_token, &self.quote_token);
         sim::limits(&ladder, sell_decimals, buy_decimals)
@@ -415,32 +416,49 @@ mod tests {
         assert_eq!(wbtc_limit, expected_wbtc_limit);
     }
 
+    /// Bebop's book prices both directions, so what it cannot answer is a token that is not in
+    /// the pair — whichever of the three questions it is asked.
     #[test]
-    fn test_get_limits_invalid_token_pair() {
+    fn rejects_tokens_outside_the_pair() {
         let state = create_test_bebop_state();
+        let amount = BigUint::from_str("1000000000000000000").unwrap();
+        let results = [
+            state
+                .spot_price(&weth(), &usdc())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount.clone(), &weth(), &usdc())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount, &wbtc(), &weth())
+                .map(|_| ()),
+            state
+                .get_limits(weth().address.clone(), usdc().address.clone())
+                .map(|_| ()),
+        ];
 
-        // Create a different token (not WBTC or USDC)
-        let eth = Token::new(
-            &hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
-                .unwrap()
-                .into(),
-            "ETH",
-            18,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        );
-
-        // Test with invalid token pair (ETH not in WBTC/USDC pool) - should return error
-        let result = state.get_limits(eth.address.clone(), usdc().address.clone());
-        assert!(result.is_err());
-
-        if let Err(SimulationError::InvalidInput(msg, None)) = result {
-            assert!(msg.contains("Invalid token addresses"));
-        } else {
-            panic!("Expected InvalidInput with invalid token addresses message");
+        for result in results {
+            assert!(
+                matches!(&result, Err(SimulationError::InvalidInput(msg, None)) if msg.contains("Invalid token addresses")),
+                "{result:?}"
+            );
         }
+    }
+
+    /// A side the venue is not quoting has no depth to report and no swap to price.
+    #[test]
+    fn a_side_with_no_levels_has_nothing_to_offer() {
+        let mut state = create_test_bebop_state();
+        state.book.asks = Levels::default();
+
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(2_000_000u64), &usdc(), &wbtc()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.get_limits(usdc().address.clone(), wbtc().address.clone()),
+            Err(SimulationError::RecoverableError(_))
+        ));
     }
 
     #[test]
@@ -480,5 +498,15 @@ mod tests {
 
         // 1.5 from level 1 + 0.78333 from level 2 = 2.283333 WETH
         assert_eq!(amount_out_result.amount, BigUint::from_str("2_283333333333333248").unwrap());
+    }
+
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = create_test_bebop_state();
+
+        let result = state.get_amount_out(BigUint::ZERO, &wbtc(), &usdc());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }

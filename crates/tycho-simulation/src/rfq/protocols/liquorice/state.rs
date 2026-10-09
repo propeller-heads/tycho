@@ -17,6 +17,7 @@ use tycho_common::{
 use crate::{
     book::{
         component::PairState,
+        levels::Fill,
         sim::{self, SwapDirection},
     },
     rfq::protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
@@ -49,17 +50,6 @@ impl LiquoriceState {
             token_address_in,
             token_address_out,
         )
-    }
-
-    fn valid_levels_guard(&self) -> Result<(), SimulationError> {
-        if self
-            .prices_by_mm
-            .values()
-            .all(|price| price.levels.is_empty())
-        {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
-        Ok(())
     }
 
     /// The market makers' ladders that carry liquidity.
@@ -102,8 +92,11 @@ impl ProtocolSim for LiquoriceState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // Liquorice refuses a zero amount with `invalid_request: Token amount is less than or
+        // equal to zero`.
+        sim::require_positive_amount(&amount_in)?;
+
         self.valid_direction_guard(&token_in.address, &token_out.address)?;
-        self.valid_levels_guard()?;
         let amount_in = sim::to_human(&amount_in, token_in.decimals);
         // The market maker paying the most for amount_in fills the swap.
         let fill = self
@@ -114,8 +107,8 @@ impl ProtocolSim for LiquoriceState {
                     .partial_cmp(&b.amount_out)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .ok_or(SimulationError::RecoverableError("No liquidity".into()))?;
-        sim::fill_result(fill, amount_in, token_out.decimals, LIQUORICE_SWAP_GAS, self.clone_box())
+            .unwrap_or(Fill { amount_out: 0.0, remaining_in: amount_in });
+        sim::fill_result(fill, amount_in, token_out.decimals, LIQUORICE_SWAP_GAS, self)
     }
 
     fn get_limits(
@@ -124,17 +117,16 @@ impl ProtocolSim for LiquoriceState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.valid_direction_guard(&sell_token, &buy_token)?;
-        self.valid_levels_guard()?;
         // The limits are those of the deepest market maker's ladder.
-        let deepest = self
-            .populated_books()
-            .max_by(|a, b| {
-                a.levels
-                    .notional()
-                    .partial_cmp(&b.levels.notional())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .ok_or(SimulationError::RecoverableError("No liquidity".into()))?;
+        let Some(deepest) = self.populated_books().max_by(|a, b| {
+            a.levels
+                .notional()
+                .partial_cmp(&b.levels.notional())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            // Nothing on this side is no swap at any size, so there is no limit to report.
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        };
         sim::limits(&deepest.levels, self.base_token.decimals, self.quote_token.decimals)
     }
 
@@ -334,20 +326,27 @@ mod tests {
             assert!((price - 20995.0 / 7.0).abs() < 1e-10);
         }
 
+        /// Makers quoting nothing leave no price to report, and no depth either.
         #[test]
-        fn returns_no_liquidity_error() {
+        fn an_empty_book_has_nothing_to_offer() {
             let mut state = create_test_liquorice_state();
             state
                 .prices_by_mm
                 .values_mut()
                 .for_each(|price| price.levels = Levels::default());
+
             let result = state.spot_price(&state.base_token, &state.quote_token);
-            assert!(result.is_err());
-            if let Err(SimulationError::RecoverableError(msg)) = result {
-                assert_eq!(msg, "No liquidity");
-            } else {
-                panic!("Expected RecoverableError");
-            }
+            assert!(
+                matches!(&result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
+                "{result:?}"
+            );
+            assert!(matches!(
+                state.get_limits(
+                    state.base_token.address.clone(),
+                    state.quote_token.address.clone()
+                ),
+                Err(SimulationError::RecoverableError(_))
+            ));
         }
     }
 
@@ -399,5 +398,19 @@ mod tests {
             assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
             assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
         }
+    }
+
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = create_test_liquorice_state();
+
+        let result = state.get_amount_out(
+            BigUint::ZERO,
+            &state.base_token.clone(),
+            &state.quote_token.clone(),
+        );
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }

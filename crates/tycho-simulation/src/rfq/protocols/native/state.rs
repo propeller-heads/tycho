@@ -144,36 +144,24 @@ impl ProtocolSim for NativeState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // Native refuses a zero amount with `131004 invalid parameter`; an amount under the
+        // side's published minimum is its separate `171055`.
+        sim::require_positive_amount(&amount_in)?;
+
         let direction = SwapDirection::require(
             &self.base_token,
             &self.quote_token,
             &token_in.address,
             &token_out.address,
         )?;
-        if amount_in == BigUint::ZERO {
-            return Err(SimulationError::InvalidInput(
-                "Native swap amount must be greater than zero".to_string(),
-                None,
-            ));
-        }
-
         let side = self.side(direction);
         Self::enforce_minimum(&amount_in, side.minimum_in, "input")?;
 
         let ladder = self.ladder(direction);
-        if ladder.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
 
         let amount_in = sim::to_human(&amount_in, token_in.decimals);
         let fill = ladder.fill(amount_in);
-        let result = sim::fill_result(
-            fill,
-            amount_in,
-            token_out.decimals,
-            NATIVE_SWAP_GAS,
-            self.clone_box(),
-        )?;
+        let result = sim::fill_result(fill, amount_in, token_out.decimals, NATIVE_SWAP_GAS, self)?;
         Self::enforce_minimum(&result.amount, side.minimum_out, "output")?;
         Ok(result)
     }
@@ -186,6 +174,7 @@ impl ProtocolSim for NativeState {
         let direction =
             SwapDirection::require(&self.base_token, &self.quote_token, &sell_token, &buy_token)?;
         let ladder = self.ladder(direction);
+        // Nothing on this side is no swap at any size, so there is no limit to report.
         if ladder.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
@@ -449,16 +438,6 @@ mod tests {
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, Some(_)))));
     }
 
-    /// A zero amount is rejected before any ladder is consulted; Native's quote API refuses it.
-    #[test]
-    fn rejects_zero_amount() {
-        let state = state();
-
-        let result = state.get_amount_out(BigUint::ZERO, &state.base_token, &state.quote_token);
-
-        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
-    }
-
     /// Limits follow the ladder of the swap direction and the decimals of the tokens on each side.
     #[rstest]
     #[case::sell_base(true, 1_000_000_000_000_000_000, 2_000_000_000)]
@@ -507,7 +486,8 @@ mod tests {
     }
 
     #[test]
-    fn reports_no_liquidity_for_empty_direction() {
+    /// A side the venue is not quoting has no depth to report and no swap to price.
+    fn a_side_with_no_levels_has_nothing_to_offer() {
         let mut state = state();
         state.book.bids.levels = Levels::default();
 
@@ -517,11 +497,25 @@ mod tests {
                 &state.base_token,
                 &state.quote_token,
             ),
-            Err(SimulationError::RecoverableError(_))
+            Err(SimulationError::InvalidInput(_, None))
         ));
         assert!(matches!(
             state.get_limits(state.base_token.address.clone(), state.quote_token.address.clone()),
             Err(SimulationError::RecoverableError(_))
         ));
+    }
+
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = state();
+
+        let result = state.get_amount_out(
+            BigUint::ZERO,
+            &state.base_token.clone(),
+            &state.quote_token.clone(),
+        );
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }

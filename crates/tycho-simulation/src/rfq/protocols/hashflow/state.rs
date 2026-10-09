@@ -65,13 +65,6 @@ impl HashflowState {
             token_address_out,
         )
     }
-
-    fn valid_levels_guard(&self) -> Result<(), SimulationError> {
-        if self.levels.levels.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
-        Ok(())
-    }
 }
 
 impl PairState for HashflowState {
@@ -106,8 +99,12 @@ impl ProtocolSim for HashflowState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // Hashflow refuses a zero amount with `79 Below minimum amount`, the same code it
+        // declines any amount under its maker's first level with. The minimum below answers for
+        // a maker that is quoting; one that is not has a first level of nothing.
+        sim::require_positive_amount(&amount_in)?;
+
         self.valid_direction_guard(&token_in.address, &token_out.address)?;
-        self.valid_levels_guard()?;
         let min_amount_in = self.min_amount_in();
         if amount_in < min_amount_in {
             return Err(SimulationError::RecoverableError(format!(
@@ -118,7 +115,7 @@ impl ProtocolSim for HashflowState {
         let amount_in = sim::to_human(&amount_in, token_in.decimals);
         let fill = self.levels.levels.fill(amount_in);
         // The state doesn't change after a swap.
-        sim::fill_result(fill, amount_in, token_out.decimals, HASHFLOW_SWAP_GAS, self.clone_box())
+        sim::fill_result(fill, amount_in, token_out.decimals, HASHFLOW_SWAP_GAS, self)
     }
 
     fn get_limits(
@@ -127,7 +124,10 @@ impl ProtocolSim for HashflowState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.valid_direction_guard(&sell_token, &buy_token)?;
-        self.valid_levels_guard()?;
+        // Nothing on this side is no swap at any size, so there is no limit to report.
+        if self.levels.levels.is_empty() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
         sim::limits(&self.levels.levels, self.base_token.decimals, self.quote_token.decimals)
     }
 
@@ -316,27 +316,25 @@ mod tests {
     }
 
     #[test]
-    fn reports_no_liquidity_for_an_empty_ladder() {
+    /// A maker quoting nothing has no price and no swap to offer, and no depth to report.
+    fn an_empty_ladder_has_nothing_to_offer() {
         let mut state = create_test_hashflow_state();
         state.levels.levels = Levels::default();
-        let results = [
-            state
-                .spot_price(&weth(), &usdc())
-                .map(|_| ()),
-            state
-                .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &weth(), &usdc())
-                .map(|_| ()),
-            state
-                .get_limits(weth().address.clone(), usdc().address.clone())
-                .map(|_| ()),
-        ];
-
-        for result in results {
-            assert!(
-                matches!(&result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
-                "{result:?}"
-            );
-        }
+        let price = state.spot_price(&weth(), &usdc());
+        assert!(
+            matches!(&price, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
+            "{price:?}"
+        );
+        let swap = state.get_amount_out(
+            BigUint::from_str("1000000000000000000").unwrap(),
+            &weth(),
+            &usdc(),
+        );
+        assert!(matches!(swap, Err(SimulationError::InvalidInput(_, None))), "{swap:?}");
+        assert!(matches!(
+            state.get_limits(weth().address.clone(), usdc().address.clone()),
+            Err(SimulationError::RecoverableError(_))
+        ));
     }
 
     #[test]
@@ -421,5 +419,15 @@ mod tests {
         // Total buy: (0.5+1.5)*3000 + 5.0*2999 = 20995 USDC (6 decimals)
         assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
         assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+    }
+
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = create_test_hashflow_state();
+
+        let result = state.get_amount_out(BigUint::ZERO, &weth(), &usdc());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }
