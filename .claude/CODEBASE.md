@@ -203,6 +203,7 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 | `DELTA_WINDOW_DEPTH` | Blocks each extractor's RPC-side window retains (default 128) |
 | `DELTA_WINDOW_FOLD_BATCH` | Evictable blocks required before a fold runs (default 1) |
 | `ENTITY_CACHE_MODE` | `off` (default), `shadow`, or `serve`; anything but `off` loads the entity cache at startup and folds the windows into it |
+| `DISABLED_RPC_CACHES` | Comma-separated RPC response caches to turn off: `contract_storage`, `protocol_state`, `protocol_components`, `traced_entry_points` (default: all on) |
 | `ENTITY_CACHE_SHADOW_SAMPLE_RATE` | Share of state requests that `shadow` compares with the entity cache, 0.0 to 1.0 (default 0.0) |
 | `TYCHO_S3_BUCKET` | S3 bucket the Substreams spkg packages are fetched from |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |

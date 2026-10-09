@@ -1,4 +1,4 @@
-use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand};
+use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand, ValueEnum};
 use tycho_common::{models::Chain, Bytes};
 use tycho_ethereum::rpc::{
     config::{RPCBatchingConfig, RPCRetryConfig},
@@ -7,7 +7,7 @@ use tycho_ethereum::rpc::{
 
 use crate::{
     extractor::ExtractionError,
-    services::{EntityCacheMode, WindowConfig},
+    services::{EntityCacheMode, RpcCacheKind, WindowConfig},
 };
 
 /// Tycho Indexer using Substreams
@@ -93,6 +93,19 @@ pub struct GlobalArgs {
     #[clap(long, env = "ENTITY_CACHE_SHADOW_SAMPLE_RATE", default_value_t = 0.0, value_parser = parse_sample_rate)]
     pub entity_cache_shadow_sample_rate: f64,
 
+    /// RPC response caches to turn off, comma-separated: `contract_storage`, `protocol_state`,
+    /// `protocol_components`, `traced_entry_points`. A request to an endpoint whose cache is off
+    /// always runs the full path. Blank entries are ignored, so an empty value keeps every
+    /// cache on (the default).
+    #[clap(
+        long,
+        env = "DISABLED_RPC_CACHES",
+        default_value = "",
+        hide_default_value = true,
+        value_parser = parse_disabled_rpc_caches
+    )]
+    pub disabled_rpc_caches: DisabledRpcCaches,
+
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
     //Default is for backward compatibility but needs to be removed later
@@ -117,6 +130,36 @@ pub struct GlobalArgs {
     /// RPC configuration (URL and retry settings)
     #[command(flatten)]
     pub rpc: RPCArgs,
+}
+
+/// The caches named by `--disabled-rpc-caches`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DisabledRpcCaches(pub Vec<RpcCacheKind>);
+
+/// Parses a comma-separated list of cache names. Blank entries are ignored, so an empty value
+/// names no cache.
+fn parse_disabled_rpc_caches(value: &str) -> Result<DisabledRpcCaches, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            RpcCacheKind::from_str(name, false).map_err(|_| {
+                let valid: Vec<String> = RpcCacheKind::value_variants()
+                    .iter()
+                    .filter_map(|kind| {
+                        Some(
+                            kind.to_possible_value()?
+                                .get_name()
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+                format!("unknown RPC cache '{name}', expected one of: {}", valid.join(", "))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(DisabledRpcCaches)
 }
 
 /// Parses a share from 0.0 to 1.0. Rejects NaN.
@@ -393,6 +436,7 @@ mod cli_tests {
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
                 entity_cache_shadow_sample_rate: 0.0,
+                disabled_rpc_caches: DisabledRpcCaches::default(),
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -489,6 +533,34 @@ mod cli_tests {
         assert_eq!(cli.global_args.entity_cache_mode, expected);
     }
 
+    #[rstest]
+    #[case::empty("", vec![])]
+    #[case::one("protocol_state", vec![RpcCacheKind::ProtocolState])]
+    #[case::two(
+        "contract_storage,traced_entry_points",
+        vec![RpcCacheKind::ContractStorage, RpcCacheKind::TracedEntryPoints]
+    )]
+    #[case::blank_entries_and_spaces(" protocol_components , ,", vec![RpcCacheKind::ProtocolComponents])]
+    fn test_arg_parsing_disabled_rpc_caches(
+        #[case] value: &'static str,
+        #[case] expected: Vec<RpcCacheKind>,
+    ) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--disabled-rpc-caches", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(cli.global_args.disabled_rpc_caches, DisabledRpcCaches(expected));
+    }
+
+    #[test]
+    fn test_arg_parsing_rejects_unknown_rpc_cache() {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--disabled-rpc-caches", "tokens"]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
     #[test]
     fn test_arg_parsing_rejects_unknown_entity_cache_mode() {
         let mut args = args_with_delta_window("128", "1");
@@ -571,6 +643,7 @@ mod cli_tests {
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
                 entity_cache_shadow_sample_rate: 0.0,
+                disabled_rpc_caches: DisabledRpcCaches::default(),
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

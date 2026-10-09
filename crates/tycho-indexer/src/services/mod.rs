@@ -47,6 +47,7 @@ mod rpc;
 mod state;
 mod ws;
 
+pub use cache::RpcCacheKind;
 pub use middleware::PlansConfig;
 pub use state::{
     cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
@@ -73,6 +74,8 @@ pub struct ServicesBuilder<G> {
     entity_cache: EntityCacheSetup<Arc<EntityCache>>,
     /// Share of state requests that shadow mode compares.
     shadow_sample_rate: f64,
+    /// RPC response caches that stay off.
+    disabled_rpc_caches: Vec<RpcCacheKind>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -110,7 +113,15 @@ where
             window_config: WindowConfig::default(),
             entity_cache: EntityCacheSetup::Off,
             shadow_sample_rate: 0.0,
+            disabled_rpc_caches: Vec::new(),
         }
+    }
+
+    /// Turns the given RPC response caches off. Requests to those endpoints always run the
+    /// full path.
+    pub fn disabled_rpc_caches(mut self, kinds: Vec<RpcCacheKind>) -> Self {
+        self.disabled_rpc_caches = kinds;
+        self
     }
 
     /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
@@ -292,6 +303,9 @@ where
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
+        if !self.disabled_rpc_caches.is_empty() {
+            info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
+        }
         let rpc_data = web::Data::new(
             rpc::RpcHandler::new(
                 self.db_gateway,
@@ -301,6 +315,7 @@ where
                 self.dci_protocols,
                 self.protocol_systems,
             )
+            .with_disabled_caches(&self.disabled_rpc_caches)
             .with_state_service(state_service),
         );
 
