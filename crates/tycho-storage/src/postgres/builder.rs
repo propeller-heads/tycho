@@ -97,7 +97,8 @@ impl GatewayBuilder {
             self.token_cache
                 .then_some(self.chains.as_slice()),
             self.component_index
-                .then_some(self.chains.as_slice()),
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
@@ -125,7 +126,8 @@ impl GatewayBuilder {
             self.token_cache
                 .then_some(self.chains.as_slice()),
             self.component_index
-                .then_some(self.chains.as_slice()),
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
@@ -152,7 +154,8 @@ impl GatewayBuilder {
             self.token_cache
                 .then_some(self.chains.as_slice()),
             self.component_index
-                .then_some(self.chains.as_slice()),
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);

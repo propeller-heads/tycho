@@ -541,7 +541,7 @@ impl PostgresGateway {
         pool: Pool<AsyncPgConnection>,
         retention_horizon: NaiveDateTime,
         token_cache_chains: Option<&[Chain]>,
-        component_index_chains: Option<&[Chain]>,
+        component_index_chain: Option<Chain>,
     ) -> Result<Self, StorageError> {
         let chain_cache = ChainEnumCache::from_pool(pool.clone()).await?;
         let native_token_cache = Self::native_cache_from_pool(pool.clone(), &chain_cache).await?;
@@ -553,10 +553,14 @@ impl PostgresGateway {
             }
             None => None,
         };
-        let component_index = match component_index_chains {
-            Some(chains) => Some(Arc::new(
-                component_index::ComponentIndex::from_pool(pool.clone(), chains).await?,
-            )),
+        let component_index = match component_index_chain {
+            Some(chain) => {
+                let chain_db_id = chain_cache.try_get_id(&chain)?;
+                Some(Arc::new(
+                    component_index::ComponentIndex::from_pool(pool.clone(), chain, chain_db_id)
+                        .await?,
+                ))
+            }
             None => None,
         };
         let gw = PostgresGateway::with_cache(

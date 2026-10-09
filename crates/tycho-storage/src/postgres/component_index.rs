@@ -72,7 +72,6 @@
 //! second index until the swap.
 use std::{
     collections::HashMap,
-    str::FromStr,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
@@ -80,7 +79,7 @@ use std::{
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection, RunQueryDsl};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tycho_common::{
     models::{Chain, PaginationParams},
     storage::StorageError,
@@ -253,68 +252,44 @@ struct RefreshState {
     last_full_reload: Instant,
 }
 
-/// In-memory filter and paging index over `protocol_component`, one per chain.
+/// In-memory filter and paging index over `protocol_component`.
 ///
-/// Holds only the database id and the TVL of each component, grouped by protocol system in
-/// ascending id order. Answers which components match a request and how many there are; the
-/// component contents stay in Postgres. See the module docs for the design.
+/// Holds only the database id and the TVL of each component of one chain, grouped by protocol
+/// system in ascending id order. Answers which components match a request and how many there are;
+/// the component contents stay in Postgres. See the module docs for the design.
 pub struct ComponentIndex {
-    chains: HashMap<Chain, RwLock<ChainIndex>>,
-    /// Database id of each indexed chain.
-    chain_db_ids: HashMap<Chain, i64>,
+    chain: Chain,
+    chain_db_id: i64,
+    index: RwLock<ChainIndex>,
     refresh_state: Mutex<RefreshState>,
     /// [`TVL_BULK_ROWS`], lowered by tests.
     tvl_bulk_rows: usize,
 }
 
 impl ComponentIndex {
+    /// Like [`Self::from_connection`], with a connection from `pool`.
     pub async fn from_pool(
         pool: Pool<AsyncPgConnection>,
-        chains: &[Chain],
+        chain: Chain,
+        chain_db_id: i64,
     ) -> Result<Self, StorageError> {
         let mut conn = pool
             .get()
             .await
             .map_err(|err| StorageError::Unexpected(err.to_string()))?;
-        Self::from_connection(&mut conn, chains).await
+        Self::from_connection(&mut conn, chain, chain_db_id).await
     }
 
-    /// Loads the components of the given chains. Chains present in the `chain` table but not
-    /// requested are not loaded, and requests for them go to SQL. Chain rows whose name this build
-    /// does not recognize are skipped with a warning, so a shared database cannot prevent startup.
+    /// Loads the components of `chain`, whose id in the `chain` table is `chain_db_id`.
     pub async fn from_connection(
         conn: &mut AsyncPgConnection,
-        chains: &[Chain],
+        chain: Chain,
+        chain_db_id: i64,
     ) -> Result<Self, StorageError> {
-        if chains.is_empty() {
-            return Err(StorageError::Unexpected(
-                "Component index requires at least one configured chain".to_string(),
-            ));
-        }
-
-        let chain_rows: Vec<(i64, String)> = schema::chain::table
-            .select((schema::chain::id, schema::chain::name))
-            .load(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        let mut chain_db_ids = HashMap::new();
-        for (chain_db_id, chain_name) in chain_rows {
-            let Ok(chain) = Chain::from_str(&chain_name) else {
-                warn!(chain = %chain_name, "Skipping unknown chain in chain table");
-                continue;
-            };
-            if chains.contains(&chain) {
-                chain_db_ids.insert(chain, chain_db_id);
-            }
-        }
-
         let index = Self {
-            chains: chain_db_ids
-                .keys()
-                .map(|chain| (*chain, RwLock::new(ChainIndex::default())))
-                .collect(),
-            chain_db_ids,
+            chain,
+            chain_db_id,
+            index: RwLock::new(ChainIndex::default()),
             refresh_state: Mutex::new(RefreshState {
                 newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
@@ -327,7 +302,7 @@ impl ComponentIndex {
 
     /// The page of components of `protocol_system_id` on `chain` with a TVL above `min_tvl`, in
     /// ascending id order, with the same rows and total as the SQL path. Without pagination, all
-    /// matching components form the page. Returns `None` when the chain is not indexed.
+    /// matching components form the page. Returns `None` for a chain this index does not hold.
     pub(crate) fn query(
         &self,
         chain: &Chain,
@@ -335,18 +310,14 @@ impl ComponentIndex {
         min_tvl: Option<f64>,
         pagination: Option<&PaginationParams>,
     ) -> Option<ComponentPage> {
+        if *chain != self.chain {
+            return None;
+        }
         let (offset, limit) = pagination
             .map(|params| (params.offset().max(0) as usize, params.page_size.max(0) as usize))
             .unwrap_or((0, usize::MAX));
-        let chain_index = self
-            .chains
-            .get(chain)?
-            .read()
-            .expect("component index lock poisoned");
-        let page = match chain_index
-            .systems
-            .get(&protocol_system_id)
-        {
+        let index = self.read_index();
+        let page = match index.systems.get(&protocol_system_id) {
             Some(system) => system.query(min_tvl, offset, limit),
             None => ComponentPage { ids: Vec::new(), total: 0 },
         };
@@ -383,48 +354,38 @@ impl ComponentIndex {
 
     /// Adds the components with an id above the highest id in the index.
     async fn load_new_components(&self, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
-        for (chain, chain_db_id) in &self.chain_db_ids {
-            let chain_lock = &self.chains[chain];
-            let max_id = chain_lock
-                .read()
-                .expect("component index lock poisoned")
-                .max_id;
-            let rows: Vec<(i64, i64)> = schema::protocol_component::table
-                .filter(schema::protocol_component::chain_id.eq(*chain_db_id))
-                .filter(schema::protocol_component::id.gt(max_id))
-                .select((
-                    schema::protocol_component::id,
-                    schema::protocol_component::protocol_system_id,
-                ))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            let Some(max_id) = rows.iter().map(|(id, _)| *id).max() else {
-                continue;
-            };
-            debug!(chain = %chain, n_components = rows.len(), "Component index polled new components");
-            let mut chain_index = chain_lock
-                .write()
-                .expect("component index lock poisoned");
-            for (id, protocol_system_id) in rows {
-                chain_index.insert(protocol_system_id, id, NO_TVL);
-            }
-            chain_index.max_id = chain_index.max_id.max(max_id);
+        let max_id = self.read_index().max_id;
+        let rows: Vec<(i64, i64)> = schema::protocol_component::table
+            .filter(schema::protocol_component::chain_id.eq(self.chain_db_id))
+            .filter(schema::protocol_component::id.gt(max_id))
+            .select((
+                schema::protocol_component::id,
+                schema::protocol_component::protocol_system_id,
+            ))
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        let Some(max_id) = rows.iter().map(|(id, _)| *id).max() else {
+            return Ok(());
+        };
+        debug!(n_components = rows.len(), "Component index polled new components");
+        let mut index = self.write_index();
+        for (id, protocol_system_id) in rows {
+            index.insert(protocol_system_id, id, NO_TVL);
         }
+        index.max_id = index.max_id.max(max_id);
         Ok(())
     }
 
-    /// Writes `rows`, sorted by component id, into every chain's index. With `replace_all`, all
-    /// other components lose their TVL.
+    /// Writes `rows`, sorted by component id, into the index. With `replace_all`, all other
+    /// components lose their TVL.
     fn write_tvl(&self, rows: &[TvlRow], replace_all: bool) {
-        for chain_lock in self.chains.values() {
-            let mut chain_index = chain_lock
-                .write()
-                .expect("component index lock poisoned");
+        {
+            let mut index = self.write_index();
             if replace_all {
-                chain_index.clear_tvl();
+                index.clear_tvl();
             }
-            chain_index.apply_tvl(rows);
+            index.apply_tvl(rows);
         }
         self.advance_newest_tvl_ts(rows);
     }
@@ -443,42 +404,45 @@ impl ComponentIndex {
     /// Reads components and TVL again and swaps the result in. Returns the number of components.
     async fn full_reload(&self, conn: &mut AsyncPgConnection) -> Result<usize, StorageError> {
         let started = Instant::now();
-        let mut components = HashMap::new();
-        for (chain, chain_db_id) in &self.chain_db_ids {
-            let mut rows: Vec<(i64, i64)> = schema::protocol_component::table
-                .filter(schema::protocol_component::chain_id.eq(*chain_db_id))
-                .select((
-                    schema::protocol_component::id,
-                    schema::protocol_component::protocol_system_id,
-                ))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            rows.sort_unstable();
-            components.insert(*chain, rows);
-        }
+        let mut rows: Vec<(i64, i64)> = schema::protocol_component::table
+            .filter(schema::protocol_component::chain_id.eq(self.chain_db_id))
+            .select((
+                schema::protocol_component::id,
+                schema::protocol_component::protocol_system_id,
+            ))
+            .load(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        rows.sort_unstable();
         let tvl_rows = load_tvl(conn, None).await?;
 
-        let mut n_components = 0;
-        for (chain, rows) in components {
-            let mut rebuilt = ChainIndex::from_sorted_components(&rows);
-            rebuilt.apply_tvl(&tvl_rows);
-            n_components += rebuilt.n_components();
-            info!(
-                chain = %chain,
-                n_components = rebuilt.n_components(),
-                n_protocol_systems = rebuilt.systems.len(),
-                n_tvl_rows = tvl_rows.len(),
-                elapsed = ?started.elapsed(),
-                "Reloaded component index"
-            );
-            *self.chains[&chain]
-                .write()
-                .expect("component index lock poisoned") = rebuilt;
-        }
+        let mut rebuilt = ChainIndex::from_sorted_components(&rows);
+        rebuilt.apply_tvl(&tvl_rows);
+        let n_components = rebuilt.n_components();
+        info!(
+            chain = %self.chain,
+            n_components,
+            n_protocol_systems = rebuilt.systems.len(),
+            n_tvl_rows = tvl_rows.len(),
+            elapsed = ?started.elapsed(),
+            "Component index reloaded"
+        );
+        *self.write_index() = rebuilt;
         self.advance_newest_tvl_ts(&tvl_rows);
         self.state().last_full_reload = Instant::now();
         Ok(n_components)
+    }
+
+    fn read_index(&self) -> std::sync::RwLockReadGuard<'_, ChainIndex> {
+        self.index
+            .read()
+            .expect("component index lock poisoned")
+    }
+
+    fn write_index(&self) -> std::sync::RwLockWriteGuard<'_, ChainIndex> {
+        self.index
+            .write()
+            .expect("component index lock poisoned")
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, RefreshState> {
@@ -680,18 +644,16 @@ mod test {
         assert_eq!(chain_index.systems[&7].tvl, vec![NO_TVL, 3.0]);
     }
 
-    fn index_with(chain_db_id: i64, rows: &[(i64, i64)]) -> ComponentIndex {
+    fn index_with(rows: &[(i64, i64)]) -> ComponentIndex {
         let mut sorted: Vec<(i64, i64)> = rows
             .iter()
             .map(|(protocol_system_id, id)| (*id, *protocol_system_id))
             .collect();
         sorted.sort_unstable();
         ComponentIndex {
-            chains: HashMap::from([(
-                Chain::Ethereum,
-                RwLock::new(ChainIndex::from_sorted_components(&sorted)),
-            )]),
-            chain_db_ids: HashMap::from([(Chain::Ethereum, chain_db_id)]),
+            chain: Chain::Ethereum,
+            chain_db_id: 1,
+            index: RwLock::new(ChainIndex::from_sorted_components(&sorted)),
             refresh_state: Mutex::new(RefreshState {
                 newest_tvl_ts: NaiveDateTime::default(),
                 last_full_reload: Instant::now(),
@@ -702,7 +664,7 @@ mod test {
 
     #[test]
     fn test_query_unknown_system_is_empty_and_unknown_chain_is_none() {
-        let index = index_with(1, &[(7, 100)]);
+        let index = index_with(&[(7, 100)]);
 
         assert_eq!(index.query(&Chain::Ethereum, 8, None, None), Some(page(&[], 0)));
         assert_eq!(index.query(&Chain::Base, 7, None, None), None);
@@ -710,7 +672,7 @@ mod test {
 
     #[test]
     fn test_newest_tvl_ts_never_moves_back() {
-        let index = index_with(1, &[]);
+        let index = index_with(&[]);
         let at = |secs| {
             chrono::DateTime::from_timestamp(secs, 0)
                 .unwrap()
@@ -733,6 +695,8 @@ mod test {
 ///     component_index_benchmark -- --ignored --nocapture
 #[cfg(test)]
 mod benchmark {
+    use std::str::FromStr;
+
     use diesel_async::AsyncConnection;
 
     use super::*;
@@ -804,12 +768,18 @@ mod benchmark {
 
         let rss_before = rss_mib();
         let started = Instant::now();
-        let index = ComponentIndex::from_connection(&mut conn, &[chain])
+        let chain_db_id: i64 = schema::chain::table
+            .filter(schema::chain::name.eq(chain.to_string()))
+            .select(schema::chain::id)
+            .first(&mut conn)
+            .await
+            .expect("BENCH_CHAIN missing from the chain table");
+        let index = ComponentIndex::from_connection(&mut conn, chain, chain_db_id)
             .await
             .unwrap();
         let load_elapsed = started.elapsed();
         let (n_components, systems) = {
-            let chain_index = index.chains[&chain].read().unwrap();
+            let chain_index = index.read_index();
             let mut systems: Vec<(i64, usize)> = chain_index
                 .systems
                 .iter()
@@ -889,6 +859,8 @@ mod benchmark {
 /// through the index as through the SQL path, after each kind of refresh.
 #[cfg(test)]
 mod serial_db_test {
+    use std::str::FromStr;
+
     use tycho_common::{
         models::{protocol::ProtocolComponent, ChangeType},
         Bytes,
@@ -1040,7 +1012,7 @@ mod serial_db_test {
 
         let sql_gateway = PostgresGateway::from_connection(conn).await;
         assert!(sql_gateway.component_index.is_none());
-        let index = ComponentIndex::from_connection(conn, &[Chain::Ethereum])
+        let index = ComponentIndex::from_connection(conn, Chain::Ethereum, chain_id)
             .await
             .unwrap();
         let mut indexed_gateway = sql_gateway.clone();
