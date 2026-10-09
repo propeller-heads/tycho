@@ -26,7 +26,8 @@ bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` lets `book::wire` set an entry aside before it is read.
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_with = { workspace = true, optional = true }
 toml = { workspace = true }
 typetag = { workspace = true }

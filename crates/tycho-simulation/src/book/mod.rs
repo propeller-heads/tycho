@@ -23,6 +23,7 @@ pub(crate) mod levels;
 pub mod quote_tokens;
 pub(crate) mod sim;
 pub(crate) mod tvl;
+pub(crate) mod wire;
 
 /// One pair's book: the component that identifies the pair and the ready-to-simulate state
 /// holding the provider's price levels for it.

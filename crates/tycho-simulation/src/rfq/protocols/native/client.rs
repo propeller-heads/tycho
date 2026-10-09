@@ -15,8 +15,8 @@ use crate::{
     rfq::{
         errors::RFQError,
         protocols::native::models::{
-            FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeOrderbookEntry,
-            NativeSupportedChain,
+            FirmQuoteRequest, FirmQuoteResponse, NativeApiErrorResponse, NativeOrderbook,
+            NativeOrderbookEntry, NativeSupportedChain,
         },
     },
     snapshot_feed::{errors::FeedError, http::fetch_bytes},
@@ -92,14 +92,16 @@ impl NativeClient {
         // 200, so a successful response still has two possible shapes. The orderbook is tried
         // first: it is what almost every poll returns, and when neither shape matches, its parse
         // error is the one that says what the response actually looked like.
-        serde_json::from_slice(&body).map_err(|orderbook_error| {
-            match serde_json::from_slice::<NativeApiErrorResponse>(&body) {
-                Ok(api_error) => Self::orderbook_api_error(&api_error),
-                Err(_) => FeedError::Parsing(format!(
-                    "Failed to parse Native Relay orderbook: {orderbook_error}"
-                )),
-            }
-        })
+        serde_json::from_slice::<NativeOrderbook>(&body)
+            .map(|orderbook| orderbook.0)
+            .map_err(|orderbook_error| {
+                match serde_json::from_slice::<NativeApiErrorResponse>(&body) {
+                    Ok(api_error) => Self::orderbook_api_error(&api_error),
+                    Err(_) => FeedError::Parsing(format!(
+                        "Failed to parse Native Relay orderbook: {orderbook_error}"
+                    )),
+                }
+            })
     }
 
     #[instrument(

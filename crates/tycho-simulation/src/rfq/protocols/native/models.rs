@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use tycho_common::{models::Chain, Bytes};
 
-use crate::book::levels::{Levels, PriceLevel};
+use crate::book::{
+    levels::{Levels, PriceLevel},
+    wire::SkipInvalidEntries,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -34,6 +38,13 @@ where
     }
     Ok(value)
 }
+
+/// Native's aggregated orderbook: one entry per pair, side and orientation its makers quote.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct NativeOrderbook(
+    #[serde_as(deserialize_as = "SkipInvalidEntries")] pub Vec<NativeOrderbookEntry>,
+);
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NativeOrderbookEntry {
@@ -280,6 +291,29 @@ mod tests {
     /// read its ladders only.
     fn side(levels: Vec<PriceLevel>) -> NativeBookSide {
         NativeBookSide { levels: Levels::new(levels).unwrap(), minimum_in: 0.0, minimum_out: 0.0 }
+    }
+
+    /// An entry Native got wrong costs that pair alone; the orderbook's other entries publish.
+    #[test]
+    fn an_entry_native_got_wrong_leaves_the_orderbook_standing() {
+        let json = r#"[
+                {"base_address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quote_address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","minimum_in_base":0,"side":"bid","levels":[[1,0]]},
+                {"base_address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quote_address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","minimum_in_base":0,"side":"ask","levels":[[2,3000]]}
+            ]"#;
+
+        let NativeOrderbook(entries) = serde_json::from_str(json).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].side, NativeOrderbookSide::Ask);
+    }
+
+    /// Nothing readable in the orderbook is a parsing failure, not an empty book: a published
+    /// snapshot is complete, so an empty one withdraws every pair the venue had.
+    #[test]
+    fn an_orderbook_with_no_readable_entry_is_an_error() {
+        let json = r#"[{"base_address":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quote_address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","minimum_in_base":0,"side":"bid","levels":[[1,0]]}]"#;
+
+        assert!(serde_json::from_str::<NativeOrderbook>(json).is_err());
     }
 
     #[test]

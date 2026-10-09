@@ -1,14 +1,20 @@
 use std::{collections::HashMap, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use serde_with::skip_serializing_none;
+use serde_with::{serde_as, skip_serializing_none};
 use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
 
-use crate::{book::levels::Levels, rfq::errors::RFQError, serde_helpers::evm_address};
+use crate::{
+    book::{levels::Levels, wire::SkipInvalidEntries},
+    rfq::errors::RFQError,
+    serde_helpers::evm_address,
+};
 
 /// Response from GET /price-levels?chainId=<id>
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiquoricePriceLevelsResponse {
+    #[serde_as(deserialize_as = "SkipInvalidEntries")]
     pub prices: HashMap<String, Vec<LiquoriceTokenPairPrice>>,
 }
 
@@ -164,6 +170,30 @@ mod tests {
 
         let json = serde_json::to_string(&mm_levels[0]).unwrap();
         assert!(json.contains(r#"[["1.00115","100"],["1.00125","500"]]"#), "{json}");
+    }
+
+    /// A maker quoting a ladder Liquorice got wrong goes quiet for the poll; the makers that
+    /// priced their pairs correctly still publish.
+    #[test]
+    fn a_maker_with_a_malformed_ladder_does_not_cost_the_others() {
+        let json = r#"{"prices":{
+                "maker_0":[{"baseToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","quoteToken":"0xdac17f958d2ee523a2206206994597c13d831ec7","levels":[["0","1"]]}],
+                "maker_1":[{"baseToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","quoteToken":"0xdac17f958d2ee523a2206206994597c13d831ec7","levels":[["1.0005","100"]]}]
+            }}"#;
+
+        let response: LiquoricePriceLevelsResponse = serde_json::from_str(json).unwrap();
+
+        assert!(response.prices["maker_0"].is_empty());
+        assert_eq!(response.prices["maker_1"].len(), 1);
+    }
+
+    /// Nothing readable in the response is a parsing failure, not an empty book: a published
+    /// snapshot is complete, so an empty one withdraws every pair the venue had.
+    #[test]
+    fn a_response_with_no_readable_maker_is_an_error() {
+        let json = r#"{"prices":{"maker_0":[{"baseToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","quoteToken":"0xdac17f958d2ee523a2206206994597c13d831ec7","levels":[["0","1"]]}]}}"#;
+
+        assert!(serde_json::from_str::<LiquoricePriceLevelsResponse>(json).is_err());
     }
 
     #[test]

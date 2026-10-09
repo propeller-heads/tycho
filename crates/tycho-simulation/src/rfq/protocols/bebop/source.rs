@@ -12,6 +12,7 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     book::{
         component::{pair_component, pair_component_id},
+        wire::EntryReader,
         Book, BookFeedConfig, BookSnapshot, ReceivedAt,
     },
     protocol::models::ProtocolComponent,
@@ -101,12 +102,11 @@ impl BebopBookSource {
     /// update carries becomes its own component, in the orientation it was published in. Fails
     /// when any pair carries an invalid price level.
     fn build_books(&self, update: BebopPricingUpdate) -> Result<HashMap<String, Book>, FeedError> {
-        let pairs = update
-            .pairs
-            .into_iter()
-            .map(BebopBook::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| FeedError::Parsing(format!("Invalid Bebop price level: {e}")))?;
+        let mut reader = EntryReader::new();
+        let pairs = reader.read(update.pairs, BebopBook::try_from);
+        reader
+            .finish()
+            .map_err(|reason| FeedError::Parsing(format!("Bebop pricing update: {reason}")))?;
         debug!(pairs = pairs.len(), "decoded pricing update");
         // TVL normalization looks across all pairs, so it runs before the pairs are consumed.
         // Only a pair between configured tokens becomes a book, and only those are normalized —
@@ -275,8 +275,32 @@ mod tests {
             .is_empty());
     }
 
+    /// Bebop sends its whole book in one frame, so a level it got wrong on one pair costs that
+    /// pair and no other — including when the bad pair is one nobody asked for.
     #[test]
-    fn build_books_rejects_an_update_with_an_invalid_level() {
+    fn build_books_drops_the_pair_whose_level_is_invalid() {
+        let source = test_source("ws://unused".to_string(), 0.0);
+
+        let mut unconfigured = weth_usdc_price_data(3000.0);
+        unconfigured.base = hex::decode("1111111111111111111111111111111111111111").unwrap();
+        unconfigured.quote = hex::decode("2222222222222222222222222222222222222222").unwrap();
+        unconfigured.bids = vec![0.0f32, 1.0f32];
+        let update = BebopPricingUpdate { pairs: vec![weth_usdc_price_data(3000.0), unconfigured] };
+
+        let books = source.build_books(update).unwrap();
+
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        assert_eq!(
+            books.keys().collect::<Vec<_>>(),
+            vec![&pair_component_id(PROTOCOL_SYSTEM, &weth, &usdc).to_string()]
+        );
+    }
+
+    /// A frame with nothing readable in it fails the poll: a published snapshot is complete, so
+    /// one carrying no books withdraws every pair Bebop was serving.
+    #[test]
+    fn build_books_rejects_an_update_with_nothing_valid_in_it() {
         let source = test_source("ws://unused".to_string(), 0.0);
 
         let mut price_data = weth_usdc_price_data(3000.0);

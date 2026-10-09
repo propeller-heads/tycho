@@ -1,13 +1,17 @@
 use std::{collections::HashMap, fmt};
 
 use serde::{Deserialize, Serialize};
-use serde_with::skip_serializing_none;
+use serde_with::{serde_as, skip_serializing_none};
 use tycho_common::{
     models::{protocol::GetAmountOutParams, Chain},
     Bytes,
 };
 
-use crate::{book::levels::Levels, rfq::errors::RFQError, serde_helpers::evm_address};
+use crate::{
+    book::{levels::Levels, wire::SkipInvalidEntries},
+    rfq::errors::RFQError,
+    serde_helpers::evm_address,
+};
 
 /// The error Hashflow reports on a rejected request, sent as an object alongside HTTP 200.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,9 +26,11 @@ impl fmt::Display for HashflowError {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowPriceLevelsResponse {
     pub status: String, // "success" or "fail"
+    #[serde_as(deserialize_as = "Option<SkipInvalidEntries>")]
     pub levels: Option<HashMap<String, Vec<HashflowMarketMakerLevels>>>,
     pub error: Option<HashflowError>,
 }
@@ -211,6 +217,31 @@ mod tests {
 
     use super::*;
     use crate::book::levels::PriceLevel;
+
+    /// A maker quoting a ladder Hashflow got wrong goes quiet for the poll; the makers that
+    /// priced their pairs correctly still publish.
+    #[test]
+    fn a_maker_with_a_malformed_ladder_does_not_cost_the_others() {
+        let json = r#"{"status":"success","levels":{
+                "mm1":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"0"}]}],
+                "mm2":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"3000"}]}]
+            }}"#;
+
+        let response: HashflowPriceLevelsResponse = serde_json::from_str(json).unwrap();
+
+        let levels = response.levels.unwrap();
+        assert!(levels["mm1"].is_empty());
+        assert_eq!(levels["mm2"].len(), 1);
+    }
+
+    /// Nothing readable in the response is a parsing failure, not an empty book: a published
+    /// snapshot is complete, so an empty one withdraws every pair the venue had.
+    #[test]
+    fn a_response_with_no_readable_maker_is_an_error() {
+        let json = r#"{"status":"success","levels":{"mm1":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"0"}]}]}}"#;
+
+        assert!(serde_json::from_str::<HashflowPriceLevelsResponse>(json).is_err());
+    }
 
     /// Hashflow answers a rejected RFQ with HTTP 200 and an `error` object, so the quote response
     /// has to deserialize that shape rather than only the successful one.
