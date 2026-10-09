@@ -1149,7 +1149,6 @@ where
             let mut retry_count = 0;
             let mut current_end_rx = end_rx;
             let mut final_error = None;
-            let mut first_run = true;
 
             while retry_count < self.max_retries {
                 info!(extractor_id=%&self.extractor_id, retry_count, "(Re)starting synchronization loop");
@@ -1160,12 +1159,11 @@ where
                     .map(|h| h.number);
                 // Restarts of many clients happen at once after a server or extractor restart;
                 // a random delay spreads their snapshot requests.
-                let snapshot_delay = if first_run {
-                    Duration::ZERO
-                } else {
+                let snapshot_delay = if prev_block.is_some() {
                     rand::thread_rng().gen_range(Duration::ZERO..=self.snapshot_jitter)
+                } else {
+                    Duration::ZERO
                 };
-                first_run = false;
                 let res = self
                     .state_sync(&mut tx, current_end_rx, snapshot_delay)
                     .await;
@@ -3833,6 +3831,54 @@ mod test {
         assert_eq!(*snapshot_blocks.lock().unwrap(), vec![1]);
     }
 
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_retry_before_first_block_has_no_snapshot_delay() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        deltas_client
+            .expect_subscribe()
+            .times(1)
+            .returning(|_, _| Err(DeltasError::ServerError("unavailable".to_string())));
+        let (tx, rx) = channel(128);
+        deltas_client
+            .expect_subscribe()
+            .return_once(move |_, _| {
+                tokio::spawn(async move {
+                    for block in 1..=5 {
+                        let _ = tx
+                            .send(make_block_changes(block, None))
+                            .await;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                Ok((Uuid::default(), rx))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .return_once(|_| Ok(()));
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        state_sync.max_retries = 2;
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+
+        let msg = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive the first block")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        assert_eq!(msg.header.number, 1);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![1]);
+    }
+
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
         // Use vec to create Bytes from block number
         let hash = Bytes::from(vec![block_num as u8; 32]);
@@ -3954,6 +4000,8 @@ mod test {
             timestamp: 0,
             partial_block_index: None,
         });
+        // This test checks block selection, not the restart delay.
+        state_sync.snapshot_jitter = Duration::ZERO;
 
         let (handle, mut block_rx) = state_sync.start().await;
         let (jh, close_tx) = handle.split();
