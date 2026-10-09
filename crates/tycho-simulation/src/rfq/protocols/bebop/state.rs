@@ -25,12 +25,22 @@ use crate::{
 /// Rough gas estimate for one Bebop settlement.
 const BEBOP_SWAP_GAS: u64 = 70_000;
 
+/// What Bebop's quote endpoint refuses below, measured against the live API on Ethereum and
+/// Base in both directions: a trade worth less than one US dollar on the side being sold, the
+/// same figure for every pair. The venue says so in the refusal — `MinSize: Request quotes over
+/// $1.` — and publishes no per-token minimum, so this constant and a price are the whole rule.
+const MIN_TRADE_USD: f64 = 1.0;
+
 #[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
 pub struct BebopState {
     pub(super) base_token: Token,
     pub(super) quote_token: Token,
     #[debug(skip)]
     pub(super) book: BebopBook,
+    /// What one quote token is worth in US dollars, from the pair that prices it in a USD quote
+    /// token at the moment this book was published. It is what turns the venue's dollar floor
+    /// into an amount of a token.
+    pub(super) usd_per_quote_token: f64,
     #[debug(skip)]
     pub(super) client: Arc<BebopClient>,
 }
@@ -114,6 +124,18 @@ impl ProtocolSim for BebopState {
         }
         let amount_in = sim::to_human(&amount_in, token_in.decimals);
         let fill = ladder.fill(amount_in);
+        // The trade's worth is read on the quote side, which the swap already expresses: the
+        // amount sold when the quote token is sold, and what the ladder pays otherwise.
+        let quote_amount = match direction {
+            SwapDirection::QuoteToBase => amount_in,
+            SwapDirection::BaseToQuote => fill.amount_out,
+        };
+        let worth_usd = quote_amount * self.usd_per_quote_token;
+        if worth_usd < MIN_TRADE_USD {
+            return Err(SimulationError::RecoverableError(format!(
+                "Trade is worth {worth_usd} USD, below the {MIN_TRADE_USD} USD Bebop quotes"
+            )));
+        }
         // The state doesn't change after a swap.
         sim::fill_result(fill, amount_in, token_out.decimals, BEBOP_SWAP_GAS, self.clone_box())
     }
@@ -190,6 +212,7 @@ impl IndicativelyPriced for BebopState {
 mod tests {
     use std::str::FromStr;
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
@@ -247,6 +270,32 @@ mod tests {
         ))
     }
 
+    /// Bebop will not sign a trade worth less than a dollar, so simulating one advertises a
+    /// quote that cannot be had. This book quotes WBTC in USDC — a dollar is one USDC going in,
+    /// and 1539 satoshi coming out at the 65 000 USDC best bid.
+    #[rstest]
+    #[case::half_a_dollar_of_usdc("500000", true, false)]
+    #[case::two_dollars_of_usdc("2000000", true, true)]
+    #[case::sixty_five_cents_of_wbtc("1000", false, false)]
+    #[case::six_dollars_of_wbtc("10000", false, true)]
+    fn a_trade_worth_less_than_a_dollar_is_refused(
+        #[case] amount_in: &str,
+        #[case] sell_quote: bool,
+        #[case] quotable: bool,
+    ) {
+        let state = create_test_bebop_state();
+        let (token_in, token_out) = if sell_quote { (usdc(), wbtc()) } else { (wbtc(), usdc()) };
+
+        let result =
+            state.get_amount_out(BigUint::from_str(amount_in).unwrap(), &token_in, &token_out);
+
+        assert_eq!(result.is_ok(), quotable, "{result:?}");
+        if !quotable {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("below the 1 USD Bebop quotes"), "{error}");
+        }
+    }
+
     fn create_test_bebop_state() -> BebopState {
         let price_data = BebopPriceData {
             base: hex::decode("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(), // WBTC
@@ -259,6 +308,8 @@ mod tests {
             base_token: wbtc(),
             quote_token: usdc(),
             book: BebopBook::try_from(price_data).unwrap(),
+            // The pair's quote token is USDC.
+            usd_per_quote_token: 1.0,
             client: empty_client(),
         }
     }
@@ -408,6 +459,8 @@ mod tests {
             base_token: weth.clone(),
             quote_token: usdc.clone(),
             book: BebopBook::try_from(price_data).unwrap(),
+            // The pair's quote token is USDC.
+            usd_per_quote_token: 1.0,
             client: empty_client(),
         };
 

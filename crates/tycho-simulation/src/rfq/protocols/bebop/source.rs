@@ -5,6 +5,7 @@ use std::{
 
 use chrono::DateTime;
 use http::Request;
+use itertools::Itertools;
 use prost::Message as ProstMessage;
 use tracing::{debug, warn};
 use tycho_common::{models::token::Token, Bytes};
@@ -52,6 +53,7 @@ impl BebopBookSource {
         base_token: Token,
         quote_token: Token,
         book: BebopBook,
+        usd_per_quote_token: f64,
     ) -> (ProtocolComponent, BebopState) {
         let component = pair_component(
             component_id,
@@ -61,32 +63,32 @@ impl BebopBookSource {
             base_token.clone(),
             quote_token.clone(),
         );
-        let state = BebopState { base_token, quote_token, book, client: Arc::clone(&self.client) };
+        let state = BebopState {
+            base_token,
+            quote_token,
+            book,
+            usd_per_quote_token,
+            client: Arc::clone(&self.client),
+        };
         (component, state)
     }
 
-    /// The book's TVL in USD quote-token units, normalized through a pair that prices its quote
-    /// token in one of them when the quote token is not one itself. `None` when no such pair is
-    /// in the update.
-    fn normalized_tvl(&self, book: &BebopBook, pairs: &[BebopBook]) -> Option<f64> {
+    /// What the book is worth in USD and what one of its quote tokens is worth there: its TVL,
+    /// and the price the venue's dollar floor is read against. Both rest on the same pair — the
+    /// one pricing the book's quote token in a USD quote token, or none at all when the quote
+    /// token is one itself — so a book that has one has both. `None` when nothing in the update
+    /// prices that token, or when the pair that does is one-sided and names no price.
+    ///
+    /// The two are priced at different sizes on purpose: a book's TVL is worth what converting
+    /// all of it would fetch, where a floor of one dollar is a trade at the top of the ladder.
+    fn measure_in_usd(&self, book: &BebopBook, pairs: &[BebopBook]) -> Option<(f64, f64)> {
         if self
             .usd_quote_tokens
             .contains(&book.quote)
         {
-            return Some(book.calculate_tvl(None));
+            return Some((book.calculate_tvl(None), 1.0));
         }
-        // Look for a pair containing both our quote token and an approved token.
-        // Can be either QUOTE/APPROVED or APPROVED/QUOTE.
-        let quote_book = self
-            .usd_quote_tokens
-            .iter()
-            .find_map(|approved_quote_token| {
-                pairs.iter().find(|p| {
-                    (p.base == book.quote && p.quote == *approved_quote_token) ||
-                        (p.quote == book.quote && p.base == *approved_quote_token)
-                })
-            });
-        let Some(quote_book) = quote_book else {
+        let Some(quote_book) = self.conversion_book(book, pairs) else {
             debug!(
                 base = %book.base,
                 quote = %book.quote,
@@ -94,7 +96,25 @@ impl BebopBookSource {
             );
             return None;
         };
-        Some(book.calculate_tvl(Some(quote_book)))
+        let usd_per_quote_token = quote_book.get_mid_price(1.0, &book.quote)?;
+        Some((book.calculate_tvl(Some(quote_book)), usd_per_quote_token))
+    }
+
+    /// A pair in the same update that prices `book`'s quote token in a USD quote token, in
+    /// either orientation.
+    fn conversion_book<'a>(
+        &self,
+        book: &BebopBook,
+        pairs: &'a [BebopBook],
+    ) -> Option<&'a BebopBook> {
+        self.usd_quote_tokens
+            .iter()
+            .find_map(|usd_quote_token| {
+                pairs.iter().find(|pair| {
+                    (pair.base == book.quote && pair.quote == *usd_quote_token) ||
+                        (pair.quote == book.quote && pair.base == *usd_quote_token)
+                })
+            })
     }
 
     /// Builds the complete book for one pricing update: every pair between requested tokens
@@ -108,29 +128,32 @@ impl BebopBookSource {
             .finish()
             .map_err(|reason| FeedError::Parsing(format!("Bebop pricing update: {reason}")))?;
         debug!(pairs = pairs.len(), "decoded pricing update");
+
         // TVL normalization looks across all pairs, so it runs before the pairs are consumed.
         // Only a pair between configured tokens becomes a book, and only those are normalized —
         // but every pair stays in the list, because a kept pair's quote token may be priced by
         // one that was filtered out.
-        let tvls: Vec<Option<f64>> = pairs
+        // Pricing a book in USD needs the whole update, since the pair that prices its quote
+        // token is another of the pairs the venue just sent — so every pair is measured before
+        // any of them is consumed. What comes out is what a book needs to exist at all.
+        let measured = pairs
             .iter()
             .map(|book| {
-                self.book_config
+                let (base_token, quote_token) = self
+                    .book_config
                     .pair_tokens(&book.base, &book.quote)?;
-                self.normalized_tvl(book, &pairs)
+                let (tvl, usd_per_quote_token) = self.measure_in_usd(book, &pairs)?;
+                Some((base_token, quote_token, tvl, usd_per_quote_token))
             })
-            .collect();
+            .collect_vec();
 
         let mut books = HashMap::new();
-        for (book, tvl) in pairs.into_iter().zip(tvls) {
-            let Some((base_token, quote_token)) = self
-                .book_config
-                .pair_tokens(&book.base, &book.quote)
-            else {
-                continue;
-            };
+        for (book, (base_token, quote_token, tvl, usd_per_quote_token)) in pairs
+            .into_iter()
+            .zip(measured)
+            .filter_map(|(book, measured)| measured.map(|measured| (book, measured)))
+        {
             let component_id = pair_component_id(self.protocol_system, &book.base, &book.quote);
-            let Some(tvl) = tvl else { continue };
             if !self
                 .book_config
                 .clears_min_tvl(tvl, &component_id)
@@ -141,8 +164,13 @@ impl BebopBookSource {
             // values observed live).
             let updated_at = DateTime::from_timestamp_millis(book.last_update_ts as i64);
             let book_key = component_id.to_string();
-            let (component, state) =
-                self.build_book(component_id, base_token.clone(), quote_token.clone(), book);
+            let (component, state) = self.build_book(
+                component_id,
+                base_token.clone(),
+                quote_token.clone(),
+                book,
+                usd_per_quote_token,
+            );
             books.insert(book_key, Book { component, state: Arc::new(state), updated_at });
         }
         Ok(books)
@@ -376,13 +404,20 @@ mod tests {
 
         // With the normalization pair present, WETH/WBTC is emitted.
         let update = BebopPricingUpdate { pairs: vec![weth_wbtc.clone(), wbtc_usdc] };
-        assert_eq!(
-            source
-                .build_books(update)
-                .unwrap()
-                .len(),
-            1
-        );
+        let books = source.build_books(update).unwrap();
+        assert_eq!(books.len(), 1);
+
+        // The same pair prices the venue's dollar floor: one WBTC is worth the mid of the
+        // 60 000 bid and the 60 050 ask it is quoted at.
+        let state = books
+            .values()
+            .next()
+            .unwrap()
+            .state
+            .as_any()
+            .downcast_ref::<BebopState>()
+            .expect("a Bebop state");
+        assert_eq!(state.usd_per_quote_token, 60_025.0);
 
         // Without it, the unapproved quote cannot be priced and the pair is skipped.
         let update = BebopPricingUpdate { pairs: vec![weth_wbtc] };
