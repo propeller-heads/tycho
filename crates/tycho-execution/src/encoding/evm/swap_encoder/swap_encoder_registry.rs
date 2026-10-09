@@ -23,7 +23,8 @@ use crate::encoding::{
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
-            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
+            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
             uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
@@ -174,6 +175,9 @@ impl SwapEncoderRegistry {
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "pancakeswap_infinity_cl" | "pancakeswap_infinity_bin" => Ok(Box::new(
+                PancakeswapInfinitySwapEncoder::new(executor_address, self.chain, config)?,
+            )),
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
             }

@@ -243,6 +243,7 @@ impl ProtocolStreamProcessor {
                 "aerodrome_slipstreams".to_string(),
                 "aerodrome_v1".to_string(),
                 "lunarbase".to_string(),
+                "pancakeswap_infinity_cl".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -251,6 +252,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_v2".to_string(),
                 "pancakeswap_v3".to_string(),
                 "ring_swap_v2".to_string(),
+                "pancakeswap_infinity_cl".to_string(),
             ],
             Chain::Unichain => {
                 vec![
@@ -283,6 +285,7 @@ impl ProtocolStreamProcessor {
                     "ramses_v3".to_string(),
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
+                    "pancakeswap_infinity_cl".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -346,6 +349,13 @@ impl ProtocolStreamProcessor {
             }
             "uniswap_v4" => {
                 stream = stream.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None);
+            }
+            "pancakeswap_infinity_cl" => {
+                stream = stream.exchange::<UniswapV4State>(
+                    "pancakeswap_infinity_cl",
+                    tvl_filter.clone(),
+                    None,
+                );
             }
             "ekubo_v2" => {
                 stream = stream.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);

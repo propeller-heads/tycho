@@ -57,6 +57,7 @@ const deploy_protocols = {
         "fallback",
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
+        "pancakeswap_infinity_cl",
     ],
     "unichain": [
         "uniswap_v2",
@@ -71,7 +72,6 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
         "native_wrapper",
-        "rfq:metric",
         "rfq:native"
     ],
     "polygon": [
@@ -79,7 +79,6 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
         "native_wrapper",
-        "rfq:metric",
     ],
     "bsc": [
         "ring_swap_v2",
@@ -88,8 +87,8 @@ const deploy_protocols = {
         "uniswap_v3",
         "uniswap_v4",
         "native_wrapper",
-        "rfq:metric",
-        "rfq:native"
+        "rfq:native",
+        "pancakeswap_infinity_cl"
     ],
     "plasma": [
         "uniswap_v3",
