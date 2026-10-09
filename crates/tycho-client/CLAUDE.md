@@ -37,8 +37,9 @@ TychoStreamBuilder (stream.rs)
 1. `WsDeltasClient` subscribes; first message determines snapshot block.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
    tracked component), the synchronizer discards deltas for a random delay in
-   `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s) to spread snapshot requests
-   across clients; the first block after the delay sets the snapshot.
+   `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least
+   `MIN_SNAPSHOT_JITTER`, 5 s) to spread snapshot requests across clients; the first block after
+   the delay sets the snapshot.
 2. `HttpRPCClient` fetches initial snapshot at that block synchronously; all subsequent new
    components are fetched via background tasks (`spawn_snapshot_task`) so the delta loop never
    blocks on RPC. Each component moves through `SnapshotStatus` (`Deferred` → `InFlight`

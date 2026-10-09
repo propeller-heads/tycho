@@ -43,6 +43,8 @@ use crate::{
 
 /// Default maximum random delay before a restarted synchronizer requests a snapshot.
 pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
+/// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
+pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -468,9 +470,17 @@ where
     ///
     /// After a restart that needs a snapshot, the synchronizer waits a random time in
     /// `[0, jitter]` before it requests the snapshot. The first start has no delay.
-    /// `Duration::ZERO` turns the delay off.
+    /// A `jitter` below [`MIN_SNAPSHOT_JITTER`] is raised to it.
     pub fn with_snapshot_jitter(mut self, jitter: Duration) -> Self {
-        self.snapshot_jitter = jitter;
+        if jitter < MIN_SNAPSHOT_JITTER {
+            warn!(
+                extractor_id=%self.extractor_id,
+                requested_ms=jitter.as_millis(),
+                min_ms=MIN_SNAPSHOT_JITTER.as_millis(),
+                "Snapshot jitter is below the minimum; using the minimum"
+            );
+        }
+        self.snapshot_jitter = jitter.max(MIN_SNAPSHOT_JITTER);
         self
     }
 
@@ -3835,6 +3845,16 @@ mod test {
 
         assert_eq!(msg.header.number, 1);
         assert_eq!(*snapshot_blocks.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn test_snapshot_jitter_has_a_minimum() {
+        let state_sync = with_mocked_clients(true, false, None, None);
+        let state_sync = state_sync.with_snapshot_jitter(Duration::ZERO);
+        assert_eq!(state_sync.snapshot_jitter, MIN_SNAPSHOT_JITTER);
+
+        let state_sync = state_sync.with_snapshot_jitter(Duration::from_secs(10));
+        assert_eq!(state_sync.snapshot_jitter, Duration::from_secs(10));
     }
 
     #[test_log::test(tokio::test(start_paused = true))]

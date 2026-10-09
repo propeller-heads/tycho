@@ -123,8 +123,8 @@ struct CliArgs {
 
     /// Maximum random delay in seconds before a restarted synchronizer requests a snapshot.
     /// Spreads snapshot requests after a server or extractor restart. The first start has no
-    /// delay. Set to 0 to request snapshots without delay.
-    #[clap(long, default_value = "60")]
+    /// delay. The minimum is 5.
+    #[clap(long, default_value = "60", value_parser = clap::value_parser!(u64).range(5..))]
     snapshot_jitter: u64,
 
     /// Path to a TOML file containing component IDs to exclude from tracking.
@@ -374,8 +374,17 @@ mod cli_tests {
             "--exchange",
             "uniswap_v2",
             "--snapshot-jitter",
-            "0",
+            "5",
         ]);
-        assert_eq!(args.snapshot_jitter, 0);
+        assert_eq!(args.snapshot_jitter, 5);
+
+        let res = CliArgs::try_parse_from([
+            "tycho-client",
+            "--exchange",
+            "uniswap_v2",
+            "--snapshot-jitter",
+            "4",
+        ]);
+        assert!(res.is_err(), "A snapshot jitter below 5 should be rejected");
     }
 }

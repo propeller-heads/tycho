@@ -591,7 +591,7 @@ impl ProtocolStreamBuilder {
 
     /// Sets the maximum random delay before a restarted synchronizer requests a snapshot.
     ///
-    /// Defaults to 60 seconds. `Duration::ZERO` turns the delay off.
+    /// Defaults to 60 seconds. A `jitter` below 5 seconds is raised to 5 seconds.
     pub fn snapshot_jitter(mut self, jitter: time::Duration) -> Self {
         self.stream_builder = self
             .stream_builder

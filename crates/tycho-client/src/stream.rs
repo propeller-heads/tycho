@@ -219,7 +219,7 @@ impl TychoStreamBuilder {
     ///
     /// After a restart that needs a snapshot, each synchronizer waits a random time in
     /// `[0, jitter]` before it requests the snapshot. The first start has no delay. Defaults to
-    /// 60 seconds. `Duration::ZERO` turns the delay off.
+    /// 60 seconds. A `jitter` below 5 seconds is raised to 5 seconds.
     pub fn snapshot_jitter(mut self, jitter: Duration) -> Self {
         self.snapshot_jitter = jitter;
         self
@@ -784,8 +784,8 @@ mod tests {
         let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
         assert_eq!(builder.snapshot_jitter, Duration::from_secs(60));
 
-        let builder = builder.snapshot_jitter(Duration::ZERO);
-        assert_eq!(builder.snapshot_jitter, Duration::ZERO);
+        let builder = builder.snapshot_jitter(Duration::from_secs(10));
+        assert_eq!(builder.snapshot_jitter, Duration::from_secs(10));
     }
 
     #[test]
