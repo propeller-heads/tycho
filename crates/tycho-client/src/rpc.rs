@@ -864,15 +864,15 @@ pub trait RPCClient: Send + Sync {
         // allowing us to pre-compute the number of requests to be made.
         match component_ids {
             Some(ids) => {
+                // The server pages within the requested ids, so every chunk is page 0.
                 let tasks: Vec<_> =
                     ids.chunks(chunk_size)
-                        .enumerate()
-                        .map(|(index, chunk)| {
+                        .map(|chunk| {
                             let sem = semaphore.clone();
                             let mut base =
                                 ProtocolComponentsParams::new(chain, protocol_system.as_str())
                                     .with_component_ids(chunk.to_vec())
-                                    .with_pagination(index as i64, chunk_size as i64);
+                                    .with_pagination(0, chunk_size as i64);
                             if let Some(tvl) = tvl_gt {
                                 base = base.with_tvl_gt(tvl);
                             }
@@ -1088,14 +1088,14 @@ pub trait RPCClient: Send + Sync {
 
         match params.component_ids {
             Some(ids) => {
+                // The server pages within the requested ids, so every chunk is page 0.
                 let tasks: Vec<_> =
                     ids.chunks(chunk_size)
-                        .enumerate()
-                        .map(|(index, chunk)| {
+                        .map(|chunk| {
                             let sem = semaphore.clone();
                             let mut p = ComponentTvlParams::new(params.chain)
                                 .with_component_ids(chunk.to_vec())
-                                .with_pagination(index as i64, chunk_size as i64);
+                                .with_pagination(0, chunk_size as i64);
                             if let Some(ref ps) = params.protocol_system {
                                 p = p.with_protocol_system(ps.as_str());
                             }
@@ -2155,6 +2155,70 @@ mod tests {
 
         full_chunks.assert();
         assert_eq!(accounts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_components_paginated_requests_every_id_chunk_as_page_zero() {
+        let mut server = Server::new_async().await;
+        let chunks = server
+            .mock("POST", "/v1/protocol_components")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(r#"{"protocol_components": [], "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..250)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_protocol_components_paginated(
+                ProtocolComponentsPaginatedParams::new(
+                    Chain::Ethereum,
+                    "uniswap_v2",
+                    RPC_CLIENT_CONCURRENCY,
+                )
+                .with_component_ids(ids)
+                .with_chunk_size(100),
+            )
+            .await
+            .expect("get components");
+
+        chunks.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_component_tvl_paginated_requests_every_id_chunk_as_page_zero() {
+        let mut server = Server::new_async().await;
+        let chunks = server
+            .mock("POST", "/v1/component_tvl")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(r#"{"tvl": {}, "pagination": {"page": 0, "page_size": 100, "total": 0}}"#)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<String> = (0..250)
+            .map(|i| format!("component_{i}"))
+            .collect();
+
+        client
+            .get_component_tvl_paginated(
+                ComponentTvlPaginatedParams::new(Chain::Ethereum, RPC_CLIENT_CONCURRENCY)
+                    .with_component_ids(ids)
+                    .with_chunk_size(100),
+            )
+            .await
+            .expect("get component tvl");
+
+        chunks.assert();
     }
 
     #[tokio::test]
