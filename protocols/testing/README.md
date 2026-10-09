@@ -106,3 +106,42 @@ The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op
 
 `UniswapV4Robinhood.runtime.json` builds like the others, from `(robinhood, uniswap_v4)` on a
 Robinhood fork, so `forge test` catches drift if the Robinhood executor changes.
+
+## Shared packages and fork aliases
+
+`protocol_packages.json` maps fork names to their Substreams package directories. The Rust runner,
+Docker build/filter stages and integration CI read this same file. To register a fork of an existing
+package, add its alias here and add its chain manifest and `integration_test_<alias>.tycho.yaml`
+(with hyphens replaced by underscores) under the shared package. No Dockerfile or Rust mapping edit
+is needed.
+
+Values are runtime directories: `ethereum-uniswap-v4/no-hooks`, for example. Docker builds and
+copies the top-level workspace (`ethereum-uniswap-v4`) so its nested manifests and local `target`
+directory remain available. Unmapped protocol names resolve to their own directory.
+
+Integration CI executes the selector from the PR's **base commit** and reads the candidate checkout
+only as data. Changes to Python selection code are tested separately under `pull_request`, without
+secrets or shared caches. The expensive build and execution jobs retain their fork approval gates.
+
+Selection compares the PR head with its merge base:
+
+- Alias mapping, `<alias>.yaml` and `integration_test_<alias>.tycho.yaml` changes test only their
+  owning aliases. Removal tests the former package and remaining aliases instead of a deleted job.
+- Shared package code, ABIs and Cargo metadata test that package and all its aliases, including
+  nested manifest variants.
+- Non-Markdown changes under `protocols/testing/` (except the alias map), shared Substreams crates
+  and dependencies, the Docker composite action, and the integration workflow test all eligible
+  protocols. Substreams lockfile changes that only bump local package versions do not widen scope.
+- Root workspace Cargo files and `crates/**` changes do not automatically trigger this expensive
+  matrix. Use manual dispatch when a dependency or core change needs protocol integration coverage.
+- Documentation-only changes do not schedule integration tests. Manual dispatch accepts either
+  protocol names or `protocol=filter` entries and passes filters through unchanged.
+
+The builder resolves aliases once into a directory list; the filter image consumes that list and
+needs neither Python nor an extra package installation.
+
+Run the resolution and selection regression tests with Python 3.11 or newer:
+
+```sh
+python3 -m unittest discover -s protocols/testing/scripts -p 'test_*.py'
+```
