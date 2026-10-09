@@ -38,8 +38,8 @@ use tracing::debug;
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
-        blockchain::BlockAggregatedChanges, contract::Account, protocol::ProtocolComponentState,
-        MergeError, PaginationParams,
+        blockchain::BlockAggregatedChanges, protocol::ProtocolComponentState, MergeError,
+        PaginationParams,
     },
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
@@ -330,7 +330,7 @@ impl StateService {
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts.push(dto::ResponseAccount::from(Account::from(entry)));
+            accounts.push(dto::ResponseAccount::from(entry.into_served_account()));
         }
 
         Ok(dto::StateRequestResponse::new(
@@ -893,6 +893,44 @@ mod test {
         assert_eq!(response.accounts.len(), 1);
         assert_eq!(response.accounts[0].slots[&word(1)], word(expected));
         assert_eq!(response.accounts[0].token_balances[&addr(9)], Bytes::from(expected));
+    }
+
+    /// Slot 2 is zero in the cached entry; block 5, still in the window, deletes slot 3.
+    #[test]
+    fn contract_state_leaves_out_zero_slots() {
+        let harness = Harness::new(2);
+        harness.push(with_account(
+            msg(1),
+            AccountDelta::new(
+                Chain::Ethereum,
+                addr(1),
+                fixtures::optional_slots([(1, 1), (2, 0), (3, 3)]),
+                Some(Bytes::from(1u64)),
+                Some(Bytes::from("0x6000")),
+                ChangeType::Creation,
+            ),
+        ));
+        for n in 2..=4 {
+            harness.push(msg(n));
+        }
+        harness.push(with_account(
+            msg(5),
+            AccountDelta::new(
+                Chain::Ethereum,
+                addr(1),
+                HashMap::from([(word(3), None)]),
+                None,
+                None,
+                ChangeType::Update,
+            ),
+        ));
+
+        let response = harness
+            .service
+            .contract_state(&contract_request(vec![addr(1)], at_block(5)))
+            .unwrap();
+
+        assert_eq!(response.accounts[0].slots, HashMap::from([(word(1), word(1))]));
     }
 
     #[test]

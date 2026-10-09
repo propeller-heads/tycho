@@ -322,27 +322,38 @@ impl CachedAccount {
 
 impl From<CachedAccount> for Account {
     fn from(cached: CachedAccount) -> Self {
-        let code = cached.code.value;
+        cached.into_account_keeping_slots(|_| true)
+    }
+}
+
+impl CachedAccount {
+    /// Converts the entry into the account that `/contract_state` returns: slots whose value is
+    /// zero are left out. A missing slot reads as zero, so the account state is the same.
+    pub(crate) fn into_served_account(self) -> Account {
+        self.into_account_keeping_slots(|value| !value.is_zero())
+    }
+
+    fn into_account_keeping_slots(self, keep: impl Fn(&StoreVal) -> bool) -> Account {
+        let code = self.code.value;
         Account::new(
-            cached.chain,
-            cached.address,
-            cached.title,
-            cached
-                .slots
+            self.chain,
+            self.address,
+            self.title,
+            self.slots
                 .into_iter()
+                .filter(|(_, value)| keep(&value.value))
                 .map(|(key, value)| (key, value.value))
                 .collect(),
-            cached.native_balance.value,
-            cached
-                .token_balances
+            self.native_balance.value,
+            self.token_balances
                 .into_iter()
                 .map(|(token, balance)| (token, balance.value))
                 .collect(),
             code.code,
             code.hash,
-            cached.balance_modify_tx,
-            cached.code_modify_tx,
-            cached.creation_tx,
+            self.balance_modify_tx,
+            self.code_modify_tx,
+            self.creation_tx,
         )
     }
 }
