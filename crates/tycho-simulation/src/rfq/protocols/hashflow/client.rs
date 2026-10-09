@@ -535,6 +535,21 @@ mod tests {
         )
     }
 
+    /// A state carries its client into every recording of it, so what authenticates the feed
+    /// must not survive the round trip, and what addresses the venue must.
+    #[test]
+    fn serialization_skips_credentials() {
+        let original =
+            create_test_client("https://hashflow.example/rfq".to_string(), Duration::from_secs(1));
+
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: HashflowClient = serde_json::from_str(&serialized).unwrap();
+
+        assert!(!serialized.contains("test_user"), "{serialized}");
+        assert!(!serialized.contains("test_key"), "{serialized}");
+        assert_eq!(deserialized.quote_endpoint, original.quote_endpoint);
+    }
+
     #[test]
     fn debug_output_omits_credentials() {
         let client =

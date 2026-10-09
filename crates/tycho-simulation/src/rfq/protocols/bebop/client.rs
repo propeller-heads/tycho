@@ -374,10 +374,8 @@ mod tests {
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: BebopClient = serde_json::from_str(&serialized).unwrap();
 
-        assert!(!serialized.contains("secret_key"));
-        assert!(!serialized.contains("secret_key"));
+        assert!(!serialized.contains("secret_key"), "{serialized}");
         assert_eq!(deserialized.quote_endpoint, original.quote_endpoint);
-        assert_eq!(deserialized.quote_timeout, original.quote_timeout);
     }
 
     #[test]

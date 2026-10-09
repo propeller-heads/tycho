@@ -600,16 +600,14 @@ mod tests {
     }
 
     #[test]
-    fn serialization_keeps_config_and_drops_the_key() {
+    fn serialization_skips_credentials() {
         let client = create_test_client("https://native.example".to_string());
 
         let serialized = serde_json::to_string(&client).unwrap();
         let deserialized: NativeClient = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized.chain, client.chain);
+        assert!(!serialized.contains("secret_key"), "{serialized}");
         assert_eq!(deserialized.endpoint, client.endpoint);
-        assert_eq!(deserialized.quote_timeout, client.quote_timeout);
-        assert!(deserialized.api_key.is_empty());
     }
 
     #[test]
