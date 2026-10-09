@@ -68,6 +68,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    "flamm",
 ];
 
 /// Whether the router must approve the protocol before swapping (see

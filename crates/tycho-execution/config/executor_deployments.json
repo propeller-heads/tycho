@@ -165,6 +165,10 @@
       "contract": "BebopFallbackExecutor",
       "args": ["0x4bB02166188132103fc608402B8993c0c0857708"]
     },
+    "flamm": {
+      "contract": "FLAMMExecutor",
+      "args": ["0x1BfcE014774D0DD7e04bC595D46Fa09F7dCCF45f"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

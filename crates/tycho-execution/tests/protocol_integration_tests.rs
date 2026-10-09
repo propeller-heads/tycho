@@ -3361,6 +3361,66 @@ fn test_single_encoding_strategy_metric() {
 }
 
 #[test]
+fn test_single_encoding_strategy_flamm() {
+    // Generates calldata for TychoRouterForFLAMMTest Solidity integration test.
+    // cbBTC -> USDC on the Everlong FLAMM pool's swap venue (Base). The amounts
+    // replay the pool's first settled swap (block 51302916): 15000 sats paid
+    // 11301759 USDC, which the Solidity test asserts to the wei on a fork of the
+    // parent block.
+    let cbbtc_base = Bytes::from_str("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf").unwrap();
+    let usdc_base = Bytes::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
+
+    let flamm_swap_component = ProtocolComponent {
+        // The swap venue's id is the pool address; the lever-up venue's id would
+        // carry the `0x00000000 || uint64(1)` discriminator.
+        id: String::from("0xc0fdCB1799cCc2CEBaA1fe247157b0dF33D57572"),
+        protocol_system: String::from("flamm"),
+        ..Default::default()
+    };
+
+    let swap = Swap::new(
+        flamm_swap_component,
+        default_token(cbbtc_base.clone()),
+        default_token(usdc_base.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        cbbtc_base,
+        usdc_base,
+        BigUint::from_str("15000").unwrap(),
+        BigUint::from_str("11301759").unwrap(),
+        BigUint::from_str("11301759").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_flamm", hex_calldata.as_str());
+}
+
+#[test]
 fn test_evm_two_hop_usv4_twif_intermediary() {
     // UniswapV4 cyclical swaps encoded as two separate hops with TWIF (6%
     // fee-on-transfer) as intermediary. Same pool used in both directions to

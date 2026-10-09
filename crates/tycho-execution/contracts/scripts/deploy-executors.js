@@ -57,6 +57,7 @@ const deploy_protocols = {
         "fallback",
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
+        "flamm",
     ],
     "unichain": [
         "uniswap_v2",
