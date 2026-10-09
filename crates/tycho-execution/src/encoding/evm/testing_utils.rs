@@ -136,21 +136,17 @@ impl IndicativelyPriced for MockRFQState {
 
 /// Builds a Bebop swap whose signed quote arrives after `delay`.
 pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) -> Swap {
-    bebop_swap(token_in, token_out, MockRFQState { delay, ..bebop_state() })
+    recording_bebop_swap(token_in, token_out, delay, Arc::default())
 }
 
-/// Builds a Bebop swap and returns the list that records the `origin` of each quote request.
+/// Builds a Bebop swap that pushes the `origin` of each quote request onto `received_origins`.
 pub fn recording_bebop_swap(
     token_in: Bytes,
     token_out: Bytes,
-) -> (Swap, Arc<Mutex<Vec<Option<Bytes>>>>) {
-    let state = bebop_state();
-    let received_origins = state.received_origins.clone();
-    (bebop_swap(token_in, token_out, state), received_origins)
-}
-
-fn bebop_state() -> MockRFQState {
-    MockRFQState {
+    delay: Duration,
+    received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
+) -> Swap {
+    let state = MockRFQState {
         quote_amount_in: None,
         quote_amount_out: BigUint::from(1_000u64),
         level_amount_out: None,
@@ -159,12 +155,9 @@ fn bebop_state() -> MockRFQState {
             ("partial_fill_offset".to_string(), Bytes::from(12u64.to_be_bytes().to_vec())),
             ("tx_to".to_string(), Bytes::from("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F")),
         ]),
-        delay: Duration::ZERO,
-        received_origins: Arc::default(),
-    }
-}
-
-fn bebop_swap(token_in: Bytes, token_out: Bytes, state: MockRFQState) -> Swap {
+        delay,
+        received_origins,
+    };
     Swap::new(
         ProtocolComponent {
             id: "bebop-rfq".to_string(),

@@ -112,6 +112,7 @@ rstest_reuse = "0.7.0"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 tempfile = "3.13.0"
 mockall = { workspace = true }
+mockito = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
 ratatui = "0.29.0"

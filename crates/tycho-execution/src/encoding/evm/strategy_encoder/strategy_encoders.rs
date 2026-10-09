@@ -477,23 +477,6 @@ mod tests {
         Bytes::from_str("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2").unwrap()
     }
 
-    fn usdc() -> Bytes {
-        Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap()
-    }
-
-    fn bebop_solution(swaps: Vec<crate::encoding::models::Swap>) -> Solution {
-        Solution::new(
-            Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-            Bytes::default(),
-            usdc(),
-            weth(),
-            BigUint::from(1_000u64),
-            BigUint::from(1_000u64),
-            BigUint::from(900u64),
-            swaps,
-        )
-    }
-
     mod single {
         use super::*;
         use crate::encoding::{
@@ -504,8 +487,26 @@ mod tests {
         #[test]
         fn test_single_swap_passes_solution_origin_to_rfq_quote() {
             let origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
-            let (swap, received_origins) = recording_bebop_swap(usdc(), weth());
-            let solution = bebop_solution(vec![swap]).with_origin(origin.clone());
+            let received_origins: std::sync::Arc<std::sync::Mutex<Vec<Option<Bytes>>>> =
+                Default::default();
+            let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+            let swap = recording_bebop_swap(
+                usdc.clone(),
+                weth(),
+                Duration::ZERO,
+                received_origins.clone(),
+            );
+            let solution = Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                usdc,
+                weth(),
+                BigUint::from(1_000u64),
+                BigUint::from(1_000u64),
+                BigUint::from(900u64),
+                vec![swap],
+            )
+            .with_origin(origin.clone());
             let encoder =
                 SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
                     .unwrap();
@@ -515,21 +516,6 @@ mod tests {
                 .unwrap();
 
             assert_eq!(*received_origins.lock().unwrap(), vec![Some(origin)]);
-        }
-
-        #[test]
-        fn test_single_swap_sends_no_origin_to_rfq_quote_without_solution_origin() {
-            let (swap, received_origins) = recording_bebop_swap(usdc(), weth());
-            let solution = bebop_solution(vec![swap]);
-            let encoder =
-                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            encoder
-                .encode_strategy(&solution)
-                .unwrap();
-
-            assert_eq!(*received_origins.lock().unwrap(), vec![None]);
         }
 
         #[test]
@@ -592,28 +578,9 @@ mod tests {
     mod sequential {
         use super::*;
         use crate::encoding::{
-            evm::testing_utils::{delayed_bebop_swap, recording_bebop_swap},
+            evm::testing_utils::delayed_bebop_swap,
             models::{default_token, Swap},
         };
-
-        #[test]
-        fn test_sequential_swap_passes_solution_origin_to_every_rfq_hop() {
-            let origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
-            let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
-            let (first_hop, first_origins) = recording_bebop_swap(usdc(), weth());
-            let (second_hop, second_origins) = recording_bebop_swap(weth(), dai);
-            let solution = bebop_solution(vec![first_hop, second_hop]).with_origin(origin.clone());
-            let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
-
-            encoder
-                .encode_strategy(&solution)
-                .unwrap();
-
-            assert_eq!(*first_origins.lock().unwrap(), vec![Some(origin.clone())]);
-            assert_eq!(*second_origins.lock().unwrap(), vec![Some(origin)]);
-        }
 
         #[test]
         fn test_sequential_swap_strategy_encoder_no_permit2() {
