@@ -23,7 +23,8 @@ use crate::encoding::{
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
-            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
+            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
             uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
@@ -35,6 +36,8 @@ use crate::encoding::{
 
 /// The protocol system of a Uniswap V4 pool whose pool key names a hook.
 const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
+const PANCAKESWAP_INFINITY_BIN: &str = "pancakeswap_infinity_bin";
+const PANCAKESWAP_INFINITY_CL: &str = "pancakeswap_infinity_cl";
 
 /// Registry containing all supported `SwapEncoders`.
 #[derive(Clone)]
@@ -113,6 +116,9 @@ impl SwapEncoderRegistry {
     ///
     /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
     /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
+    ///
+    /// `pancakeswap_infinity_bin` resolves to the `pancakeswap_infinity_cl` encoder the same way:
+    /// one executor serves both pool types and picks by a pool-type byte in the swap data.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
@@ -120,6 +126,11 @@ impl SwapEncoderRegistry {
         }
         if protocol_system == UNISWAP_V4_HOOKS {
             return self.encoders.get("uniswap_v4");
+        }
+        if protocol_system == PANCAKESWAP_INFINITY_BIN {
+            return self
+                .encoders
+                .get(PANCAKESWAP_INFINITY_CL);
         }
         if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
             return self
@@ -174,6 +185,9 @@ impl SwapEncoderRegistry {
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            PANCAKESWAP_INFINITY_CL | PANCAKESWAP_INFINITY_BIN => Ok(Box::new(
+                PancakeswapInfinitySwapEncoder::new(executor_address, self.chain, config)?,
+            )),
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -429,6 +443,23 @@ mod tests {
         assert!(registry
             .get_encoder("uniswap_v4")
             .is_none());
+    }
+
+    /// One Infinity executor serves CL and Bin pools, so only the CL key is deployed and
+    /// configured; a Bin swap has to find it.
+    #[test]
+    fn test_pancakeswap_infinity_bin_resolves_to_the_cl_encoder() {
+        let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
+        let executors = format!(r#"{{"base": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
+
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+
+        let bin = registry
+            .get_encoder("pancakeswap_infinity_bin")
+            .expect("a Bin pool must resolve to the Infinity encoder");
+        assert_eq!(bin.executor_address(), &Bytes::from_str(executor).unwrap());
     }
 
     #[test]

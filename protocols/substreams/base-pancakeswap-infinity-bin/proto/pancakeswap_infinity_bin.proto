@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+// Intermediate messages passed between this package's modules. Same shape as
+// ../base-pancakeswap-infinity-cl/proto/pancakeswap_infinity_cl.proto, with ticks replaced by
+// bins: a Liquidity Book pool is a map of bin id -> (reserveX, reserveY) plus an active bin.
+package pancakeswap.infinity.bin;
+
+message Pool {
+  // The bytes32 PoolId, keccak256 of the 6-word PoolKey (infinity-core src/types/PoolId.sol:10-15).
+  bytes id = 1;
+  bytes currency0 = 2;
+  bytes currency1 = 3;
+  bytes created_tx_hash = 4;
+}
+
+message Transaction {
+  bytes hash = 1;
+  bytes from = 2;
+  bytes to = 3;
+  uint64 index = 4;
+}
+
+// One `level2` word of the bin tree after a mint or burn rewrote it: bit `id & 0xff` is set
+// when bin `(segment << 8) | bit` is in the tree, which is what the swap loop walks.
+message TreeDelta {
+  bytes pool_id = 1;
+  // `bin_id >> 8`, the key of the `level2` mapping.
+  uint32 segment = 2;
+  // The 32-byte word as written.
+  bytes bitmap = 3;
+  // Log ordinal of the Mint or Burn that caused the write.
+  uint64 ordinal = 4;
+}
+
+message TreeDeltas {
+  repeated TreeDelta deltas = 1;
+}
+
+// Absolute reserves of one bin, before and after a transaction touched it.
+//
+// Unlike CL ticks, these are NOT deltas. The events do not carry per-bin amounts, so the values
+// are read out of the BinPoolManager storage diff (see 6_map_bin_changes.rs). Both sides are kept
+// because map_protocol_changes needs `old` to decide Creation vs Update vs Deletion, and
+// map_balance_changes needs `new - old` to derive the token balance delta.
+message BinDelta {
+  // The raw 32-byte pool id.
+  bytes pool_id = 1;
+  // Liquidity Book bin id, uint24 on chain (0 .. 2^24-1), widened here.
+  uint32 bin_id = 2;
+  // Packed reserves BEFORE the write: [0,128) reserveX | [128,256) reserveY, big endian bytes32.
+  // All zero when the bin did not exist (PackedUint128Math.sol).
+  bytes old_packed = 3;
+  // Packed reserves AFTER the write, same encoding. All zero when the bin was emptied.
+  bytes new_packed = 4;
+  uint64 ordinal = 5;
+  Transaction transaction = 6;
+  // Carried through so map_balance_changes needs no second lookup: a BinDelta knows its pool but
+  // the pool's tokens only exist on the event it came from.
+  bytes currency0 = 7;
+  bytes currency1 = 8;
+  // Tree membership before and after this event. Only tree bins are swapped through: a burn down
+  // to MINIMUM_SHARE removes a bin from the tree but leaves dust in reserveOfBin, so reserves
+  // alone overstate what a swap can reach.
+  bool was_in_tree = 9;
+  bool in_tree = 10;
+}
+
+message BinDeltas {
+  repeated BinDelta deltas = 1;
+}
+
+message Events {
+  repeated PoolEvent pool_events = 3;
+
+  message PoolEvent {
+    oneof type {
+      Initialize initialize = 1;
+      Mint mint = 2;
+      Burn burn = 3;
+      Swap swap = 4;
+      Donate donate = 5;
+      ProtocolFeeUpdated protocol_fee_updated = 6;
+    }
+    uint64 log_ordinal = 100;
+    // 0x-prefixed hex of the bytes32 pool id; also the Tycho component id.
+    string pool_id = 102;
+    string currency0 = 103;
+    string currency1 = 104;
+    Transaction transaction = 105;
+
+    message Initialize {
+      // PoolKey.fee: LP fee in pips, or 0x800000 for a dynamic fee (LPFeeLibrary.sol:19).
+      uint32 fee = 1;
+      // Decoded from parameters bits [16, 32) (BinPoolParametersHelper.sol).
+      uint32 bin_step = 2;
+      // The bin the pool starts at. uint24 on chain.
+      uint32 active_id = 3;
+      string hooks = 4;
+      // Raw PoolKey.parameters (hook bitmap in bits [0, 16)).
+      bytes parameters = 5;
+    }
+
+    // Mint and Burn carry the bin ids they touched but not the resulting reserves, so
+    // 6_map_bin_changes.rs uses `ids` only to decide which storage slots to look up.
+    message Mint {
+      string sender = 1;
+      repeated uint32 ids = 2;
+      string salt = 3;
+    }
+
+    message Burn {
+      string sender = 1;
+      repeated uint32 ids = 2;
+      string salt = 3;
+    }
+
+    message Swap {
+      string sender = 1;
+      // Signed int128 as decimal string, from the pool's point of view.
+      string amount0 = 2;
+      string amount1 = 3;
+      // The active bin AFTER the swap. Combined with the pre-swap value from store_active_id
+      // this gives the inclusive range of bins the swap crossed.
+      uint32 active_id = 4;
+      // Composite swap fee actually charged (protocol + LP), pips.
+      uint32 fee = 5;
+    }
+
+    message Donate {
+      string sender = 1;
+      string amount0 = 2;
+      string amount1 = 3;
+      uint32 bin_id = 4;
+    }
+
+    message ProtocolFeeUpdated {
+      string pool_id = 1;
+      // uint24: bits [0,12) zero-for-one, bits [12,24) one-for-zero (ProtocolFeeLibrary.sol:22-31).
+      uint32 protocol_fee = 2;
+    }
+  }
+}

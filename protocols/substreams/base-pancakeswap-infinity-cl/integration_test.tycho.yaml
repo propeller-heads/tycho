@@ -1,0 +1,31 @@
+substreams_yaml_path: ./base-pancakeswap-infinity-cl.yaml
+protocol_system: "pancakeswap_infinity_cl"
+protocol_type_names:
+  - "pancakeswap_infinity_cl_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted. This also keeps
+# the suite off debug_storageRangeAt, which not every archive RPC serves.
+initialized_accounts:
+tests:
+  # Hookless static-fee pool, minted into in the creation transaction, so in-range liquidity is
+  # non-zero from the first block and simulation can quote immediately. The stop block reaches the
+  # first swap at 37,529,176, which exercises the tick and sqrt-price update path.
+  - name: test_usdc_usdt_pool
+    start_block: 37504386
+    stop_block: 37529676
+    expected_components:
+      - id: "0x9ed2b133457a9debb64997f932b15a0a81f61718e8a267a4b36fab7b960d788a"
+        tokens:
+          - "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" # USDC
+          - "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2" # USDT
+        static_attributes:
+          key_lp_fee: "0x05"
+          tick_spacing: "0x02"
+        creation_tx: "0x73c93505134565a9123bbd765c3b3e34a753d6769baba5c3825d14f3633b945e"
+        skip_simulation: false
+        # Needs an archive RPC that serves this block AND batches more than 3 calls: balance
+        # slot detection fires two calls per token, so a 2-token pool needs a batch of 4.
+        skip_execution: false
