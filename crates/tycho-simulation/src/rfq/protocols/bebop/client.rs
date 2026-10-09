@@ -551,7 +551,11 @@ impl RFQClient for BebopClient {
             ("fee", "0".into()),
             ("is_ui", "false".into()),
         ];
-        if let Some(origin_address) = &self.origin_address {
+        if let Some(origin_address) = params
+            .origin
+            .as_ref()
+            .or(self.origin_address.as_ref())
+        {
             query.push(("origin_address", bytes_to_address(origin_address)?.to_string()));
         }
         if let Some(origin_target) = &self.origin_target {
@@ -1569,6 +1573,112 @@ mod tests {
         // Verify exactly 3 requests were made (2 failures + 1 success)
         let final_count = *request_count.lock().unwrap();
         assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
+    }
+
+    /// Mock server that answers every request with aggregate_order.json and sends each request
+    /// line (method, path and query) on the returned channel.
+    async fn create_capturing_server(
+    ) -> (std::net::SocketAddr, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let json_response =
+            std::fs::read_to_string("src/rfq/protocols/bebop/test_responses/aggregate_order.json")
+                .unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let sender = sender.clone();
+                let json_response = json_response.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 8192];
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let request_line = request
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    sender.send(request_line).unwrap();
+
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json_response.len(),
+                        json_response
+                    );
+                    let _ = stream
+                        .write_all(response.as_bytes())
+                        .await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (addr, receiver)
+    }
+
+    /// Sends one binding quote request and returns the `origin_address` query values the server
+    /// received.
+    async fn origin_addresses_sent(
+        client_origin: Option<Bytes>,
+        request_origin: Option<Bytes>,
+    ) -> Vec<String> {
+        let (addr, mut requests) = create_capturing_server().await;
+        let mut client = create_test_bebop_client(
+            format!("http://127.0.0.1:{}/quote", addr.port()),
+            Duration::from_secs(5),
+        );
+        client.origin_address = client_origin;
+        let mut params = create_test_quote_params();
+        params.origin = request_origin;
+
+        client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        let request_line = requests.recv().await.unwrap();
+        let url = reqwest::Url::parse(&format!(
+            "http://localhost{}",
+            request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+        ))
+        .unwrap();
+        url.query_pairs()
+            .filter(|(key, _)| key == "origin_address")
+            .map(|(_, value)| value.to_lowercase())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_binding_quote_request_origin_overrides_client_default() {
+        let request_origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let client_origin = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+
+        let sent = origin_addresses_sent(Some(client_origin), Some(request_origin)).await;
+
+        assert_eq!(sent, vec!["0x1111111111111111111111111111111111111111"]);
+    }
+
+    #[tokio::test]
+    async fn test_binding_quote_uses_client_default_origin_without_request_origin() {
+        let client_origin = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+
+        let sent = origin_addresses_sent(Some(client_origin), None).await;
+
+        assert_eq!(sent, vec!["0x2222222222222222222222222222222222222222"]);
+    }
+
+    #[tokio::test]
+    async fn test_binding_quote_sends_no_origin_without_any_origin() {
+        let sent = origin_addresses_sent(None, None).await;
+
+        assert!(sent.is_empty(), "unexpected origin_address: {sent:?}");
     }
 
     #[test]
