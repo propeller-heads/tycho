@@ -14,11 +14,16 @@ substreams-helper = { path = "../crates/substreams-helper" }
 tycho-substreams = "0.8.1"
 anyhow = "1.0.95"
 ethabi = "18.0.0"
-num-bigint = "0.4.6"
 hex = "0.4.3"
+# Used by the Abigen-generated bindings in `src/abi/`.
+num-bigint = "0.4.6"
 itertools = "0.10.5"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_qs = "0.13.0"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[dev-dependencies]
+hex-literal = "0.4.1"
 
 [build-dependencies]
 anyhow = "1"

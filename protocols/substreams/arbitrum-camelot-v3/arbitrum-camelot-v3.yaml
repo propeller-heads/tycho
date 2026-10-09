@@ -18,9 +18,9 @@ binaries:
     file: ../target/wasm32-unknown-unknown/release/arbitrum_camelot_v3.wasm
 
 # Every module starts at the AlgebraFactory creation block (tx
-# 0x2420d9fe941f8ff2d9ac39a05f8d97535b7dbfa8a31830ddf3b1fd34c6d13ea7) so that the factory's
-# code and storage are witnessed: pools read the factory's `vaultAddress` on every swap that
-# pays a community fee. The first `Pool` event is at block 101213149.
+# 0x2420d9fe941f8ff2d9ac39a05f8d97535b7dbfa8a31830ddf3b1fd34c6d13ea7), a lower bound no pool
+# can predate. The modules read no factory code or storage: everything they track follows the
+# factory's `Pool` events, the first of which is at block 101213149.
 modules:
   - name: map_protocol_components
     kind: map
@@ -56,20 +56,28 @@ modules:
     inputs:
       - map: map_relative_component_balances
 
+  - name: store_operator_slots
+    kind: store
+    initialBlock: 101163738
+    updatePolicy: set
+    valueType: bytes
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_protocol_components
+
   - name: map_protocol_changes
     kind: map
     initialBlock: 101163738
     inputs:
-      - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_protocol_components
       - map: map_relative_component_balances
       - store: store_protocol_components
       - store: store_balances
         mode: deltas
+      - store: store_operator_slots
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
   map_protocol_components: "factory=1a3c9b1d2f0529d97f2afc5136cc23e58f1fd35b"
-  map_protocol_changes: "factory=1a3c9b1d2f0529d97f2afc5136cc23e58f1fd35b"
