@@ -487,12 +487,12 @@ async fn create_indexing_tasks(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let (cached_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
+    let (cached_gw, rpc_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
-        .build()
+        .build_with_rpc_gateway()
         .await?;
     let token_processor = EthereumTokenPreProcessor::new(
         &rpc_client,
@@ -524,17 +524,16 @@ async fn create_indexing_tasks(
     })?;
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .dci_protocols(dci_protocols)
-            .protocol_systems(protocol_systems)
-            .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs)
-            .run()?;
+    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .dci_protocols(dci_protocols)
+        .protocol_systems(protocol_systems)
+        .register_extractors(extractor_handles.clone())
+        .pending_deltas(pending_deltas_rxs)
+        .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
