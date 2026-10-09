@@ -57,10 +57,10 @@ periodic `modified_ts` delta poll for out-of-process writers. See the module doc
 `get_protocol_components` requests with a protocol system and no ids skip the SQL `COUNT` and
 `OFFSET` scan; Postgres only loads the components on the page, by primary key. Enabled via
 `GatewayBuilder::set_component_index` (the `--component-index` flag / `COMPONENT_INDEX` env var of
-the `index` and `rpc` commands, on by default). Kept fresh by write-through in
-`add_protocol_components`, a 30 s poll of new component ids and of `component_tvl` rows with a newer
-`modified_ts` (`idx_component_tvl_modified_ts`), and a full reload every hour. See the module docs
-for design and for the unexpected cases only the full reload corrects.
+the `index` and `rpc` commands, on by default). Kept fresh by a 5 s poll of new component ids and
+of `component_tvl` rows with a newer `modified_ts` (`idx_component_tvl_modified_ts`), and a full
+reload every hour. See the module docs for design and for the unexpected cases only the full
+reload corrects.
 
 ## Write Order
 

@@ -26,17 +26,17 @@
 //!
 //! # How the index stays fresh
 //!
-//! The database is the source of truth. The index converges to it through four mechanisms:
+//! The database is the source of truth. The index converges to it through three mechanisms:
 //!
-//! 1. **Write-through** — the gateway adds the components it inserts, before the enclosing
-//!    transaction commits.
-//! 2. **New-component poll** — every refresh reads the components with an id above the highest id a
-//!    poll or full reload has seen. This catches components inserted by other processes.
-//! 3. **TVL poll** — every refresh reads the `component_tvl` rows whose `modified_ts` is newer than
+//! 1. **New-component poll** — every refresh reads the components with an id above the highest id
+//!    the index has seen. The index sees a new component only once its transaction commits. Until
+//!    the next poll, the RPC still serves it from the pending-deltas buffer, which keeps a block
+//!    until the extractor reports its commit.
+//! 2. **TVL poll** — every refresh reads the `component_tvl` rows whose `modified_ts` is newer than
 //!    the newest one read so far. The update trigger and the column default set `modified_ts` on
 //!    every write. When a write changed more than [`TVL_BULK_ROWS`] rows, such as a cron rewriting
 //!    the whole table, the poll stops and all TVL is read in one sequential scan instead.
-//! 4. **Full reload** — at startup and at a fixed interval, components and TVL are read again and
+//! 3. **Full reload** — at startup and at a fixed interval, components and TVL are read again and
 //!    swapped in.
 //!
 //! Full reads of components or TVL are sequential scans of one table without `ORDER BY`; the polls
@@ -48,10 +48,6 @@
 //! The polls cannot see the cases below. None happens in normal operation; the next full reload
 //! corrects each of them.
 //!
-//! - **Rolled-back write path.** Write-through runs before the transaction commits. When the
-//!   transaction rolls back, the index keeps an id without a row, and the retry inserts the
-//!   component again under a new id. The phantom id has no TVL, so requests with a TVL threshold
-//!   never see it; requests without one count it in `total` and return its page one row short.
 //! - **Deleted rows.** A component or TVL row deleted from the database stays in the index: a
 //!   deleted component like a phantom id, a deleted TVL row with its last value.
 //! - **Writes that do not move `modified_ts`.** An insert that sets `modified_ts` explicitly, or a
@@ -67,7 +63,7 @@
 //! Each chain's index sits behind one `RwLock`, never held across an `await`. A query holds the
 //! read lock for one scan of one protocol system. TVL reads take the write lock only to write the
 //! fetched values. A full reload builds a new index without the lock, then swaps it in; components
-//! written through while it ran come back with the new-component poll that follows it.
+//! committed while it ran come back with the new-component poll that follows it.
 //!
 //! # Cost
 //!
@@ -99,14 +95,6 @@ const NO_TVL: f64 = f64::NEG_INFINITY;
 /// instead: right after a large write, the planner's statistics do not show it yet, and a read
 /// through the `modified_ts` index would visit most of the table in random order.
 const TVL_BULK_ROWS: usize = 10_000;
-
-/// A component row inserted by the write path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NewComponentRow {
-    pub(crate) chain_id: i64,
-    pub(crate) protocol_system_id: i64,
-    pub(crate) id: i64,
-}
 
 /// One page of a query: the database ids on the page, in ascending order, and the number of
 /// components matching the filters on all pages.
@@ -188,10 +176,8 @@ impl SystemIndex {
 #[derive(Debug, Default)]
 struct ChainIndex {
     systems: HashMap<i64, SystemIndex>,
-    /// Highest component id read by a new-component poll or a full reload, 0 when none. Write-
-    /// through does not move it, so the next poll also reads the components written through since,
-    /// and brings back any that a full reload swapped out.
-    polled_max_id: i64,
+    /// Highest component id in the index, 0 when empty.
+    max_id: i64,
 }
 
 impl ChainIndex {
@@ -201,7 +187,7 @@ impl ChainIndex {
         for (id, protocol_system_id) in rows {
             chain_index.insert(*protocol_system_id, *id, NO_TVL);
         }
-        chain_index.polled_max_id = rows.last().map_or(0, |(id, _)| *id);
+        chain_index.max_id = rows.last().map_or(0, |(id, _)| *id);
         chain_index
     }
 
@@ -367,26 +353,6 @@ impl ComponentIndex {
         Some(page)
     }
 
-    /// Adds components inserted by the write path. Rows of chains that are not indexed are
-    /// ignored. A new component has no TVL until a TVL poll reads its row, like in the database.
-    pub(crate) fn insert(&self, rows: &[NewComponentRow]) {
-        if rows.is_empty() {
-            return;
-        }
-        for (chain, chain_lock) in &self.chains {
-            let chain_db_id = self.chain_db_ids[chain];
-            let mut chain_index = chain_lock
-                .write()
-                .expect("component index lock poisoned");
-            for row in rows
-                .iter()
-                .filter(|row| row.chain_id == chain_db_id)
-            {
-                chain_index.insert(row.protocol_system_id, row.id, NO_TVL);
-            }
-        }
-    }
-
     /// Brings the index up to date with the database: a full reload when the last one is older
     /// than `full_reload_interval`, otherwise the new-component and TVL polls.
     pub async fn refresh(
@@ -415,17 +381,17 @@ impl ComponentIndex {
         Ok(RefreshOutcome::TvlDelta { n_rows: rows.len() })
     }
 
-    /// Adds the components with an id above the highest id a poll or full reload has seen.
+    /// Adds the components with an id above the highest id in the index.
     async fn load_new_components(&self, conn: &mut AsyncPgConnection) -> Result<(), StorageError> {
         for (chain, chain_db_id) in &self.chain_db_ids {
             let chain_lock = &self.chains[chain];
-            let polled_max_id = chain_lock
+            let max_id = chain_lock
                 .read()
                 .expect("component index lock poisoned")
-                .polled_max_id;
+                .max_id;
             let rows: Vec<(i64, i64)> = schema::protocol_component::table
                 .filter(schema::protocol_component::chain_id.eq(*chain_db_id))
-                .filter(schema::protocol_component::id.gt(polled_max_id))
+                .filter(schema::protocol_component::id.gt(max_id))
                 .select((
                     schema::protocol_component::id,
                     schema::protocol_component::protocol_system_id,
@@ -443,7 +409,7 @@ impl ComponentIndex {
             for (id, protocol_system_id) in rows {
                 chain_index.insert(protocol_system_id, id, NO_TVL);
             }
-            chain_index.polled_max_id = chain_index.polled_max_id.max(max_id);
+            chain_index.max_id = chain_index.max_id.max(max_id);
         }
         Ok(())
     }
@@ -740,25 +706,6 @@ mod test {
 
         assert_eq!(index.query(&Chain::Ethereum, 8, None, None), Some(page(&[], 0)));
         assert_eq!(index.query(&Chain::Base, 7, None, None), None);
-    }
-
-    #[test]
-    fn test_insert_ignores_other_chains_sets_no_tvl_and_leaves_the_poll_watermark() {
-        let index = index_with(1, &[(7, 50)]);
-        index.insert(&[
-            NewComponentRow { chain_id: 1, protocol_system_id: 7, id: 100 },
-            NewComponentRow { chain_id: 2, protocol_system_id: 7, id: 101 },
-        ]);
-
-        assert_eq!(index.query(&Chain::Ethereum, 7, None, None), Some(page(&[50, 100], 2)));
-        assert_eq!(index.query(&Chain::Ethereum, 7, Some(-1.0), None), Some(page(&[], 0)));
-        assert_eq!(
-            index.chains[&Chain::Ethereum]
-                .read()
-                .unwrap()
-                .polled_max_id,
-            50
-        );
     }
 
     #[test]
@@ -1280,7 +1227,7 @@ mod serial_db_test {
     }
 
     #[tokio::test]
-    async fn test_serial_db_write_through_shows_new_components_without_tvl() {
+    async fn test_serial_db_poll_reads_components_added_through_the_gateway() {
         run_against_db(|pool| async move {
             let mut conn = pool.get().await.unwrap();
             let fixture = setup(&mut conn).await;
@@ -1303,7 +1250,7 @@ mod serial_db_test {
                 .await
                 .unwrap();
 
-            // No refresh: write-through alone makes the component visible.
+            assert_eq!(fixture.refresh(&mut conn).await, RefreshOutcome::Unchanged);
             fixture
                 .assert_equivalent(&mut conn)
                 .await;

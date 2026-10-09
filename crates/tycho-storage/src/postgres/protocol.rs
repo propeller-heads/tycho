@@ -23,7 +23,6 @@ use tycho_common::{
 };
 
 use super::{
-    component_index::NewComponentRow,
     maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
     truncate_to_byte_limit,
     versioning::{apply_partitioned_versioning, VersioningEntry},
@@ -536,14 +535,6 @@ impl PostgresGateway {
         .instrument(debug_span!("insert_protocol_components", count = component_count))
         .await?;
 
-        let inserted_rows: Vec<NewComponentRow> = inserted_protocol_components
-            .iter()
-            .map(|(pc_id, _, ps_id, chain_id_db)| NewComponentRow {
-                chain_id: *chain_id_db,
-                protocol_system_id: *ps_id,
-                id: *pc_id,
-            })
-            .collect();
         let mut protocol_db_id_map = HashMap::new();
         for (pc_id, ex_id, ps_id, chain_id_db) in inserted_protocol_components {
             protocol_db_id_map.insert(
@@ -704,12 +695,6 @@ impl PostgresGateway {
         }
         .instrument(debug_span!("insert_component_contract_junction"))
         .await?;
-
-        // Like the token cache, this runs before the enclosing transaction commits; see the
-        // component index module docs for what a rollback leaves behind.
-        if let Some(component_index) = &self.component_index {
-            component_index.insert(&inserted_rows);
-        }
 
         Ok(())
     }
