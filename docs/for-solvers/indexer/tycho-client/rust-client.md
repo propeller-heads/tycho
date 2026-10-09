@@ -78,7 +78,7 @@ async fn main() {
 
 ### Snapshot jitter
 
-When the Tycho server or one of its extractors restarts, every client restarts its synchronizers at the same moment. To spread the load, a restarted synchronizer waits a random time in `[0, jitter]` before it requests a new snapshot. It discards deltas during the wait and takes the snapshot at the next block. The first start has no delay, and a restart that continues from the next expected block has no delay.
+When the Tycho server or one of its extractors restarts, every client restarts its synchronizers at the same moment. To spread the load, a restarted synchronizer waits a random time in `[0, jitter]` before it requests a new snapshot. It discards deltas during the wait and takes the snapshot at the next block. The first start has no delay. A restart that continues from the next expected block, or a stream with `no_state(true)`, requests no snapshot and has no delay.
 
 The default jitter is 60 seconds. Use `snapshot_jitter` on the builder to change it, or pass `Duration::ZERO` to turn it off:
 
