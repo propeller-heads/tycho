@@ -51,7 +51,7 @@ Entry (e.g. splitSwap)
 Interfaces (`contracts/interfaces/`): `IExecutor` (swap [void],
 getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRouter],
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
-calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
+calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client, tokenIn, tokenOut → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
 `IPropAMM` (the pAMM standard) and `IUniversalRouter`.
 
@@ -109,6 +109,11 @@ later. It is explicit rather than defaulted to `msg.sender` because deployment g
 **Per-client overrides**: Both router fees can be overridden per client address via `_customRouterFees`
 mapping (`CustomFees` struct, single storage slot). If set, the custom rate replaces the default for that client. Can be
 removed to revert to defaults.
+
+**Token fees** (`_tokenFeeBps`, set via `setTokenFee`, read via `getTokenFee`): a router fee on output for swaps
+whose `tokenIn` or `tokenOut` has a fee. It applies to every client and adds to the router fee on output. When both
+tokens have a fee, the higher one applies once. A non-zero token fee forces `mustOutputThroughRouter` to return true.
+Setting the fee to zero removes it.
 
 **Client resolution** (`_resolveClient`): When `client == address(0)` (no EIP-712 signature supplied),
 `calculateFee` and `mustOutputThroughRouter` fall back to `tx.origin` for the custom fee lookup. This lets
