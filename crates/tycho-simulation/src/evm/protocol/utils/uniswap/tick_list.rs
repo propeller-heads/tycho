@@ -185,6 +185,42 @@ impl TickList {
         Ok(())
     }
 
+    /// Sets the net liquidity of `tick`, inserting the tick when it is unknown.
+    ///
+    /// Unlike [`Self::set_tick_liquidity`], a zero value keeps the tick in the list: Algebra
+    /// pools keep a tick initialized while any position references it, so a tick whose
+    /// position liquidity cancels out still ends a swap step on chain.
+    pub(crate) fn set_tick(
+        &mut self,
+        tick: i32,
+        net_liquidity: i128,
+    ) -> Result<(), SimulationError> {
+        match self
+            .ticks
+            .binary_search_by(|t| t.index.cmp(&tick))
+        {
+            Ok(existing_idx) => self.ticks[existing_idx].net_liquidity = net_liquidity,
+            Err(insert_idx) => self
+                .ticks
+                .insert(insert_idx, TickInfo::new(tick, net_liquidity)?),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ticks.is_empty()
+    }
+
+    /// Removes `tick` from the list; removing an unknown tick changes nothing.
+    pub(crate) fn remove_tick(&mut self, tick: i32) {
+        if let Ok(existing_idx) = self
+            .ticks
+            .binary_search_by(|t| t.index.cmp(&tick))
+        {
+            self.ticks.remove(existing_idx);
+        }
+    }
+
     fn is_below_smallest(&self, tick: i32) -> bool {
         tick < self.ticks[0].index
     }
@@ -702,6 +738,60 @@ mod tests {
         let upper = tick_list.get_tick(10).unwrap();
         assert_eq!(lower.net_liquidity, delta);
         assert_eq!(upper.net_liquidity, -delta);
+    }
+
+    #[test]
+    fn test_set_tick_keeps_a_zero_net_liquidity_tick() {
+        let mut tick_list =
+            TickList::from(1, vec![create_tick_info(-100, 10), create_tick_info(100, -10)])
+                .unwrap();
+
+        tick_list.set_tick(100, 0).unwrap();
+        assert_eq!(
+            tick_list
+                .get_tick(100)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+        assert_eq!(
+            tick_list
+                .next_initialized_tick_within_one_word(0, false)
+                .unwrap(),
+            (100, true),
+            "a zero-net tick still ends a step"
+        );
+
+        tick_list.set_tick(50, 0).unwrap();
+        assert_eq!(
+            tick_list
+                .get_tick(50)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+        assert_eq!(
+            tick_list
+                .next_initialized_tick_within_one_word(0, false)
+                .unwrap(),
+            (50, true)
+        );
+        assert_eq!(tick_list.ticks.len(), 3);
+    }
+
+    #[test]
+    fn test_remove_tick() {
+        let mut tick_list =
+            TickList::from(1, vec![create_tick_info(-100, 10), create_tick_info(100, -10)])
+                .unwrap();
+
+        tick_list.remove_tick(7);
+        assert_eq!(tick_list.ticks.len(), 2, "removing an unknown tick changes nothing");
+        tick_list.remove_tick(100);
+        assert!(tick_list.get_tick(100).is_err());
+        assert!(!tick_list.is_empty());
+        tick_list.remove_tick(-100);
+        assert!(tick_list.is_empty());
     }
 
     #[test]
