@@ -551,7 +551,11 @@ impl RFQClient for BebopClient {
             ("fee", "0".into()),
             ("is_ui", "false".into()),
         ];
-        if let Some(origin_address) = &self.origin_address {
+        if let Some(origin_address) = params
+            .origin
+            .as_ref()
+            .or(self.origin_address.as_ref())
+        {
             query.push(("origin_address", bytes_to_address(origin_address)?.to_string()));
         }
         if let Some(origin_target) = &self.origin_target {
@@ -1000,6 +1004,7 @@ mod tests {
             token_out: token_out.clone(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
         let quote = client
             .request_binding_quote(&params)
@@ -1068,6 +1073,7 @@ mod tests {
             token_out: token_out.clone(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
         let quote = client
             .request_binding_quote(&params)
@@ -1117,6 +1123,7 @@ mod tests {
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
             receiver: Bytes::from_str("0xfd0b31d2e955fa55e3fa641fe90e08b677188d35").unwrap(),
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_out, BigUint::from_str("52571055094221715780641").unwrap());
@@ -1138,6 +1145,7 @@ mod tests {
             token_out: Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(),
             sender: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
             receiver: Bytes::from_str("0x809305d724B6E79C71e10a097ABadd1274B9C279").unwrap(),
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_out, BigUint::from_str("11186653890").unwrap());
@@ -1161,6 +1169,7 @@ mod tests {
             token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
@@ -1197,6 +1206,7 @@ mod tests {
             token_out: Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("1000000000000000000").unwrap());
@@ -1285,6 +1295,7 @@ mod tests {
             token_out,
             sender: router.clone(),
             receiver: router,
+            origin: None,
         }
     }
 
@@ -1564,6 +1575,54 @@ mod tests {
         assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
     }
 
+    /// Sends one binding quote request and asserts the server received `expected` as its only
+    /// `origin_address`.
+    async fn assert_origin_sent(
+        client_origin: Option<Bytes>,
+        request_origin: Option<Bytes>,
+        expected: &Bytes,
+    ) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .match_query(mockito::Matcher::UrlEncoded(
+                "origin_address".into(),
+                bytes_to_address(expected)
+                    .unwrap()
+                    .to_string(),
+            ))
+            .with_body(include_str!("test_responses/aggregate_order.json"))
+            .create_async()
+            .await;
+        let mut client = create_test_bebop_client(server.url(), Duration::from_secs(5));
+        client.origin_address = client_origin;
+        let mut params = create_test_quote_params();
+        params.origin = request_origin;
+
+        client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_binding_quote_request_origin_overrides_client_default() {
+        let request_origin = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let client_origin = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+
+        assert_origin_sent(Some(client_origin), Some(request_origin.clone()), &request_origin)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_binding_quote_uses_client_default_origin_without_request_origin() {
+        let client_origin = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+
+        assert_origin_sent(Some(client_origin.clone()), None, &client_origin).await;
+    }
+
     #[test]
     fn test_bebop_client_serialize_deserialize_roundtrip() {
         let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
@@ -1647,6 +1706,7 @@ mod tests {
             token_out: Bytes::from_str("0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3").unwrap(),
             sender: router.clone(),
             receiver: router,
+            origin: None,
         };
         let res = BebopClient::process_quote_response(quote_response, &params).unwrap();
         assert_eq!(res.amount_in, BigUint::from_str("20000000000").unwrap());

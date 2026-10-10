@@ -88,6 +88,7 @@ mod tests {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
         let encoder = RocketpoolSwapEncoder::new(
             Bytes::from("0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"),
@@ -126,6 +127,7 @@ mod tests {
             router_address: Some(Bytes::default()),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
         let encoder = RocketpoolSwapEncoder::new(
             Bytes::from("0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"),

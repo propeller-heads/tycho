@@ -137,6 +137,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: dai,
             group_token_out: weth,
+            origin: None,
         };
 
         let hex_swap = encode(
@@ -172,6 +173,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: weth,
             group_token_out: dai,
+            origin: None,
         };
 
         let hex_swap = encode(
@@ -207,6 +209,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: fw_dai,
             group_token_out: fw_weth,
+            origin: None,
         };
 
         let err = encoder()

@@ -144,6 +144,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(format!("0x{WETH}").as_str()),
             group_token_out: Bytes::from(format!("0x{WBTC}").as_str()),
+            origin: None,
         }
     }
 

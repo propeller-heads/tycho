@@ -9975,6 +9975,7 @@ dependencies = [
  "metrics",
  "metrics-util 0.20.0",
  "mockall",
+ "mockito",
  "num-bigint",
  "num-traits",
  "prost 0.13.5",

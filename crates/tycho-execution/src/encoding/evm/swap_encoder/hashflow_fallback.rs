@@ -195,6 +195,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: address(&format!("0x{WETH}")),
             group_token_out: address(&format!("0x{USDC}")),
+            origin: None,
         }
     }
 

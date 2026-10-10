@@ -74,6 +74,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = LunarBaseSwapEncoder::new(Bytes::zero(20), Chain::Base, None).unwrap();
 
