@@ -1,6 +1,5 @@
 use crate::modules::utils::{
-    dynamic_fee_config_initialized_key, dynamic_fee_config_key, should_process_dynamic_fee_config,
-    DynamicFeeEvent, Params,
+    dynamic_fee_config_initialized_key, dynamic_fee_config_key, DynamicFeeEvent, Params,
 };
 use substreams::{
     scalar::BigInt,
@@ -22,11 +21,11 @@ fn set_config_value(
 
 #[substreams::handlers::store]
 pub fn store_dynamic_fee_config(params: String, block: eth::Block, store: StoreSetBigInt) {
-    if !should_process_dynamic_fee_config(block.number) {
+    let params = Params::parse_from_query(&params).expect("Invalid module parameters");
+    if !params.processes_dynamic_fee_config(block.number) {
         return;
     }
 
-    let params = Params::parse_from_query(&params).expect("Invalid module parameters");
     let dynamic_fee_modules = params
         .dynamic_fee_modules
         .iter()

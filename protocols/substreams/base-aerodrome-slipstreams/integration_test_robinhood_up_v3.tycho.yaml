@@ -1,0 +1,29 @@
+substreams_yaml_path: ./robinhood-up-v3.yaml
+protocol_system: "up_v3"
+protocol_type_names:
+  - "up_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG on tick spacing 60. The range starts at the factory's deployment block because a
+  # pool is only emitted once its tick spacing has a stored fee, and the fee for tick spacing 60
+  # was enabled at block 6,185,348.
+  - name: weth_usdg
+    start_block: 6184096
+    # Stop once the pool has been created, initialized, minted into and swapped:
+    #   PoolCreated + Initialize: block 6,185,457
+    #   Mint:                     block 6,198,051
+    #   Swap:                     block 6,201,038
+    stop_block: 6201038
+    expected_components:
+      - id: "0xfb5637e6163279cb22fdf15b0fe5239b79e7e025"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          default_fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0xa9a348d0face9dbc307f16eb9155d3fa5b6872f45c9587e0a4ae31697c5a41be"
+        skip_simulation: false
+        skip_execution: false

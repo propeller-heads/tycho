@@ -30,7 +30,7 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
 `--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
-`--test-every-n-blocks 10`, `--bypass-executor-timelock`.
+`--test-every-n-updates 10`, `--bypass-executor-timelock`.
 
 `--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
 chain into the execution simulation's state overrides, so an executor that is unapproved or still
@@ -43,9 +43,11 @@ shows up as a failure.
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
-  dispatches blocks to stream processors, calls `poll_rpc_for_block` (every-block mode) or
-  `await_target_block` (`--test-every-n-blocks` > 1, fetches the sampled block by number) for
-  on-chain comparison
+  dispatches blocks to stream processors, tests every Nth protocol update
+  (`--test-every-n-updates`, alias `--test-every-n-blocks`), calls `poll_rpc_for_block`
+  (every-update mode, and sampled mode under `--partial-blocks`) or `await_target_block`
+  (sampled mode without `--partial-blocks`, fetches the sampled block by number) for on-chain
+  comparison
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
@@ -57,12 +59,10 @@ shows up as a failure.
     the finalized block), samples pair states, validates `get_limits` / `get_amount_out`. Marks
     the served venues stale in metrics when no Titan message arrives within
     `--price-level-stream-stale-threshold-secs`. Execution is simulated at the quoted block with
-    the overrides `oracle_overrides.rs` collected for it. Venues on the PropAMMRouter whitelist
-    are served under `propammfallback:*` and execute through the router; the others stay on
-    `pricelevelstream:*`. Both families resolve through their single `pricelevelstream` /
-    `propammfallback` entry in `executor_addresses.json` (the generic PropAMMExecutor and the
-    PropAMMFallbackExecutor). Without overrides for its venue a swap falls to the router's Uniswap
-    V3 fallback, counted per venue by
+    the overrides `oracle_overrides.rs` collected for it. Venues are served under `fallback:*`
+    and execute through `TychoFallbackRouter`, resolving through the single `fallback` entry in
+    `executor_addresses.json`. Without overrides for its venue a swap falls to the fallback pool
+    named in its `user_data`, counted per venue by
     `tycho_integration_price_level_oracle_override_misses_total` (Titan published none for that
     block) or `tycho_integration_price_level_oracle_override_unserved_total` (Titan serves no
     channel for the venue); a venue called directly reverts `StaleUpdate`

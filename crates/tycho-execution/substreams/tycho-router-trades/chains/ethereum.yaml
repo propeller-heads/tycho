@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: tycho_router_trades
-  version: v0.1.0
+  version: v0.3.0
   url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
 
 imports:
@@ -19,9 +19,21 @@ binaries:
     file: ../../target/wasm32-unknown-unknown/release/tycho_router_trades.wasm
 
 modules:
+  - name: index_router_activity
+    kind: blockIndex
+    initialBlock: 24735864
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:sf.substreams.index.v1.Keys
+
   - name: map_fee_config_events
     kind: map
-    initialBlock: 22575004
+    initialBlock: 24735864
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "fee_cfg"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -30,7 +42,7 @@ modules:
 
   - name: store_fee_config
     kind: store
-    initialBlock: 22575004
+    initialBlock: 24735864
     updatePolicy: set
     valueType: string
     inputs:
@@ -38,7 +50,11 @@ modules:
 
   - name: map_trades
     kind: map
-    initialBlock: 22575004
+    initialBlock: 24735864
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "addr:0xfd0b31d2e955fa55e3fa641fe90e08b677188d35 || addr:0x1f8db310f32d48b6180ff902ec60c586128cef47 || addr:0xda892c989d07a18b5dd3f392d949f00df15c5736 || addr:0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614 || addr:0x1644d2477f809cc2c71bccfd6dc9497e3f83210d"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -46,12 +62,26 @@ modules:
     output:
       type: proto:tycho.router.v1.Trades
 
+  - name: map_vault_transfers
+    kind: map
+    initialBlock: 24735864
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "addr:0xfd0b31d2e955fa55e3fa641fe90e08b677188d35 || addr:0x1f8db310f32d48b6180ff902ec60c586128cef47 || addr:0xda892c989d07a18b5dd3f392d949f00df15c5736 || addr:0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614 || addr:0x1644d2477f809cc2c71bccfd6dc9497e3f83210d"
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.VaultTransfers
+
   - name: db_out
     kind: map
-    initialBlock: 22575004
+    initialBlock: 24735864
     inputs:
       - map: map_trades
       - map: map_fee_config_events
+      - map: map_vault_transfers
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
@@ -60,6 +90,7 @@ network: mainnet
 params:
   map_fee_config_events: chain=ethereum&routers=0xfd0b31d2e955fa55e3fa641fe90e08b677188d35:v2,0x1f8db310f32d48b6180ff902ec60c586128cef47:v3_0,0xda892c989d07a18b5dd3f392d949f00df15c5736:v3_0,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:v3_1,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:v3_1&fee_calculators=0x1f8db310f32d48b6180ff902ec60c586128cef47:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xda892c989d07a18b5dd3f392d949f00df15c5736:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:0xa236e1f03e18d5f0ad2c7fd1a94d32b459f06a85,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:0x2930cb02f8293a684981ef7fb63c160329c410f1
   map_trades: chain=ethereum&routers=0xfd0b31d2e955fa55e3fa641fe90e08b677188d35:v2,0x1f8db310f32d48b6180ff902ec60c586128cef47:v3_0,0xda892c989d07a18b5dd3f392d949f00df15c5736:v3_0,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:v3_1,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:v3_1&fee_calculators=0x1f8db310f32d48b6180ff902ec60c586128cef47:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xda892c989d07a18b5dd3f392d949f00df15c5736:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:0xa236e1f03e18d5f0ad2c7fd1a94d32b459f06a85,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:0x2930cb02f8293a684981ef7fb63c160329c410f1
+  map_vault_transfers: chain=ethereum&routers=0xfd0b31d2e955fa55e3fa641fe90e08b677188d35:v2,0x1f8db310f32d48b6180ff902ec60c586128cef47:v3_0,0xda892c989d07a18b5dd3f392d949f00df15c5736:v3_0,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:v3_1,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:v3_1&fee_calculators=0x1f8db310f32d48b6180ff902ec60c586128cef47:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xda892c989d07a18b5dd3f392d949f00df15c5736:0x24ad1d4a2666a99ef46ada68999a89e324cd914c,0xea290ce3eae57bdb37e57872a5a14dc0d2f6e614:0xa236e1f03e18d5f0ad2c7fd1a94d32b459f06a85,0x1644d2477f809cc2c71bccfd6dc9497e3f83210d:0x2930cb02f8293a684981ef7fb63c160329c410f1
 
 sink:
   module: db_out

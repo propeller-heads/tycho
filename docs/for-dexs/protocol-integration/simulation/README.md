@@ -6,7 +6,7 @@ To enable simulations for a newly added protocol, it must first be integrated in
 
 In order to add a new native protocol, you will need to complete the following high-level steps:
 
-1. Create a protocol state struct that contains the state of the protocol, and implements the `ProtocolSim` trait (see <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-simulation/src/protocol/state.rs" target="_blank" rel="noopener noreferrer">here</a>).
+1. Create a protocol state struct that contains the state of the protocol, and implements the `ProtocolSim` trait (see <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/crates/tycho-common/src/simulation/protocol_sim.rs" target="_blank" rel="noopener noreferrer">here</a>).
 2. Create a tycho decoder for the protocol state: i.e. implement `TryFromWithBlock` for `ComponentWithState` to your new protocol state.
 
 Each native protocol should have its own module under `crates/tycho-simulation/src/evm/protocol`.
@@ -50,7 +50,7 @@ The following exchanges are integrated with the VM approach:
 
 Read the documentation of the [Ethereum Solidity](ethereum-solidity.md) interface. It describes the functions that need to be implemented and the manifest file.
 
-Additionally, read through the docstring of the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/interfaces/ISwapAdapter.sol" target="_blank" rel="noopener noreferrer">ISwapAdapter.sol</a> interface and the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/interfaces/ISwapAdapterTypes.sol" target="_blank" rel="noopener noreferrer">ISwapAdapterTypes.sol</a> interface, which defines the data types and errors the adapter interface uses. You can also generate the documentation locally and look at the generated documentation in the `./docs` folder:
+Additionally, read through the docstring of the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/src/interfaces/ISwapAdapter.sol" target="_blank" rel="noopener noreferrer">ISwapAdapter.sol</a> interface and the <a href="https://github.com/propeller-heads/tycho-indexer/blob/main/protocols/adapter-integration/evm/src/interfaces/ISwapAdapterTypes.sol" target="_blank" rel="noopener noreferrer">ISwapAdapterTypes.sol</a> interface, which defines the data types and errors the adapter interface uses. You can also generate the documentation locally and look at the generated documentation in the `./docs` folder:
 
 ```bash
 cd ./evm/
@@ -101,7 +101,7 @@ Once you have the swap adapter implemented for the new protocol, you will need t
     ```
 
 
-2. Add the associated adapter runtime file to `crates/tycho-simulation/src/protocol/vm/assets`. Make sure to name the file according to the protocol name used by Tycho Indexer in the following format: `<Protocol><Version>Adapter.evm.runtime`. For example: `vm:balancer_v2` will be `BalancerV2Adapter.evm.runtime`. Following this naming format is important as we use an automated name resolution for these files.
+2. Add the associated adapter runtime file to `crates/tycho-simulation/src/evm/protocol/vm/assets`. Make sure to name the file according to the protocol name used by Tycho Indexer in the following format: `<Protocol><Version>Adapter.evm.runtime`. For example: `vm:balancer_v2` will be `BalancerV2Adapter.evm.runtime`. Following this naming format is important as we use an automated name resolution for these files.
 
 ## Filtering
 

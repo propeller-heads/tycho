@@ -68,14 +68,22 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
         ("unichain-curve", "ethereum-curve"),
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
+        ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
+        ("robinhood-up-v3", "base-aerodrome-slipstreams"),
+        ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
+        ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
     ])
 });
 
@@ -106,6 +114,24 @@ fn check_execution_slippage(
         Err(format!("amounts differ by more than {}%", MAX_EXECUTION_SLIPPAGE * 100.0))
     } else {
         Ok(())
+    }
+}
+
+/// The largest input amount a swap can actually be executed with, given `limit`.
+///
+/// Uniswap V4 settles a swap through a `BalanceDelta` of two `int128`s, and the executor's
+/// `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to `int128`, so no
+/// amount above `int128::MAX` can be executed however deep the pool is. A limit above that
+/// ceiling is not executable, and the percentages the harness trades at must stay distinct sizes,
+/// so the cap belongs on the limit itself rather than on each amount derived from it.
+///
+/// Returns `limit` unchanged when it is at or below the ceiling.
+fn executable_max_input(limit: &BigUint) -> BigUint {
+    let ceiling = BigUint::from(i128::MAX as u128);
+    if *limit > ceiling {
+        ceiling
+    } else {
+        limit.clone()
     }
 }
 
@@ -577,7 +603,19 @@ impl TestRunner {
                     .wrap_err("Failed to run Tycho")?;
             }
             let rpc_server = tycho_runner.start_rpc_server()?;
-            match self.run_test(test, &config, test.stop_block) {
+            let result = self
+                .runtime
+                .block_on(self.last_indexed_block(&config.protocol_system))
+                .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
+                .and_then(|block| {
+                    info!(
+                        "Reading the snapshot at block {block}, the last one the indexer committed \
+                         (stop block {})",
+                        test.stop_block
+                    );
+                    self.run_test(test, &config, block)
+                });
+            match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
                 }
@@ -603,7 +641,7 @@ impl TestRunner {
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         // Fetch protocol data from Tycho RPC
         let expected_ids = test
@@ -613,16 +651,16 @@ impl TestRunner {
             .collect::<Vec<String>>();
 
         // Get block header to extract the timestamp
-        let block = self
+        let header = self
             .runtime
             .block_on(
                 self.rpc_provider
-                    .get_block_header(stop_block),
+                    .get_block_header(block),
             )
             .wrap_err("Failed to get block header")?;
 
         let (protocol_components, snapshot, all_tokens) =
-            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, stop_block)?;
+            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, block)?;
 
         let response_protocol_states_by_id: HashMap<String, ProtocolComponentState> = snapshot
             .states
@@ -655,7 +693,7 @@ impl TestRunner {
                 self.validate_token_balances(
                     &tokens_by_component,
                     &response_protocol_states_by_id,
-                    stop_block,
+                    block,
                 )?;
                 info!("All token balances match the values found onchain")
             }
@@ -670,12 +708,19 @@ impl TestRunner {
 
         let update = self.decode_snapshot(
             &config.protocol_system,
-            &block,
+            &header,
             snapshot,
             all_tokens,
             adapter_contract_path_str,
             self.vm_simulation_traces,
         )?;
+
+        let undecoded = undecoded_components(&test.expected_components, update.states.keys());
+        ensure!(
+            undecoded.is_empty(),
+            "Expected components failed to decode, see the StateDecodingFailure warnings: {}",
+            undecoded.join(", ")
+        );
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
@@ -692,7 +737,7 @@ impl TestRunner {
         self.runtime
             .block_on(self.run_execution(
                 execution_data,
-                &block,
+                &header,
                 &config.protocol_system,
                 &test.expected_components,
             ))?;
@@ -747,6 +792,44 @@ impl TestRunner {
             .into_diagnostic()?;
 
         Ok(())
+    }
+
+    /// Returns the last main-chain block committed by the protocol's extractor on this chain,
+    /// or `None` when it has no committed extraction state.
+    ///
+    /// Stopgap: `tycho-indexer run` does not wait for its final commit before exiting, so the
+    /// committed block is `stop_block` or `stop_block + 1` depending on how fast the stream
+    /// ends. Once the indexer commits through its stop block on stream end, read at
+    /// `stop_block` and remove this query, which depends on the indexer's private storage schema.
+    async fn last_indexed_block(&self, protocol_system: &str) -> miette::Result<Option<u64>> {
+        let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
+            .await
+            .into_diagnostic()
+            .wrap_err("Failed to connect to the test database")?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Database connection error: {:#}", e);
+            }
+        });
+
+        let row = client
+            .query_opt(
+                "SELECT b.number FROM extraction_state e \
+                 JOIN chain c ON c.id = e.chain_id \
+                 JOIN block b ON b.id = e.block_id AND b.chain_id = e.chain_id \
+                 WHERE c.name = $1 AND e.name = $2 AND b.main",
+                &[&self.chain.to_string(), &protocol_system],
+            )
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to query the last indexed block for {protocol_system} on {}",
+                    self.chain
+                )
+            })?;
+        Ok(row.map(|row| row.get::<_, i64>(0) as u64))
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
@@ -827,35 +910,30 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Fetches protocol data from the Tycho RPC server and prepares it for validation and
-    /// simulation.
+    /// Fetches protocol data from the Tycho RPC server for validation and decoding.
     ///
-    /// This method connects to the running Tycho RPC server to retrieve protocol components,
-    /// states, and contract storage. It then sets up the Tycho Decoder and creates an update
-    /// message that can be used for validation and simulation testing.
+    /// Retrieves the protocol's components, then the snapshot of the expected components at
+    /// `block`, including the contracts and storage slots their traced entry points access.
     ///
     /// # Arguments
     /// * `protocol_system` - The protocol system identifier (e.g., "uniswap_v2", "balancer_v2")
-    /// * `expected_component_ids` - List of component IDs to fetch from Tycho
-    /// * `adapter_contract` - Optional adapter contract name for VM-based protocols
-    /// * `adapter_build_signature` - Optional build signature for the adapter contract
-    /// * `adapter_build_args` - Optional build arguments for the adapter contract
-    /// * `vm_simulation_traces` - Whether to enable VM simulation traces
-    /// * `stop_block` - The block number to fetch data for
+    /// * `expected_component_ids` - Lowercase ids of the components to snapshot; empty means all of
+    ///   the protocol's components
+    /// * `block` - The block number to fetch the snapshot at
     ///
     /// # Returns
     /// A tuple containing:
-    /// - `Update` - Decoded protocol state update for simulation
-    /// - `HashMap<String, ProtocolComponentState>` - Protocol states by component ID
-    /// - `Block` - The block header for the specified block
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    /// - `Vec<ProtocolComponent>` - Every component of the protocol system
+    /// - `Snapshot` - States and contract storage of the expected components at `block`
+    /// - `HashMap<Bytes, Token>` - All tokens on the chain, by address
+    #[allow(clippy::type_complexity)]
     fn fetch_from_tycho_rpc(
         &self,
         protocol_system: &str,
         expected_component_ids: Vec<String>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<(Vec<ProtocolComponent>, Snapshot, HashMap<Bytes, Token>)> {
-        info!("Fetching protocol data from Tycho with stop block {}...", stop_block);
+        info!("Fetching protocol data from Tycho at block {block}...");
 
         // Create Tycho client for the RPC server
         let tycho_client = TychoClient::new(&self.tycho_http_url(), None)
@@ -918,7 +996,7 @@ impl TestRunner {
             .runtime
             .block_on(tycho_client.get_snapshots(
                 chain,
-                stop_block,
+                block,
                 protocol_system,
                 &components_by_id,
                 &contract_ids,
@@ -1159,12 +1237,6 @@ impl TestRunner {
                 .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
 
             let tokens = component.tokens.clone();
-            let formatted_token_str = format!("{:}/{:}", tokens[0].symbol, tokens[1].symbol);
-            state
-                .spot_price(&tokens[0], &tokens[1])
-                .map(|price| info!("[{}] Spot price {:?}: {:?}", id, formatted_token_str, price))
-                .into_diagnostic()
-                .wrap_err(format!("Error calculating spot price for Pool {id:?}."))?;
 
             // Test get_amount_out with different percentages of limits. The reserves or limits
             // are relevant because we need to know how much to test with. We
@@ -1181,6 +1253,8 @@ impl TestRunner {
                 .map(|perm| (perm[0], perm[1]))
                 .collect();
 
+            let mut quoted_any_direction = false;
+
             for (token_in, token_out) in &swap_directions {
                 let (max_input, max_output) = state
                     .get_limits(token_in.address.clone(), token_out.address.clone())
@@ -1193,6 +1267,46 @@ impl TestRunner {
                 info!(
                     "[{}] Retrieved limits. | Max input: {max_input} {} | Max output: {max_output} {}",
                     id, token_in.symbol, token_out.symbol
+                );
+
+                let executable_input = executable_max_input(&max_input);
+                if executable_input != max_input {
+                    warn!(
+                        "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
+                         sizing trades from {executable_input} instead",
+                        id, token_in.symbol
+                    );
+                }
+                let max_input = executable_input;
+
+                // A zero limit means the venue does not quote this direction at all - a
+                // one-directional component such as ETH -> stETH staking, or a redemption
+                // rate limit with no capacity at this block. Skip the direction instead of
+                // failing the component; the guard below still requires that at least one
+                // direction was exercised.
+                if max_input.is_zero() {
+                    warn!(
+                        "[{}] Zero limit for {} -> {}, skipping direction",
+                        id, token_in.symbol, token_out.symbol
+                    );
+                    continue;
+                }
+
+                // Priced per direction rather than once per component: consumers key their
+                // price data by swap direction, so a venue that quotes only one ordering
+                // leaves them without a price for a direction that does trade. Asked after
+                // the zero-limit skip, so a direction the venue does not trade is not
+                // required to have a price either.
+                let spot_price = state
+                    .spot_price(token_in, token_out)
+                    .into_diagnostic()
+                    .wrap_err(format!(
+                        "Error calculating spot price for Pool {id:?} for in token: {}, and out token: {}",
+                        token_in.address, token_out.address
+                    ))?;
+                info!(
+                    "[{}] Spot price {}/{}: {:?}",
+                    id, token_in.symbol, token_out.symbol, spot_price
                 );
 
                 for percentage in percentages.iter() {
@@ -1228,16 +1342,23 @@ impl TestRunner {
                             amount_out_result.gas
                         );
 
+                    quoted_any_direction = true;
+
                     if skip_execution.contains(id) {
                         info!("Skipping execution for component {id}");
                         continue;
                     }
 
-                    let executors_json = json!({
-                        (self.chain.to_string()): {
-                            (protocol_system): EXECUTOR_ADDRESS
-                        }
-                    });
+                    // Swaps are grouped before their encoder is looked up, and grouping folds
+                    // `uniswap_v4_hooks` into `uniswap_v4` because both swap through the same
+                    // PoolManager. Registering the executor under both names lets the lookup
+                    // find it whichever of the two the group ends up carrying.
+                    let mut executors = serde_json::Map::new();
+                    executors.insert(protocol_system.to_string(), json!(EXECUTOR_ADDRESS));
+                    if protocol_system == "uniswap_v4_hooks" {
+                        executors.insert("uniswap_v4".to_string(), json!(EXECUTOR_ADDRESS));
+                    }
+                    let executors_json = json!({ (self.chain.to_string()): executors });
                     let chain_model = self.chain;
                     let (solution, calldata) = encode_swap(
                         component,
@@ -1271,6 +1392,12 @@ impl TestRunner {
                         },
                     );
                 }
+            }
+
+            if !quoted_any_direction {
+                return Err(miette!(
+                    "No tradable direction for pool {id}: every swap direction reported a zero limit."
+                ));
             }
         }
 
@@ -1333,53 +1460,20 @@ impl TestRunner {
         let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
 
         // Prepare router overwrites data
-        let router_overwrites_data = execution::create_router_overwrites_data(protocol_system)?;
+        let router_overwrites_data =
+            execution::create_router_overwrites_data(self.chain, protocol_system)?;
 
-        info!("Executing {} simulations in batches ...", filtered_execution_data.len());
+        info!("Executing {} simulations ...", filtered_execution_data.len());
 
-        // Split execution data into smaller batches to avoid RPC request size limits
-        // This happens because our overwrites are colossal
-        const BATCH_SIZE: usize = 30;
-        let execution_batches: Vec<HashMap<String, TychoExecutionInput>> = filtered_execution_data
-            .clone()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .chunks(BATCH_SIZE)
-            .map(|chunk| chunk.iter().cloned().collect())
-            .collect();
-
-        let mut all_results = HashMap::new();
-
-        // Process each batch sequentially
-        for (batch_index, batch) in execution_batches.iter().enumerate() {
-            info!(
-                "Processing execution batch {} of {} ({} simulations)",
-                batch_index + 1,
-                execution_batches.len(),
-                batch.len()
-            );
-
-            let batch_results = simulate_swap_transaction(
-                &rpc_tools,
-                batch.clone(),
-                block,
-                router_overwrites_data.clone(),
-                None,
-            )
-            .await;
-
-            let batch_results = match batch_results {
-                Ok(results) => results,
-                Err((error, _, _)) => {
-                    error!("Batch {} failed: {:#}", batch_index + 1, error);
-                    return Err(error);
-                }
-            };
-
-            all_results.extend(batch_results);
-        }
-
-        let results = all_results;
+        let results = simulate_swap_transaction(
+            &rpc_tools,
+            filtered_execution_data.clone(),
+            block,
+            router_overwrites_data,
+            None,
+        )
+        .await
+        .map_err(|(error, _, _)| error)?;
 
         let mut success_count = 0;
         let mut failure_count = 0;
@@ -1454,7 +1548,7 @@ impl TestRunner {
         &self,
         component_tokens: &HashMap<String, Vec<Token>>,
         protocol_states_by_id: &HashMap<String, ProtocolComponentState>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         for (id, component) in protocol_states_by_id.iter() {
             let tokens = component_tokens.get(id);
@@ -1479,7 +1573,7 @@ impl TestRunner {
                             .block_on(self.rpc_provider.get_token_balance(
                                 token_address,
                                 component_address,
-                                stop_block,
+                                block,
                             ))?;
                     if balance != node_balance {
                         return Err(miette!(
@@ -1533,6 +1627,51 @@ impl TestRunner {
     }
 }
 
+/// Returns the block a range test reads its snapshot at: the last block the indexer committed.
+///
+/// The indexer keeps only the latest version of every attribute and may commit one block past
+/// `stop_block`, depending on how fast the stream ends. A read at an earlier block would miss
+/// every attribute written after it, so the read targets the committed block instead. Fails
+/// when that block is missing or below `stop_block`, because the database then lacks the range
+/// under test, and when it is past `stop_block + 1`, because the database then holds a later
+/// range, such as one reused with `--reuse-last-sync` from a longer run.
+fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
+    let Some(block) = last_indexed_block else {
+        return Err(miette!(
+            "The extractor has no committed block, expected at least stop block {stop_block}"
+        ));
+    };
+    ensure!(
+        block >= stop_block,
+        "The indexer committed up to block {block}, below the stop block {stop_block}"
+    );
+    ensure!(
+        block <= stop_block + 1,
+        "The indexer committed up to block {block}, past the stop block {stop_block}; the \
+         database holds a later range, rerun without --reuse-last-sync"
+    );
+    Ok(block)
+}
+
+/// Returns the lowercase ids of the expected components without `skip_simulation` that are
+/// absent from `decoded_ids`, compared case-insensitively. Returns an empty list when every such
+/// component decoded.
+fn undecoded_components<'a>(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    decoded_ids: impl IntoIterator<Item = &'a String>,
+) -> Vec<String> {
+    let decoded: HashSet<String> = decoded_ids
+        .into_iter()
+        .map(|id| id.to_lowercase())
+        .collect();
+    expected_components
+        .iter()
+        .filter(|component| !component.skip_simulation)
+        .map(|component| component.base.id.to_lowercase())
+        .filter(|id| !decoded.contains(id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
@@ -1542,6 +1681,62 @@ mod tests {
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
+
+    #[test]
+    fn snapshot_block_reads_at_the_last_committed_block() {
+        assert_eq!(snapshot_block(Some(51_696_284), 51_696_283).unwrap(), 51_696_284);
+        assert_eq!(snapshot_block(Some(51_696_283), 51_696_283).unwrap(), 51_696_283);
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_short_of_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_282), 51_696_283).is_err());
+        assert!(snapshot_block(None, 51_696_283).is_err());
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_past_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_285), 51_696_283).is_err());
+    }
+
+    #[test]
+    fn undecoded_components_lists_expected_components_missing_from_the_update() {
+        let expected: Vec<ProtocolComponentWithTestConfig> = serde_yaml::from_str(
+            r#"
+            - id: "0xAA"
+              tokens: []
+              creation_tx: "0x01"
+            - id: "0xbb"
+              tokens: []
+              creation_tx: "0x02"
+            - id: "0xcc"
+              tokens: []
+              creation_tx: "0x03"
+              skip_simulation: true
+            "#,
+        )
+        .unwrap();
+        let decoded = ["0xaa".to_string()];
+
+        assert_eq!(undecoded_components(&expected, &decoded), vec!["0xbb".to_string()]);
+        assert!(
+            undecoded_components(&expected, &["0xaa".to_string(), "0xBB".to_string()]).is_empty()
+        );
+    }
+
+    /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
+    /// size the venue reported, untouched.
+    #[test]
+    fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
+        let ceiling = BigUint::from(i128::MAX as u128);
+
+        assert_eq!(executable_max_input(&BigUint::from(1_000u32)), BigUint::from(1_000u32));
+        assert_eq!(executable_max_input(&ceiling), ceiling);
+        assert_eq!(executable_max_input(&(&ceiling + 1u32)), ceiling);
+        // The limit the deep Pons pool reports, some 12 orders of magnitude past the ceiling.
+        let pons_limit = BigUint::from_str("1693513416259416009682992155640660564186233").unwrap();
+        assert_eq!(executable_max_input(&pons_limit), ceiling);
+    }
 
     #[test]
     fn execution_within_slippage_tolerance_matches() {
@@ -1617,15 +1812,91 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arc_uniswap_packages_use_shared_packages_and_arc_manifests() {
+        let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("protocols/testing must live below protocols")
+            .to_path_buf();
+
+        for (protocol, base_protocol, config_file_name, manifest_path) in [
+            (
+                "arc-uniswap-v2",
+                "ethereum-uniswap-v2",
+                "integration_test_arc_uniswap_v2.tycho.yaml",
+                "./arc-uniswap-v2.yaml",
+            ),
+            (
+                "arc-uniswap-v3",
+                "ethereum-uniswap-v3-logs-only",
+                "integration_test_arc_uniswap_v3.tycho.yaml",
+                "./arc-uniswap-v3.yaml",
+            ),
+            (
+                "arc-uniswap-v4-no-hooks",
+                "ethereum-uniswap-v4/no-hooks",
+                "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
+                "./arc-uniswap-v4-no-hooks.yaml",
+            ),
+        ] {
+            let runner = TestRunner::new(RunnerConfig {
+                test_type: TestType::Range(TestTypeRange { match_test: None }),
+                root_path: root_path.clone(),
+                chain: Chain::Arc,
+                protocol: protocol.to_string(),
+                db_url: String::new(),
+                rpc_url: "http://localhost:8545".to_string(),
+                tycho_server_port: 4242,
+                vm_simulation_traces: false,
+                reuse_last_sync: false,
+                prebuilt_wasm: false,
+            })
+            .expect("Arc package resolution must produce a runner");
+
+            assert!(
+                runner
+                    .substreams_path
+                    .ends_with(PathBuf::from("substreams").join(base_protocol)),
+                "unexpected shared package for {protocol}",
+            );
+            assert!(
+                runner
+                    .config_file_path
+                    .ends_with(config_file_name),
+                "unexpected config file for {protocol}",
+            );
+
+            let config = TestRunner::parse_config(&runner.config_file_path)
+                .expect("Arc integration test configuration must parse");
+            assert_eq!(
+                config.substreams_yaml_path, manifest_path,
+                "unexpected manifest for {protocol}",
+            );
+            assert!(
+                runner
+                    .substreams_path
+                    .join(config.substreams_yaml_path)
+                    .is_file(),
+                "manifest must exist for {protocol}",
+            );
+        }
+    }
+
     fn get_mocked_runner() -> TestRunner {
         dotenv().ok();
         let rpc_url = env::var("RPC_URL").unwrap();
+        get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
+    }
+
+    /// Builds a runner for `protocol` on `chain` rooted at the current directory. The RPC URL
+    /// is only stored, so callers that never reach the network can pass a placeholder.
+    fn get_mocked_runner_for(chain: Chain, protocol: &str, rpc_url: String) -> TestRunner {
         let current_dir = std::env::current_dir().unwrap();
         TestRunner::new(RunnerConfig {
             test_type: TestType::Range(TestTypeRange { match_test: None }),
             root_path: current_dir,
-            chain: Chain::Ethereum,
-            protocol: "test-protocol".to_string(),
+            chain,
+            protocol: protocol.to_string(),
             db_url: "".to_string(),
             rpc_url,
             tycho_server_port: 4242,
@@ -1635,6 +1906,57 @@ mod tests {
         })
         .unwrap()
     }
+
+    #[test]
+    fn robinhood_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
+        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
+        // in the no-external-deps CI job, which does not set RPC_URL.
+        let runner = get_mocked_runner_for(
+            Chain::Robinhood,
+            "robinhood-uniswap-v4-with-hooks",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("ethereum-uniswap-v4/with-hooks"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_robinhood_uniswap_v4_with_hooks.tycho.yaml")
+        );
+    }
+
+    #[test]
+    fn bsc_ring_swap_v2_uses_shared_package_config() {
+        let runner = get_mocked_runner_for(
+            Chain::Bsc,
+            "bsc-ring-swap-v2",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("substreams/ethereum-ring-swap-v2"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_bsc_ring_swap_v2.tycho.yaml")
+        );
+    }
+
     #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();

@@ -154,6 +154,7 @@ mod extraction_state;
 mod orm;
 mod protocol;
 mod schema;
+mod snapshot;
 pub mod token_cache;
 mod versioning;
 
@@ -355,6 +356,14 @@ impl From<StorageError> for PostgresError {
     fn from(value: StorageError) -> Self {
         PostgresError(value)
     }
+}
+
+/// True if `message` is the Postgres error of a transaction that aborted because it conflicted
+/// with a concurrent one: a serialization failure (SQLSTATE 40001) or a deadlock (40P01). Every
+/// 40001 message starts with "could not serialize access"; the check is a `contains` because one
+/// conversion path prefixes the message with `DieselError: `.
+fn is_transaction_conflict(message: &str) -> bool {
+    message.contains("deadlock detected") || message.contains("could not serialize access")
 }
 
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
@@ -614,18 +623,23 @@ impl PostgresGateway {
 ///   successfully.
 /// - `Err`: Contains a `StorageError` if there was an issue creating the connection pool.
 async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
-    let pool = Pool::builder(config)
-        .build()
-        .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+    let pool = new_pool(db_url)?;
     run_migrations(db_url);
     Ok(pool)
+}
+
+/// Creates a connection pool without running migrations.
+fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    Pool::builder(config)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.
 ///
 /// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
-/// Also ensures the chain's native and wrapped native tokens are present.
+/// Also ensures every representation of the chain's native asset is present.
 ///
 /// # Arguments
 ///
@@ -670,8 +684,10 @@ async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), 
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-    ensure_token_with_price(chain_id, &chain.native_token(), conn).await;
-    ensure_token_with_price(chain_id, &chain.wrapped_native_token(), conn).await;
+    let native_asset = chain.native_asset();
+    for token in native_asset.representations() {
+        ensure_token_with_price(chain_id, token, conn).await;
+    }
 
     debug!("Ensured chain enum and native token presence for: {:?}", chain);
     Ok(())
@@ -1479,11 +1495,33 @@ pub mod db_fixtures {
 }
 
 #[cfg(test)]
+mod tests_transaction_conflict {
+    use super::is_transaction_conflict;
+
+    #[test]
+    fn test_is_transaction_conflict() {
+        let cases = [
+            ("deadlock detected", true),
+            ("DieselError: deadlock detected", true),
+            ("could not serialize access due to concurrent update", true),
+            ("DieselError: could not serialize access due to concurrent update", true),
+            ("could not serialize access due to read/write dependencies among transactions", true),
+            ("duplicate key value violates unique constraint \"token_pkey\"", false),
+            ("Failed to update tokens: connection reset", false),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(is_transaction_conflict(message), expected, "{message}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests_ensure_chain {
-    use diesel_async::AsyncConnection;
+    use diesel::prelude::*;
+    use diesel_async::{AsyncConnection, RunQueryDsl};
     use tycho_common::models::Chain;
 
-    use super::ensure_chain;
+    use super::{ensure_chain, schema};
 
     async fn setup_conn() -> diesel_async::AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").unwrap();
@@ -1513,6 +1551,53 @@ mod tests_ensure_chain {
         ensure_chain(Chain::Ethereum, &mut conn)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_arc_native_asset_bootstrap_is_idempotent_and_prices_both_representations() {
+        let mut conn = setup_conn().await;
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+        ensure_chain(Chain::Arc, &mut conn)
+            .await
+            .unwrap();
+
+        let chain_id: i64 = schema::chain::table
+            .select(schema::chain::id)
+            .filter(schema::chain::name.eq("arc"))
+            .first(&mut conn)
+            .await
+            .unwrap();
+
+        let account_count: i64 = schema::account::table
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        let token_count: i64 = schema::token::table
+            .inner_join(schema::account::table)
+            .filter(schema::account::chain_id.eq(chain_id))
+            .count()
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(account_count, 2);
+        assert_eq!(token_count, 2);
+
+        let rows: Vec<(Vec<u8>, i32, f64)> = schema::account::table
+            .inner_join(schema::token::table.inner_join(schema::token_price::table))
+            .filter(schema::account::chain_id.eq(chain_id))
+            .select((schema::account::address, schema::token::decimals, schema::token_price::price))
+            .order(schema::account::address.asc())
+            .load(&mut conn)
+            .await
+            .unwrap();
+
+        let mut routable_address = vec![0u8; 20];
+        routable_address[0] = 0x36;
+        assert_eq!(rows, vec![(vec![0u8; 20], 18, 1e18), (routable_address, 6, 1e6)]);
     }
 
     #[tokio::test]

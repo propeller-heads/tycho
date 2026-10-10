@@ -8,6 +8,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "base": {
@@ -19,6 +22,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "unichain": {
@@ -30,6 +36,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "arbitrum": {
@@ -41,6 +50,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "bsc": {
@@ -52,6 +64,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "polygon": {
@@ -63,6 +78,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "plasma": {
@@ -74,6 +92,9 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   },
   "robinhood": {
@@ -85,6 +106,23 @@
     ],
     "ROUTER_FEE_SETTER": [
       "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
+    ]
+  },
+  "arc": {
+    "EXECUTOR_SETTER_ROLE": [
+      "0x613112ACD43d95d4bE257Dae562Fb8Ea4d7ED455"
+    ],
+    "UNPAUSER_ROLE": [
+      "0x0e27D232A79dd76FBcB17830F45374c6d45bc1Cf"
+    ],
+    "ROUTER_FEE_SETTER": [
+      "0x109ff346BbfD47fDf7CD0dDCa207e19bA5fd601D"
+    ],
+    "ROUTER_FEE_RECEIVER": [
+      "0xA5503D92EE16a78E602996AD362674Dc49034A14"
     ]
   }
 }

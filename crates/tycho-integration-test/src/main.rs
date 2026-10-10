@@ -24,22 +24,29 @@ use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
 use num_traits::{Pow, ToPrimitive, Zero};
-use rand::prelude::IndexedRandom;
+use rand::prelude::{IndexedRandom, SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
-use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-    utils::bytes_to_address, PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_PREFIX,
+    utils::bytes_to_address, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX,
 };
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
-    rfq::protocols::{
-        hashflow::{client::HashflowClient, state::HashflowState},
-        liquorice::{client::LiquoriceClient, state::LiquoriceState},
+    rfq::{
+        models::ComponentLayout,
+        protocols::{
+            component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
+            hashflow::{
+                all_pairs_state::HashflowAllPairsState, client::HashflowClient,
+                state::HashflowState,
+            },
+            liquorice::{client::LiquoriceClient, state::LiquoriceState},
+        },
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
@@ -103,6 +110,12 @@ struct Cli {
     /// Disable RFQ protocols
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
+
+    /// Stream RFQ venues as one component for all token pairs where the client supports it. A
+    /// swap then limits how often the route may quote the venue again. One component per pair by
+    /// default.
+    #[arg(long, default_value_t = false)]
+    rfq_all_pairs: bool,
 
     /// Run PAMM RFQ protocols.
     #[arg(long, default_value_t = true)]
@@ -187,17 +200,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     partial_blocks: bool,
 
-    /// Run the protocol-stream test pipeline only on blocks whose number is a multiple of this
-    /// value. 1 tests every block (current behavior). Use a higher value on fast chains (e.g.
-    /// Robinhood) where the harness cannot keep up with the head. State from every block is
-    /// still ingested. Incompatible with --partial-blocks.
+    /// Run the protocol-stream test pipeline on every Nth protocol update. 1 tests every update.
+    /// Use a higher value on fast chains where the harness cannot keep up with the head, or with
+    /// --partial-blocks to cap the RPC rate: one update arrives per flashblock, so the tested
+    /// updates spread evenly in time. State from every update is ingested either way.
     #[arg(
         long,
+        visible_alias = "test-every-n-blocks",
         default_value_t = 1,
-        value_parser = clap::value_parser!(u64).range(1..),
-        conflicts_with = "partial_blocks"
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
-    test_every_n_blocks: u64,
+    test_every_n_updates: u64,
 
     /// Seconds without a protocol update before marking all known protocols as stale in metrics.
     /// 0 disables the watchdog.
@@ -241,6 +254,15 @@ struct TychoState {
     states: HashMap<String, Box<dyn ProtocolSim>>,
     components: HashMap<String, ProtocolComponent>,
     component_ids_by_protocol: HashMap<String, HashSet<String>>,
+    protocol_updates_seen: u64,
+}
+
+impl TychoState {
+    /// Counts one received protocol update and returns its 1-based sequence number.
+    fn next_update_seq(&mut self) -> u64 {
+        self.protocol_updates_seen += 1;
+        self.protocol_updates_seen
+    }
 }
 
 /// Shared, periodically-refreshed token-price snapshot (raw token units per ETH).
@@ -255,6 +277,74 @@ const TOKEN_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60)
 /// and gas estimates. Capping the input to a realistic value (~10k USD at recent ETH prices) keeps
 /// simulation and the dashboard gas estimates representative.
 const MAX_INPUT_VALUE_ETH: f64 = 5.0;
+
+/// Swap directions simulated per RFQ component. One RFQ component covers a whole chain, and each
+/// direction costs one firm quote and one transaction simulation.
+const MAX_RFQ_SWAP_DIRECTIONS: usize = 10;
+
+/// The directions an RFQ component quotes, as token pairs.
+fn rfq_swap_directions(attribute: &Bytes, tokens: &[Token]) -> Result<Vec<(Token, Token)>, String> {
+    let tokens: HashMap<&Bytes, &Token> = tokens
+        .iter()
+        .map(|token| (&token.address, token))
+        .collect();
+    let mut directions = Vec::new();
+    for (token_in, token_out) in decode_swap_directions(attribute)? {
+        let (Some(token_in), Some(token_out)) = (tokens.get(&token_in), tokens.get(&token_out))
+        else {
+            return Err(format!(
+                "Swap direction {token_in} -> {token_out} names a token the component does not carry"
+            ));
+        };
+        directions.push(((*token_in).clone(), (*token_out).clone()));
+    }
+    Ok(directions)
+}
+
+/// A random sample of at most [`MAX_RFQ_SWAP_DIRECTIONS`] directions.
+fn sample_rfq_swap_directions(mut directions: Vec<(Token, Token)>) -> Vec<(Token, Token)> {
+    directions.shuffle(&mut rand::rng());
+    directions.truncate(MAX_RFQ_SWAP_DIRECTIONS);
+    directions
+}
+
+/// The one direction a per-pair Hashflow or Liquorice state quotes. `None` for every other state.
+///
+/// Reads the state because `ProtocolComponent::from_with_tokens` reorders `component.tokens`.
+fn rfq_pair_direction(state: &dyn ProtocolSim) -> Option<(Token, Token)> {
+    if let Some(state) = state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+    {
+        return Some((state.base_token.clone(), state.quote_token.clone()));
+    }
+    let state = state
+        .as_any()
+        .downcast_ref::<LiquoriceState>()?;
+    Some((state.base_token.clone(), state.quote_token.clone()))
+}
+
+/// The smallest input a Hashflow market maker on the pair accepts, in atomic units. A maker
+/// declines an amount below its first level.
+fn hashflow_min_amount_in(
+    state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+) -> Option<BigUint> {
+    if let Some(state) = state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+    {
+        let first_level = state.levels.levels.first()?;
+        let min_amount_in = BigUint::from(first_level.quantity.ceil() as u128);
+        return Some(min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals));
+    }
+    state
+        .as_any()
+        .downcast_ref::<HashflowAllPairsState>()?
+        .price_levels
+        .minimum_amount_in(&token_in.address, &token_out.address)
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -433,7 +523,11 @@ async fn run(cli: Cli) -> miette::Result<()> {
             Duration::from_secs(cli.skip_messages_duration),
             cli.run_pamm_protocols,
         )
-        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"))
+        .with_component_layout(match cli.rfq_all_pairs {
+            true => ComponentLayout::AllPairs,
+            false => ComponentLayout::PerPair,
+        });
         rfq_handle = Some(
             rfq_stream_processor
                 .run_stream(&all_tokens, rfq_tx)
@@ -975,7 +1069,7 @@ async fn process_update(
     let block = match update.update_type {
         UpdateType::Protocol => {
             // Update state cache before block alignment check
-            {
+            let update_seq = {
                 let mut current_state = tycho_state
                     .write()
                     .map_err(|e| miette!("Failed to acquire write lock on Tycho state: {e}"))?;
@@ -1008,21 +1102,24 @@ async fn process_update(
                 for (protocol, component_ids) in &current_state.component_ids_by_protocol {
                     metrics::record_protocol_pool_count(protocol, component_ids.len());
                 }
-            }
+                current_state.next_update_seq()
+            };
 
             let update_block_number = update.update.block_number_or_timestamp;
 
-            if !is_sampled_block(update_block_number, cli.test_every_n_blocks) {
+            if !update_seq.is_multiple_of(cli.test_every_n_updates) {
                 metrics::record_protocol_update_sampled_out();
                 return Ok(());
             }
 
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
 
-            let block = if cli.test_every_n_blocks > 1 {
-                // Sampled mode: on fast chains the head is expected to be past the update, so the
-                // target block is fetched by number instead of racing the head. clap rejects
-                // --partial-blocks in this mode, so the block is always full.
+            let by_number =
+                should_fetch_block_by_number(cli.test_every_n_updates, cli.partial_blocks);
+
+            let block = if by_number {
+                // On fast chains the head is expected to be past the update, so fetch the target
+                // block by number instead of racing the head.
                 match await_target_block(
                     &rpc_tools,
                     update_block_number,
@@ -1097,6 +1194,9 @@ async fn process_update(
                              {update_block_number}, skipping."
                         );
                         metrics::record_protocol_update_skipped();
+                        for protocol in update.update.sync_states.keys() {
+                            metrics::record_protocol_sync_state_skipped(protocol);
+                        }
                         return Ok(());
                     }
                 }
@@ -1578,43 +1678,31 @@ async fn process_state(
         error!("Component has less than 2 tokens, skipping...");
         return HashMap::new();
     }
-    let mut min_amount = BigUint::ZERO;
-    // Get all the possible swap directions
-    let swap_directions = match component.protocol_system.as_str() {
-        HashflowClient::PROTOCOL_SYSTEM => {
-            // Hashflow only supports swaps between the requested base and quote tokens
-            // WARN: we read from state because the component.tokens original order
-            // is modified here: src/protocol/models.rs: ProtocolComponent::from_with_tokens
-            let state = match state
-                .as_any()
-                .downcast_ref::<HashflowState>()
-            {
-                Some(s) => s.clone(),
+    // An RFQ all-pairs component names every token the venue quotes; its swap directions attribute
+    // says which of them are paired.
+    let swap_directions = match component
+        .static_attributes
+        .get(SWAP_DIRECTIONS_ATTRIBUTE)
+    {
+        Some(attribute) => match rfq_swap_directions(attribute, &component.tokens) {
+            Ok(directions) => sample_rfq_swap_directions(directions),
+            Err(e) => {
+                error!("Invalid swap directions attribute, skipping: {e}");
+                return HashMap::new();
+            }
+        },
+        None if [HashflowClient::PROTOCOL_SYSTEM, LiquoriceClient::PROTOCOL_SYSTEM]
+            .contains(&component.protocol_system.as_str()) =>
+        {
+            match rfq_pair_direction(state.as_ref()) {
+                Some(direction) => vec![direction],
                 None => {
-                    warn!("Failed to downcast state to HashflowState");
+                    warn!("Failed to downcast state of {} component", component.protocol_system);
                     return HashMap::new();
                 }
-            };
-            // The smallest amount acceptable for hashflow is the amount of the first level, random
-            // small amounts are not accepted. The amount in will be capped to this value
-            let min_amount_in = BigUint::from(state.levels.levels[0].quantity.ceil() as u128);
-            min_amount = min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals);
-            vec![(state.base_token, state.quote_token)]
+            }
         }
-        LiquoriceClient::PROTOCOL_SYSTEM => {
-            let state = match state
-                .as_any()
-                .downcast_ref::<LiquoriceState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to LiquoriceState");
-                    return HashMap::new();
-                }
-            };
-            vec![(state.base_token, state.quote_token)]
-        }
-        _ => component
+        None => component
             .tokens
             .iter()
             .permutations(2)
@@ -1687,7 +1775,9 @@ async fn process_state(
             debug!("Calculated amount_in is zero, skipping...");
             continue;
         }
-        amount_in = amount_in.max(min_amount.clone());
+        if let Some(min_amount_in) = hashflow_min_amount_in(state.as_ref(), token_in, token_out) {
+            amount_in = amount_in.max(min_amount_in);
+        }
 
         // Safety bound for tokens missing from the price snapshot, whose limit is left uncapped:
         // avoids the "amount exceeds 96 bits" error seen on Uniswap V3/V4 with very high limits.
@@ -2025,9 +2115,12 @@ fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatis
     stats.blocks_processed >= max_blocks
 }
 
-/// True when `block_number` is selected by the `--test-every-n-blocks` sampling interval.
-fn is_sampled_block(block_number: u64, interval: u64) -> bool {
-    block_number.is_multiple_of(interval)
+/// True when a sampled update's target block should be fetched by number rather than polled for.
+///
+/// A flashblock's pending state cannot be fetched by number after the fact, so under
+/// `--partial-blocks` sampling only gates which updates are tested.
+fn should_fetch_block_by_number(interval: u64, partial_blocks: bool) -> bool {
+    interval > 1 && !partial_blocks
 }
 
 /// Selector of the priority-update-registry's `StaleUpdate()` error, the freshness guard of the
@@ -2042,7 +2135,7 @@ const FEED_STALLED_SELECTOR: &str = "9a0423af";
 fn pamm_venue(protocol_system: &str) -> Option<&str> {
     protocol_system
         .strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
-        .or_else(|| protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX))
+        .or_else(|| protocol_system.strip_prefix(FALLBACK_PREFIX))
 }
 
 /// Counts, per protocol system, the pAMM swaps about to be simulated without the overrides their
@@ -2157,12 +2250,78 @@ fn format_error_chain(e: &miette::Error) -> String {
 mod tests {
     use clap::Parser;
     use rstest::rstest;
+    use tycho_common::models::{token::Token, Chain};
 
-    use super::{is_oracle_stale_revert, is_sampled_block, pamm_venue, Cli};
+    use super::{
+        is_oracle_stale_revert, pamm_venue, rfq_swap_directions, sample_rfq_swap_directions,
+        should_fetch_block_by_number, Bytes, Cli, TychoState, MAX_RFQ_SWAP_DIRECTIONS,
+    };
+
+    /// A token whose address is `byte` repeated, so each one differs.
+    fn token(byte: u8) -> Token {
+        Token::new(
+            &Bytes::from(vec![byte; 20]),
+            &format!("T{byte}"),
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    /// The attribute the all-pairs component carries: token in, then token out, 20 bytes each.
+    fn swap_directions_attribute(directions: &[(&Token, &Token)]) -> Bytes {
+        let mut encoded = Vec::new();
+        for (token_in, token_out) in directions {
+            encoded.extend_from_slice(&token_in.address);
+            encoded.extend_from_slice(&token_out.address);
+        }
+        encoded.into()
+    }
+
+    #[test]
+    fn rfq_swap_directions_reads_the_attribute() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b), (&b, &a)]);
+
+        let directions = rfq_swap_directions(&attribute, &[a.clone(), b.clone()]).unwrap();
+
+        assert_eq!(directions, [(a.clone(), b.clone()), (b, a)]);
+    }
+
+    #[test]
+    fn rfq_swap_directions_names_a_token_the_component_lacks() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b)]);
+
+        let result = rfq_swap_directions(&attribute, &[a]);
+
+        assert!(result.is_err_and(|message| message.contains("does not carry")));
+    }
+
+    #[test]
+    fn sample_rfq_swap_directions_caps_the_count() {
+        let tokens: Vec<Token> = (0..=MAX_RFQ_SWAP_DIRECTIONS as u8)
+            .map(token)
+            .collect();
+        let directions: Vec<(Token, Token)> = tokens
+            .iter()
+            .map(|token_in| (token_in.clone(), tokens[0].clone()))
+            .collect();
+        assert!(directions.len() > MAX_RFQ_SWAP_DIRECTIONS);
+
+        let sampled = sample_rfq_swap_directions(directions.clone());
+
+        assert_eq!(sampled.len(), MAX_RFQ_SWAP_DIRECTIONS);
+        for direction in &sampled {
+            assert!(directions.contains(direction));
+        }
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
-    #[case::through_the_router("propammfallback:fermiswap", Some("fermiswap"))]
+    #[case::through_the_router("fallback:fermiswap", Some("fermiswap"))]
     #[case::auto_detected(
         "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
         Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
@@ -2202,32 +2361,45 @@ mod tests {
         assert!(!is_oracle_stale_revert(pamm, reason));
     }
 
-    #[rstest]
-    #[case::interval_one_selects_every_block(1, 41513952, true)]
-    #[case::interval_one_selects_multiples_too(1, 41513950, true)]
-    #[case::multiple_of_interval(10, 41513950, true)]
-    #[case::not_a_multiple(10, 41513952, false)]
-    #[case::block_zero(10, 0, true)]
-    fn sampling_selects_multiples_of_interval(
-        #[case] interval: u64,
-        #[case] block: u64,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(is_sampled_block(block, interval), expected);
+    #[test]
+    fn update_sequence_starts_at_one_and_increments() {
+        let mut state = TychoState::default();
+        assert_eq!(state.next_update_seq(), 1);
+        assert_eq!(state.next_update_seq(), 2);
     }
 
     #[test]
-    fn test_every_n_blocks_conflicts_with_partial_blocks() {
-        let result = Cli::try_parse_from([
+    fn sampled_with_partial_blocks_polls_instead_of_fetching_by_number() {
+        assert!(!should_fetch_block_by_number(10, true));
+    }
+
+    #[test]
+    fn test_every_n_updates_accepts_partial_blocks() {
+        Cli::try_parse_from([
             "tycho-integration-test",
             "--tycho-url",
             "localhost:4242",
             "--rpc-url",
             "http://localhost:8545",
             "--partial-blocks",
+            "--test-every-n-updates",
+            "10",
+        ])
+        .expect("--test-every-n-updates must be accepted alongside --partial-blocks");
+    }
+
+    #[test]
+    fn test_every_n_blocks_alias_sets_test_every_n_updates() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
             "--test-every-n-blocks",
             "10",
-        ]);
-        assert!(result.is_err());
+        ])
+        .expect("--test-every-n-blocks must stay accepted as an alias");
+        assert_eq!(cli.test_every_n_updates, 10);
     }
 }

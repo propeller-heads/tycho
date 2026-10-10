@@ -64,6 +64,12 @@ BEGIN
         RAISE EXCEPTION 'base preferred pricing wrong: % %', v.volume_usd, v.price_source;
     END IF;
 
+    -- A quote probe is priced like any other call that returned. Only trades_settled leaves it
+    -- out, so quote activity stays readable in USD.
+    IF (SELECT priced_at FROM trades WHERE id = 'discarded-call') IS NULL THEN
+        RAISE EXCEPTION 'a discarded call was not priced';
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM trades
         WHERE id IN ('old-nonstable', 'failed-call', 'stale-price', 'out-of-band')

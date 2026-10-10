@@ -105,7 +105,6 @@ fn extract_contract_changes_generic<
                 .collect();
 
             let mut storage_changes = Vec::new();
-            let mut balance_changes = Vec::new();
             let mut code_changes = Vec::new();
 
             let filtered_calls = block_tx.calls.iter().filter(|call| {
@@ -120,9 +119,20 @@ fn extract_contract_changes_generic<
 
             filtered_calls.for_each(|call| {
                 storage_changes.extend(call.storage_changes.iter());
-                balance_changes.extend(call.balance_changes.iter());
                 code_changes.extend(call.code_changes.iter());
             });
+
+            // A value transfer's balance changes are recorded on the callee's call frame, so the
+            // native balance a tracked contract sends to an untracked address lives in a frame the
+            // filter above skips. Balance changes are therefore taken from every call of the
+            // transaction and matched on the changed address alone.
+            let mut balance_changes: Vec<_> = block_tx
+                .calls
+                .iter()
+                .filter(|call| !call.state_reverted)
+                .flat_map(|call| call.balance_changes.iter())
+                .filter(|change| inclusion_predicate(&change.address))
+                .collect();
 
             storage_changes.sort_unstable_by_key(|change| change.ordinal);
             balance_changes.sort_unstable_by_key(|change| change.ordinal);
@@ -146,7 +156,6 @@ fn extract_contract_changes_generic<
 
             balance_changes
                 .iter()
-                .filter(|changes| inclusion_predicate(&changes.address))
                 .for_each(|balance_change| {
                     let contract_change = changed_contracts
                         .entry(balance_change.address.clone())
@@ -186,4 +195,119 @@ fn extract_contract_changes_generic<
             }
             changed_contracts.clear()
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use substreams_ethereum::pb::eth::v2::{
+        BalanceChange, BigInt, Block, Call, TransactionTrace, TransactionTraceStatus,
+    };
+
+    use super::*;
+
+    const POOL: [u8; 20] = [0xaa; 20];
+    const USER: [u8; 20] = [0xbb; 20];
+    const RECIPIENT: [u8; 20] = [0xcc; 20];
+
+    fn balance_change(address: &[u8], new_value: u8, ordinal: u64) -> BalanceChange {
+        BalanceChange {
+            address: address.to_vec(),
+            old_value: None,
+            new_value: Some(BigInt { bytes: vec![new_value] }),
+            ordinal,
+            ..Default::default()
+        }
+    }
+
+    fn call(index: u32, caller: &[u8], address: &[u8], changes: Vec<BalanceChange>) -> Call {
+        Call {
+            index,
+            call_type: CallType::Call.into(),
+            caller: caller.to_vec(),
+            address: address.to_vec(),
+            balance_changes: changes,
+            ..Default::default()
+        }
+    }
+
+    fn extended_block(calls: Vec<Call>) -> Block {
+        Block {
+            detail_level: DetailLevel::DetaillevelExtended.into(),
+            transaction_traces: vec![TransactionTrace {
+                index: 0,
+                status: TransactionTraceStatus::Succeeded.into(),
+                calls,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn pool_balance(block: &Block) -> Option<Vec<u8>> {
+        let mut transaction_changes = HashMap::new();
+        extract_contract_changes(block, |addr| addr == POOL, &mut transaction_changes);
+        let changes = transaction_changes.remove(&0)?;
+        assert!(changes
+            .contract_changes
+            .iter()
+            .all(|change| change.address == POOL));
+        changes
+            .contract_changes
+            .into_iter()
+            .next()
+            .map(|change| change.balance)
+    }
+
+    #[test]
+    fn outgoing_transfer_recorded_on_the_callee_frame_updates_the_sender() {
+        // The pool sends value to an untracked recipient. Firehose records both sides of the
+        // transfer on the recipient's call frame.
+        let block = extended_block(vec![
+            call(0, &USER, &POOL, vec![]),
+            call(
+                1,
+                &POOL,
+                &RECIPIENT,
+                vec![balance_change(&POOL, 5, 10), balance_change(&RECIPIENT, 7, 11)],
+            ),
+        ]);
+
+        assert_eq!(pool_balance(&block), Some(vec![5]));
+    }
+
+    #[test]
+    fn incoming_transfer_recorded_on_the_pool_frame_updates_the_pool() {
+        let block = extended_block(vec![call(
+            0,
+            &USER,
+            &POOL,
+            vec![balance_change(&USER, 1, 10), balance_change(&POOL, 9, 11)],
+        )]);
+
+        assert_eq!(pool_balance(&block), Some(vec![9]));
+    }
+
+    #[test]
+    fn last_balance_change_by_ordinal_wins_across_frames() {
+        let block = extended_block(vec![
+            call(0, &USER, &POOL, vec![balance_change(&POOL, 9, 11)]),
+            call(1, &POOL, &RECIPIENT, vec![balance_change(&POOL, 5, 12)]),
+            call(2, &USER, &POOL, vec![balance_change(&POOL, 2, 5)]),
+        ]);
+
+        assert_eq!(pool_balance(&block), Some(vec![5]));
+    }
+
+    #[test]
+    fn reverted_frames_and_untracked_addresses_are_ignored() {
+        let mut reverted = call(1, &POOL, &RECIPIENT, vec![balance_change(&POOL, 5, 10)]);
+        reverted.state_reverted = true;
+        let block = extended_block(vec![
+            call(0, &USER, &POOL, vec![]),
+            reverted,
+            call(2, &USER, &RECIPIENT, vec![balance_change(&RECIPIENT, 7, 11)]),
+        ]);
+
+        assert_eq!(pool_balance(&block), None);
+    }
 }

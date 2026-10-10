@@ -82,6 +82,7 @@ message BlockTransactionEvents {
         PoolInitialized pool_initialized = 5;
         VirtualExecution virtual_execution = 6;
         RateUpdated rate_updated = 7;
+        SwapFeeUpdated swap_fee_updated = 8;
       }
 
       message Swapped {
@@ -119,6 +120,10 @@ message BlockTransactionEvents {
         uint64 end_time = 2;         // block timestamp
         bytes token0_rate_delta = 3; // int112
         bytes token1_rate_delta = 4; // int112
+      }
+
+      message SwapFeeUpdated {
+        bytes swap_fee = 1; // uint64
       }
     }
   }

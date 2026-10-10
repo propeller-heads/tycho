@@ -464,6 +464,7 @@ mod tests {
     mod single {
         use super::*;
         use crate::encoding::models::{default_token, Swap};
+
         #[test]
         fn test_single_swap_strategy_encoder() {
             // Performs a single swap from WETH to DAI on a USV2 pool, with no grouping

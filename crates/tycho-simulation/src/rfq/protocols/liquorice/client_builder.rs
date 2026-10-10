@@ -4,7 +4,11 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::LiquoriceClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError,
+    models::{ComponentLayout, QuoteRule},
+    protocols::utils::default_quote_tokens_for_chain,
+};
 
 pub struct LiquoriceClientBuilder {
     chain: Chain,
@@ -16,6 +20,8 @@ pub struct LiquoriceClientBuilder {
     poll_time: Duration,
     quote_timeout: Duration,
     quote_expiry_secs: u64,
+    component_layout: ComponentLayout,
+    quote_rule: QuoteRule,
 }
 
 impl LiquoriceClientBuilder {
@@ -30,7 +36,23 @@ impl LiquoriceClientBuilder {
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
             quote_expiry_secs: 300,
+            component_layout: ComponentLayout::PerPair,
+            quote_rule: LiquoriceClient::DEFAULT_QUOTE_RULE,
         }
+    }
+
+    /// The components the client streams. One per pair, by default. Register a `PerPair` client
+    /// with `LiquoriceState` and a `AllPairs` client with `LiquoriceAllPairsState`.
+    pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
+    }
+
+    /// How often one route may take quotes from Liquorice, under the `AllPairs` layout. Every
+    /// maker once, by default.
+    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
+        self.quote_rule = quote_rule;
+        self
     }
 
     pub fn tokens(mut self, tokens: HashSet<Bytes>) -> Self {
@@ -83,5 +105,10 @@ impl LiquoriceClientBuilder {
             self.quote_timeout,
             self.quote_expiry_secs,
         )
+        .map(|client| {
+            client
+                .with_component_layout(self.component_layout)
+                .with_quote_rule(self.quote_rule)
+        })
     }
 }

@@ -1,5 +1,5 @@
 // Generated from the `error` entries of the ABIs under abi/ plus the Solidity built-in
-// `Error(string)` and `Panic(uint256)`. Regenerate with scripts/gen_tables.py.
+// `Error(string)` and `Panic(uint256)`. Regenerate with scripts/gen_error_table.py.
 
 /// Custom error name and its parameter types, used to resolve revert selectors.
 pub(crate) const ERRORS: &[(&str, &[&str])] = &[

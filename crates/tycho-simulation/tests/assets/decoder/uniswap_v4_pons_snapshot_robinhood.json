@@ -1,0 +1,44 @@
+{
+  "state": {
+    "component_id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+    "attributes": {
+      "balance_owner": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+      "liquidity": "0x1382ec98f6ead85fa3a3",
+      "sqrt_price_x96": "0x1d96af77dc8202588b5cca",
+      "tick": "0xfda62c",
+      "protocol_fees/zero2one": "0x00",
+      "protocol_fees/one2zero": "0x00",
+      "ticks/-887200/net-liquidity": "0x1382ec98f6ead85fa3a3",
+      "ticks/887200/net-liquidity": "0xec7d1367091527a05c5d"
+    },
+    "balances": {
+      "0xab5983fe30f186055095305c862b0e097dab3b52": "0xa8cff7796e7836404ff8a6",
+      "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec": "0x024150e398003fecb9"
+    }
+  },
+  "component": {
+    "id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+    "protocol_system": "uniswap_v4_hooks",
+    "protocol_type_name": "uniswap_v4_pool",
+    "chain": "robinhood",
+    "tokens": [
+      "0xab5983fe30f186055095305c862b0e097dab3b52",
+      "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+    ],
+    "contract_ids": [],
+    "static_attributes": {
+      "pool_id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+      "tick_spacing": "0x00c8",
+      "key_lp_fee": "0x00",
+      "hooks": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+      "hook_identifier": "0x706f6e735f7632",
+      "pons_hook_fee_bps": "0x64",
+      "pons_creator_tax_bps": "0x64"
+    },
+    "change": "Creation",
+    "creation_tx": "0xf66ca58190cc186683267cb486bbc6e1f0469176b7ad4f92e43eb68a1a0936e5",
+    "created_at": "2026-09-09T18:25:31"
+  },
+  "component_tvl": null,
+  "entrypoints": []
+}

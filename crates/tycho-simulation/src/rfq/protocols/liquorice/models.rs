@@ -4,7 +4,12 @@ use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
 use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
 
-use crate::rfq::errors::RFQError;
+#[cfg(test)]
+pub use crate::rfq::models::PriceLevel as LiquoricePriceLevel;
+use crate::rfq::{
+    errors::RFQError,
+    models::{fill_levels, PriceLevel},
+};
 
 /// Response from GET /price-levels?chainId=<id>
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,13 +24,12 @@ pub struct LiquoriceTokenPairPrice {
     pub base_token: Bytes,
     #[serde(rename = "quoteToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
     pub quote_token: Bytes,
-    /// Levels as [price, quantity] string pairs from the API, deserialized into
-    /// LiquoricePriceLevel
+    /// Levels as [price, quantity] string pairs from the API.
     #[serde(
         deserialize_with = "deserialize_string_pair_to_price_levels",
         serialize_with = "serialize_price_levels_to_string_pairs"
     )]
-    pub levels: Vec<LiquoricePriceLevel>,
+    pub levels: Vec<PriceLevel>,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<u64>,
 }
@@ -43,7 +47,7 @@ where
 
 fn deserialize_string_pair_to_price_levels<'de, D>(
     deserializer: D,
-) -> Result<Vec<LiquoricePriceLevel>, D::Error>
+) -> Result<Vec<PriceLevel>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -54,7 +58,7 @@ where
             if pair.len() == 2 {
                 let price = pair[0].parse::<f64>().ok()?;
                 let quantity = pair[1].parse::<f64>().ok()?;
-                Some(Ok(LiquoricePriceLevel { price, quantity }))
+                Some(Ok(PriceLevel { price, quantity }))
             } else {
                 None
             }
@@ -63,7 +67,7 @@ where
 }
 
 fn serialize_price_levels_to_string_pairs<S>(
-    levels: &[LiquoricePriceLevel],
+    levels: &[PriceLevel],
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -75,39 +79,6 @@ where
         seq.serialize_element(&[level.price.to_string(), level.quantity.to_string()])?;
     }
     seq.end()
-}
-
-/// Price level with price and quantity
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiquoricePriceLevel {
-    #[serde(
-        rename = "q",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    pub quantity: f64,
-    #[serde(
-        rename = "p",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    pub price: f64,
-}
-
-fn deserialize_string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    s.parse()
-        .map_err(serde::de::Error::custom)
-}
-
-fn serialize_f64_to_string<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
 }
 
 impl LiquoriceTokenPairPrice {
@@ -141,26 +112,9 @@ impl LiquoriceTokenPairPrice {
         }
 
         let (total_quote_token, remaining_base_token) =
-            self.get_amount_out_from_levels(base_token_amount);
+            fill_levels(&self.levels, base_token_amount);
 
         Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        let mut remaining_amount_in = amount_in;
-        let mut total_amount_out = 0.0;
-
-        for level in &self.levels {
-            if remaining_amount_in <= 0.0 {
-                break;
-            }
-
-            let amount_to_fill = remaining_amount_in.min(level.quantity);
-            total_amount_out += amount_to_fill * level.price;
-            remaining_amount_in -= amount_to_fill;
-        }
-
-        (total_amount_out, remaining_amount_in)
     }
 }
 
@@ -266,8 +220,8 @@ mod tests {
             base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
             quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
             levels: vec![
-                LiquoricePriceLevel { quantity: 1.0, price: 3000.0 },
-                LiquoricePriceLevel { quantity: 2.0, price: 2999.0 },
+                PriceLevel { quantity: 1.0, price: 3000.0 },
+                PriceLevel { quantity: 2.0, price: 2999.0 },
             ],
             updated_at: Some(1234567890),
         }
@@ -306,23 +260,6 @@ mod tests {
             updated_at: None,
         };
         assert_eq!(empty_levels.get_price_for_amount(1.0), None);
-    }
-
-    #[test]
-    fn test_get_amount_out_from_levels() {
-        let levels = liquorice_mm_levels();
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(1.0);
-        assert_eq!(amount_out, 3000.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(2.0);
-        assert_eq!(amount_out, 5999.0);
-        assert_eq!(remaining, 0.0);
-
-        let (amount_out, remaining) = levels.get_amount_out_from_levels(5.0);
-        assert_eq!(amount_out, 8998.0);
-        assert_eq!(remaining, 2.0);
     }
 
     #[test]

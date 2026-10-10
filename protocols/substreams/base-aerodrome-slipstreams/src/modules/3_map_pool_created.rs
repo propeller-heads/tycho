@@ -25,7 +25,13 @@ pub fn map_pools_created(
         .iter()
         .map(|f| Address::from_str(f).expect("invalid address"))
         .collect::<Vec<_>>();
-    get_new_pools(&block, &mut new_pools, factory_addresses, tick_spacing_to_fee_store);
+    get_new_pools(
+        &block,
+        &mut new_pools,
+        factory_addresses,
+        tick_spacing_to_fee_store,
+        &params.protocol_type_name,
+    );
 
     Ok(BlockChanges { block: Some((&block).into()), changes: new_pools, ..Default::default() })
 }
@@ -36,6 +42,7 @@ fn get_new_pools(
     new_pools: &mut Vec<TransactionChanges>,
     factory_addresses: Vec<Address>,
     tick_spacing_to_fee_store: StoreGetInt64,
+    protocol_type_name: &str,
 ) {
     // Extract new pools from PoolCreated events
     let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, log: &eth::Log| {
@@ -134,7 +141,7 @@ fn get_new_pools(
                 ],
                 change: i32::from(ChangeType::Creation),
                 protocol_type: Option::from(ProtocolType {
-                    name: "aerodrome_slipstreams_pool".to_string(),
+                    name: protocol_type_name.to_string(),
                     financial_type: FinancialType::Swap.into(),
                     attribute_schema: vec![],
                     implementation_type: ImplementationType::Custom.into(),

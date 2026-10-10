@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: tycho_router_trades
-  version: v0.1.0
+  version: v0.3.0
   url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
 
 imports:
@@ -19,9 +19,21 @@ binaries:
     file: ../../target/wasm32-unknown-unknown/release/tycho_router_trades.wasm
 
 modules:
+  - name: index_router_activity
+    kind: blockIndex
+    initialBlock: 24417223
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:sf.substreams.index.v1.Keys
+
   - name: map_fee_config_events
     kind: map
     initialBlock: 24417223
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "fee_cfg"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -39,6 +51,10 @@ modules:
   - name: map_trades
     kind: map
     initialBlock: 24417223
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "addr:0x345e48768a65ae596ac6a2aee71202753c4866f5 || addr:0x09215a470bd585e59eb3f4b612fbd2678131ff9e"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -46,12 +62,26 @@ modules:
     output:
       type: proto:tycho.router.v1.Trades
 
+  - name: map_vault_transfers
+    kind: map
+    initialBlock: 24417223
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "addr:0x345e48768a65ae596ac6a2aee71202753c4866f5 || addr:0x09215a470bd585e59eb3f4b612fbd2678131ff9e"
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.VaultTransfers
+
   - name: db_out
     kind: map
     initialBlock: 24417223
     inputs:
       - map: map_trades
       - map: map_fee_config_events
+      - map: map_vault_transfers
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
@@ -60,6 +90,7 @@ network: robinhood
 params:
   map_fee_config_events: chain=robinhood&routers=0x345e48768a65ae596ac6a2aee71202753c4866f5:v3_1,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:v3_1&fee_calculators=0x345e48768a65ae596ac6a2aee71202753c4866f5:0xd16dbe64e5688c5771e52d530e0c21b32901f141,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:0x0dd35e98aa40b4b75a8aa4950fd761b23de12854
   map_trades: chain=robinhood&routers=0x345e48768a65ae596ac6a2aee71202753c4866f5:v3_1,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:v3_1&fee_calculators=0x345e48768a65ae596ac6a2aee71202753c4866f5:0xd16dbe64e5688c5771e52d530e0c21b32901f141,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:0x0dd35e98aa40b4b75a8aa4950fd761b23de12854
+  map_vault_transfers: chain=robinhood&routers=0x345e48768a65ae596ac6a2aee71202753c4866f5:v3_1,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:v3_1&fee_calculators=0x345e48768a65ae596ac6a2aee71202753c4866f5:0xd16dbe64e5688c5771e52d530e0c21b32901f141,0x09215a470bd585e59eb3f4b612fbd2678131ff9e:0x0dd35e98aa40b4b75a8aa4950fd761b23de12854
 
 sink:
   module: db_out

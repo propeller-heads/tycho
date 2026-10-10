@@ -10,7 +10,6 @@ use super::{block_timestamp, keys};
 use crate::{
     abi::tycho_router_v3_1::events::FeesTaken,
     decode::{self, revert::decode_revert, swaps::decode_hops, SwapCall},
-    executors,
     params::{Params, RouterConfig, RouterVersion},
     pb::tycho::router::v1::{
         ClientFee, FeeTaken, Hop, RouterCallError, RouterFeeConfig, Trade, Trades,
@@ -107,6 +106,7 @@ fn call_error(
         error,
         tx_success: tx.status == 1,
         call_success: !call.status_failed && !call.status_reverted,
+        state_committed: !call.state_reverted,
     }
 }
 
@@ -121,6 +121,8 @@ fn build_trade(
     swap: SwapCall,
     fee_store: &StoreGetString,
 ) -> std::result::Result<Trade, TradeDecodeError> {
+    // Whether the call returned normally, which decides where the amount out comes from. It is
+    // not whether the chain kept the result: see `Trade.state_committed`.
     let call_success = !call.status_failed && !call.status_reverted;
     let (amount_out, revert) = if call_success {
         match decode::decode_amount_out(&call.return_data) {
@@ -156,7 +158,6 @@ fn build_trade(
         .enumerate()
         .map(|(i, hop)| Hop {
             index: i as u32,
-            protocol_systems: executors::protocol_systems_for(&hop.executor),
             executor: hop.executor,
             token_in_index: hop
                 .token_in_index
@@ -175,9 +176,14 @@ fn build_trade(
         .logs
         .iter()
         .filter_map(FeesTaken::match_and_decode)
-        .flat_map(|ev| ev.fees.into_iter())
+        .flat_map(|ev| {
+            let token = ev.token;
+            ev.fees
+                .into_iter()
+                .map(move |fee| (token.clone(), fee))
+        })
         .enumerate()
-        .map(|(index, (recipient, amount))| FeeTaken {
+        .map(|(index, (token, (recipient, amount)))| FeeTaken {
             recipient,
             amount: amount.to_string(),
             role: match index {
@@ -186,6 +192,7 @@ fn build_trade(
                 _ => "unknown",
             }
             .to_string(),
+            token,
         })
         .collect();
 
@@ -218,6 +225,7 @@ fn build_trade(
         call_index: call.index,
         tx_success: tx.status == 1,
         call_success,
+        state_committed: !call.state_reverted,
         router: router.address.clone(),
         router_version: router.version.as_str().to_string(),
         strategy: swap.method.as_str().to_string(),
@@ -253,6 +261,16 @@ fn build_trade(
     })
 }
 
+/// The denominator the fee bps of a calculator are on.
+///
+/// The scale belongs to the calculator, not to the router that resolves to it: a router rotated
+/// onto a calculator of another generation reports bps on that generation's denominator. So an
+/// observed scale wins, and the generation the router shipped with is only the fallback for a
+/// calculator no observed event gives away.
+fn bps_scale(observed: Option<u64>, router: RouterVersion) -> Option<u64> {
+    observed.or_else(|| router.default_bps_scale())
+}
+
 /// Resolves the router fee configuration in effect at `ordinal`, applying per-client overrides
 /// the same way `FeeCalculator._resolveClient` does (zero client falls back to `tx.origin`).
 fn resolve_fee_config(
@@ -262,11 +280,17 @@ fn resolve_fee_config(
     tx_origin: &[u8],
     client: Option<&[u8]>,
 ) -> Option<RouterFeeConfig> {
-    let bps_scale = router.version.bps_scale()?;
+    if router.version == RouterVersion::V2 {
+        return None;
+    }
     let fee_calculator = store
         .get_at(ordinal, keys::router_fee_calculator(&router.address))
         .and_then(|v| hex::decode(v.trim_start_matches("0x")).ok())
         .or_else(|| router.fee_calculator.clone())?;
+    let observed_scale = store
+        .get_at(ordinal, keys::fee_bps_scale(&fee_calculator))
+        .and_then(|v| v.parse::<u64>().ok());
+    let bps_scale = bps_scale(observed_scale, router.version)?;
     let client = match client {
         Some(c) if c != ZERO_ADDRESS => c,
         _ => tx_origin,
@@ -289,6 +313,12 @@ fn resolve_fee_config(
             .get_at(ordinal, keys::positive_slippage(&fee_calculator))
             .map(|v| v == "1")
             .unwrap_or(false);
+    // Only the calculator generation that has the exemption emits the event that sets this, so a
+    // trade on an older calculator resolves to false.
+    let positive_slippage_exempt = store
+        .get_at(ordinal, keys::positive_slippage_exempt(&fee_calculator, client))
+        .map(|v| v == "1")
+        .unwrap_or(false);
     Some(RouterFeeConfig {
         fee_calculator,
         fee_on_output_bps,
@@ -296,6 +326,32 @@ fn resolve_fee_config(
         custom_fee_on_output: custom_output.is_some(),
         custom_fee_on_client_fee: custom_client.is_some(),
         positive_slippage_enabled,
+        positive_slippage_exempt,
         bps_scale,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rotation this fixes: a v3_0 router pointed at a calculator of the next generation
+    /// reports its bps on 100000000, and reading 10000 off the router makes the rate 10000 times
+    /// too large.
+    #[test]
+    fn an_observed_scale_beats_the_router_generation() {
+        assert_eq!(bps_scale(Some(100_000_000), RouterVersion::V3_0), Some(100_000_000));
+        assert_eq!(bps_scale(Some(10_000), RouterVersion::V3_1), Some(10_000));
+    }
+
+    #[test]
+    fn without_one_the_router_generation_answers() {
+        assert_eq!(bps_scale(None, RouterVersion::V3_0), Some(10_000));
+        assert_eq!(bps_scale(None, RouterVersion::V3_1), Some(100_000_000));
+    }
+
+    #[test]
+    fn v2_has_no_scale_either_way() {
+        assert_eq!(bps_scale(None, RouterVersion::V2), None);
+    }
 }

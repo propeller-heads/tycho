@@ -1,10 +1,14 @@
 mod db_out;
 mod fee_config;
+mod index;
 mod trades;
+mod vault;
 
 pub use db_out::db_out;
 pub use fee_config::{map_fee_config_events, store_fee_config};
+pub use index::index_router_activity;
 pub use trades::map_trades;
+pub use vault::map_vault_transfers;
 
 /// Store key prefixes shared between the fee-config store writer and the trades reader.
 pub(crate) mod keys {
@@ -26,6 +30,12 @@ pub(crate) mod keys {
     pub fn positive_slippage(fc: &[u8]) -> String {
         format!("fc:{}:pos_slip", hex::encode(fc))
     }
+    pub fn fee_bps_scale(fc: &[u8]) -> String {
+        format!("fc:{}:scale", hex::encode(fc))
+    }
+    pub fn positive_slippage_exempt(fc: &[u8], client: &[u8]) -> String {
+        format!("fc:{}:ps_exempt:{}", hex::encode(fc), hex::encode(client))
+    }
 }
 
 /// Event names emitted in `FeeConfigEvent.event`.
@@ -38,6 +48,7 @@ pub(crate) mod events {
     pub const CUSTOM_FEE_ON_CLIENT_FEE_REMOVED: &str = "CustomRouterFeeOnClientFeeRemoved";
     pub const ROUTER_FEE_RECEIVER_UPDATED: &str = "RouterFeeReceiverUpdated";
     pub const POSITIVE_SLIPPAGE_TOGGLED: &str = "PositiveSlippageToggled";
+    pub const POSITIVE_SLIPPAGE_EXEMPTION_SET: &str = "PositiveSlippageExemptionSet";
     pub const FEE_CALCULATOR_SET: &str = "FeeCalculatorSet";
     pub const FEE_CALCULATOR_ACTIVATED: &str = "FeeCalculatorActivated";
     pub const FEE_CALCULATOR_UPDATED: &str = "FeeCalculatorUpdated";

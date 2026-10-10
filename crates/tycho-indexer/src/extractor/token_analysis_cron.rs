@@ -229,7 +229,7 @@ async fn analyze_batch(
         {
             Ok(res) => res,
             Err(error) => {
-                warn!(?error, "Token quality detection failed");
+                warn!(?t.address, ?error, "Token quality detection failed");
                 outcome.failed += 1;
                 continue;
             }

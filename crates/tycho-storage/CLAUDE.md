@@ -16,6 +16,7 @@ postgres/
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
+├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 └── schema.rs           — auto-generated Diesel table! macros
@@ -28,15 +29,17 @@ All public DB operations go through one of two gateway structs:
 - **`CachedGateway`** (normal path): sends `WriteOp` messages over an async channel to
   `DBCacheWriteExecutor`, which batches by block and flushes in a fixed order when the next
   block arrives. Most reads hit the DB directly; the exceptions are `get_tokens` (served from
-  `token_cache` when enabled) and `get_delta` (small LRU).
+  `token_cache` when enabled) and `get_delta` (small LRU). The executor runs a batch up to
+  three times when Postgres reports a transaction conflict (deadlock or serialization
+  failure); each attempt re-runs from scratch with a fresh snapshot.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
 single-chain; it hard-fails otherwise.
 
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
-`chain`, `contract`, `protocol`, `entry_point`, and `extraction_state`—each adding methods to
-`PostgresGateway` via `impl` blocks in their own file.
+`chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
+methods to `PostgresGateway` via `impl` blocks in their own file.
 
 `versioning` is the only module without a DB table of its own; it provides the shared traits
 and utilities consumed by `contract` and `protocol`. Two paths: `apply_versioning()` for plain

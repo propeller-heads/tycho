@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::fill_levels,
     protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
 };
 
@@ -113,7 +114,7 @@ impl ProtocolSim for LiquoriceState {
             .prices_by_mm
             .values()
             .filter(|price| !price.levels.is_empty())
-            .map(|price| price.get_amount_out_from_levels(amount_in))
+            .map(|price| fill_levels(&price.levels, amount_in))
             .max_by(|a, b| {
                 a.0.partial_cmp(&b.0)
                     .unwrap_or(std::cmp::Ordering::Equal)

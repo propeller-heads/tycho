@@ -90,16 +90,17 @@ struct Cli {
 
 impl Cli {
     fn with_defaults(mut self) -> Self {
-        // By default, we swap a small amount of the chain's main stablecoin into its wrapped
-        // native token.
+        // By default, we swap a small amount of the chain's main stablecoin into its routable
+        // native representation, falling back to the native token when none exists.
 
         if self.buy_token.is_none() {
-            self.buy_token = Some(
-                self.chain
-                    .wrapped_native_token()
-                    .address
-                    .to_string(),
-            );
+            let buy_token = self
+                .chain
+                .native_asset()
+                .routable_token()
+                .cloned()
+                .unwrap_or_else(|| self.chain.native_token());
+            self.buy_token = Some(buy_token.address.to_string());
         }
 
         if self.sell_token.is_none() {
@@ -274,7 +275,9 @@ async fn main() {
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
         }
         _ => {}
     }

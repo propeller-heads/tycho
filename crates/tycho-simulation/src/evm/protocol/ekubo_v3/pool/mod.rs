@@ -6,6 +6,7 @@ pub mod oracle;
 pub mod stableswap;
 mod timed;
 pub mod twamm;
+pub mod ve33;
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,9 +42,11 @@ pub trait EkuboPool {
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError>;
 
+    /// Quotes `token_amount`. A set `sqrt_ratio_limit` stops the swap early at that sqrt ratio.
     fn quote(
         &self,
         token_amount: EvmTokenAmount,
-    ) -> Result<super::pool::EkuboPoolQuote, SimulationError>;
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError>;
     fn get_limit(&self, token_in: Address) -> Result<i128, SimulationError>;
 }

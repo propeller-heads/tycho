@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.4
+
+- Read the SignedExclusiveSwap extension address from the `map_components`
+  params (`signed_exclusive_swap_address=0x...`) instead of a hardcoded
+  constant, so each chain tags `is_exclusive` on its own deployment. The
+  Ethereum and Robinhood manifests each carry their deployment's address;
+  omitting the param disables the `is_exclusive` attribute.
+
+## v0.2.3
+
+- Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33
+  extension address is chain-specific and passed via the module params
+  query string (`ve33_address=0x...`, serde_qs like the other packages);
+  omitting it (e.g. on Ethereum) disables Ve33 handling.
+- Add a `robinhood-ekubo-v3.yaml` manifest with the Robinhood Ve33 extension
+  address baked into the module params, plus a Robinhood integration test
+  config covering the first Ve33 pool.
+
 ## v0.2.2
 
 - Track the second TWAMM extension deployment

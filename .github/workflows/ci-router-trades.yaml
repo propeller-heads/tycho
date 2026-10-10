@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - 'crates/tycho-execution/substreams/**'
+      - 'crates/tycho-execution/config/executor_addresses.json'
       - '.github/workflows/ci-router-trades.yaml'
   push:
     branches: [main]
     paths:
       - 'crates/tycho-execution/substreams/**'
+      - 'crates/tycho-execution/config/executor_addresses.json'
       - '.github/workflows/ci-router-trades.yaml'
   workflow_dispatch:
 
@@ -46,6 +48,12 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Manifest filters
+        run: make check-manifests
+
+      - name: Executor names
+        run: make check-executors
+
       - name: Formatting
         run: cargo +nightly-2026-06-28 fmt -- --check
 
@@ -54,6 +62,12 @@ jobs:
 
       - name: WASM build
         run: make build
+
+      - name: Executor table integration
+        run: make test-executors
+
+      - name: Views integration
+        run: make test-views
 
       - name: Pricing integration and outage isolation
         run: |

@@ -98,7 +98,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
 
     // FEE CALCULATOR TESTS
     function testSetFeeCalculatorQueuesPending() public {
-        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(newCalc));
 
@@ -114,7 +114,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
     }
 
     function testActivationAfterTimelock() public {
-        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(newCalc));
 
@@ -128,7 +128,7 @@ contract TychoRouterTest is TychoRouterTestSetup {
     }
 
     function testActivationRevertsWhenTimelocked() public {
-        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER);
+        FeeCalculator newCalc = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
         vm.prank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(newCalc));
 
@@ -161,8 +161,8 @@ contract TychoRouterTest is TychoRouterTestSetup {
     }
 
     function testSetFeeCalculatorOverwritesPending() public {
-        FeeCalculator calc1 = new FeeCalculator(FEE_SETTER);
-        FeeCalculator calc2 = new FeeCalculator(FEE_SETTER);
+        FeeCalculator calc1 = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
+        FeeCalculator calc2 = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
 
         vm.startPrank(FEE_SETTER);
         tychoRouter.setFeeCalculator(address(calc1));
@@ -192,7 +192,8 @@ contract TychoRouterTest is TychoRouterTestSetup {
 
     function testConstructorNonContractPermit2() public {
         // Deploy a new FeeCalculator contract
-        FeeCalculator newFeeCalculator = new FeeCalculator(FEE_SETTER);
+        FeeCalculator newFeeCalculator =
+            new FeeCalculator(FEE_SETTER, routerFeeReceiver);
         address nonContract = address(0x999);
         vm.expectRevert(
             abi.encodeWithSelector(

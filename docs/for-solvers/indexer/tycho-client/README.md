@@ -55,7 +55,7 @@ Note: _While Tycho takes **chain** as a parameter, it is designed to support str
 
 You can request individual pools or use a minimum TVL threshold to filter the components. If you choose minimum TVL tracking, Tycho-client will automatically add snapshots for any components that exceed the TVL threshold, e.g., because more liquidity was provided. It will also notify you and remove any components that fall below the TVL threshold. Note that the TVL values are estimates intended solely for filtering the most relevant components.
 
-**TVL Filtering:**
+#### TVL Filtering <a href="#tvl-filtering" id="tvl-filtering"></a>
 
 {% hint style="info" %}
 Tycho indexes all the components in a Protocol. TVL filtering is highly encouraged to speed up data transfer and processing times by reducing the number of returned components.
@@ -65,8 +65,9 @@ Tycho indexes all the components in a Protocol. TVL filtering is highly encourag
 
 | Chain | Native Token | Default `--min-tvl` (~$20K USD) |
 | ----- | ------------ | ------------------------------- |
-| Ethereum, Arbitrum, Base, Unichain, Starknet, ZkSync | ETH | 10 |
+| Ethereum, Arbitrum, Base, Unichain, Robinhood, Starknet, ZkSync | ETH | 10 |
 | Polygon | POL | 200,000 |
+| Plasma | XPL | 200,000 |
 | BSC | BNB | 32 |
 
 You can filter by TVL in 2 ways:
@@ -87,7 +88,7 @@ tycho-client --remove-tvl-threshold 95 --add-tvl-threshold 100 --exchange uniswa
 
 This will stream state updates for all components whose TVL exceeds the `add-tvl-threshold`. It will continue to track already added components if they drop below the `add-tvl-threshold`, only emitting a message to remove them if they drop below `remove-tvl-threshold`.
 
-#### Streaming Options
+#### Streaming Options <a href="#streaming-options" id="streaming-options"></a>
 
 Tycho Client supports several options to customize the data stream. These are available as CLI flags, Rust builder methods, and Python parameters. Refer to each client's documentation for usage details.
 

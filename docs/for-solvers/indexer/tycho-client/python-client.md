@@ -13,7 +13,7 @@ A python package is available to ease integration into python-based projects. To
 #### Install the package
 
 ```bash
-pip install git+https://github.com/propeller-heads/tycho-indexer.git#subdirectory=tycho-client-py
+pip install git+https://github.com/propeller-heads/tycho-indexer.git#subdirectory=crates/tycho-client-py
 ```
 
 ## Understanding and using  the Python Client

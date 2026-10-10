@@ -16,10 +16,15 @@ use alloy::{
     },
     sol_types::SolValue,
 };
-use num_bigint::BigUint;
+use metrics::{counter, histogram};
+use num_bigint::{BigInt, BigUint};
 use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
-use tycho_common::Bytes;
+use tracing::{debug, warn};
+use tycho_common::{
+    simulation::{indicatively_priced::SignedQuote, protocol_sim::ProtocolSim},
+    Bytes,
+};
 
 use crate::encoding::{errors::EncodingError, evm::constants::ROUTER_ETH_ADDRESS, models::Swap};
 
@@ -276,6 +281,110 @@ pub(crate) async fn get_client() -> Result<EVMProvider, EncodingError> {
     Ok(Arc::new(client))
 }
 
+/// Records how far a maker's signed RFQ quote lands from the price levels of `protocol_state`,
+/// and enforces the swap's `max_signed_quote_shortfall_bps`.
+///
+/// Prices `signed_quote.amount_in` on `protocol_state` and emits a debug event with that level
+/// amount, `signed_quote.amount_out` and the gap between them in basis points. A negative gap
+/// means the maker signed for less than its levels advertised. If the levels cannot price the
+/// signed input, it logs a warning instead.
+///
+/// Returns `EncodingError::RecoverableError` when the signed amount out is further below the
+/// level amount than the swap allows, with the message `"{protocol} signed {n} bps below its
+/// price levels; the swap allows {max} bps"`. A swap without a limit, or a quote the levels cannot
+/// price, passes.
+pub(crate) fn check_signed_quote(
+    swap: &Swap,
+    protocol_state: &dyn ProtocolSim,
+    signed_quote: &SignedQuote,
+) -> Result<(), EncodingError> {
+    let component = swap.component();
+    let labels = [("protocol", component.protocol_system.clone())];
+    let price_level_amount_out = match protocol_state.get_amount_out(
+        signed_quote.amount_in.clone(),
+        swap.token_in(),
+        swap.token_out(),
+    ) {
+        Ok(result) => result.amount,
+        Err(err) => {
+            counter!("rfq_signed_quote_unpriced_total", &labels).increment(1);
+            warn!(
+                protocol = %component.protocol_system,
+                component_id = %component.id,
+                token_in = %swap.token_in().address,
+                token_out = %swap.token_out().address,
+                amount_in = %signed_quote.amount_in,
+                error = %err,
+                "could not price a signed RFQ quote on its price levels"
+            );
+            return Ok(());
+        }
+    };
+    let deviation_bps = deviation_bps(&price_level_amount_out, &signed_quote.amount_out);
+    debug!(
+        target: "rfq_signed_quote",
+        protocol = %component.protocol_system,
+        component_id = %component.id,
+        token_in = %swap.token_in().address,
+        token_out = %swap.token_out().address,
+        amount_in = %signed_quote.amount_in,
+        price_level_amount_out = %price_level_amount_out,
+        signed_amount_out = %signed_quote.amount_out,
+        deviation_bps,
+        "signed RFQ quote against its price levels"
+    );
+    match deviation_bps {
+        Some(bps) => histogram!("rfq_signed_quote_deviation_bps", &labels).record(bps as f64),
+        None => counter!("rfq_signed_quote_unpriced_total", &labels).increment(1),
+    }
+    let Some(max_shortfall_bps) = swap.max_signed_quote_shortfall_bps() else { return Ok(()) };
+    match exceeds_shortfall_tolerance_by(
+        &price_level_amount_out,
+        &signed_quote.amount_out,
+        max_shortfall_bps,
+    ) {
+        Some(shortfall_bps) => Err(EncodingError::RecoverableError(format!(
+            "{} signed {shortfall_bps} bps below its price levels; the swap allows \
+             {max_shortfall_bps} bps",
+            component.protocol_system
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Returns how far `signed_amount_out` is below `price_level_amount_out`, in basis points rounded
+/// up, when that is more than `max_shortfall_bps`.
+///
+/// The comparison is exact. Returns `None` when the shortfall is within the limit, when the maker
+/// signed for at least the level amount, or when `price_level_amount_out` is zero.
+fn exceeds_shortfall_tolerance_by(
+    price_level_amount_out: &BigUint,
+    signed_amount_out: &BigUint,
+    max_shortfall_bps: u32,
+) -> Option<u64> {
+    if *price_level_amount_out == BigUint::ZERO || signed_amount_out >= price_level_amount_out {
+        return None;
+    }
+    let scaled_shortfall = (price_level_amount_out - signed_amount_out) * 10_000u32;
+    if scaled_shortfall <= price_level_amount_out * max_shortfall_bps {
+        return None;
+    }
+    let shortfall_bps = (scaled_shortfall + price_level_amount_out - 1u32) / price_level_amount_out;
+    Some(u64::try_from(&shortfall_bps).unwrap_or(u64::MAX))
+}
+
+/// Returns `(signed - level) / level` in whole basis points, truncated toward zero.
+///
+/// Returns `None` when `price_level_amount_out` is zero or the result does not fit in an `i64`.
+fn deviation_bps(price_level_amount_out: &BigUint, signed_amount_out: &BigUint) -> Option<i64> {
+    if *price_level_amount_out == BigUint::ZERO {
+        return None;
+    }
+    let price_level = BigInt::from(price_level_amount_out.clone());
+    let gap = BigInt::from(signed_amount_out.clone()) - &price_level;
+    i64::try_from(gap * 10_000 / price_level).ok()
+}
+
 /// Uses prefix-length encoding to efficient encode action data.
 ///
 /// Prefix-length encoding is a data encoding method where the beginning of a data segment
@@ -339,6 +448,52 @@ pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_deviation_bps() {
+        let price_level = BigUint::from(1_000_000u64);
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(1_000_000u64)), Some(0));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(990_000u64)), Some(-100));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(1_005_000u64)), Some(50));
+        assert_eq!(deviation_bps(&price_level, &BigUint::from(999_950u64)), Some(0));
+        assert_eq!(deviation_bps(&price_level, &BigUint::ZERO), Some(-10_000));
+    }
+
+    #[test]
+    fn test_exceeds_shortfall_tolerance_by() {
+        let price_level = BigUint::from(1_000_000u64);
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(995_000u64), 50),
+            None
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(994_999u64), 50),
+            Some(51)
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(990_000u64), 50),
+            Some(100)
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(1_000_001u64), 0),
+            None
+        );
+        assert_eq!(
+            exceeds_shortfall_tolerance_by(&price_level, &BigUint::from(999_999u64), 0),
+            Some(1)
+        );
+        assert_eq!(exceeds_shortfall_tolerance_by(&price_level, &BigUint::ZERO, 50), Some(10_000));
+    }
+
+    #[test]
+    fn test_exceeds_shortfall_tolerance_by_zero_price_level() {
+        assert_eq!(exceeds_shortfall_tolerance_by(&BigUint::ZERO, &BigUint::from(1u64), 0), None);
+    }
+
+    #[test]
+    fn test_deviation_bps_zero_level() {
+        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1u64)), None);
+    }
 
     #[test]
     fn test_map_on_threads_keeps_input_order_above_the_thread_cap() {

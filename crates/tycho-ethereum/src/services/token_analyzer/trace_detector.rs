@@ -17,7 +17,9 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{arbitrary_recipient, calculate_fee, call_request, map_block_tag};
+use super::{
+    arbitrary_recipient, calculate_fee_bps, call_request, map_block_tag, ObservedTransfer,
+};
 use crate::{
     erc20::{approveCall, balanceOfCall, transferCall},
     rpc::EthereumRpcClient,
@@ -294,13 +296,17 @@ impl TraceCallDetector {
             None => return Ok((bad, Some(gas_per_transfer), None)),
         };
 
-        let fees = calculate_fee(
-            amount,
-            middle_amount,
-            balance_before_in,
-            balance_after_in,
-            balance_recipient_before,
-            balance_recipient_after,
+        let fees = calculate_fee_bps(
+            ObservedTransfer {
+                sent: amount,
+                balance_before: balance_before_in,
+                balance_after: balance_after_in,
+            },
+            ObservedTransfer {
+                sent: middle_amount,
+                balance_before: balance_recipient_before,
+                balance_after: balance_recipient_after,
+            },
         );
 
         tracing::debug!(%amount, %balance_before_in, %balance_after_in, %balance_after_out);

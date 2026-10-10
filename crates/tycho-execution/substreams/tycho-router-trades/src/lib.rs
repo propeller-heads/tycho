@@ -6,8 +6,6 @@
 
 mod abi;
 mod decode;
-mod executors;
-mod executors_table;
 mod modules;
 mod params;
 mod pb;

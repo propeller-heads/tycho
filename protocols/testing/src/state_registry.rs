@@ -3,7 +3,9 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
-            fluid::FluidV1, lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
+            ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
+            filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
+            lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State, ring_swap_v2::state::RingSwapV2State,
             rocketpool::state::RocketpoolState, sky::state::SkyState,
             uniswap_v2::state::UniswapV2State, uniswap_v3::state::UniswapV3State,
@@ -46,17 +48,26 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-        "uniswap_v3" | "pancakeswap_v3" => stream_builder
-            .exchange_with_decoder_context::<UniswapV3State>(
+        "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" | "gigadex_v3" => {
+            stream_builder.exchange_with_decoder_context::<UniswapV3State>(
                 protocol_system,
                 tvl_filter,
                 None,
                 decoder_context,
-            ),
+            )
+        }
         "ramses_v3" => stream_builder.exchange_with_decoder_context::<RamsesV3State>(
             protocol_system,
             tvl_filter,
             None,
+            decoder_context,
+        ),
+        // SignedExclusiveSwap pools are excluded: swapping one needs a per-swap signature the
+        // harness has no source for.
+        "ekubo_v3" => stream_builder.exchange_with_decoder_context::<EkuboV3State>(
+            protocol_system,
+            tvl_filter,
+            Some(ekubo_v3_extension_filter),
             decoder_context,
         ),
         "ekubo_v2" => stream_builder.exchange_with_decoder_context::<EkuboState>(
@@ -73,6 +84,18 @@ pub fn register_protocol(
                 decoder_context,
             ),
         "fluid_v1" => stream_builder.exchange_with_decoder_context::<FluidV1>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        "etherfi" => stream_builder.exchange_with_decoder_context::<EtherfiState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        "lido_v4" => stream_builder.exchange_with_decoder_context::<LidoV4State>(
             protocol_system,
             tvl_filter,
             None,
@@ -103,6 +126,12 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
+        "up_v3" => stream_builder.exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
         // Default to EVMPoolState for all other protocols
         _ => stream_builder.exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
             protocol_system,

@@ -6,10 +6,14 @@ use substreams_database_change::{
 };
 
 use super::hex_addr;
-use crate::pb::tycho::router::v1::{FeeConfigEvents, Trade, Trades};
+use crate::pb::tycho::router::v1::{FeeConfigEvents, Trade, Trades, VaultTransfers};
 
 #[substreams::handlers::map]
-pub fn db_out(trades: Trades, fee_events: FeeConfigEvents) -> Result<DatabaseChanges> {
+pub fn db_out(
+    trades: Trades,
+    fee_events: FeeConfigEvents,
+    vault: VaultTransfers,
+) -> Result<DatabaseChanges> {
     let mut tables = Tables::new();
     for trade in &trades.trades {
         insert_trade(&mut tables, trade)?;
@@ -29,7 +33,8 @@ pub fn db_out(trades: Trades, fee_events: FeeConfigEvents) -> Result<DatabaseCha
             .set("stage", &error.stage)
             .set("error", &error.error)
             .set("tx_success", error.tx_success)
-            .set("call_success", error.call_success);
+            .set("call_success", error.call_success)
+            .set("state_committed", error.state_committed);
     }
     for ev in &fee_events.events {
         let id = format!("{}:{}:{}", ev.chain, hex_addr(&ev.tx_hash), ev.log_index);
@@ -50,6 +55,26 @@ pub fn db_out(trades: Trades, fee_events: FeeConfigEvents) -> Result<DatabaseCha
         if !ev.new_value.is_empty() {
             row.set("new_value", &ev.new_value);
         }
+        if ev.bps_scale != 0 {
+            row.set("bps_scale", ev.bps_scale);
+        }
+    }
+    for t in &vault.transfers {
+        let id = format!("{}:{}:{}", t.chain, hex_addr(&t.tx_hash), t.log_index);
+        tables
+            .create_row("vault_transfers", id)
+            .set("chain", &t.chain)
+            .set("block_number", t.block_number)
+            .set("block_time", rfc3339(t.block_timestamp))
+            .set("tx_hash", hex_addr(&t.tx_hash))
+            .set("log_index", t.log_index)
+            .set("router", hex_addr(&t.router))
+            .set("caller", hex_addr(&t.caller))
+            .set("sender", hex_addr(&t.sender))
+            .set("receiver", hex_addr(&t.receiver))
+            .set("token", hex_addr(&t.token))
+            .set("amount", &t.amount)
+            .set("kind", &t.kind);
     }
     Ok(tables.to_database_changes())
 }
@@ -60,11 +85,6 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
         .hops
         .iter()
         .map(|h| hex_addr(&h.executor))
-        .collect();
-    let protocol_systems: Vec<String> = t
-        .hops
-        .iter()
-        .flat_map(|hop| hop.protocol_systems.iter().cloned())
         .collect();
     let fee_split = split_fees(t)?;
 
@@ -77,6 +97,7 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
         .set("call_index", t.call_index)
         .set("tx_success", t.tx_success)
         .set("call_success", t.call_success)
+        .set("state_committed", t.state_committed)
         .set("router", hex_addr(&t.router))
         .set("router_version", &t.router_version)
         .set("strategy", &t.strategy)
@@ -95,7 +116,6 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
         .set("wrap_eth", t.wrap_eth)
         .set("unwrap_eth", t.unwrap_eth);
     row.set("executors", psql_text_array(&executors));
-    row.set("protocol_systems", psql_text_array(&protocol_systems));
     if !t.expected_amount_out.is_empty() {
         row.set("expected_amount_out", &t.expected_amount_out);
         if let Some(bps) = slippage_tolerance_bps(&t.expected_amount_out, &t.min_amount_out) {
@@ -136,6 +156,7 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
             .set("custom_fee_on_output", f.custom_fee_on_output)
             .set("custom_fee_on_client_fee", f.custom_fee_on_client_fee)
             .set("positive_slippage_enabled", f.positive_slippage_enabled)
+            .set("positive_slippage_exempt", f.positive_slippage_exempt)
             .set("fee_bps_scale", f.bps_scale);
     }
     if !t.fees_taken.is_empty() {
@@ -151,7 +172,6 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
             .set("hop_index", hop.index)
             .set("executor", hex_addr(&hop.executor))
             .set("protocol_data", hex_addr(&hop.protocol_data));
-        row.set("protocol_systems", psql_text_array(&hop.protocol_systems));
         if t.strategy == "split" {
             row.set("token_in_index", hop.token_in_index)
                 .set("token_out_index", hop.token_out_index)
@@ -164,7 +184,7 @@ fn insert_trade(tables: &mut Tables, t: &Trade) -> Result<()> {
         row.set("trade_id", &trade_id)
             .set("chain", &t.chain)
             .set("block_number", t.block_number)
-            .set("token", hex_addr(&t.token_out))
+            .set("token", hex_addr(&fee.token))
             .set("recipient", hex_addr(&fee.recipient))
             .set("amount", &fee.amount)
             .set("role", &fee.role);
@@ -312,8 +332,18 @@ mod tests {
         use crate::pb::tycho::router::v1::FeeTaken;
         let t = Trade {
             fees_taken: vec![
-                FeeTaken { recipient: vec![0xaa; 20], amount: "10".into(), role: "router".into() },
-                FeeTaken { recipient: vec![0xcc; 20], amount: "5".into(), role: "client".into() },
+                FeeTaken {
+                    recipient: vec![0xaa; 20],
+                    amount: "10".into(),
+                    role: "router".into(),
+                    token: vec![0x11; 20],
+                },
+                FeeTaken {
+                    recipient: vec![0xcc; 20],
+                    amount: "5".into(),
+                    role: "client".into(),
+                    token: vec![0x11; 20],
+                },
             ],
             ..Default::default()
         };
@@ -327,8 +357,18 @@ mod tests {
         use crate::pb::tycho::router::v1::FeeTaken;
         let t = Trade {
             fees_taken: vec![
-                FeeTaken { recipient: vec![0xee; 20], amount: "7".into(), role: "router".into() },
-                FeeTaken { recipient: vec![0xee; 20], amount: "3".into(), role: "client".into() },
+                FeeTaken {
+                    recipient: vec![0xee; 20],
+                    amount: "7".into(),
+                    role: "router".into(),
+                    token: vec![0x11; 20],
+                },
+                FeeTaken {
+                    recipient: vec![0xee; 20],
+                    amount: "3".into(),
+                    role: "client".into(),
+                    token: vec![0x11; 20],
+                },
             ],
             ..Default::default()
         };
@@ -345,6 +385,7 @@ mod tests {
                 recipient: vec![0xee; 20],
                 amount: "7".into(),
                 role: "unknown".into(),
+                token: vec![0x11; 20],
             }],
             ..Default::default()
         };

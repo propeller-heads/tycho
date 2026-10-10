@@ -30,8 +30,13 @@ impl RouterVersion {
         }
     }
 
-    /// Denominator of the fee bps values stored in the FeeCalculator of this generation.
-    pub fn bps_scale(self) -> Option<u64> {
+    /// Denominator of the fee bps values of the FeeCalculator this router generation shipped
+    /// with, or `None` for a generation that has no FeeCalculator.
+    ///
+    /// A router can be rotated onto a calculator of another generation, which changes the
+    /// denominator without changing the router. This is only the fallback for a calculator whose
+    /// generation no observed event gives away; `keys::fee_bps_scale` holds the observed one.
+    pub fn default_bps_scale(self) -> Option<u64> {
         match self {
             RouterVersion::V2 => None,
             RouterVersion::V3_0 => Some(10_000),

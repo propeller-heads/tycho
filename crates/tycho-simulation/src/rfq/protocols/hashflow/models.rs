@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
@@ -7,19 +7,36 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::errors::RFQError;
+pub use crate::rfq::models::PriceLevel as HashflowPriceLevel;
+use crate::rfq::{
+    errors::RFQError,
+    models::{fill_levels, PriceLevel},
+};
+
+/// The error Hashflow reports on a rejected request, sent as an object alongside HTTP 200.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashflowError {
+    pub code: u64,
+    pub message: String,
+}
+
+impl fmt::Display for HashflowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (code {})", self.message, self.code)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowPriceLevelsResponse {
     pub status: String, // "success" or "fail"
     pub levels: Option<HashMap<String, Vec<HashflowMarketMakerLevels>>>,
-    pub error: Option<String>,
+    pub error: Option<HashflowError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashflowMarketMakerLevels {
     pub pair: HashflowPair,
-    pub levels: Vec<HashflowPriceLevel>,
+    pub levels: Vec<PriceLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,40 +56,6 @@ where
     let checksum = address.to_checksum(None);
     let checksum_bytes = Bytes::from_str(&checksum).map_err(serde::de::Error::custom)?;
     Ok(checksum_bytes)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HashflowPriceLevel {
-    #[serde(
-        rename = "q",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    /// Quantity of tokens that can be traded at this level
-    pub quantity: f64,
-    #[serde(
-        rename = "p",
-        deserialize_with = "deserialize_string_to_f64",
-        serialize_with = "serialize_f64_to_string"
-    )]
-    /// Price per token at this level
-    pub price: f64,
-}
-
-fn deserialize_string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    s.parse()
-        .map_err(serde::de::Error::custom)
-}
-
-fn serialize_f64_to_string<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
 }
 
 impl HashflowMarketMakerLevels {
@@ -102,40 +85,11 @@ impl HashflowMarketMakerLevels {
         }
 
         let (total_quote_token, remaining_base_token) =
-            self.get_amount_out_from_levels(base_token_amount);
+            fill_levels(&self.levels, base_token_amount);
 
         // If we can't fill the whole order (ran out of liquidity), calculate the price based on
         // the amount that we could fill, in order to have at least some price estimate
         Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-
-    /// Calculates the total token output for a given token input using available price levels.
-    ///
-    /// Iterates over the price levels, consuming as much liquidity as available at each
-    /// price level until the input amount is fully consumed or liquidity runs out.
-    ///
-    /// # Parameters
-    /// - `amount_in`: The amount of base tokens to trade.
-    ///
-    /// # Returns
-    /// A tuple of (amount_out, remaining_amount_in) where:
-    /// - `amount_out`: The total quote tokens that can be obtained
-    /// - `remaining_amount_in`: Any remaining base tokens that couldn't be filled
-    pub fn get_amount_out_from_levels(&self, amount_in: f64) -> (f64, f64) {
-        let mut remaining_amount_in = amount_in;
-        let mut total_amount_out = 0.0;
-
-        for level in &self.levels {
-            if remaining_amount_in <= 0.0 {
-                break;
-            };
-
-            let amount_to_fill = remaining_amount_in.min(level.quantity);
-            total_amount_out += amount_to_fill * level.price;
-            remaining_amount_in -= amount_to_fill;
-        }
-
-        (total_amount_out, remaining_amount_in)
     }
 }
 
@@ -185,12 +139,26 @@ pub struct HashflowRFQ {
     pub trader: String,
     #[serde(rename = "effectiveTrader")]
     pub effective_trader: Option<String>,
+    /// The only market makers Hashflow asks. `None` asks every maker.
+    #[serde(rename = "marketMakers", skip_serializing_if = "Option::is_none")]
+    pub market_makers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<HashflowRFQOptions>,
+}
+
+/// Options of one quote request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashflowRFQOptions {
+    /// When true, a request the named makers decline fails instead of being answered by another
+    /// maker.
+    #[serde(rename = "doNotRetryWithOtherMakers")]
+    pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowQuoteResponse {
     pub status: String,
-    pub error: Option<String>,
+    pub error: Option<HashflowError>,
     #[serde(rename = "rfqId")]
     rfq_id: String,
     #[serde(rename = "internalRfqIds")]
@@ -209,7 +177,11 @@ pub struct HashflowQuote {
 }
 
 impl HashflowQuote {
-    pub fn validate(&self, params: &GetAmountOutParams) -> Result<(), RFQError> {
+    pub fn validate(
+        &self,
+        params: &GetAmountOutParams,
+        expected_effective_trader: &Bytes,
+    ) -> Result<(), RFQError> {
         if self.quote_data.base_token != params.token_in {
             return Err(RFQError::FatalError(format!(
                 "Base token mismatch: expected {}, got {}",
@@ -226,6 +198,16 @@ impl HashflowQuote {
             return Err(RFQError::FatalError(format!(
                 "Trader address mismatch: expected {}, got {}",
                 params.receiver, self.quote_data.trader
+            )));
+        }
+        let effective_trader = self
+            .quote_data
+            .effective_trader
+            .clone()
+            .unwrap_or_else(|| self.quote_data.trader.clone());
+        if &effective_trader != expected_effective_trader {
+            return Err(RFQError::FatalError(format!(
+                "Effective trader mismatch: expected {expected_effective_trader}, got {effective_trader}"
             )));
         }
         if self.quote_data.base_token_amount != params.amount_in.to_string() {
@@ -274,10 +256,23 @@ mod tests {
                 quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
             },
             levels: vec![
-                HashflowPriceLevel { quantity: 1.0, price: 3000.0 },
-                HashflowPriceLevel { quantity: 2.0, price: 2999.0 },
+                PriceLevel { quantity: 1.0, price: 3000.0 },
+                PriceLevel { quantity: 2.0, price: 2999.0 },
             ],
         }
+    }
+
+    /// Hashflow answers a rejected RFQ with HTTP 200 and an `error` object, so the quote response
+    /// has to deserialize that shape rather than only the successful one.
+    #[test]
+    fn test_deserialize_rejected_quote_response() {
+        let body = r#"{"status":"fail","rfqId":"0x2250000000000000000000000000000f",
+            "error":{"code":82,"message":"No maker supports this request"}}"#;
+
+        let response: HashflowQuoteResponse = serde_json::from_str(body).unwrap();
+
+        assert_eq!(response.status, "fail");
+        assert_eq!(response.error.unwrap().to_string(), "No maker supports this request (code 82)");
     }
 
     #[test]
@@ -314,26 +309,6 @@ mod tests {
         assert_eq!(empty_mm_level.get_price(1.0), None);
     }
 
-    #[test]
-    fn test_get_amount_out_from_levels() {
-        let mm_level = hashflow_level();
-
-        // Test exact amount that can be filled with a single level
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(1.0);
-        assert_eq!(amount_out, 3000.0); // 1.0 * 3000.0
-        assert_eq!(remaining, 0.0);
-
-        // Test amount spanning multiple levels
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(2.0);
-        assert_eq!(amount_out, 5999.0); // 1.0 * 3000.0 + 1.0 * 2999.0
-        assert_eq!(remaining, 0.0);
-
-        // Test amount exceeding available liquidity
-        let (amount_out, remaining) = mm_level.get_amount_out_from_levels(5.0);
-        assert_eq!(amount_out, 8998.0); // 1.0 * 3000.0 + 2.0 * 2999.0 = 3000.0 + 5998.0
-        assert_eq!(remaining, 2.0); // 5.0 - 3.0 (total available)
-    }
-
     #[cfg(test)]
     mod hashflow_quote_validate_tests {
         use num_bigint::BigUint;
@@ -352,7 +327,7 @@ mod tests {
                 base_token_amount: "1000".to_string(),
                 quote_token_amount: "2000".to_string(),
                 trader: hex_to_bytes("0x3333333333333333333333333333333333333333"),
-                effective_trader: None,
+                effective_trader: Some(hex_to_bytes("0x6666666666666666666666666666666666666666")),
                 tx_id: hex_to_bytes("0x4444444444444444444444444444444444444444"),
                 pool: hex_to_bytes("0x5555555555555555555555555555555555555555"),
                 quote_expiry: 123456,
@@ -371,6 +346,10 @@ mod tests {
             }
         }
 
+        fn expected_effective_trader() -> Bytes {
+            hex_to_bytes("0x6666666666666666666666666666666666666666")
+        }
+
         fn quote() -> HashflowQuote {
             HashflowQuote {
                 quote_data: quote_data(),
@@ -384,7 +363,9 @@ mod tests {
         fn test_validate_success() {
             let quote = quote();
             let params = params();
-            assert!(quote.validate(&params).is_ok());
+            assert!(quote
+                .validate(&params, &expected_effective_trader())
+                .is_ok());
         }
 
         #[test]
@@ -393,7 +374,9 @@ mod tests {
             quote.quote_data.base_token =
                 hex_to_bytes("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
             let params = params();
-            let err = quote.validate(&params).unwrap_err();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
             assert!(format!("{err:?}").contains("Base token mismatch"));
         }
 
@@ -403,7 +386,9 @@ mod tests {
             quote.quote_data.quote_token =
                 hex_to_bytes("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
             let params = params();
-            let err = quote.validate(&params).unwrap_err();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
             assert!(format!("{err:?}").contains("Quote token mismatch"));
         }
 
@@ -412,8 +397,35 @@ mod tests {
             let mut quote = quote();
             quote.quote_data.trader = hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
             let params = params();
-            let err = quote.validate(&params).unwrap_err();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
             assert!(format!("{err:?}").contains("Trader address mismatch"));
+        }
+
+        #[test]
+        fn test_validate_effective_trader_mismatch() {
+            let mut quote = quote();
+            quote.quote_data.effective_trader =
+                Some(hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
+            let params = params();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("Effective trader mismatch"));
+        }
+
+        #[test]
+        fn test_validate_effective_trader_absent() {
+            // An answer without an effectiveTrader is not tied to the address we requested
+            // (Hashflow ties it to the trader instead), so validation must reject it.
+            let mut quote = quote();
+            quote.quote_data.effective_trader = None;
+            let params = params();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("Effective trader mismatch"));
         }
 
         #[test]
@@ -421,7 +433,9 @@ mod tests {
             let mut quote = quote();
             quote.quote_data.base_token_amount = "9999".to_string();
             let params = params();
-            let err = quote.validate(&params).unwrap_err();
+            let err = quote
+                .validate(&params, &expected_effective_trader())
+                .unwrap_err();
             assert!(format!("{err:?}").contains("Base token amount mismatch"));
         }
     }

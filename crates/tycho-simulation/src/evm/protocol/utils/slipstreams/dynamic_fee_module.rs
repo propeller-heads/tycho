@@ -13,10 +13,14 @@ pub(crate) const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
 pub(crate) const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
-const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 3] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 4] = [
     address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
     address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
     address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
+    // UP on Robinhood Chain. Same module code as the Base deployments above, so the fee resolution
+    // below applies unchanged; only its `factory` immutable and the name of its base-fee event
+    // differ.
+    address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
 ];
 const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 

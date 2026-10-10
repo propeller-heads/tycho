@@ -45,6 +45,10 @@
       "contract": "HashflowExecutor",
       "args": ["0x55084eE0fEf03f14a305cd24286359A35D735151"]
     },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"]
+    },
     "fluid_v1": {
       "contract": "FluidV1Executor",
       "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
@@ -54,7 +58,10 @@
       "contract": "RocketpoolExecutor",
       "args": ["0xCE15294273CFb9D9b628F4D61636623decDF4fdC"]
     },
-    "ekubo_v3": { "contract": "EkuboV3Executor", "args": [] },
+    "ekubo_v3": {
+      "contract": "EkuboV3Executor",
+      "args": ["0x55b703eED01b35641963da2FB2E14885993605A3"]
+    },
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]
@@ -76,10 +83,25 @@
       "args": ["0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca"]
     },
     "pricelevelstream": { "contract": "PropAMMExecutor", "args": [] },
-    "propammfallback": { "contract": "PropAMMFallbackExecutor", "args": [] },
+    "fallback": {
+      "contract": "PropAMMFallbackExecutor",
+      "args": ["0xA4bC389e87011fED8e902166bF421A29Fa6ef633"]
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0xB5c9a380DC501440F26420CD8015a1586Fd6E9e1"]
+    },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0xE51A1f575671364f295f61F121992788631553a1"]
+    },
+    "fallback:rfq:hashflow": {
+      "contract": "HashflowFallbackExecutor",
+      "args": ["0x29D7A3cd3485710585d4f3bee5E43fE28633915F"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     },
     "sky": {
       "contract": "SkyExecutor",
@@ -87,6 +109,23 @@
         "0xf6e72Db5454dd049d0788e411b06CfAF16853042",
         "0xA188EEC8F81263234dA3622A406892F3D630f98c",
         "0x3225737a9Bbb6473CB4a45b7244ACa2BeFdB276A"
+      ]
+    },
+    "lido_v4": {
+      "contract": "LidoV4Executor",
+      "args": [
+        "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+        "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+      ]
+    },
+    "etherfi": {
+      "contract": "EtherfiExecutor",
+      "args": [
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "0x35fA164735182de50811E8e2E824cFb9B6118ac2",
+        "0x308861A430be4cce5502d0A12724771Fc6DaF216",
+        "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+        "0xDadEf1fFBFeaAB4f68A9fD181395F68b4e4E7Ae0"
       ]
     }
   },
@@ -114,9 +153,25 @@
       "args": ["0x4200000000000000000000000000000000000006"]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "fallback": {
+      "contract": "PropAMMFallbackExecutor",
+      "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
+    },
+    "fallback:rfq:bebop": {
+      "contract": "BebopFallbackExecutor",
+      "args": ["0x4bB02166188132103fc608402B8993c0c0857708"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
     }
   },
   "unichain": {
@@ -156,9 +211,13 @@
       "contract": "NativeWrapExecutor",
       "args": ["0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"]
     },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+      "args": []
     }
   },
   "polygon": {
@@ -174,14 +233,17 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
-    },
-    "rfq:metric": {
-      "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
     }
   },
   "bsc": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ring_swap_v2": {
+      "contract": "RingSwapV2Executor",
+      "args": [
+        "0xEeE400Eabfba8F60f4e6B351D8577394BeB972CD",
+        "0x4De602A30Ad7fEf8223dcf67A9fB704324C4dd9B"
+      ]
+    },
     "pancakeswap_v2": { "contract": "UniswapV2Executor", "args": [25] },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
@@ -195,9 +257,9 @@
       "contract": "NativeWrapExecutor",
       "args": ["0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"]
     },
-    "rfq:metric": {
-      "contract": "MetricExecutor",
-      "args": ["0x681E908B8ab57c49C74D770F369754CCC3E1ae09"]
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
     }
   },
   "plasma": {
@@ -220,6 +282,10 @@
   },
   "robinhood": {
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
+    "ekubo_v3": {
+      "contract": "EkuboV3RobinhoodExecutor",
+      "args": ["0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"]
+    },
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
     "uniswap_v4": {
       "contract": "UniswapV4Executor",
@@ -231,6 +297,37 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x6f37069B1dcd2e33595F1fF711559CfdDe5338E5"]
+    },
+    "rfq:native": {
+      "contract": "NativeExecutor",
+      "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
+    }
+  },
+  "arc": {
+    "uniswap_v2": {
+      "contract": "UniswapV2Executor",
+      "args": [
+        30
+      ]
+    },
+    "uniswap_v3": {
+      "contract": "UniswapV3Executor",
+      "args": []
+    },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
     }
   }
 }

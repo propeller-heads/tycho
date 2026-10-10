@@ -85,7 +85,7 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - On `BlockUndoSignal`: purge blocks after the reverted hash (falling back to the target height when the hash is unknown), emit revert messages — no DB rollback needed
    - Drain to DB when `count_blocks_before(finalized_block_height) >= commit_batch_size` — only finalized blocks ever reach DB
 4. Drained blocks: `BlockChanges` → `BlockAggregatedChanges` (merge all tx-level deltas into one state per component/account)
-5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message
+5. DB write via `CachedGateway` → Postgres (upsert blocks, tokens, components, state, balances); sets `db_committed_block_height` on outgoing message to `CachedGateway::flushed_block_height`, the height whose writes reached Postgres (not the last drained block)
 6. Broadcast a `DeltaCommand` on the internal channel — `Block(BlockAggregatedChanges)` for all
    blocks (including pending/non-committed), or `ExtractorRestarted` when the supervisor rebuilt
    the extractor
@@ -94,10 +94,15 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 7. WebSocket subscribers (`services/ws.rs`) receive broadcast directly; revert flag signals chain
    reorg. On `ExtractorRestarted`, `ws.rs` sends `Response::SubscriptionEnded` and `PendingDeltas`
-   resets that extractor's buffer
-8. `PendingDeltasBuffer` (`services/deltas_buffer.rs`) receives broadcast
-   - Inserts every full block (partial blocks skipped)
-   - Auto-drains blocks ≤ `db_committed_block_height` (already in DB, no longer "pending")
+   folds that extractor's committed blocks into the sink and clears its window
+8. `PendingDeltas` (`services/deltas_buffer.rs`) receives broadcast
+   - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`.
+     Evicted blocks fold into the `EntityCache` when `ENTITY_CACHE_MODE` is not `off` (built from
+     one database snapshot before the server starts), otherwise into `DiscardSink`
+   - Retains a block until it is at or below `min(finalized, db_committed, tip - depth)`, then
+     folds it into a `FoldSink` and evicts it; committed blocks stay servable meanwhile
+   - A block the window cannot apply ends the pump and the process; the window cannot refill
+     itself (see `crates/tycho-indexer/CLAUDE.md`, "Reorg handling")
    - RPC handlers query DB snapshot + pending deltas = consistent view of latest state
 
 ### Client (tycho-client)
@@ -195,6 +200,10 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 | `MAIN_WORKER_THREADS` | Server runtime threads (default 3) |
 | `RPC_MAX_RETRIES` / `RPC_INITIAL_BACKOFF_MS` / `RPC_MAX_BACKOFF_MS` | RPC retry policy |
 | `RPC_MAX_BATCH_SIZE` / `RPC_STORAGE_SLOT_MAX_BATCH_SIZE` | RPC request batching limits |
+| `DELTA_WINDOW_DEPTH` | Blocks each extractor's RPC-side window retains (default 128) |
+| `DELTA_WINDOW_FOLD_BATCH` | Evictable blocks required before a fold runs (default 1) |
+| `ENTITY_CACHE_MODE` | `off` (default), `shadow`, or `serve`; anything but `off` loads the entity cache at startup and folds the windows into it |
+| `ENTITY_CACHE_SHADOW_SAMPLE_RATE` | Share of state requests that `shadow` compares with the entity cache, 0.0 to 1.0 (default 0.0) |
 | `TYCHO_S3_BUCKET` | S3 bucket the Substreams spkg packages are fetched from |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |
 | `RUST_LOG` | Tracing filter (e.g. `tycho_indexer=debug`) |

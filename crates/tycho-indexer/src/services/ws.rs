@@ -475,7 +475,9 @@ enum ExtractorEvent {
 /// restart). It lets the actor send `SubscriptionEnded` to the client and clean up the
 /// subscription without dropping the entire WebSocket connection.
 impl StreamHandler<ExtractorEvent> for WsActor {
-    #[instrument(skip_all, fields(WsActor.id = %self.id))]
+    // Debug level: the actor mailbox separates this from the block that produced the message,
+    // so at info it exports one parentless single-span trace per message per subscriber.
+    #[instrument(level = "debug", skip_all, fields(WsActor.id = %self.id))]
     fn handle(&mut self, msg: ExtractorEvent, ctx: &mut Self::Context) {
         match msg {
             ExtractorEvent::Message(subscription_id, deltas) => {

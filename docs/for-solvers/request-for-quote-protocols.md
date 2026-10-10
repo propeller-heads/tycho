@@ -11,28 +11,36 @@ Tycho supports streaming, simulating, and executing RFQ quotes as part of multi-
 
 Currently, Tycho supports the following RFQ protocols:
 
-| Protocol    | Simulation Time |
-| ----------- | --------------- |
-| `bebop`     | 0.5 µs          |
-| `hashflow`  | 0.4 µs          |
-| `liquorice` | 0.4 µs          |
+| Protocol    | Simulation Time | Credentials            | Chains                                   |
+| ----------- | --------------- | ---------------------- | ---------------------------------------- |
+| `bebop`     | 0.5 µs          | Required               | Ethereum, Base                           |
+| `hashflow`  | 0.4 µs          | Required               | Ethereum                                 |
+| `liquorice` | 0.4 µs          | Required               | Ethereum                                 |
+| `metric`    | -               | None (public endpoint) | Base, Robinhood                          |
+| `native`    | -               | Required               | Ethereum, Base, Arbitrum, BSC, Robinhood |
+
+On Ethereum, Metric is available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
 
 ## Quickstart
 
 The RFQ quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a> and <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a> are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, Metric and Native are the only supported providers.
 
 You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
 
 ```bash
+unset HISTFILE # to not save your credentials to your shell history
 export BEBOP_KEY=<your-bebop-api-key>
 export HASHFLOW_USER=<your-hashflow-api-username>
 export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
+export NATIVE_API_KEY=<your-native-api-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
+
+Metric needs no credentials: the client defaults to Metric's public endpoint. Override it with `METRIC_API_URL`, and set `METRIC_SECRET_KEY` only if your endpoint requires one. The example registers Metric under the `--run-pamm-protocols` flag, which is on by default, so it runs even without any authenticated RFQ credentials.
 
 Then run the example:
 
@@ -109,6 +117,21 @@ let rfq_stream_builder = RFQStreamBuilder::new()
 * Streams that return errors are removed automatically.
 
 RFQ streams are **timestamped**, not block-based. Each update provides the full known state from the provider at that moment (not just deltas). The `removed_pairs` field indicates any pairs that disappeared since the last update. The `new_pairs` field contains all the currently available pairs.
+
+### Venue components
+
+By default, Hashflow, Liquorice, Bebop and Native stream one component per token pair, and a swap leaves the state unchanged. `.component_layout(ComponentLayout::AllPairs)` on the client builder makes the client stream one component for all token pairs instead. Register an all-pairs client with `HashflowAllPairsState`, `LiquoriceAllPairsState`, `BebopAllPairsState` or `NativeAllPairsState` under the name `<venue>_all_pairs`, for example `.add_client::<HashflowAllPairsState>("hashflow_all_pairs", Box::new(client))`. The two layouts stream under different names, so one stream builder can carry a per-pair and an all-pairs client of the same venue. `ComponentLayout` and `QuoteRule` are in `tycho_simulation::rfq::models`.
+
+An all-pairs component has these properties. Its `tokens` are every token the venue quotes, and its `swap_directions` static attribute lists the directions it quotes, 40 bytes each: the token in, then the token out. Add graph edges from that attribute, not from every pair of `tokens`, and rebuild them when the component's `tokens` change between updates.
+
+A swap records what it used in the `new_state` it returns. How often one route may quote a venue is its quote rule, carried as the `quote_rule` static attribute:
+
+* Hashflow and Liquorice name their market makers. By default every maker quotes once per route (`once_per_maker`). `.quote_rule(QuoteRule::OncePerVenue)` on the client builder limits the venue to one quote per route.
+* Bebop and Native name no maker and quote once per route (`once_per_venue`).
+
+The rule takes effect wherever your algorithm threads `new_state` between two uses of the component. A swap the rule refuses returns a recoverable `No liquidity` error.
+
+Request the firm quote on the state the swap was simulated on, with the simulated amount. For Hashflow and Liquorice, that state picks the market maker the firm quote asks. On the `new_state` the swap returned, that maker is already used.
 
 ### Simulation
 
@@ -215,10 +238,10 @@ This gives you full control over execution. And it protects you from MEV and sli
 
 ### Execution
 
-This step allows you to test or perform real transactions based on the best available swap options. For this step, you need to pass your wallet's private key in the run command. Handle it securely and never expose it publicly.
+This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Quickstart](#quickstart). Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example quickstart -- --swapper-pk $PK
+cargo run --release --example rfq_quickstart
 ```
 
 Once the best swap is found you can:
@@ -236,3 +259,27 @@ Market conditions can change rapidly. Delays in your decision-making can lead to
 {% hint style="info" %}
 Because the RFQ will only let you swap up to the amount of tokens specified in the quote, when the RFQ swap happens after another protocol in a sequential swap, if positive slippage occurs during the preceding swap, any additional input tokens beyond the permitted quote amount will remain in the Tycho Router and not be sent to the RFQ protocol.
 {% endhint %}
+
+## pAMM Price Level Stream
+
+Besides the RFQ clients above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for a subset of the pAMMs Titan serves. It only serves Ethereum Mainnet.
+
+`PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream:
+
+```rust
+use tycho_simulation::price_level_stream::stream::PriceLevelStreamBuilder;
+
+let price_level_stream = PriceLevelStreamBuilder::new()
+    .with_known_pamms()       // serve the venues Tycho has measured
+    .auto_detect(true)        // also serve any other venue Titan streams
+    .with_tokens(all_tokens.clone())
+    .build();
+```
+
+Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. Each update carries the block its frame targets; that number only decreases after every component has been removed, when the stream re-anchors on the next frame. The stream never terminates — run it in its own task alongside your protocol stream.
+
+Frames are best effort, not complete snapshots: a venue or a pair can be absent from one frame and present in the next, so the stream never removes a component because a frame omits it. Instead it serves a component for `stale_after` (default 24 s) after the last frame that carried it, then lists the component in `removed_pairs`; the next frame that carries it adds it back in `new_pairs`. Every state also refuses to quote once its frame is 12 s old, so you cannot quote a ladder past the block it targeted even before the removal arrives. Treat a removal like any other: stop routing through the component until it reappears in `new_pairs`. If you quote states more than 12 s after they arrive by design (a batch simulator, a validation harness), `without_quote_guard()` emits states that never refuse; the 24 s removal still applies, and a quote from such a state may no longer be fillable.
+
+`with_known_pamms()` serves these venues: Bebop, FermiSwap, Kipseli, Metric, TaurusFi and Tempest. Titan does not stream every venue at all times, so the live set can be smaller.
+
+Components arrive as `fallback:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one: `tycho-execution` routes those swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback pool named in the swap's `user_data`. `without_fallback_router()` keeps every venue on the direct `pricelevelstream:{pamm}` path, where a stale quote reverts the route.

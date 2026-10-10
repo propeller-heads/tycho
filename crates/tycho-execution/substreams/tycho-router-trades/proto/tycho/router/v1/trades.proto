@@ -23,6 +23,8 @@ message RouterCallError {
   string error = 10;
   bool tx_success = 11;
   bool call_success = 12;
+  // Whether the chain kept the state changes of the call. See Trade.state_committed.
+  bool state_committed = 13;
 }
 
 // One call into a TychoRouter swap entry point (successful or reverted).
@@ -76,14 +78,22 @@ message Trade {
   // V2 only.
   bool wrap_eth = 32;
   bool unwrap_eth = 33;
+  // Whether the chain kept the state changes of the call.
+  //
+  // A call can return normally and still have every state change it made thrown away, because
+  // an ancestor call reverted afterwards. A caller quoting the router on chain does exactly
+  // that: it calls the router, reads the return value, then reverts. Such a call carries
+  // tx_success and call_success like a fill, so this is the only field that separates the two.
+  bool state_committed = 34;
 }
 
 // One executor invocation inside a trade.
 message Hop {
   uint32 index = 1;
   bytes executor = 2;
-  // Protocol systems resolved from the executor address; empty when unknown.
-  repeated string protocol_systems = 3;
+  // 3 was protocol_systems, which the `executors` table now resolves from the address at query
+  // time. See executors.sql.
+  reserved 3;
   // Split swaps only: indices into the trade's token array and the raw uint24 split
   // (0 means "remainder").
   uint32 token_in_index = 4;
@@ -112,6 +122,10 @@ message RouterFeeConfig {
   bool positive_slippage_enabled = 6;
   // Denominator of the bps values: 10000 for v3_0, 100000000 for v3_1.
   uint64 bps_scale = 7;
+  // Whether this trade's client is exempt from positive slippage capture. The client is the
+  // signed clientFeeReceiver, or tx.origin when that is zero, the same resolution the
+  // FeeCalculator does. Only the calculator generation that has exemptions can set it.
+  bool positive_slippage_exempt = 8;
 }
 
 // One recipient of the FeesTaken event.
@@ -120,6 +134,9 @@ message FeeTaken {
   string amount = 2;
   // Contract array position: "router" first, then "client".
   string role = 3;
+  // The credited token, from the event rather than the calldata, so a vault balance built on
+  // this does not depend on the swap decoder.
+  bytes token = 4;
 }
 
 // Fee configuration changes found in one block.
@@ -143,4 +160,41 @@ message FeeConfigEvent {
   // Decimal / hex string representation of the old and new values.
   string old_value = 10;
   string new_value = 11;
+  // Denominator of the bps values this emitter uses, when the event gives its generation away;
+  // 0 otherwise. The two FeeCalculator generations widened the bps arguments from uint16 to
+  // uint32, so an event that carries one has a different topic in each.
+  uint64 bps_scale = 12;
+}
+
+// Every ERC-6909 Transfer a router emitted in one block.
+//
+// The router keeps a vault of internal token balances. It credits a fee recipient there instead
+// of transferring, so router revenue accrues as a vault balance until someone withdraws it.
+//
+// Fee credits are NOT in here: the router mints those without an event to save gas, and reports
+// them through FeesTaken instead (see FeeTaken). A balance therefore needs both sources.
+message VaultTransfers {
+  repeated VaultTransfer transfers = 1;
+}
+
+// One ERC-6909 Transfer: a deposit, a withdrawal, or a move between two owners.
+message VaultTransfer {
+  string chain = 1;
+  uint64 block_number = 2;
+  uint64 block_timestamp = 3;
+  bytes tx_hash = 4;
+  uint32 log_index = 5;
+  // The router holding the vault. Each router has its own, so a balance is per router.
+  bytes router = 6;
+  // msg.sender of the call that moved the balance. The owner of an operator-driven move.
+  bytes caller = 7;
+  // Debited owner; empty on a credit (mint).
+  bytes sender = 8;
+  // Credited owner; empty on a debit (burn).
+  bytes receiver = 9;
+  // The ERC-6909 id, which the router derives from the token address.
+  bytes token = 10;
+  string amount = 11;
+  // "credit" (minted), "debit" (burned) or "transfer" (between two owners).
+  string kind = 12;
 }

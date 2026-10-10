@@ -27,7 +27,8 @@ from being stored in the shell history.
    export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
    ```
 
-On Robinhood Chain (`robinhood`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+On Robinhood Chain (`robinhood`) and Arc (`arc`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.
@@ -40,8 +41,12 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 
 1. Define the `ROUTER_FEE_SETTER` address for your network in `scripts/roles.json`. The first
    address receives `ROUTER_FEE_SETTER_ROLE` to manage fee configuration.
-2. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
-3. Note the deployed address — you will need it in the next step.
+2. Define `ROUTER_FEE_RECEIVER` for your network in the same file. The first address is passed to
+   the constructor and owns the vault balance every router fee is credited to, so it must be an
+   address that can call `withdraw()` on the router. It is a constructor argument because the
+   deployment goes through the CREATE2 factory, which can never withdraw.
+3. Deploy: `npx hardhat run scripts/deploy-fee-calculator.js --network NETWORK`
+4. Note the deployed address — you will need it in the next step.
 
 ### Deploy executors
 
@@ -63,8 +68,18 @@ The FeeCalculator must be deployed **before** the TychoRouterV3, as the router r
 Via the safe wallet UI:
 
 5. Set the executors addresses
-6. Set fee amounts and router fee receiver in FeeCalculator
+6. Set fee amounts in FeeCalculator
 7. Set the pauser wallets
+
+### Publish the deployment
+
+1. Add the complete deployment snapshot under the chain's `scheduled_successor` field. Keep the current deployment active during the notice period.
+2. Set the notice publication date, effective date, matching migration deadline, deployment commit, dependency snapshot, and `status: scheduled`.
+3. Publish the successor at least 30 days before its effective date. For an urgent material security risk, add a `notice_exception` with `kind: material_security_risk` and a nonempty reason.
+4. Treat any change to the router, FeeCalculator, executor set, or pinned dependency configuration as a successor change.
+5. At the effective time, move the previous active deployment into the chain's `superseded` list, promote the scheduled successor, and set `scheduled_successor` to `null`. Do not remove history.
+6. Update `docs/for-solvers/execution/contract-addresses.md` when scheduling and promoting the successor.
+
 ### Revoke roles
 
 1. If you wish to revoke a role for a certain address, run: `npx hardhat run scripts/revoke-role.js --network NETWORK`
@@ -78,37 +93,3 @@ Via the safe wallet UI:
        approved in their UI to execute on chain. Be sure to change the PRIVATE_KEY to that which has permissions on the
        safe wallet.
     2. If it's not set, it will submit the transaction directly to the chain.
-
-## Export Runtime Bytecode
-
-The `export-runtime-bytecode.js` script allows you to export the runtime bytecode of any executor contract for use in
-SDK testing.
-
-### Prerequisites
-
-1. Ensure the contract is compiled: `forge build`
-2. Start a local blockchain: `anvil` (or `anvil &` to run in background)
-
-### Usage
-
-```bash
-node scripts/export-runtime-bytecode.js <ContractName> [constructorArg1] [constructorArg2] ...
-```
-
-### Example
-
-```bash
-# Export BalancerV2Executor (requires permit2 address)
-node scripts/export-runtime-bytecode.js BalancerV2Executor 0x000000000022D473030F116dDEE9F6B43aC78BA3
-```
-
-### Output
-
-The script will:
-
-1. Deploy the contract with the provided constructor arguments to your local fork
-2. Extract the runtime bytecode (including immutables)
-3. Save it to `test/{ContractName}.runtime.json`
-
-The generated JSON file contains the runtime bytecode in the format expected by the SDK and should be copied to the
-appropriate SDK repository for testing. **Do not commit these files to this repository.**

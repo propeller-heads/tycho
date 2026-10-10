@@ -114,20 +114,25 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
 
 /// Filters `vm:curve` components to those the hybrid `CurveState` can quote correctly.
 ///
-/// Excludes pools with rate-bearing or rebasing coins. Such a coin prices through a per-block rate
-/// (an oracle, an ERC4626 vault, or an in-place rebase exposed via `stored_rates`) whose source is
-/// an external contract that is not part of the indexed pool state. The hybrid reads that rate via
-/// VM getters against the locally indexed storage, so it gets a stale or default value and the
-/// quote drifts from the on-chain swap (observed up to ~30% on oracle-rate NG pools). Supporting
-/// these requires DCI on the rate source in the substreams.
+/// Excludes pools with rate-bearing or rebasing coins, unless every such coin is an oracle coin
+/// whose rate provider is on a trusted list. Such a coin prices through a per-block
+/// rate (an oracle, an ERC4626 vault, or an in-place rebase exposed via `stored_rates`) whose
+/// source is an external contract. The hybrid reads that rate via VM getters against the locally
+/// indexed storage. If DCI does not capture every slot the rate read touches, the hybrid gets a
+/// stale or default value and the quote drifts from the on-chain swap (observed up to ~30% on
+/// oracle-rate NG pools). Some providers also return an inflated rate to callers that look like
+/// a quote.
 ///
 /// Detection uses the substreams' static markers:
-/// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx).
-/// - `asset_types` — per-coin Curve NG asset type encoded as a hex int; any non-zero entry (oracle
-///   / rebasing / ERC4626) is unsupported. Standard coins encode as `"0x"` / `"0x00"`.
+/// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx). A pool carrying it is
+///   kept only if its id is on a trusted list.
+/// - `asset_types` — per-coin Curve NG asset type encoded as a hex int. Standard coins encode as
+///   `"0x"` / `"0x00"`. An oracle coin (`"0x01"`) is kept only if its entry in `oracles` and
+///   `method_ids` is a trusted provider. Rebasing (`"0x02"`) and ERC4626 (`"0x03"`) coins are
+///   always excluded.
 pub fn curve_filter(component: &ComponentWithState) -> bool {
     let attrs = &component.component.static_attributes;
-    if attr_json_list_non_empty(attrs, "rebase_tokens") || asset_types_has_non_standard(attrs) {
+    if has_untrusted_rebase_tokens(component) || has_unsupported_asset_type(attrs) {
         debug!(
             "Filtering out curve pool {} with rate-bearing/rebasing coins (unsupported by hybrid)",
             component.component.id
@@ -167,22 +172,106 @@ fn attr_json_list_non_empty(attrs: &HashMap<String, Bytes>, key: &str) -> bool {
     attr_json_list(attrs, key).is_some_and(|list| !list.is_empty())
 }
 
-/// True when `asset_types` contains any non-standard coin. Each entry is a hex-encoded integer
-/// (`"0x"`/`"0x00"` = standard; `"0x01"` oracle, `"0x02"` rebasing, `"0x03"` ERC4626).
-fn asset_types_has_non_standard(attrs: &HashMap<String, Bytes>) -> bool {
-    attr_json_list(attrs, "asset_types").is_some_and(|types| {
-        types.iter().any(|entry| {
-            let digits = entry.trim_start_matches("0x");
-            digits.chars().any(|c| c != '0')
-        })
-    })
+/// True when the pool lists `rebase_tokens` and is not on the trusted list below.
+fn has_untrusted_rebase_tokens(component: &ComponentWithState) -> bool {
+    // Pools whose rebasing coins the hybrid quotes correctly. An entry must read each rebasing
+    // coin's balance live through `balanceOf(pool)` rather than caching it in pool storage, so
+    // the substreams' `balanceOf` DCI entrypoint captures every slot a rebase changes and the pool
+    // is re-emitted when it does.
+    //
+    // Both stETH pools hold native ETH, which the pool reads as `self.balance`. That balance is
+    // only correct from tycho-substreams 0.8.2 (#1544): earlier packages missed ETH sent out of
+    // the pool, and the legacy pool's indexed native balance drifted ~299 ETH above the chain.
+    //
+    // Checked on Ethereum on 2026-10-09: the hybrid quote equalled the pool's `get_dy` to the wei
+    // in both directions over 5 ETH swaps (blocks 26152141-26152169), and the 17 slots DCI traces
+    // for `balanceOf(pool)` matched the chain at block 26152079. Executed swaps land 1-2 wei
+    // under the quote because a stETH transfer rounds down to whole shares; `get_dy` does not
+    // model that either.
+    const TRUSTED_REBASE_POOLS: [&str; 2] = [
+        // Lido ETH/stETH, the legacy StableSwap pool.
+        "0xdc24316b9ae028f1497c275eb9192a3ea0f67022",
+        // ETH/stETH-ng, a plain pool from the meta pool factory.
+        "0x21e27a5e5513d6e65c4f830167390997aa84843a",
+    ];
+
+    if !attr_json_list_non_empty(&component.component.static_attributes, "rebase_tokens") {
+        return false;
+    }
+    let id = &component.component.id;
+    !TRUSTED_REBASE_POOLS
+        .iter()
+        .any(|trusted| id.eq_ignore_ascii_case(trusted))
 }
 
+/// True when `asset_types` contains a coin the hybrid cannot quote: any non-standard coin other
+/// than an oracle coin backed by a trusted rate provider. Each entry is a hex-encoded integer
+/// (`"0x"`/`"0x00"` = standard; `"0x01"` oracle, `"0x02"` rebasing, `"0x03"` ERC4626). A pool
+/// without `asset_types` has only standard coins.
+fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
+    // Oracle rate providers as `(oracle, method id)` pairs, matched against the pool's `oracles`
+    // and `method_ids` static attributes. An entry must return the same rate to a quote as to a
+    // swap (no branch on the caller or the gas price, no value set from outside the issuer), and
+    // DCI must capture every storage slot the rate read touches, so the pool is re-emitted when
+    // the rate changes.
+    const TRUSTED_RATE_ORACLES: [(&str, &str); 1] = [
+        // weETH `getRate()` on Ethereum: the rate is ether.fi's own share accounting. The
+        // weETH/WETH NG pool quoted wei-exact against `get_dy` over 1000 blocks, rate updates
+        // included.
+        ("0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce"),
+    ];
+
+    let Some(types) = attr_json_list(attrs, "asset_types") else {
+        return false;
+    };
+    let oracles = attr_json_list(attrs, "oracles").unwrap_or_default();
+    let method_ids = attr_json_list(attrs, "method_ids").unwrap_or_default();
+    for (index, entry) in types.iter().enumerate() {
+        let asset_type = entry
+            .trim_start_matches("0x")
+            .trim_start_matches('0');
+        if asset_type.is_empty() {
+            continue;
+        }
+        let (Some(oracle), Some(method_id)) = (oracles.get(index), method_ids.get(index)) else {
+            return true;
+        };
+        let trusted = TRUSTED_RATE_ORACLES
+            .iter()
+            .any(|(trusted_oracle, trusted_method_id)| {
+                oracle.eq_ignore_ascii_case(trusted_oracle) &&
+                    method_id.eq_ignore_ascii_case(trusted_method_id)
+            });
+        if asset_type != "1" || !trusted {
+            return true;
+        }
+    }
+    false
+}
+
+/// Filters out ERC4626 vaults that cannot be quoted correctly.
+///
+/// FIXME: spETH, sUSDS and sUSDC are knowingly left in, and are correct only where `vm:curve` is
+/// indexed: its components trace their rate getter at a block where the accrual branch runs,
+/// which is what puts `vsr`/`ssr` into the indexed slot set. A deployment without it fails to
+/// decode them exactly like the vaults listed below. They stay because consumers route through
+/// them, and each one is a whole leg rather than depth — a vault converts at a fixed rate at any
+/// size up to its caps — so excluding one takes USDS/sUSDS, USDC/sUSDC or WETH/spETH out of the
+/// graph outright. The fix belongs in the substreams: emit an entrypoint per rate getter, so the
+/// slot is captured whichever branch a conversion takes.
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
-    const UNSUPPORTED_POOLS: [&str; 4] = [
-        "0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d",
+    const UNSUPPORTED_POOLS: [&str; 3] = [
+        // Spark Vault V2 (spUSDC, spUSDT). Their rate is `nowChi()`, which reads `vsr` (slot 4)
+        // only on the `block.timestamp > rho` branch. Any deposit/withdraw leaves
+        // `rho == block.timestamp`, and entrypoints are traced once, at the component's first
+        // one — so the trace takes the `chi` branch and never touches `vsr`. The vault is one
+        // of the component's tokens, so DCI indexes only the slots the trace saw: `vsr` reads
+        // back as 0, `_rpow(0, dt)` collapses `nowChi()` to 0, and `convertToShares` reverts
+        // on the division, so the component fails to decode. Confirmed against production.
+        // spETH is not affected: a Curve pool holding it traces `convertToAssets` off a
+        // non-drip block, so `vsr` is captured and stays indexed.
+        "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
-        "0xfE6eb3b609a7C8352A241f7F3A21CEA4e9209B8f",
         // sDAI: `maxDeposit` returns `type(uint256).max`, which `ERC4626State` takes at face
         // value as the deposit limit, so deposits quote unbounded. The real limit is not
         // exposed on-chain in any form we can trace, and there is no generic fix.
@@ -229,6 +318,27 @@ mod tests {
         }
     }
 
+    fn curve_component(static_attributes: &[(&str, &str)]) -> ComponentWithState {
+        ComponentWithState {
+            state: ProtocolComponentState::new("curve_pool", HashMap::new(), HashMap::new()),
+            component: ProtocolComponent {
+                static_attributes: attrs(static_attributes),
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
+    fn erc4626_component(id: &str) -> ComponentWithState {
+        ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent { id: id.to_string(), ..Default::default() },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        }
+    }
+
     #[test]
     fn non_angstrom_filter_excludes_angstrom_pools() {
         assert!(!uniswap_v4_non_angstrom_hook_pool_filter(&hooks_component(Some("angstrom_v1"))));
@@ -239,30 +349,96 @@ mod tests {
     #[test]
     fn curve_keeps_standard_pool() {
         // 3pool-style: no rate markers.
-        assert!(!asset_types_has_non_standard(&attrs(&[])));
-        assert!(!attr_json_list_non_empty(&attrs(&[]), "rebase_tokens"));
+        assert!(curve_filter(&curve_component(&[])));
         // An all-standard NG pool emits asset_types but every entry is zero.
-        assert!(!asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x00","0x00"]"#)])));
+        assert!(curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x00"]"#)])));
+    }
+
+    fn oracle_pool(asset_type: &str, oracle: &str, method_id: &str) -> ComponentWithState {
+        let asset_types = format!(r#"["0x00","{asset_type}"]"#);
+        let oracles = format!(r#"["0x0000000000000000000000000000000000000000","{oracle}"]"#);
+        let method_ids = format!(r#"["0x00000000","{method_id}"]"#);
+        curve_component(&[
+            ("asset_types", asset_types.as_str()),
+            ("oracles", oracles.as_str()),
+            ("method_ids", method_ids.as_str()),
+        ])
     }
 
     #[test]
-    fn curve_excludes_oracle_asset_type() {
-        // apyUSD/apxUSD: coin 0 is an oracle rate token.
-        assert!(asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x01","0x00"]"#)])));
-        // ERC4626 (0x03) and rebasing (0x02) asset types are also non-standard.
-        assert!(asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x00","0x03"]"#)])));
+    fn curve_keeps_trusted_oracle_asset_type() {
+        // weETH/WETH-ng: coin 1 prices through weETH `getRate()`. Checksummed input still matches.
+        assert!(curve_filter(&oracle_pool(
+            "0x01",
+            "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
+            "0x679aefce"
+        )));
+    }
+
+    #[test]
+    fn curve_excludes_untrusted_rate_coins() {
+        let weeth = "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee";
+        // Oracle outside the allowlist.
+        assert!(!curve_filter(&oracle_pool(
+            "0x01",
+            "0x1111111111111111111111111111111111111111",
+            "0x679aefce"
+        )));
+        // Trusted oracle, other method.
+        assert!(!curve_filter(&oracle_pool("0x01", weeth, "0x12345678")));
+        // The allowlist covers oracle coins only: ERC4626 stays out.
+        assert!(!curve_filter(&oracle_pool("0x03", weeth, "0x679aefce")));
+        // Oracle coin without the oracle attributes.
+        assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x01"]"#)])));
+    }
+
+    fn steth_pool(id: &str) -> ComponentWithState {
+        let mut component = curve_component(&[(
+            "rebase_tokens",
+            r#"["0xae7ab96520de3a18e5e111b5eaab095312d7fe84"]"#,
+        )]);
+        component.component.id = id.to_string();
+        component
     }
 
     #[test]
     fn curve_excludes_rebase_tokens() {
-        // ETH/ETHx and legacy stETH expose a non-empty rebase_tokens list.
-        let m = attrs(&[("rebase_tokens", r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#)]);
-        assert!(attr_json_list_non_empty(&m, "rebase_tokens"));
+        // ETH/ETHx exposes a non-empty rebase_tokens list.
+        assert!(!curve_filter(&curve_component(&[(
+            "rebase_tokens",
+            r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#
+        )])));
+        // A stETH pool outside the trusted list stays out.
+        assert!(!curve_filter(&steth_pool("0x1111111111111111111111111111111111111111")));
+    }
+
+    #[test]
+    fn curve_keeps_trusted_rebase_pools_regardless_of_id_case() {
+        assert!(curve_filter(&steth_pool("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")));
+        assert!(curve_filter(&steth_pool("0x21e27a5e5513d6e65c4f830167390997aa84843a")));
+    }
+
+    #[test]
+    fn curve_trusted_rebase_pool_still_checks_asset_types() {
+        let mut component = steth_pool("0xdc24316b9ae028f1497c275eb9192a3ea0f67022");
+        component
+            .component
+            .static_attributes
+            .extend(attrs(&[("asset_types", r#"["0x00","0x03"]"#)]));
+        assert!(!curve_filter(&component));
+    }
+
+    #[test]
+    fn erc4626_excludes_unsupported_pools_regardless_of_id_case() {
+        // Component ids arrive checksummed; the entries must be lower case to ever match.
+        assert!(!erc4626_filter(&erc4626_component("0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d")));
+        assert!(!erc4626_filter(&erc4626_component("0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d")));
+        assert!(erc4626_filter(&erc4626_component("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd")));
     }
 
     #[test]
     fn curve_zero_encoded_as_empty_hex_is_standard() {
         // BigInt 0 serializes to "0x" (empty bytes); must count as standard.
-        assert!(!asset_types_has_non_standard(&attrs(&[("asset_types", r#"["0x","0x"]"#)])));
+        assert!(curve_filter(&curve_component(&[("asset_types", r#"["0x","0x"]"#)])));
     }
 }

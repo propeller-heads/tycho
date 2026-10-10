@@ -1,6 +1,7 @@
 # Local setup: Postgres, one sink per chain and the pricing loop.
 #
 #   docker compose up -d db                      # database only (then `make sink CHAIN=...`)
+#   make pack-all                                # the sinks read these, the image ships none
 #   docker compose --profile sinks up -d         # database + all chain sinks + pricer
 #
 # Set SUBSTREAMS_API_TOKEN in the environment (or a .env file next to this file).
@@ -15,6 +16,8 @@ x-sink: &sink
   depends_on:
     db:
       condition: service_healthy
+  volumes:
+    - ./target/spkg:/opt/router-trades/spkg:ro
   environment: &sink-env
     DSN: psql://tycho:tycho@db:5432/router_trades?sslmode=disable
     SUBSTREAMS_API_TOKEN: ${SUBSTREAMS_API_TOKEN}
@@ -39,28 +42,28 @@ services:
 
   sink-ethereum:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: ethereum }
+    environment: { <<: *sink-env, CHAIN: ethereum, SPKG: /opt/router-trades/spkg/ethereum.spkg }
   sink-base:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: base }
+    environment: { <<: *sink-env, CHAIN: base, SPKG: /opt/router-trades/spkg/base.spkg }
   sink-unichain:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: unichain }
+    environment: { <<: *sink-env, CHAIN: unichain, SPKG: /opt/router-trades/spkg/unichain.spkg }
   sink-arbitrum:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: arbitrum }
+    environment: { <<: *sink-env, CHAIN: arbitrum, SPKG: /opt/router-trades/spkg/arbitrum.spkg }
   sink-bsc:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: bsc }
+    environment: { <<: *sink-env, CHAIN: bsc, SPKG: /opt/router-trades/spkg/bsc.spkg }
   sink-polygon:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: polygon }
+    environment: { <<: *sink-env, CHAIN: polygon, SPKG: /opt/router-trades/spkg/polygon.spkg }
   sink-plasma:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: plasma }
+    environment: { <<: *sink-env, CHAIN: plasma, SPKG: /opt/router-trades/spkg/plasma.spkg }
   sink-robinhood:
     <<: *sink
-    environment: { <<: *sink-env, CHAIN: robinhood }
+    environment: { <<: *sink-env, CHAIN: robinhood, SPKG: /opt/router-trades/spkg/robinhood.spkg }
 
   pricer:
     <<: *sink

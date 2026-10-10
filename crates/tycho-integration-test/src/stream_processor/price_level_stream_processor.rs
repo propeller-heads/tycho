@@ -59,9 +59,9 @@ impl PriceLevelStreamProcessor {
         // The default venues are served under their names, auto-detection additionally serves
         // any newly streamed pAMM under its address.
         //
-        // Whitelisted venues go through the PropAMMRouter, as they do for consumers. The venue
-        // itself fills whenever execution overrides its registry slot (see `oracle_overrides`).
-        // Without those overrides the venue reverts and the router fills on Uniswap V3 instead,
+        // Venues go through `TychoFallbackRouter`, as they do for consumers. The venue itself
+        // fills whenever execution overrides its registry slot (see `oracle_overrides`). Without
+        // those overrides the venue reverts and the router fills on the fallback pool instead,
         // which reads as a quote mismatch rather than a stale quote — so every swap that lacks
         // them is counted, by `tycho_integration_price_level_oracle_override_misses_total` when
         // Titan published nothing for the venue at that block, and by

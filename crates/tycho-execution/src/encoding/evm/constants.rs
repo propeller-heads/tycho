@@ -126,6 +126,19 @@ pub static NON_PLE_ENCODED_PROTOCOLS: LazyLock<HashSet<&'static str>> = LazyLock
     set
 });
 
+/// Uniswap V2 and its forks encode identically, so they share `UniswapV2SwapEncoder`.
+pub const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
+pub const UNISWAP_V3_FORKS: &[&str] =
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3", "gigadex_v3"];
+
+/// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
+/// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
+pub const SLIPSTREAMS_FORKS: &[&str] =
+    &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3"];
+
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
 /// auto-detected pAMMs, the venue address (e.g. `pricelevelstream:0x5979…`); every such protocol
@@ -137,15 +150,23 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
-/// Protocol system prefix for pAMM components executed through the PropAMMRouter, so a stale maker
-/// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
-/// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
-/// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
-pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
+/// Protocol system prefix for components executed through a fallback router, which retries a
+/// failing primary on the fallback protocol named in the swap's `user_data`. pAMM suffixes follow
+/// `PRICE_LEVEL_STREAM_PREFIX`.
+pub const FALLBACK_PREFIX: &str = "fallback:";
 
-/// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
+/// The executor-config key serving the whole fallback protocol family, mirroring
 /// `PRICE_LEVEL_STREAM_KEY`.
-pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
+pub const FALLBACK_KEY: &str = "fallback";
+
+/// Metric components executed through `MetricFallbackRouter`.
+pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
+
+/// Bebop components executed through `BebopFallbackRouter`.
+pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
+
+/// Hashflow components executed through `HashflowFallbackRouter`.
+pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
 
 #[cfg(test)]
 mod tests {
@@ -156,7 +177,10 @@ mod tests {
     #[test]
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
-        assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
+        assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
+        assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

@@ -9,7 +9,7 @@ DSN ?= psql://tycho:tycho@localhost:5433/router_trades?sslmode=disable
 START ?=
 STOP ?= +10
 
-.PHONY: build test test-pricing lint fmt protogen pack run setup sink price-once price-loop
+.PHONY: build test test-pricing test-executors test-views check-manifests check-executors lint fmt protogen pack run setup executors views sink price-once price-loop
 
 # --target-dir keeps the wasm where the manifests expect it even with a global CARGO_TARGET_DIR.
 build:
@@ -21,18 +21,42 @@ test:
 test-pricing:
 	./scripts/test_pricing.sh
 
-lint:
+test-executors:
+	./scripts/test_executors.sh
+
+test-views:
+	./scripts/test_views.sh
+
+check-manifests:
+	python3 scripts/check_manifests.py
+
+check-executors:
+	python3 scripts/check_executors.py
+
+lint: check-manifests check-executors
 	cargo +nightly fmt -- --check
 	cargo +nightly clippy --all --all-features --all-targets -- -D warnings
 
 fmt:
 	cargo +nightly fmt
 
+# Needs a substreams CLI that bundles the sink-sql descriptors (1.22 does, 1.16 does not:
+# it fails on the manifest's `sink:` block with "could not find protobuf message type").
 protogen:
-	cd tycho-router-trades && substreams protogen chains/ethereum.yaml --output-path src/pb --exclude-paths="sf/substreams,google,sf/ethereum"
+	cd tycho-router-trades && substreams protogen chains/ethereum.yaml --output-path src/pb --exclude-paths="sf/substreams,sf/firehose,google,sf/ethereum"
 
+# Packs into target/spkg/, where docker-compose mounts it for the local sinks. release.sh does the
+# same for the published packages.
 pack: build
-	substreams pack $(MANIFEST) -o tycho-router-trades-$(CHAIN).spkg
+	mkdir -p target/spkg
+	substreams pack $(MANIFEST) -o target/spkg/$(CHAIN).spkg
+
+pack-all: build
+	mkdir -p target/spkg
+	for manifest in tycho-router-trades/chains/*.yaml; do \
+		chain=$$(basename "$$manifest" .yaml); \
+		substreams pack "$$manifest" -o "target/spkg/$$chain.spkg"; \
+	done
 
 # Stream decoded trades to the terminal for a block range, e.g.
 #   make run CHAIN=ethereum START=25654569 STOP=+100
@@ -41,6 +65,8 @@ run: build
 
 setup:
 	substreams-sink-sql setup "$(DSN)" $(MANIFEST)
+	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f executors.sql
+	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f views.sql
 
 sink: build
 	substreams-sink-sql run "$(DSN)" $(MANIFEST) $(if $(START),$(START):,) --batch-block-flush-interval 100
@@ -54,6 +80,15 @@ PSQL_DSN ?= postgres://tycho:tycho@localhost:5433/router_trades
 price-setup:
 	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f pricing/migrate_usd.sql
 	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f pricing/preferred_tokens.sql
+
+# Executor address -> protocol names, and the views that resolve a hop. Re-apply after adding a
+# row to executors.sql.
+executors:
+	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f executors.sql
+
+# Views over trades, trades_settled included.
+views:
+	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -f views.sql
 
 price-once:
 	psql "$(PSQL_DSN)" -v ON_ERROR_STOP=1 -v chain='$(CHAIN)' \

@@ -4207,7 +4207,9 @@ mod test {
         let chain_id = db_fixtures::insert_chain(&mut conn, "ethereum").await;
 
         let native = Chain::Ethereum.native_token();
-        let wrapped = Chain::Ethereum.wrapped_native_token();
+        let wrapped = Chain::Ethereum
+            .wrapped_native_token()
+            .expect("Ethereum should have a wrapper");
         crate::postgres::ensure_token_with_price(chain_id, &native, &mut conn).await;
         crate::postgres::ensure_token_with_price(chain_id, &wrapped, &mut conn).await;
 

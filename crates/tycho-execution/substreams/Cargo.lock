@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-router-trades"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",

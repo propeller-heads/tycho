@@ -8,6 +8,7 @@ fn main() -> Result<()> {
         ("TychoRouterV3_1", "tycho_router_v3_1"),
         ("FeeCalculator", "fee_calculator"),
         ("FeeCalculatorV3_0", "fee_calculator_v3_0"),
+        ("FeeCalculatorExemption", "fee_calculator_exemption"),
     ] {
         Abigen::new(name, &format!("abi/{name}.json"))?
             .generate()?

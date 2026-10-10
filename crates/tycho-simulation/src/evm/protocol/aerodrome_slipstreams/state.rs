@@ -10,33 +10,43 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, BlockContext, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, BlockContext, GetAmountOutResult, PoolSwap, Price, ProtocolSim,
+            QueryPoolSwapParams, SwapConstraint,
+        },
     },
     Bytes,
 };
 
 use crate::{
-    evm::protocol::{
-        safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
-        utils::{
-            add_fee_markup,
-            slipstreams::{
-                dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
-                observations::{Observation, Observations},
-            },
-            uniswap::{
-                i24_be_bytes_to_i32, liquidity_math,
-                sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-                swap_math,
-                tick_list::{TickInfo, TickList, TickListErrorKind},
-                tick_math::{
-                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                    MIN_SQRT_RATIO, MIN_TICK,
+    evm::{
+        protocol::{
+            clmm::clmm_swap_to_price,
+            safe_math::{safe_add_u256, safe_sub_u256},
+            u256_num::u256_to_biguint,
+            utils::{
+                add_fee_markup,
+                slipstreams::{
+                    dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
+                    observations::{Observation, Observations},
+                    raw_target_price,
                 },
-                StepComputation, SwapResults, SwapState,
+                uniswap::{
+                    i24_be_bytes_to_i32, liquidity_math,
+                    sqrt_price_math::{
+                        get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64,
+                    },
+                    swap_math,
+                    tick_list::{TickInfo, TickList, TickListErrorKind},
+                    tick_math::{
+                        get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                        MIN_SQRT_RATIO, MIN_TICK,
+                    },
+                    StepComputation, SwapResults, SwapState,
+                },
             },
         },
+        query_pool_swap::price_to_f64_with_decimals,
     },
     protocol::models::BlockPositionAssumption,
 };
@@ -179,6 +189,53 @@ impl AerodromeSlipstreamsState {
             self.observation_cardinality,
         )?;
         Ok(())
+    }
+
+    /// Swaps token_in until `spot_price(token_in, token_out)` reaches the middle of the band
+    /// `[target, target * (1 + tolerance)]`. Falls back to numerical search if recording the
+    /// observation changes the fee enough to move the final price outside the band.
+    fn swap_to_target_price(
+        &self,
+        params: &QueryPoolSwapParams,
+        target: &Price,
+        tolerance: f64,
+    ) -> Result<PoolSwap, SimulationError> {
+        let token_in = params.token_in();
+        let token_out = params.token_out();
+        let target_f64 = price_to_f64_with_decimals(target, token_in.decimals, token_out.decimals)?;
+        if target_f64 == self.spot_price(token_in, token_out)? {
+            return Ok(PoolSwap::new(BigUint::ZERO, BigUint::ZERO, Box::new(self.clone()), None));
+        }
+        let Some(limit) = raw_target_price(target, tolerance, self.get_fee()?.fee) else {
+            return crate::evm::query_pool_swap::query_pool_swap(self, params);
+        };
+        // `limit` already strips the fee that `spot_price` adds, so the swap uses fee 0.
+        let Ok((amount_in, amount_out, result)) = clmm_swap_to_price(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            &limit,
+            0,
+            Sign::Positive,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
+            },
+        ) else {
+            return crate::evm::query_pool_swap::query_pool_swap(self, params);
+        };
+
+        let mut new_state = self.clone();
+        if !amount_in.is_zero() {
+            new_state.record_observation(result.tick)?;
+            new_state.liquidity = result.liquidity;
+            new_state.tick = result.tick;
+            new_state.sqrt_price = result.sqrt_price;
+        }
+        let final_spot = new_state.spot_price(token_in, token_out)?;
+        if final_spot < target_f64 || final_spot > target_f64 * (1.0 + tolerance) {
+            return crate::evm::query_pool_swap::query_pool_swap(self, params);
+        }
+        Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
     }
 
     fn swap(
@@ -684,11 +741,40 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         }
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    /// Answers [`SwapConstraint::PoolTargetPrice`] with one native swap and no `price_points`.
+    /// [`SwapConstraint::TradeLimitPrice`] uses the numerical search.
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+            SwapConstraint::PoolTargetPrice {
+                target,
+                tolerance,
+                min_amount_in: _,
+                max_amount_in: _,
+            } => {
+                let swap = self.swap_to_target_price(params, target, *tolerance)?;
+                let target = price_to_f64_with_decimals(
+                    target,
+                    params.token_in().decimals,
+                    params.token_out().decimals,
+                )?;
+                let spot = swap
+                    .new_state()
+                    .spot_price(params.token_in(), params.token_out())?;
+                if !tolerance.is_finite() ||
+                    *tolerance < 0.0 ||
+                    !(spot >= target && spot <= target * (1.0 + tolerance))
+                {
+                    return Err(SimulationError::RecoverableError(
+                        "Aerodrome target-price search ended outside the requested tolerance"
+                            .into(),
+                    ));
+                }
+                Ok(swap)
+            }
+        }
     }
 }
 
@@ -697,18 +783,25 @@ mod tests {
     use std::str::FromStr;
 
     use alloy::primitives::{Sign, I256, U256};
+    use rstest::rstest;
     use tycho_common::{models::Chain, simulation::errors::SimulationError};
 
     use super::*;
-    use crate::evm::protocol::utils::{
-        slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
-        uniswap::{
-            tick_list::TickInfo,
-            tick_math::{
-                get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MIN_SQRT_RATIO,
-                MIN_TICK,
+    use crate::evm::{
+        protocol::utils::{
+            slipstreams::{
+                dynamic_fee_module::{DynamicFeeConfig, ZERO_FEE_INDICATOR},
+                observations::Observation,
+            },
+            uniswap::{
+                tick_list::TickInfo,
+                tick_math::{
+                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MIN_SQRT_RATIO,
+                    MIN_TICK,
+                },
             },
         },
+        query_pool_swap::test_helpers::{target_price_params, to_price},
     };
 
     fn create_basic_test_pool() -> AerodromeSlipstreamsState {
@@ -1172,5 +1265,132 @@ mod tests {
         let amount = I256::checked_from_sign_and_abs(Sign::Positive, U256::from(1000u64)).unwrap();
         let result = pool.swap(true, amount, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
+    }
+
+    fn token_pair() -> (Token, Token) {
+        let token_a =
+            Token::new(&Bytes::from([0x11; 20]), "A", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        let token_b =
+            Token::new(&Bytes::from([0x22; 20]), "B", 18, 0, &[Some(10_000)], Chain::Base, 100);
+        (token_a, token_b)
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_lands_in_band(#[values(true, false)] sell_a: bool) {
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(3000, 10_000, 0, false, 0);
+        let (token_a, token_b) = token_pair();
+        let (token_in, token_out) =
+            if sell_a { (&token_a, &token_b) } else { (&token_b, &token_a) };
+        let target = pool
+            .spot_price(token_in, token_out)
+            .unwrap() *
+            0.99;
+        let tolerance = 1e-4;
+        let params = target_price_params(
+            token_in,
+            token_out,
+            to_price(target, token_in, token_out),
+            tolerance,
+        );
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        let new_spot = swap
+            .new_state()
+            .spot_price(token_in, token_out)
+            .unwrap();
+        assert!(new_spot >= target && new_spot <= target * (1.0 + tolerance), "spot {new_spot}");
+        assert!(swap.price_points().is_none(), "the native path returns no price points");
+        let quote = pool
+            .get_amount_out(swap.amount_in().clone(), token_in, token_out)
+            .unwrap();
+        assert_eq!(&quote.amount, swap.amount_out());
+    }
+
+    #[test]
+    fn target_price_revalidates_after_initial_fee_changes() {
+        let mut pool = initial_fee_pool(999_999);
+        pool.ticks = TickList::from(
+            1,
+            vec![TickInfo::new(-1200, 0).unwrap(), TickInfo::new(1200, 0).unwrap()],
+        )
+        .unwrap();
+        let (token_in, token_out) = token_pair();
+        let target = 0.99;
+        let tolerance = 1e-4;
+        let params = target_price_params(
+            &token_in,
+            &token_out,
+            to_price(target, &token_in, &token_out),
+            tolerance,
+        );
+        let swap = pool
+            .query_pool_swap(&params)
+            .expect("search reaches the target using the final fee");
+        let spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        assert!(spot >= target && spot <= target * (1.0 + tolerance), "final spot {spot}");
+        assert!(swap.price_points().is_some(), "fee change should trigger numerical search");
+    }
+
+    /// A target less than half the tolerance below spot puts the swap limit above spot.
+    #[test]
+    fn test_query_pool_swap_target_price_falls_back_to_search() {
+        let pool = create_basic_test_pool();
+        let (token_a, token_b) = token_pair();
+        let spot = pool
+            .spot_price(&token_a, &token_b)
+            .unwrap();
+        let params = target_price_params(
+            &token_a,
+            &token_b,
+            to_price(spot * (1.0 - 1e-5), &token_a, &token_b),
+            1e-4,
+        );
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.price_points().is_some(), "the numerical search returns price points");
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_price_at_spot() {
+        let mut pool = create_basic_test_pool();
+        pool.dfc = DynamicFeeConfig::new(ZERO_FEE_INDICATOR, 10_000, 0, false, 0);
+        let (token_a, token_b) = token_pair();
+        let params = target_price_params(
+            &token_a,
+            &token_b,
+            Price::new(BigUint::from(1u64), BigUint::from(1u64)),
+            1e-4,
+        );
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        assert!(swap.amount_in().is_zero());
+        assert!(swap.amount_out().is_zero());
+        assert!(swap.new_state().eq(&pool));
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_price_above_spot() {
+        let pool = create_basic_test_pool();
+        let (token_a, token_b) = token_pair();
+        let spot = pool
+            .spot_price(&token_a, &token_b)
+            .unwrap();
+        let params = target_price_params(
+            &token_a,
+            &token_b,
+            to_price(spot * 1.01, &token_a, &token_b),
+            1e-4,
+        );
+
+        let result = pool.query_pool_swap(&params);
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "got {result:?}");
     }
 }

@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::fill_levels,
     protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
 };
 
@@ -115,16 +116,14 @@ impl ProtocolSim for HashflowState {
         }
 
         // Calculate amount out
-        let (amount_out, remaining_amount_in) = self
-            .levels
-            .get_amount_out_from_levels(amount_in);
+        let (amount_out, remaining_amount_in) = fill_levels(&self.levels.levels, amount_in);
 
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
                 .ok_or_else(|| {
                     SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
                 })?,
-            gas: BigUint::from(134_000u64), // Rough gas estimation
+            gas: BigUint::from(151_000u64), // Rough gas estimation
             new_state: self.clone_box(),    // The state doesn't change after a swap
         };
 
@@ -359,7 +358,7 @@ mod tests {
 
             // Expected: (0.5 * 3000) + (1.0 * 3000) = 1500 + 3000 = 4500 USDC
             assert_eq!(amount_out_result.amount, BigUint::from_str("4500000000").unwrap()); // 6 decimals
-            assert_eq!(amount_out_result.gas, BigUint::from(134_000u64));
+            assert_eq!(amount_out_result.gas, BigUint::from(151_000u64));
         }
 
         #[test]
