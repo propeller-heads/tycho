@@ -126,12 +126,13 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
-        "up_v3" => stream_builder.exchange_with_decoder_context::<AerodromeSlipstreamsState>(
-            protocol_system,
-            tvl_filter,
-            None,
-            decoder_context,
-        ),
+        "up_v3" | "topaz_cl" => stream_builder
+            .exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+                protocol_system,
+                tvl_filter,
+                None,
+                decoder_context,
+            ),
         // Default to EVMPoolState for all other protocols
         _ => stream_builder.exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
             protocol_system,

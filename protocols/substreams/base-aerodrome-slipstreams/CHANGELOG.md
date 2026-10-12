@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.6
+
+### Added
+
+- Index Topaz CL on Robinhood Chain via a third manifest, `robinhood-topaz-cl.yaml` (factory
+  `0xaa5865dc3a60b25d305226d66fd573021f0d8ffb`, swap fee module
+  `0x0Dca13b1039277d82B27ADd86d06195B8E9BBfDb`, initial block 60,744,015). Topaz's factory and
+  pool use the Slipstream event signatures and pool storage layout. Its fee module emits
+  `SetCustomFee`, `FeeCapSet` and `ScalingFactorSet`, which this package already decodes, plus a
+  `DynamicFeeConfigured(address,uint24,uint64)` event that repeats the last two and is ignored.
+  The factory's first fee module (`0x3ae3642ecebb720e48fe3f8feff5f7b5c50f98f6`, replaced at block
+  60,854,672) emitted no events, so the manifest lists only its replacement, with
+  `first_dynamic_fee_module_block=60854474`.
+
+### Deployment notes
+
+- No module code changed, so Base and UP V3 output is unchanged. Only the package version moves.
+- Topaz back-processes from block 60,744,015.
+
 ## v0.1.5
 
 ### Added
