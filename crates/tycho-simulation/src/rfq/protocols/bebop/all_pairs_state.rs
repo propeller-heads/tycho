@@ -310,7 +310,12 @@ mod tests {
 
     #[test]
     fn test_get_limits_used_venue() {
-        let state = create_test_bebop_state().used_state();
+        let state = create_test_bebop_state().with_fill(
+            &weth().address,
+            &usdc().address,
+            None,
+            &BigUint::from(1u8),
+        );
         let result = state.get_limits(wbtc().address, usdc().address);
         assert!(
             matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "Bebop already quoted in this route")
@@ -354,7 +359,7 @@ mod tests {
             .as_any()
             .downcast_ref::<BebopAllPairsState>()
             .unwrap();
-        assert!(after_first.used);
+        assert!(after_first.fill.is_some());
 
         let second = after_first.get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc());
         assert!(

@@ -299,17 +299,17 @@ mod tests {
             .as_any()
             .downcast_ref::<NativeAllPairsState>()
             .unwrap();
-        assert!(after_first.used);
+        assert!(after_first.fill.is_some());
         assert!(matches!(
             after_first.get_amount_out(BigUint::from(1_000_000_000u64), &usdc(), &weth()),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
-            after_first.spot_price(&weth(), &usdc()),
+            after_first.spot_price(&usdc(), &weth()),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
-            after_first.get_limits(weth().address, usdc().address),
+            after_first.get_limits(usdc().address, weth().address),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
     }
@@ -358,7 +358,7 @@ mod tests {
             .as_any()
             .downcast_ref::<NativeAllPairsState>()
             .unwrap();
-        assert!(new_state.used);
+        assert!(new_state.fill.is_some());
     }
 
     #[test]
