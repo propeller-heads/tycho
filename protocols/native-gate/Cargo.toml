@@ -1,0 +1,24 @@
+[package]
+name = "native-gate"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+alloy = { workspace = true, features = ["rpc-types-eth", "providers"] }
+clap = { workspace = true, features = ["derive", "env"] }
+futures = { workspace = true }
+miette = { version = "7.6.0", features = ["fancy"] }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+tycho-client = { workspace = true }
+tycho-common = { workspace = true }
+tycho-simulation = { workspace = true, features = ["evm"] }
+tycho-test = { workspace = true }
