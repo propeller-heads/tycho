@@ -526,6 +526,20 @@ mod tests {
         price_levels.best_fill(&amount_in, &weth().address, &usdc().address)
     }
 
+    impl AllMakerPriceLevels {
+        /// These price levels after a swap on an unrelated pair took `market_maker`'s quote.
+        fn with_used(&self, market_maker: &str) -> Self {
+            let mut next = self.clone();
+            let pair = Bytes::from(market_maker.as_bytes());
+            next.insert_fill(MakerFill {
+                market_maker: market_maker.to_string(),
+                fill: PairFill::after(None, &pair, &pair, &BigUint::default()),
+                amount_out: BigUint::default(),
+            });
+            next
+        }
+    }
+
     #[test]
     fn new_skips_book_naming_unknown_token() {
         let price_levels = AllMakerPriceLevels::new(
@@ -642,6 +656,47 @@ mod tests {
             assert!(
                 matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
             );
+        }
+    }
+
+    mod continued_fill {
+        use super::*;
+
+        #[test]
+        fn picks_the_maker_one_swap_of_the_merged_amount_picks() {
+            // 0.5 WETH yields 1505 USDC at test_mm_2 and 1500 at test_mm. 2 WETH yield 5990 at
+            // test_mm_2 and 6000 at test_mm.
+            let levels = per_maker();
+            let first = weth_usdc_fill(&levels, weth_amount(0.5)).unwrap();
+            let after_first = levels.with_fill(&first);
+
+            let second = weth_usdc_fill(&after_first, weth_amount(1.5)).unwrap();
+            let whole = weth_usdc_fill(&levels, weth_amount(2.0)).unwrap();
+
+            assert_eq!(first.maker_levels.market_maker, "test_mm_2");
+            assert_eq!(second.maker_levels.market_maker, "test_mm");
+            assert_eq!(whole.maker_levels.market_maker, "test_mm");
+            assert_eq!(second.amount_out, usdc_amount(4495.0));
+            assert_eq!(first.amount_out + second.amount_out, whole.amount_out);
+        }
+
+        #[test]
+        fn chunk_past_every_makers_depth_is_partial() {
+            // test_mm holds 7 WETH for 20995 USDC and test_mm_2 holds 2. The first swap took 1505.
+            let levels = per_maker();
+            let after_first = levels.with_fill(&weth_usdc_fill(&levels, weth_amount(0.5)).unwrap());
+            let fill = weth_usdc_fill(&after_first, weth_amount(7.5)).unwrap();
+            assert_eq!(fill.maker_levels.market_maker, "test_mm");
+            assert_eq!(fill.remaining_amount_in, 1.0);
+            assert_eq!(fill.amount_out, usdc_amount(19490.0));
+        }
+
+        #[test]
+        fn minimum_applies_to_the_merged_amount() {
+            let levels = price_levels(MakerPricing::Hashflow, QuoteRule::OncePerMaker);
+            let after_first = levels.with_fill(&weth_usdc_fill(&levels, weth_amount(0.5)).unwrap());
+            let fill = weth_usdc_fill(&after_first, weth_amount(0.1)).unwrap();
+            assert_eq!(fill.maker_levels.market_maker, "test_mm_2");
         }
     }
 
