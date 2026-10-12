@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.4
+
+- Without `default_protocol_fee`, `map_protocol_changes` now gives a pool with a fee tier other
+  than 100, 500, 2500 or 10000 a protocol fee of 3200 in both directions on `Initialize`, instead
+  of panicking with `Unexpected fee value`. That is what `PancakeV3Pool.initialize` writes: it
+  stores 3200 first and only overrides it for the 100 and 500 tiers. The four existing tiers keep
+  their values, so the Ethereum, Base, BSC, Arbitrum and gigaDex manifests emit the same output.
+- Add the Robinhood Chain SwapHood V3 manifest, `robinhood-swaphood-v3.yaml` (PancakeV3Factory
+  `0x0ec554f0bff0be6c99d1e95c8015bb0950f6a2c7`, first pool at block `7020627`). SwapHood V3 is
+  PancakeSwap V3 with two extra fee tiers, `80` with tick spacing `10` and `1800` with tick spacing
+  `50`. Its pool code matches `PancakeV3Pool` except that `collectProtocol` also accepts calls from
+  a `PairFeesV3` contract, which forwards the protocol fees to a tax wallet and does not affect
+  swaps. Pools are deployed by `PancakeV3PoolDeployer`
+  (`0xcb42a120795ca98f762fdccf43cc4ab6d62bf1b2`), which emits no `PoolCreated`, so the manifest
+  indexes the factory. Components are emitted as `swaphood_v3_pool`.
+
 ## v0.1.3
 
 - `map_pools_created` takes a query-string parameter:

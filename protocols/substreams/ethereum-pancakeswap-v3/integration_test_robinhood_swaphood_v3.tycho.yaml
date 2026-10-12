@@ -1,0 +1,42 @@
+substreams_yaml_path: ./robinhood-swaphood-v3.yaml
+protocol_system: "swaphood_v3"
+protocol_type_names:
+  - "swaphood_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG at fee 80, one of the two tiers SwapHood adds to PancakeSwap V3. Its Initialize
+  # used to panic map_protocol_changes for want of a default protocol fee.
+  - name: test_weth_usdg_fee_80_pool
+    # PoolCreated, Initialize and the first Mint all land in the creation tx.
+    start_block: 10517593
+    # First Swap.
+    stop_block: 10521690
+    expected_components:
+      - id: "0xae6c2b14a07b24fe61d0c3ad8922bbdef47effc8"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          fee: "0x50"
+          tick_spacing: "0x0a"
+        creation_tx: "0x8bffb16a89a5aa2bcf652c5992b821efc71f0f209b3d0b95920b0d5fd7e57172"
+        skip_simulation: false
+        skip_execution: false
+  # WETH / PONS at fee 1800 with tick spacing 50, SwapHood's other added tier.
+  - name: test_weth_pons_fee_1800_pool
+    start_block: 16632396
+    # Initialize and the first Mint at 16638156, first Swap at 16645732.
+    stop_block: 16645732
+    expected_components:
+      - id: "0xdd598ba9acfdcb2e09a8cb64041962536e946ae4"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x39dbed3a2bd333467115de45665cc57f813c4571" # PONS
+        static_attributes:
+          fee: "0x0708"
+          tick_spacing: "0x32"
+        creation_tx: "0x23d20ef9d66c309110fb6c24a5b00d08b9623b2d935913dc5bd4e51f23feb121"
+        skip_simulation: false
+        skip_execution: false

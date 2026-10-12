@@ -280,6 +280,7 @@ impl ProtocolStreamProcessor {
                     "sushiswap_v3".to_string(),
                     "robinswap_v3".to_string(),
                     "gigadex_v3".to_string(),
+                    "swaphood_v3".to_string(),
                     "ramses_v3".to_string(),
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
@@ -332,6 +333,9 @@ impl ProtocolStreamProcessor {
             }
             "gigadex_v3" => {
                 stream = stream.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None);
+            }
+            "swaphood_v3" => {
+                stream = stream.exchange::<UniswapV3State>("swaphood_v3", tvl_filter.clone(), None);
             }
             "pancakeswap_v3" => {
                 stream =

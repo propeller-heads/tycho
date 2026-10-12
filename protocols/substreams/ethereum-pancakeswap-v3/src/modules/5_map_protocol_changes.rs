@@ -296,19 +296,15 @@ fn default_protocol_fees(fee: u64, params: &Params) -> (u64, u64) {
     }
 }
 
-// Map the pool fee to the default protocol fees.
+// Map the pool fee to the default protocol fees. `initialize` writes 3200 for both directions and
+// then overrides it for the 100 and 500 tiers, so every other tier, including the ones a fork
+// enables beyond Pancake's four, keeps 3200.
 // For the reference implementation see https://github.com/pancakeswap/pancake-v3-contracts/blob/5cc479f0c5a98966c74d94700057b8c3ca629afd/projects/v3-core/contracts/PancakeV3Pool.sol#L298-L306
 fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
     match fee {
         100 => (3300, 3300),
         500 => (3400, 3400),
-        2500 => (3200, 3200),
-        10000 => (3200, 3200),
-        _ => panic!(
-            "Unexpected fee value {fee}: PancakeSwap V3 sets no default protocol fee for it. A fork \
-             that uses one default for every fee tier must pass `default_protocol_fee` to \
-             map_protocol_changes"
-        ),
+        _ => (3200, 3200),
     }
 }
 
@@ -337,9 +333,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Unexpected fee value 50")]
-    fn test_unknown_fee_without_param_panics() {
-        default_protocol_fees(50, &Params::default());
+    fn test_other_fee_tiers_keep_the_initialize_default_without_params() {
+        for fee in [80, 1800, 50, 20000] {
+            assert_eq!(default_protocol_fees(fee, &Params::default()), (3200, 3200));
+        }
     }
 
     #[test]
