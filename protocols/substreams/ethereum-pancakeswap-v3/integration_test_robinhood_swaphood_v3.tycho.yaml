@@ -6,8 +6,8 @@ module_name: "map_protocol_changes"
 skip_balance_check: false
 initialized_accounts:
 tests:
-  # WETH / USDG at fee 80, one of the two tiers SwapHood adds to PancakeSwap V3. Its Initialize
-  # used to panic map_protocol_changes for want of a default protocol fee.
+  # WETH / USDG at fee 80, a tier PancakeSwap V3 does not have. Covers the 3200 protocol fee
+  # default on Initialize.
   - name: test_weth_usdg_fee_80_pool
     # PoolCreated, Initialize and the first Mint all land in the creation tx.
     start_block: 10517593
@@ -27,7 +27,8 @@ tests:
   # WETH / PONS at fee 1800 with tick spacing 50, SwapHood's other added tier.
   - name: test_weth_pons_fee_1800_pool
     start_block: 16632396
-    # Initialize and the first Mint at 16638156, first Swap at 16645732.
+    # Initialize and the first Mint at 16638156, SetFeeProtocol 3200 -> 10000 at 16640288, first
+    # Swap at 16645732.
     stop_block: 16645732
     expected_components:
       - id: "0xdd598ba9acfdcb2e09a8cb64041962536e946ae4"

@@ -296,10 +296,11 @@ fn default_protocol_fees(fee: u64, params: &Params) -> (u64, u64) {
     }
 }
 
-// Map the pool fee to the default protocol fees. `initialize` writes 3200 for both directions and
-// then overrides it for the 100 and 500 tiers, so every other tier, including the ones a fork
-// enables beyond Pancake's four, keeps 3200.
-// For the reference implementation see https://github.com/pancakeswap/pancake-v3-contracts/blob/5cc479f0c5a98966c74d94700057b8c3ca629afd/projects/v3-core/contracts/PancakeV3Pool.sol#L298-L306
+/// Returns the protocol fee, per direction, that `PancakeV3Pool.initialize` writes for a fee tier.
+/// `Initialize` does not emit it, so it is derived here and later replaced by `SetFeeProtocol`.
+/// The contract writes 3200 and overrides it only for the 100 and 500 tiers, so tiers a fork
+/// enables later also get 3200.
+/// See https://github.com/pancakeswap/pancake-v3-contracts/blob/5cc479f0c5a98966c74d94700057b8c3ca629afd/projects/v3-core/contracts/PancakeV3Pool.sol#L294-L306
 fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
     match fee {
         100 => (3300, 3300),
