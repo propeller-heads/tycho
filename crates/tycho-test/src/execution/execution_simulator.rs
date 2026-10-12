@@ -6,7 +6,7 @@ use alloy::{
     primitives::{keccak256, Bytes, B256},
     rpc::{
         client::ClientBuilder,
-        types::{Block, BlockId},
+        types::{Block, BlockId, BlockOverrides},
     },
     sol_types::SolValue,
 };
@@ -185,6 +185,7 @@ impl ExecutionSimulator {
         &mut self,
         inputs: HashMap<String, SimulationInput>,
         block: &Block,
+        block_overrides: Option<&BlockOverrides>,
     ) -> Result<HashMap<String, SimulationResult>, Box<dyn std::error::Error>> {
         // Configure tracing options - use callTracer for better formatted results
         let tracing_options = GethDebugTracingOptions {
@@ -204,7 +205,8 @@ impl ExecutionSimulator {
         let block_id = if block.header.hash == B256::ZERO {
             BlockId::from(BlockNumberOrTag::Pending)
         } else {
-            BlockId::from(block.number())
+            // A hash pins the exact block, so a reorg can't swap the state under the simulation.
+            BlockId::from(block.header.hash)
         };
 
         let client = ClientBuilder::default().http(self.rpc_url.parse()?);
@@ -216,7 +218,7 @@ impl ExecutionSimulator {
             let trace_options = GethDebugTracingCallOptions {
                 tracing_options: tracing_options.clone(),
                 state_overrides: input.state_overwrites.clone(),
-                block_overrides: None,
+                block_overrides: block_overrides.cloned(),
                 tx_index: None,
             };
             let fut =

@@ -1438,6 +1438,7 @@ async fn process_update(
         &block,
         router_overwrites_data,
         oracle_overwrites,
+        None,
     )
     .await
     {

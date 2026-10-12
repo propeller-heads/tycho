@@ -8,7 +8,7 @@ use alloy::{
         map::{AddressHashMap, B256HashMap},
         Address, B256, U256,
     },
-    rpc::types::{state::AccountOverride, Block},
+    rpc::types::{state::AccountOverride, Block, BlockOverrides},
     sol_types::SolValue,
 };
 use futures::{stream, StreamExt};
@@ -55,6 +55,9 @@ const MAX_CONCURRENT_BATCHES: usize = 4;
 /// `oracle_overwrites` are storage slots applied to every simulation, merged per account after
 /// the balance, allowance and protocol overwrites.
 ///
+/// `block_overrides` replaces the block environment the swaps execute in, e.g. to run on the state
+/// of `block` with the number and timestamp of the block a quote was projected to.
+///
 /// # Errors
 /// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
 /// signals that the whole batch could not be simulated, and carries the state overwrites and
@@ -65,6 +68,7 @@ pub async fn simulate_swap_transaction(
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
     oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
+    block_overrides: Option<BlockOverrides>,
 ) -> Result<
     HashMap<String, TychoExecutionResult>,
     (miette::Error, Option<AddressHashMap<AccountOverride>>, Option<tenderly::OverwriteMetadata>),
@@ -205,9 +209,10 @@ pub async fn simulate_swap_transaction(
         return Ok(tycho_execution_results);
     }
 
-    let execution_results = simulate_in_batches(&rpc_tools.rpc_url, &inputs, block)
-        .await
-        .map_err(|e| (e, None, None))?;
+    let execution_results =
+        simulate_in_batches(&rpc_tools.rpc_url, &inputs, block, block_overrides.as_ref())
+            .await
+            .map_err(|e| (e, None, None))?;
 
     // Process simulation results and add successful simulations to tycho_execution_results
     for (simulation_id, result) in execution_results {
@@ -270,13 +275,14 @@ async fn simulate_in_batches(
     rpc_url: &str,
     inputs: &HashMap<String, SimulationInput>,
     block: &Block,
+    block_overrides: Option<&BlockOverrides>,
 ) -> miette::Result<HashMap<String, SimulationResult>> {
     let batches = split_into_batches(inputs, MAX_CALLS_PER_BATCH);
     let n_batches = batches.len();
 
     let mut pending = stream::iter(batches.into_iter().enumerate())
         .map(|(index, batch)| async move {
-            (index, simulate_batch_with_retry(rpc_url, batch, block).await)
+            (index, simulate_batch_with_retry(rpc_url, batch, block, block_overrides).await)
         })
         .buffer_unordered(MAX_CONCURRENT_BATCHES);
 
@@ -299,6 +305,7 @@ async fn simulate_batch_with_retry(
     rpc_url: &str,
     inputs: HashMap<String, SimulationInput>,
     block: &Block,
+    block_overrides: Option<&BlockOverrides>,
 ) -> Result<HashMap<String, SimulationResult>, String> {
     let retry_strategy = ExponentialFactorBackoff::from_millis(1000, 2.)
         .max_delay_millis(5000)
@@ -310,7 +317,7 @@ async fn simulate_batch_with_retry(
         let inputs = inputs.clone();
         async move {
             simulator
-                .batch_simulate_with_trace(inputs, block)
+                .batch_simulate_with_trace(inputs, block, block_overrides)
                 .await
                 .map_err(|e| RetryError::transient(e.to_string()))
         }
@@ -582,7 +589,7 @@ mod tests {
         let (rejected, answered) = rpc_rejecting_batches_over(&mut server, 30).await;
         let inputs = simulation_inputs(70);
 
-        let results = simulate_in_batches(&server.url(), &inputs, &Block::default())
+        let results = simulate_in_batches(&server.url(), &inputs, &Block::default(), None)
             .await
             .expect("every batch fits the RPC limit");
 
@@ -608,9 +615,10 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let (_rejected, _answered) = rpc_rejecting_batches_over(&mut server, 0).await;
 
-        let error = simulate_in_batches(&server.url(), &simulation_inputs(5), &Block::default())
-            .await
-            .expect_err("the RPC rejects every batch");
+        let error =
+            simulate_in_batches(&server.url(), &simulation_inputs(5), &Block::default(), None)
+                .await
+                .expect_err("the RPC rejects every batch");
 
         assert!(
             format!("{error:?}").contains("Failed to simulate batch 1 of 1 after retries"),
