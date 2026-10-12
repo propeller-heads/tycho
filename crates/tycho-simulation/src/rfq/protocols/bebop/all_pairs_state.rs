@@ -15,33 +15,36 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::protocols::bebop::{
-    client::BebopClient, models::BebopPriceData, state::BebopState,
+use crate::rfq::{
+    models::{marginal_price, to_whole_units},
+    protocols::{
+        bebop::{client::BebopClient, models::BebopPriceData, state::BebopState},
+        fill::{continued_amount_out, continued_limits, filled_on_pair, with_new_state, PairFill},
+    },
 };
 
-/// Bebop's liquidity on one chain: one per-pair state per book, which prices every swap.
-///
-/// Bebop names no market maker and picks the makers behind a firm quote itself, so a swap marks
-/// the whole venue used and a later swap on that state finds no liquidity.
+/// Bebop's liquidity on one chain: one per-pair state per book, which prices every swap. A swap
+/// on another pair or direction than an earlier fill fails: Bebop already quoted in this route.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BebopAllPairsState {
     /// Sorted by base token address, then quote token address.
     pairs: Arc<Vec<BebopState>>,
-    /// Whether a swap on this state already took Bebop's quote.
-    used: bool,
+    /// The pair an earlier swap quoted through Bebop on this state.
+    fill: Option<PairFill>,
 }
 
 impl fmt::Debug for BebopAllPairsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BebopAllPairsState")
             .field("pairs", &self.pairs.len())
-            .field("used", &self.used)
+            .field("fill", &self.fill)
             .finish()
     }
 }
 
 impl BebopAllPairsState {
-    /// Skips a book with a token missing from `tokens` (`debug!`: the decoder logged the token).
+    /// Skips books with a token missing from `tokens` and logs each with `debug!`. The stream
+    /// decoder already logged the token.
     pub fn new(
         books: Vec<BebopPriceData>,
         tokens: HashMap<Bytes, Token>,
@@ -65,7 +68,7 @@ impl BebopAllPairsState {
             (&a.base_token.address, &a.quote_token.address)
                 .cmp(&(&b.base_token.address, &b.quote_token.address))
         });
-        Self { pairs: Arc::new(pairs), used: false }
+        Self { pairs: Arc::new(pairs), fill: None }
     }
 
     /// The state of the book with base `base` and quote `quote`, if any.
@@ -94,17 +97,27 @@ impl BebopAllPairsState {
             })
     }
 
-    fn check_unused(&self) -> Result<(), SimulationError> {
-        if self.used {
-            return Err(SimulationError::RecoverableError(
-                "Bebop already quoted in this route".into(),
-            ));
+    /// This state after a swap of `amount_in`. `filled` is what an earlier swap filled on the pair.
+    fn with_fill(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: Option<&BigUint>,
+        amount_in: &BigUint,
+    ) -> Self {
+        Self {
+            pairs: self.pairs.clone(),
+            fill: Some(PairFill::after(filled, token_in, token_out, amount_in)),
         }
-        Ok(())
     }
+}
 
-    fn used_state(&self) -> Self {
-        Self { pairs: self.pairs.clone(), used: true }
+/// The book's own tokens in input/output order for a swap from `token_in`.
+fn pair_tokens<'a>(pair: &'a BebopState, token_in: &Bytes) -> (&'a Token, &'a Token) {
+    if &pair.base_token.address == token_in {
+        (&pair.base_token, &pair.quote_token)
+    } else {
+        (&pair.quote_token, &pair.base_token)
     }
 }
 
@@ -121,10 +134,16 @@ impl ProtocolSim for BebopAllPairsState {
         0.0
     }
 
+    /// After a fill on the pair, the marginal price at the filled amount.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let pair_state = self.pair_state(&base.address, &quote.address)?;
-        self.check_unused()?;
-        pair_state.spot_price(base, quote)
+        let Some(filled) = filled_on_pair(&self.fill, &base.address, &quote.address, "Bebop")?
+        else {
+            return pair_state.spot_price(base, quote);
+        };
+        let filled = to_whole_units(filled, base.decimals)?;
+        marginal_price(&pair_state.swap_levels(&base.address), filled)
+            .ok_or_else(|| SimulationError::RecoverableError("No liquidity".into()))
     }
 
     fn get_amount_out(
@@ -134,24 +153,16 @@ impl ProtocolSim for BebopAllPairsState {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let pair_state = self.pair_state(&token_in.address, &token_out.address)?;
-        self.check_unused()?;
+        let filled = filled_on_pair(&self.fill, &token_in.address, &token_out.address, "Bebop")?;
         // The per-pair state compares whole tokens, so it gets its own.
-        let (token_in, token_out) = if pair_state.base_token.address == token_in.address {
-            (&pair_state.base_token, &pair_state.quote_token)
-        } else {
-            (&pair_state.quote_token, &pair_state.base_token)
+        let (pair_in, pair_out) = pair_tokens(pair_state, &token_in.address);
+        let amount_out = |amount| pair_state.get_amount_out(amount, pair_in, pair_out);
+        let result = match filled {
+            Some(filled) => continued_amount_out(amount_out, filled, &amount_in),
+            None => amount_out(amount_in.clone()),
         };
-        match pair_state.get_amount_out(amount_in, token_in, token_out) {
-            Ok(mut res) => {
-                res.new_state = Box::new(self.used_state());
-                Ok(res)
-            }
-            Err(SimulationError::InvalidInput(msg, Some(mut res))) => {
-                res.new_state = Box::new(self.used_state());
-                Err(SimulationError::InvalidInput(msg, Some(res)))
-            }
-            Err(e) => Err(e),
-        }
+        let new_state = self.with_fill(&token_in.address, &token_out.address, filled, &amount_in);
+        with_new_state(result, Box::new(new_state))
     }
 
     fn get_limits(
@@ -160,8 +171,14 @@ impl ProtocolSim for BebopAllPairsState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let pair_state = self.pair_state(&sell_token, &buy_token)?;
-        self.check_unused()?;
-        pair_state.get_limits(sell_token, buy_token)
+        let filled = filled_on_pair(&self.fill, &sell_token, &buy_token, "Bebop")?;
+        let limits = pair_state.get_limits(sell_token.clone(), buy_token.clone())?;
+        let Some(filled) = filled else {
+            return Ok(limits);
+        };
+        let (pair_in, pair_out) = pair_tokens(pair_state, &sell_token);
+        let amount_out = |amount| pair_state.get_amount_out(amount, pair_in, pair_out);
+        continued_limits(amount_out, limits, filled)
     }
 
     fn delta_transition(
@@ -192,7 +209,7 @@ impl ProtocolSim for BebopAllPairsState {
         else {
             return false;
         };
-        self.used == other.used &&
+        self.fill == other.fill &&
             self.pairs.len() == other.pairs.len() &&
             self.pairs
                 .iter()
