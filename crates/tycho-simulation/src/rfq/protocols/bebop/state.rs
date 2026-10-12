@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::{fill_levels, PriceLevel},
     protocols::bebop::{client::BebopClient, models::BebopPriceData},
 };
 
@@ -45,6 +46,24 @@ impl BebopState {
         client: BebopClient,
     ) -> Self {
         BebopState { base_token, quote_token, price_data, client }
+    }
+
+    /// The levels of a swap from `token_in`, as output per input unit: the bids when it sells
+    /// the base token, else the inverted asks.
+    pub fn swap_levels(&self, token_in: &Bytes) -> Vec<PriceLevel> {
+        if &self.base_token.address == token_in {
+            self.price_data
+                .get_bids()
+                .into_iter()
+                .map(|(price, quantity)| PriceLevel { quantity, price })
+                .collect()
+        } else {
+            self.price_data
+                .get_asks()
+                .into_iter()
+                .map(|(price, size)| PriceLevel { quantity: price * size, price: 1.0 / price })
+                .collect()
+        }
     }
 }
 
@@ -100,28 +119,15 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let sell_base = if token_in == &self.base_token && token_out == &self.quote_token {
-            true
-        } else if token_in == &self.quote_token && token_out == &self.base_token {
-            false
-        } else {
+        let is_pair = (token_in == &self.base_token && token_out == &self.quote_token) ||
+            (token_in == &self.quote_token && token_out == &self.base_token);
+        if !is_pair {
             return Err(SimulationError::RecoverableError(format!(
                 "Invalid token addresses: {}, {}",
                 token_in.address, token_out.address
             )));
-        };
-        // if sell base is true -> use bids
-        // if sell base is false -> use asks AND amount is in quote token so the levels need to be
-        // adjusted
-        let price_levels = if sell_base {
-            self.price_data.get_bids()
-        } else {
-            self.price_data
-                .get_asks()
-                .iter()
-                .map(|(price, size)| (1.0 / price, price * size))
-                .collect()
-        };
+        }
+        let price_levels = self.swap_levels(&token_in.address);
 
         if price_levels.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
@@ -130,9 +136,7 @@ impl ProtocolSim for BebopState {
         let amount_in = amount_in.to_f64().ok_or_else(|| {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10f64.powi(token_in.decimals as i32);
-        let (amount_out, remaining_amount_in) = self
-            .price_data
-            .get_amount_out_from_levels(amount_in, price_levels);
+        let (amount_out, remaining_amount_in) = fill_levels(&price_levels, amount_in);
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
                 .ok_or_else(|| {
