@@ -113,7 +113,14 @@ async fn main() -> miette::Result<()> {
 
     let rpc_tools = RPCTools::new(&cli.rpc_url, &chain).await?;
     let router_overwrites = zero_fee_router_overwrites()?;
-    let mut report = Report::create(&cli.out_dir)?;
+    let run_dir = cli.out_dir.join(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .into_diagnostic()?
+            .as_secs()
+            .to_string(),
+    );
+    let mut report = Report::create(&run_dir)?;
 
     let mut updates = stream::build(
         &tycho_url,
@@ -168,7 +175,7 @@ async fn main() -> miette::Result<()> {
         }
     }
     report.write_summary()?;
-    info!(out = %cli.out_dir.display(), "Done");
+    info!(out = %run_dir.display(), "Done");
     Ok(())
 }
 
@@ -302,13 +309,14 @@ async fn execute(
     let mut inputs = HashMap::new();
     let mut outcomes: Vec<Outcome> = Vec::with_capacity(points.len());
     for (index, point) in points.iter().enumerate() {
-        // A native error or zero quote still gets executed, with no minimum output, to see if the
-        // chain agrees. The router rejects a zero expected output, hence the floor of one.
+        // A native error or zero quote still gets executed to see if the chain agrees. The router
+        // takes 80% of the expected output as its minimum and rejects a zero minimum before
+        // calling the pool, so the expected output must be at least two.
         let expected = point
             .native_amount_out()
             .cloned()
             .unwrap_or_default()
-            .max(BigUint::from(1u8));
+            .max(BigUint::from(2u8));
         match encode_swap(
             &point.component,
             Some(Arc::from(point.state.clone_box())),
@@ -347,7 +355,14 @@ async fn execute(
     {
         Ok(results) => {
             for (id, result) in results {
-                let Ok(index) = id.parse::<usize>() else { continue };
+                let Some(index) = id
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| *index < outcomes.len())
+                else {
+                    warn!(id, "Simulation result for an unknown point");
+                    continue;
+                };
                 outcomes[index] = match result {
                     TychoExecutionResult::Success { amount_out, gas_used, .. } => {
                         Outcome::Executed { amount_out, gas_used }

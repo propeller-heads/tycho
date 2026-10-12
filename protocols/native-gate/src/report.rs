@@ -25,6 +25,8 @@ pub struct Point {
     pub rung: String,
     pub amount_in: BigUint,
     native: Result<(BigUint, BigUint), String>,
+    /// Output of the partial swap a native `InvalidInput` error carries, if any.
+    partial: Option<BigUint>,
 }
 
 impl Point {
@@ -37,7 +39,12 @@ impl Point {
         amount_in: BigUint,
         native: Result<tycho_common::simulation::protocol_sim::GetAmountOutResult, SimulationError>,
     ) -> Self {
+        let partial = match &native {
+            Err(SimulationError::InvalidInput(_, Some(result))) => Some(result.amount.clone()),
+            _ => None,
+        };
         Self {
+            partial,
             component: component.clone(),
             state: state.clone_box(),
             sell: sell.clone(),
@@ -80,7 +87,7 @@ pub enum Outcome {
 enum Verdict {
     /// Same output to the wei.
     Exact,
-    /// Both sides refuse the swap, or the native quote is zero and the chain reverts.
+    /// Both sides refuse the swap, or both give nothing for it.
     BothReject,
     /// Both execute, outputs differ.
     AmountMismatch,
@@ -88,6 +95,9 @@ enum Verdict {
     ChainReverts,
     /// Native refuses, the chain executes.
     NativeRejects,
+    /// Native refuses the full amount but its partial result equals what the chain executed:
+    /// both stop at the same liquidity exhaustion.
+    PartialFill,
     /// The swap could not be encoded or simulated, so nothing was compared.
     Unverified,
 }
@@ -150,6 +160,7 @@ impl Report {
         points: Vec<Point>,
         outcomes: Vec<Outcome>,
     ) -> miette::Result<()> {
+        assert_eq!(points.len(), outcomes.len(), "every point needs exactly one outcome");
         self.blocks.push(block.header.number);
         for (point, outcome) in points.iter().zip(outcomes) {
             let (verdict, chain, gas_chain) = judge(point, outcome);
@@ -168,7 +179,7 @@ impl Report {
                 .or_default()
                 .entry(key)
                 .or_default() += 1;
-            if matches!(verdict, Verdict::Exact | Verdict::BothReject) {
+            if matches!(verdict, Verdict::Exact | Verdict::BothReject | Verdict::PartialFill) {
                 continue;
             }
             let diff = match (&point.native, &chain) {
@@ -224,17 +235,42 @@ impl Report {
     }
 }
 
+/// Revert reasons that come from the harness or the router's input checks, not from the pool:
+/// such a swap never reached the protocol, so it proves nothing about the quote.
+const HARNESS_REVERTS: [&str; 4] = [
+    "Transaction failed",
+    "TychoRouter__InvalidMinAmountOut",
+    "TychoRouter__AmountOutZero",
+    "TychoRouter__ZeroInput",
+];
+
 fn judge(point: &Point, outcome: Outcome) -> (Verdict, Result<BigUint, String>, Option<u64>) {
+    let outcome = match outcome {
+        Outcome::Reverted(reason)
+            if HARNESS_REVERTS
+                .iter()
+                .any(|r| reason.contains(r)) =>
+        {
+            Outcome::SimFailed(reason)
+        }
+        outcome => outcome,
+    };
     match (&point.native, outcome) {
         (Ok((native, _)), Outcome::Executed { amount_out, gas_used }) => {
             let verdict =
                 if *native == amount_out { Verdict::Exact } else { Verdict::AmountMismatch };
             (verdict, Ok(amount_out), Some(gas_used))
         }
+        (Err(_), Outcome::Executed { amount_out, gas_used })
+            if point.partial.as_ref() == Some(&amount_out) =>
+        {
+            (Verdict::PartialFill, Ok(amount_out), Some(gas_used))
+        }
         (Err(_), Outcome::Executed { amount_out, gas_used }) => {
             (Verdict::NativeRejects, Ok(amount_out), Some(gas_used))
         }
-        // The router refuses a swap with no output, so a zero quote and a revert agree.
+        // Harness reverts are filtered out above, so this revert came from the pool or router
+        // settlement: a zero quote and a pool that pays nothing agree.
         (Ok((native, _)), Outcome::Reverted(reason)) if native.is_zero() => {
             (Verdict::BothReject, Err(reason), None)
         }
