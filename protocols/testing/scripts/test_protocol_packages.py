@@ -155,55 +155,13 @@ class ProtocolPackagesTest(unittest.TestCase):
         before = '\n[[package]]\nname = "serde"\nversion = "1.0.0"\nsource = "registry+example"\n'
         self.assertTrue(dependency_lock_changed(before, before.replace("1.0.0", "1.0.1")))
 
-    def test_pr_selection_uses_merge_base_not_new_base_branch_changes(self):
-        script = Path(__file__).with_name("select_protocols.py")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-
-            def git(*args):
-                return subprocess.check_output(["git", "-C", directory, *args], text=True).strip()
-
-            git("init", "-q")
-            git("config", "user.email", "test@example.com")
-            git("config", "user.name", "Test")
-            for package in ["ethereum-ring-swap-v2", "ethereum-uniswap-v4"]:
-                path = root / "protocols/substreams" / package
-                path.mkdir(parents=True)
-                (path / "Cargo.toml").touch()
-            mapping_path = root / MAPPING
-            mapping_path.parent.mkdir(parents=True)
-            mapping_path.write_text("{}")
-            lock_path = root / "protocols/substreams/Cargo.lock"
-            lock_path.write_text('[[package]]\nname = "ethereum-ring-swap-v2"\nversion = "0.1.0"\n')
-            git("add", ".")
-            git("commit", "-qm", "base")
-            base = git("rev-parse", "HEAD")
-            git("checkout", "-qb", "chore/base-advanced")
-            (root / "Cargo.lock").touch()
-            git("add", ".")
-            git("commit", "-qm", "unrelated base update")
-            advanced = git("rev-parse", "HEAD")
-            git("checkout", "-qb", "feat/add-fork", base)
-            mapping_path.write_text(json.dumps({"bsc-ring-swap-v2": "ethereum-ring-swap-v2"}))
-            lock_path.write_text(lock_path.read_text().replace("0.1.0", "0.1.1"))
-            git("add", ".")
-            git("commit", "-qm", "add fork")
-            output = root / "output"
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(script),
-                    "--root",
-                    directory,
-                    "--base",
-                    advanced,
-                    "--github-output",
-                    str(output),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            self.assertEqual(output.read_text().splitlines()[0], "protocols=bsc-ring-swap-v2")
+    def test_local_package_dependency_change_is_not_a_version_only_bump(self):
+        before = (
+            '[[package]]\nname = "ethereum-ring-swap-v2"\nversion = "0.1.0"\n'
+            'dependencies = ["shared-dependency 1.0.0"]\n'
+        )
+        after = before.replace("shared-dependency 1.0.0", "shared-dependency 2.0.0")
+        self.assertTrue(dependency_lock_changed(before, after))
 
 
 class ProtocolSelectionCliTest(unittest.TestCase):
@@ -213,11 +171,17 @@ class ProtocolSelectionCliTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.script = Path(__file__).with_name("select_protocols.py").resolve()
         self.resolver = self.script.with_name("resolve_package.py")
-        (self.root / MAPPING).parent.mkdir(parents=True)
-        (self.root / MAPPING).write_text('{"bsc-curve": "ethereum-curve"}')
-        package = self.root / "protocols/substreams/ethereum-curve"
-        package.mkdir(parents=True)
-        (package / "Cargo.toml").touch()
+        self.write_file(MAPPING, '{"bsc-curve": "ethereum-curve"}')
+        self.add_package("ethereum-curve")
+
+    def write_file(self, relative_path, contents=""):
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+        return path
+
+    def add_package(self, name):
+        return self.write_file(f"protocols/substreams/{name}/Cargo.toml").parent
 
     def run_selection(self, *arguments, env=None):
         return subprocess.run(
@@ -226,6 +190,113 @@ class ProtocolSelectionCliTest(unittest.TestCase):
             env=env,
             capture_output=True,
             text=True,
+        )
+
+    def git(self, *arguments):
+        return subprocess.check_output(["git", "-C", str(self.root), *arguments], text=True).strip()
+
+    def commit(self, message):
+        self.git("add", ".")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def commit_base(self):
+        self.git("init", "-q")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "Test")
+        return self.commit("base")
+
+    def selection_output(self, *arguments):
+        output = self.root / "output"
+        output.unlink(missing_ok=True)
+        result = self.run_selection(*arguments, "--github-output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        protocols, matrix = output.read_text().splitlines()
+        protocols = protocols.removeprefix("protocols=")
+        matrix = json.loads(matrix.removeprefix("matrix="))
+        self.assertEqual([entry["protocol"] for entry in matrix["include"]], protocols.split())
+        return protocols, matrix
+
+    def test_pr_selection_uses_merge_base_not_new_base_branch_changes(self):
+        for package in ["ethereum-ring-swap-v2", "ethereum-uniswap-v4"]:
+            self.add_package(package)
+        mapping = self.write_file(MAPPING, "{}")
+        lock = self.write_file(
+            "protocols/substreams/Cargo.lock",
+            '[[package]]\nname = "ethereum-ring-swap-v2"\nversion = "0.1.0"\n',
+        )
+        base = self.commit_base()
+        self.git("checkout", "-qb", "chore/base-advanced")
+        self.write_file("Cargo.lock")
+        advanced = self.commit("unrelated base update")
+        self.git("checkout", "-qb", "feat/add-fork", base)
+        mapping.write_text(json.dumps({"bsc-ring-swap-v2": "ethereum-ring-swap-v2"}))
+        lock.write_text(lock.read_text().replace("0.1.0", "0.1.1"))
+        self.commit("add fork")
+        protocols, _ = self.selection_output("--base", advanced)
+        self.assertEqual(protocols, "bsc-ring-swap-v2")
+
+    def test_cross_package_rename_selects_source_and_destination_families(self):
+        source = self.write_file(
+            "protocols/substreams/ethereum-curve/src/shared.rs", "pub fn shared() {}\n"
+        )
+        destination_package = self.add_package("ethereum-ring-swap-v2")
+        (self.root / MAPPING).write_text(
+            json.dumps(
+                {
+                    "bsc-curve": "ethereum-curve",
+                    "bsc-ring-swap-v2": "ethereum-ring-swap-v2",
+                }
+            )
+        )
+        base = self.commit_base()
+        destination = destination_package / "src/shared.rs"
+        destination.parent.mkdir()
+        source.rename(destination)
+        self.commit("move source between packages")
+        # Ensure this exercises a Git rename, rather than unrelated add/delete records.
+        self.assertTrue(self.git("diff", "--name-status", "-M", base, "HEAD").startswith("R100"))
+        _, matrix = self.selection_output("--base", base)
+        self.assertEqual(
+            [entry["protocol"] for entry in matrix["include"]],
+            ["bsc-curve", "bsc-ring-swap-v2", "ethereum-curve", "ethereum-ring-swap-v2"],
+        )
+
+    def test_rename_to_markdown_still_selects_the_original_package(self):
+        source = self.write_file(
+            "protocols/substreams/ethereum-curve/src/shared.rs", "pub fn shared() {}\n"
+        )
+        base = self.commit_base()
+        source.rename(source.parent.parent / "archived.md")
+        self.commit("archive source as markdown")
+        result = self.run_selection("--base", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "Target protocols: bsc-curve ethereum-curve")
+
+    def test_lock_only_dependency_edge_change_selects_all_protocols(self):
+        before = (
+            'version = 3\n[[package]]\nname = "ethereum-curve"\nversion = "0.1.0"\n'
+            'dependencies = ["shared-dependency 1.0.0"]\n'
+            '[[package]]\nname = "shared-dependency"\nversion = "1.0.0"\n'
+            'source = "registry+example"\n'
+            '[[package]]\nname = "shared-dependency"\nversion = "2.0.0"\n'
+            'source = "registry+example"\n'
+        )
+        lock = self.write_file("protocols/substreams/Cargo.lock", before)
+        self.add_package("ethereum-ring-swap-v2")
+        base = self.commit_base()
+        lock.write_text(
+            before.replace('["shared-dependency 1.0.0"]', '["shared-dependency 2.0.0"]')
+        )
+        self.commit("switch an existing locked dependency version")
+        self.assertEqual(
+            self.git("diff", "--name-only", base, "HEAD"), str(lock.relative_to(self.root))
+        )
+        result = self.run_selection("--base", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "Target protocols: bsc-curve ethereum-curve ethereum-ring-swap-v2",
         )
 
     def test_candidate_directory_cannot_inject_workflow_outputs(self):
@@ -238,15 +309,10 @@ class ProtocolSelectionCliTest(unittest.TestCase):
         self.assertFalse(output.exists())
 
     def test_dispatch_preserves_protocol_filters(self):
-        output = self.root / "output"
-        result = self.run_selection(
+        _, matrix = self.selection_output(
             "--protocols",
             "ethereum-curve=some_test bsc-curve=other_test",
-            "--github-output",
-            str(output),
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        matrix = json.loads(output.read_text().split("matrix=", 1)[1])
         self.assertEqual(
             matrix["include"],
             [

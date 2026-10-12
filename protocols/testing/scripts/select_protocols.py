@@ -72,20 +72,48 @@ def affected_protocols(paths, mapping, previous_mapping, available):
 
 
 def dependency_lock_changed(before, after):
-    """Local package version bumps do not change the shared dependency environment."""
+    """Ignore only local package versions, retaining their dependency relationships."""
 
     def dependencies(contents):
         lock = tomllib.loads(contents)
-        return sorted(
-            (package for package in lock.get("package", []) if "source" in package),
-            key=lambda package: (package["name"], package["version"], package["source"]),
+        packages = lock.get("package", [])
+        for package in packages:
+            if "source" not in package:
+                package.pop("version", None)
+        lock["package"] = sorted(
+            packages,
+            key=lambda package: (
+                package["name"],
+                package.get("version", ""),
+                package.get("source", ""),
+            ),
         )
+        return lock
 
     return dependencies(before) != dependencies(after)
 
 
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True)
+
+
+def read_pr_changes(root, base_sha):
+    """Read changed paths and the previous alias mapping from the PR's merge base."""
+    base = git(root, "merge-base", base_sha, "HEAD").strip()
+    # Treat renames as deletion + addition so both owners are tested, including when
+    # the destination is Markdown or lies outside the automatically selected paths.
+    paths = git(root, "diff", "--no-renames", "--name-only", "-z", base, "HEAD").split("\0")
+    lock = "protocols/substreams/Cargo.lock"
+    if lock in paths and git(root, "ls-tree", "--name-only", base, "--", lock).strip():
+        current = root / lock
+        if current.exists() and not dependency_lock_changed(
+            git(root, "show", f"{base}:{lock}"), current.read_text()
+        ):
+            paths.remove(lock)
+    previous = {}
+    if git(root, "ls-tree", "--name-only", base, "--", MAPPING).strip():
+        previous = json.loads(git(root, "show", f"{base}:{MAPPING}"))
+    return paths, previous
 
 
 def main():
@@ -107,18 +135,7 @@ def main():
         if unknown:
             parser.error(f"Unknown protocols: {', '.join(sorted(unknown))}")
     else:
-        base = git(args.root, "merge-base", args.base, "HEAD").strip()
-        paths = git(args.root, "diff", "--name-only", "-z", base, "HEAD").split("\0")
-        lock = "protocols/substreams/Cargo.lock"
-        if lock in paths and git(args.root, "ls-tree", "--name-only", base, "--", lock).strip():
-            current = args.root / lock
-            if current.exists() and not dependency_lock_changed(
-                git(args.root, "show", f"{base}:{lock}"), current.read_text()
-            ):
-                paths.remove(lock)
-        previous = {}
-        if git(args.root, "ls-tree", "--name-only", base, "--", MAPPING).strip():
-            previous = json.loads(git(args.root, "show", f"{base}:{MAPPING}"))
+        paths, previous = read_pr_changes(args.root, args.base)
         protocols = affected_protocols(paths, mapping, previous, available)
     matrix = {"include": [{"protocol": name} for name in protocols]}
     print("Target protocols: " + " ".join(protocols))

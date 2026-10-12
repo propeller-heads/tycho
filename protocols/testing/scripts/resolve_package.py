@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve fork aliases to runtime package paths or their build workspaces."""
+"""Resolve fork aliases to deduplicated build workspaces."""
 
 import argparse
 import json
@@ -31,20 +31,15 @@ def build_dir(protocol, mapping):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mapping", type=Path, default=MAPPING_PATH)
-    parser.add_argument("mode", choices=["build-dir", "build-dirs", "runtime-dir"])
-    parser.add_argument("protocol")
+    parser.add_argument("mode", choices=["build-dirs"])
+    parser.add_argument("protocols", help="Space-separated protocols, optionally with =filter")
     args = parser.parse_args()
     mapping = load_mapping(args.mapping)
-    if args.mode == "build-dirs":
-        directories = {
-            build_dir(protocol.split("=", 1)[0], mapping) for protocol in args.protocol.split()
-        }
-        for directory in sorted(directories):
-            print(directory)
-    elif args.mode == "build-dir":
-        print(build_dir(args.protocol, mapping))
-    else:
-        print(mapping.get(args.protocol, args.protocol))
+    directories = {
+        build_dir(protocol.split("=", 1)[0], mapping) for protocol in args.protocols.split()
+    }
+    for directory in sorted(directories):
+        print(directory)
 
 
 if __name__ == "__main__":
