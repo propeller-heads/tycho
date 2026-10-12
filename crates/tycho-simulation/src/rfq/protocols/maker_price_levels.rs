@@ -237,9 +237,13 @@ impl AllMakerPriceLevels {
             if maker_levels.levels.is_empty() {
                 continue;
             }
+            let used = self
+                .used_market_makers
+                .iter()
+                .map(String::as_str);
             if self
                 .rule
-                .allows(&self.used_market_makers, &maker_levels.market_maker)
+                .allows(used, &maker_levels.market_maker)
             {
                 price_levels.push(maker_levels);
             } else {

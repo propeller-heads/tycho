@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -150,10 +150,10 @@ impl QuoteRule {
     }
 
     /// Whether `market_maker` may still quote after the makers in `used` did.
-    pub fn allows(self, used: &HashSet<String>, market_maker: &str) -> bool {
+    pub fn allows<'a>(self, mut used: impl Iterator<Item = &'a str>, market_maker: &str) -> bool {
         match self {
-            QuoteRule::OncePerMaker => !used.contains(market_maker),
-            QuoteRule::OncePerVenue => used.is_empty(),
+            QuoteRule::OncePerMaker => !used.any(|used| used == market_maker),
+            QuoteRule::OncePerVenue => used.next().is_none(),
         }
     }
 }
