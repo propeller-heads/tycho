@@ -179,7 +179,13 @@ async fn main() -> miette::Result<()> {
             continue;
         }
 
-        let block = fetch_block(&rpc_tools, block_number).await?;
+        let block = match fetch_block(&rpc_tools, block_number).await {
+            Ok(block) => block,
+            Err(e) => {
+                warn!("Skipping block {block_number}: {e:?}");
+                continue;
+            }
+        };
         let pools = match &cli.components {
             Some(ids) => ids
                 .iter()

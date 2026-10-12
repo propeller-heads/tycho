@@ -223,12 +223,27 @@ impl Report {
                 gas_chain,
                 tax_bps: (point.sell.tax, point.buy.tax),
             };
+            if verdict == Verdict::AmountMismatch || verdict == Verdict::NativeRejects {
+                self.dump_state(block, point)?;
+            }
             serde_json::to_writer(&mut self.failures, &record).into_diagnostic()?;
             self.failures
                 .write_all(b"\n")
                 .into_diagnostic()?;
         }
         self.failures.flush().into_diagnostic()
+    }
+
+    /// Saves the native state a mismatch was quoted from, once per block and component, so the
+    /// state can be compared with the chain afterwards.
+    fn dump_state(&self, block: &Block, point: &Point) -> miette::Result<()> {
+        let dir = self.dir.join("states");
+        fs::create_dir_all(&dir).into_diagnostic()?;
+        let path = dir.join(format!("{}-{}.txt", block.header.number, point.component.id));
+        if !path.exists() {
+            fs::write(path, format!("{:#?}", point.state)).into_diagnostic()?;
+        }
+        Ok(())
     }
 
     pub fn write_summary(&self) -> miette::Result<()> {
@@ -250,8 +265,8 @@ const TAX_MIN_AMOUNT: u64 = 1_000_000;
 const TAX_RATIO_SPREAD: f64 = 5e-4;
 
 /// Relabels the amount mismatches of a pool direction as [`Verdict::Tax`] when the chain pays a
-/// constant fraction less than native at every non-dust amount, with at least three such points
-/// and no exact match among them.
+/// near-constant fraction less than native: at least three non-dust points, most of the
+/// mismatches, within a narrow band around the median ratio, and no exact match among them.
 fn label_taxes(points: &[Point], judged: &mut [(Verdict, Result<BigUint, String>, Option<u64>)]) {
     let mut by_direction: HashMap<(&Bytes, &Bytes), Vec<usize>> = HashMap::new();
     for (index, point) in points.iter().enumerate() {
@@ -283,11 +298,21 @@ fn label_taxes(points: &[Point], judged: &mut [(Verdict, Result<BigUint, String>
         if exact_seen || ratios.len() < 3 {
             continue;
         }
-        let (low, high) = ratios
+        // A sell tax shrinks the input, so price impact bends the ratio at large sizes: label the
+        // points around the median and leave the outliers as mismatches.
+        let mut sorted: Vec<f64> = ratios
             .iter()
-            .fold((f64::MAX, f64::MIN), |(low, high), (_, r)| (low.min(*r), high.max(*r)));
-        if high < 1.0 && high - low <= TAX_RATIO_SPREAD {
-            for (index, _) in ratios {
+            .map(|(_, ratio)| *ratio)
+            .collect();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let near: Vec<usize> = ratios
+            .iter()
+            .filter(|(_, ratio)| (ratio - median).abs() <= TAX_RATIO_SPREAD / 2.0)
+            .map(|(index, _)| *index)
+            .collect();
+        if median < 1.0 && near.len() >= 3 && near.len() * 2 > ratios.len() {
+            for index in near {
                 judged[index].0 = Verdict::Tax;
             }
         }
@@ -390,6 +415,25 @@ mod tests {
         assert!(judged
             .iter()
             .all(|(verdict, _, _)| *verdict == Verdict::Tax));
+    }
+
+    #[test]
+    fn test_sell_tax_outlier_at_large_size_stays_a_mismatch() {
+        let points = [point(10_000_000), point(50_000_000), point(90_000_000), point(900_000_000)];
+        let mut judged = vec![
+            mismatch(9_500_000),
+            mismatch(47_500_000),
+            mismatch(85_500_000),
+            mismatch(864_000_000),
+        ];
+
+        label_taxes(&points, &mut judged);
+
+        let verdicts: Vec<_> = judged
+            .iter()
+            .map(|(verdict, _, _)| *verdict)
+            .collect();
+        assert_eq!(verdicts, [Verdict::Tax, Verdict::Tax, Verdict::Tax, Verdict::AmountMismatch]);
     }
 
     #[test]
