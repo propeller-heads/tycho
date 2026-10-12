@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "robinhood_topaz_cl"
-  version: v0.1.6
+  version: v0.1.7
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/base-aerodrome-slipstreams"
 
 protobuf:

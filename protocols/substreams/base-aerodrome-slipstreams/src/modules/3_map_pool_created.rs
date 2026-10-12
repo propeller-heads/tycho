@@ -25,12 +25,17 @@ pub fn map_pools_created(
         .iter()
         .map(|f| Address::from_str(f).expect("invalid address"))
         .collect::<Vec<_>>();
+    let creation_dynamic_fee_module = params
+        .creation_dynamic_fee_module
+        .as_deref()
+        .map(|module| hex::decode(module).expect("Invalid creation_dynamic_fee_module hex"));
     get_new_pools(
         &block,
         &mut new_pools,
         factory_addresses,
         tick_spacing_to_fee_store,
         &params.protocol_type_name,
+        creation_dynamic_fee_module.as_deref(),
     );
 
     Ok(BlockChanges { block: Some((&block).into()), changes: new_pools, ..Default::default() })
@@ -43,6 +48,7 @@ fn get_new_pools(
     factory_addresses: Vec<Address>,
     tick_spacing_to_fee_store: StoreGetInt64,
     protocol_type_name: &str,
+    creation_dynamic_fee_module: Option<&[u8]>,
 ) {
     // Extract new pools from PoolCreated events
     let mut on_pool_created = |event: PoolCreated, _tx: &eth::TransactionTrace, log: &eth::Log| {
@@ -55,64 +61,69 @@ fn get_new_pools(
         let Some(default_fee) = tick_spacing_to_fee_store.get_last(&fee_key) else {
             return;
         };
+        let mut attributes = vec![
+            Attribute {
+                name: "liquidity".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "tick".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "sqrt_price_x96".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "observationIndex".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "observationCardinality".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "dfc_baseFee".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "dfc_scalingFactor".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "dfc_feeCap".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "dfc_initialFeeEnabled".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+            Attribute {
+                name: "dfc_initialFee".to_string(),
+                value: BigInt::from(0).to_signed_bytes_be(),
+                change: ChangeType::Creation.into(),
+            },
+        ];
+        if let Some(module) = creation_dynamic_fee_module {
+            attributes.push(Attribute {
+                name: "dynamic_fee_module".to_string(),
+                value: module.to_vec(),
+                change: ChangeType::Creation.into(),
+            });
+        }
         new_pools.push(TransactionChanges {
             tx: Some(tycho_tx.clone()),
             contract_changes: vec![],
-            entity_changes: vec![EntityChanges {
-                component_id: event.pool.to_hex(),
-                attributes: vec![
-                    Attribute {
-                        name: "liquidity".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "tick".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "sqrt_price_x96".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "observationIndex".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "observationCardinality".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "dfc_baseFee".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "dfc_scalingFactor".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "dfc_feeCap".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "dfc_initialFeeEnabled".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                    Attribute {
-                        name: "dfc_initialFee".to_string(),
-                        value: BigInt::from(0).to_signed_bytes_be(),
-                        change: ChangeType::Creation.into(),
-                    },
-                ],
-            }],
+            entity_changes: vec![EntityChanges { component_id: event.pool.to_hex(), attributes }],
             component_changes: vec![ProtocolComponent {
                 id: event.pool.to_hex(),
                 tokens: vec![event.token0, event.token1],
