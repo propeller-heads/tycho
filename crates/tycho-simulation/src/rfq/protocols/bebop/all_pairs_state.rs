@@ -238,6 +238,7 @@ impl IndicativelyPriced for BebopAllPairsState {
 mod tests {
     use std::{collections::HashSet, str::FromStr};
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
@@ -369,5 +370,128 @@ mod tests {
         assert!(
             matches!(spot_price, Err(SimulationError::RecoverableError(msg)) if msg == "Bebop already quoted in this route")
         );
+    }
+
+    /// The continued-fill contract of every all-pairs state. Each venue sells WETH for USDC: 1 WETH
+    /// at 3000 USDC, then 1 WETH at 2900.
+    mod continued_fill {
+        use super::*;
+        use crate::rfq::protocols::{
+            hashflow::{all_pairs_state::HashflowAllPairsState, client::HashflowClient},
+            native::{
+                all_pairs_state::NativeAllPairsState,
+                client::NativeClient,
+                models::{NativePriceData, NativePriceLevel},
+            },
+            test_utils::{maker_price_levels, usdc_amount, weth_amount},
+        };
+
+        fn tokens() -> HashMap<Bytes, Token> {
+            HashMap::from([(weth().address, weth()), (usdc().address, usdc())])
+        }
+
+        fn bebop() -> Box<dyn ProtocolSim> {
+            let book = book(&weth(), &usdc(), &[3000.0, 1.0, 2900.0, 1.0], &[]);
+            Box::new(state(vec![book]))
+        }
+
+        fn native() -> Box<dyn ProtocolSim> {
+            let client = NativeClient::new(
+                Chain::Ethereum,
+                String::new(),
+                HashSet::new(),
+                0.0,
+                HashSet::new(),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            let book = NativePriceData {
+                base_address: weth().address,
+                quote_address: usdc().address,
+                minimum_in_base: 0.0,
+                minimum_in_quote: 0.0,
+                minimum_out_base: 0.0,
+                minimum_out_quote: 0.0,
+                bids: vec![
+                    NativePriceLevel { quantity: 1.0, price: 3000.0 },
+                    NativePriceLevel { quantity: 1.0, price: 2900.0 },
+                ],
+                asks: vec![],
+            };
+            Box::new(NativeAllPairsState::new(vec![book], tokens(), client))
+        }
+
+        fn hashflow() -> Box<dyn ProtocolSim> {
+            let client = HashflowClient::new(
+                Chain::Ethereum,
+                HashSet::new(),
+                0.0,
+                HashSet::new(),
+                String::new(),
+                String::new(),
+                Duration::from_secs(0),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let levels =
+                maker_price_levels("mm", &weth(), &usdc(), &[(1.0, 3000.0), (1.0, 2900.0)]);
+            Box::new(HashflowAllPairsState::new(vec![levels], tokens(), client))
+        }
+
+        #[rstest]
+        #[case::bebop(bebop())]
+        #[case::native(native())]
+        #[case::hashflow(hashflow())]
+        fn chunks_pay_what_one_merged_swap_pays(#[case] state: Box<dyn ProtocolSim>) {
+            let whole = state
+                .get_amount_out(weth_amount(1.5), &weth(), &usdc())
+                .unwrap();
+            let first = state
+                .get_amount_out(weth_amount(1.0), &weth(), &usdc())
+                .unwrap();
+            let second = first
+                .new_state
+                .get_amount_out(weth_amount(0.5), &weth(), &usdc())
+                .unwrap();
+            assert_eq!(whole.amount, usdc_amount(4450.0));
+            assert_eq!(&first.amount + &second.amount, whole.amount);
+            assert_eq!(second.gas, BigUint::default());
+        }
+
+        #[rstest]
+        #[case::bebop(bebop())]
+        #[case::native(native())]
+        #[case::hashflow(hashflow())]
+        fn spot_price_and_limits_after_a_fill(#[case] state: Box<dyn ProtocolSim>) {
+            let first = state
+                .get_amount_out(weth_amount(1.0), &weth(), &usdc())
+                .unwrap();
+            let state = first.new_state;
+            let limits = state.get_limits(weth().address, usdc().address);
+            assert_eq!(
+                state
+                    .spot_price(&weth(), &usdc())
+                    .unwrap(),
+                2900.0
+            );
+            assert_eq!(limits.unwrap(), (weth_amount(1.0), usdc_amount(2900.0)));
+        }
+
+        #[rstest]
+        #[case::bebop(bebop())]
+        #[case::native(native())]
+        #[case::hashflow(hashflow())]
+        fn spot_price_after_the_whole_depth_is_no_liquidity(#[case] state: Box<dyn ProtocolSim>) {
+            let first = state
+                .get_amount_out(weth_amount(2.0), &weth(), &usdc())
+                .unwrap();
+            let result = first
+                .new_state
+                .spot_price(&weth(), &usdc());
+            assert!(
+                matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
+            );
+        }
     }
 }
