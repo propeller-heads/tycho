@@ -28,7 +28,8 @@ use tycho_common::{
 use super::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
+        VE33_ROBINHOOD_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
     pool::{
@@ -75,7 +76,7 @@ pub fn extension_type(extension: Address, chain: Chain) -> Option<ExtensionType>
         ExtensionType::MevCapture
     } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
         ExtensionType::BoostedFees
-    } else if extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+    } else if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS.contains(&(chain, extension)) {
         ExtensionType::SignedExclusiveSwap
     } else if chain == Chain::Robinhood && extension == VE33_ROBINHOOD_ADDRESS {
         ExtensionType::Ve33

@@ -79,13 +79,17 @@ impl EkuboPool for OraclePool {
         self.swap_state.sdk_state.liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: EvmTokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: EvmTokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let first_swap_this_block = !self.swap_state.swapped_this_block;
 
         self.imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(EvmOraclePoolState {
                     full_range_pool_state: self.swap_state.sdk_state,
                     last_snapshot_time: 0,

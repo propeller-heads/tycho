@@ -35,7 +35,7 @@ use super::{pool::concentrated::ConcentratedPool, state::EkuboV3State};
 use crate::evm::protocol::ekubo_v3::{
     addresses::{
         BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
+        SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS, TWAMM_ADDRESS_V2, VE33_ROBINHOOD_ADDRESS,
     },
     pool::{
         boosted_fees::BoostedFeesPool,
@@ -213,6 +213,21 @@ pub fn concentrated() -> TestCase {
         swap_token0: (100_u8.into(), 99_u8.into()),
         expected_limit_token0: 497_u16.into(),
     }
+}
+
+/// A full-range pool at price 1 with no liquidity.
+pub fn empty_full_range_state() -> EkuboV3State {
+    let key = EvmFullRangePoolKey {
+        token0: TOKEN0,
+        token1: TOKEN1,
+        config: EvmFullRangePoolConfig {
+            fee: 0,
+            pool_type_config: FullRangePoolTypeConfig,
+            extension: Address::ZERO,
+        },
+    };
+    let state = EvmFullRangePoolState { sqrt_ratio: U256::from_limbs([0, 0, 1, 0]), liquidity: 0 };
+    EkuboV3State::FullRange(FullRangePool::new(key, state).unwrap())
 }
 
 #[fixture]
@@ -1069,7 +1084,7 @@ pub fn signed_exclusive_swap() -> TestCase {
         config: EvmConcentratedPoolConfig {
             fee: 0,
             pool_type_config: TickSpacing(10),
-            extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+            extension: SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS,
         },
     };
 

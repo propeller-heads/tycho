@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -68,11 +68,26 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
 
-    constructor(address routerFeeSetter) {
-        _routerFeeReceiver = msg.sender;
+    /**
+     * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
+     * @param routerFeeReceiver Address whose vault balance receives router fees
+     * @dev The receiver is explicit rather than defaulted to `msg.sender`: when
+     *      the calculator is deployed through a CREATE2 factory, the factory is
+     *      the sender, and fees credited to it can never be withdrawn.
+     *      Positive slippage capture starts enabled, since that is how every
+     *      deployment is operated; `setPositiveSlippageEnabled` turns it off.
+     */
+    constructor(address routerFeeSetter, address routerFeeReceiver) {
+        if (routerFeeReceiver == address(0)) {
+            revert FeeCalculator__AddressZero();
+        }
+        _routerFeeReceiver = routerFeeReceiver;
+        _positiveSlippageEnabled = true;
         // Make the role its own admin so role holders can manage their own role
         _setRoleAdmin(ROUTER_FEE_SETTER_ROLE, ROUTER_FEE_SETTER_ROLE);
         _grantRole(ROUTER_FEE_SETTER_ROLE, routerFeeSetter);
+        emit RouterFeeReceiverUpdated(address(0), routerFeeReceiver);
+        emit PositiveSlippageToggled(true);
     }
 
     /**

@@ -1,0 +1,75 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_etherfi"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_etherfi.wasm
+
+network: mainnet
+
+params:
+  # Raw chain state at start_block. Recompute with:
+  #   RPC_URL=<your-archive-rpc> ./scripts/compute_initial_state.sh <block_number>
+  store_balance_slots: &initial_state |
+    {
+      "start_block": 25940000,
+      "creation_tx": "0xdc387d47c733ca16693792c12f81b3a038930489b2b89dfcae14b6c4f293fe56",
+      "liquidity_pool_value": "0x00000000000000390066975346099296000000000001d354d821f08629f66d6a",
+      "eeth_total_shares": "0x00000000000000000000000000000000000000000001a7c7a0870fdc1d9275d1",
+      "weeth_shares": "0x0000000000000000000000000000000000000000000199a703089f7b8ed2abd1",
+      "eth_redemption_limit": "0x0000000000005a6c000000006a8413270000000077307d560000000077359400",
+      "eth_redemption_info": "0x00000000000000000000000000000000000000000000000000000064001e03e8",
+      "eeth_mint_limit": "0x000000052c8c338e000000006aa1515300002460bc2c859e0000246139ca8000",
+      "eeth_burn_limit": "0x00000000677af407000000006aa0ce13000016b6f226fb9f000016bcc41e9000",
+      "implementations": {
+        "liquidity_pool": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "eeth": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+        "weeth": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "redemption_manager": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+        "rate_limiter": "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67"
+      }
+    }
+  map_protocol_components: *initial_state
+  map_protocol_changes: *initial_state
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: &start_block 25940000
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_balance_slots
+    kind: store
+    updatePolicy: set
+    valueType: bigint
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_balance_slots
+        mode: deltas
+      - store: store_balance_slots
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

@@ -30,8 +30,10 @@ import {
     SignedExclusiveSwap
 } from "@ekubo-v3/extensions/SignedExclusiveSwap.sol";
 
-// Handles callbacks directly and receives the native token directly
-contract EkuboV3ExecutorStandalone is EkuboV3Executor, ILocker {
+// Handles callbacks directly and receives the native token directly.
+// Abstract so that only the most derived contract passes the
+// EkuboV3Executor constructor argument.
+abstract contract EkuboV3StandaloneLocker is EkuboV3Executor, ILocker {
     function locked_6416899205(
         uint256 /* id */
     )
@@ -68,10 +70,20 @@ contract EkuboV3ExecutorStandalone is EkuboV3Executor, ILocker {
     receive() external payable {}
 }
 
+contract EkuboV3ExecutorStandalone is EkuboV3StandaloneLocker {
+    constructor(address signedExclusiveSwap_)
+        EkuboV3Executor(signedExclusiveSwap_)
+    {}
+}
+
 contract EkuboV3RobinhoodExecutorStandalone is
     EkuboV3RobinhoodExecutor,
-    EkuboV3ExecutorStandalone
+    EkuboV3StandaloneLocker
 {
+    constructor(address signedExclusiveSwap_)
+        EkuboV3RobinhoodExecutor(signedExclusiveSwap_)
+    {}
+
     // Diamond-inheritance disambiguation only; super resolves to
     // EkuboV3RobinhoodExecutor.
     function _swapHop(
@@ -92,7 +104,7 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
     using SignedExclusiveSwapLib for ISignedExclusiveSwap;
 
     EkuboV3ExecutorStandalone immutable executor =
-        new EkuboV3ExecutorStandalone();
+        new EkuboV3ExecutorStandalone(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
 
     LiquidityHelper immutable liquidityHelper = new LiquidityHelper();
 
@@ -252,17 +264,17 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         deployCodeTo(
             "SignedExclusiveSwap.sol",
             abi.encode(CORE, SIGNED_SWAP_ADMIN),
-            SIGNED_EXCLUSIVE_SWAP_ADDRESS
+            EKUBO_V3_SIGNED_EXCLUSIVE_SWAP
         );
         ISignedExclusiveSwap ext =
-            ISignedExclusiveSwap(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+            ISignedExclusiveSwap(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
 
         // --- 2. Initialize a zero-fee pool ---
         // USDC < USDT, so token0 = USDC, token1 = USDT.
         PoolConfig poolConfig = createConcentratedPoolConfig({
             _fee: 0,
             _tickSpacing: 100,
-            _extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS
+            _extension: EKUBO_V3_SIGNED_EXCLUSIVE_SWAP
         });
         PoolKey memory poolKey =
             PoolKey({token0: USDC_ADDR, token1: USDT_ADDR, config: poolConfig});
@@ -350,16 +362,16 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         deployCodeTo(
             "SignedExclusiveSwap.sol",
             abi.encode(CORE, SIGNED_SWAP_ADMIN),
-            SIGNED_EXCLUSIVE_SWAP_ADDRESS
+            EKUBO_V3_SIGNED_EXCLUSIVE_SWAP
         );
         ISignedExclusiveSwap ext =
-            ISignedExclusiveSwap(SIGNED_EXCLUSIVE_SWAP_ADDRESS);
+            ISignedExclusiveSwap(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
 
         // --- 2. Initialize a zero-fee USDC/USDT pool ---
         PoolConfig poolConfig = createConcentratedPoolConfig({
             _fee: 0,
             _tickSpacing: 100,
-            _extension: SIGNED_EXCLUSIVE_SWAP_ADDRESS
+            _extension: EKUBO_V3_SIGNED_EXCLUSIVE_SWAP
         });
         PoolKey memory poolKey =
             PoolKey({token0: USDC_ADDR, token1: USDT_ADDR, config: poolConfig});
@@ -485,7 +497,7 @@ contract LiquidityHelper {
 
 contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
     EkuboV3RobinhoodExecutorStandalone immutable executor =
-        new EkuboV3RobinhoodExecutorStandalone();
+        new EkuboV3RobinhoodExecutorStandalone(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
 
     // The token pair of the deployed WETH/USDG Ve33 pool on Robinhood Chain.
     address constant RHC_WETH = 0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73;

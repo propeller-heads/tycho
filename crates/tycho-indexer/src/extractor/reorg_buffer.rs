@@ -24,10 +24,17 @@ pub enum BlockNumberOrTimestamp {
 }
 
 impl BlockNumberOrTimestamp {
-    fn greater_than(&self, other: &Block) -> bool {
+    pub(crate) fn greater_than(&self, other: &Block) -> bool {
         match self {
             BlockNumberOrTimestamp::Number(n) => n > &other.number,
             BlockNumberOrTimestamp::Timestamp(ts) => ts > &other.ts,
+        }
+    }
+
+    pub(crate) fn less_than(&self, other: &Block) -> bool {
+        match self {
+            BlockNumberOrTimestamp::Number(n) => n < &other.number,
+            BlockNumberOrTimestamp::Timestamp(ts) => ts < &other.ts,
         }
     }
 }
@@ -50,6 +57,9 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
         })
     }
 }
+
+// TODO: rename ReorgBuffer. `DeltaWindow` also keeps committed blocks here for serving, so this is
+// a contiguous chain segment with revert purge, not a buffer of blocks awaiting persistence.
 
 /// Buffer that holds blocks awaiting persistence to the database so extractors can batch commits
 /// and efficiently handle chain reorganisations (reorg) without requiring database rollbacks.
@@ -301,6 +311,36 @@ where
         Ok(PurgeOutcome::HeightMatch(purged))
     }
 
+    /// The oldest buffered message, or `None` if the buffer is empty.
+    pub fn oldest(&self) -> Option<&B> {
+        self.block_messages.front()
+    }
+
+    /// The newest buffered message, or `None` if the buffer is empty.
+    pub fn newest(&self) -> Option<&B> {
+        self.block_messages.back()
+    }
+
+    /// The buffered message for block `number`, or `None` if that block is not buffered.
+    /// Buffered blocks are contiguous, so this is an index lookup.
+    pub fn block_at(&self, number: u64) -> Option<&B> {
+        let first = self.oldest()?.block().number;
+        let index = usize::try_from(number.checked_sub(first)?).ok()?;
+        let msg = self.block_messages.get(index)?;
+        let found = msg.block().number;
+        if found != number {
+            error!(
+                number,
+                found,
+                first,
+                len = self.block_messages.len(),
+                "ReorgBuffer is not contiguous: index lookup landed on a different block"
+            );
+            return None;
+        }
+        Some(msg)
+    }
+
     /// Returns an `Option` containing the most recent block in the buffer or `None` if the buffer
     /// is empty
     pub fn get_most_recent_block(&self) -> Option<tycho_common::models::blockchain::Block> {
@@ -384,6 +424,9 @@ where
     }
 
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
+    // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
+    // the buffer-bound behaviour the window deliberately diverges from.
+    #[allow(dead_code)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -440,6 +483,9 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         &self,
         keys: Vec<(&Address, &Address)>,
     ) -> HashMap<(Address, Address), AccountBalance>;
+
+    /// Returns the ids among `ids` whose component creation this block holds.
+    fn get_filtered_protocol_components(&self, ids: &HashSet<ComponentId>) -> HashSet<ComponentId>;
 }
 
 impl<B> ReorgBuffer<B>
@@ -482,6 +528,23 @@ where
         }
 
         (res, remaining_keys.into_iter().collect())
+    }
+
+    /// Returns the ids among `ids` with no component creation in the buffered blocks,
+    /// live and committing sections included.
+    pub fn missing_components(&self, ids: HashSet<ComponentId>) -> HashSet<ComponentId> {
+        let mut missing = ids;
+
+        for block_message in self.history() {
+            if missing.is_empty() {
+                break;
+            }
+            for id in block_message.get_filtered_protocol_components(&missing) {
+                missing.remove(&id);
+            }
+        }
+
+        missing
     }
 
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
@@ -604,9 +667,9 @@ mod test {
 
     use rstest::rstest;
     use tycho_common::models::{
-        blockchain::{Transaction, TxWithChanges},
-        protocol::ProtocolComponentStateDelta,
-        Chain,
+        blockchain::{BlockAggregatedChanges, Transaction, TxWithChanges},
+        protocol::{ProtocolComponent, ProtocolComponentStateDelta},
+        Chain, ChangeType,
     };
 
     use super::*;
@@ -819,6 +882,51 @@ mod test {
             _ => panic!("block entity version not implemented"),
         }
     }
+    fn numbered_buffer(
+        range: std::ops::RangeInclusive<u64>,
+    ) -> ReorgBuffer<BlockAggregatedChanges> {
+        let mut buffer = ReorgBuffer::new();
+        for n in range {
+            buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: testing::block(n),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        buffer
+    }
+
+    #[test]
+    fn oldest_and_newest_are_the_buffer_ends() {
+        let empty: ReorgBuffer<BlockAggregatedChanges> = ReorgBuffer::new();
+        assert!(empty.oldest().is_none() && empty.newest().is_none());
+
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(buffer.oldest().map(|b| b.block.number), Some(4));
+        assert_eq!(buffer.newest().map(|b| b.block.number), Some(6));
+    }
+
+    #[rstest]
+    #[case::first(4, Some(4))]
+    #[case::middle(5, Some(5))]
+    #[case::below(3, None)]
+    #[case::above(7, None)]
+    fn block_at_finds_a_buffered_block_by_number(
+        #[case] number: u64,
+        #[case] expected: Option<u64>,
+    ) {
+        let buffer = numbered_buffer(4..=6);
+
+        assert_eq!(
+            buffer
+                .block_at(number)
+                .map(|b| b.block.number),
+            expected
+        );
+    }
+
     #[test]
     fn test_reorg_buffer_state_lookup() {
         let mut reorg_buffer = ReorgBuffer::new();
@@ -1066,6 +1174,63 @@ mod test {
         assert_eq!(missing.len(), 2);
     }
 
+    /// The `get_block_changes` fixtures carry no protocol components, so component lookups
+    /// need blocks built here.
+    fn component_creation_block(number: u64, component_id: &str) -> BlockChanges {
+        BlockChanges::new(
+            "test".to_string(),
+            Chain::Ethereum,
+            testing::block(number),
+            0,
+            false,
+            vec![TxWithChanges {
+                protocol_components: HashMap::from([(
+                    component_id.to_string(),
+                    ProtocolComponent {
+                        id: component_id.to_string(),
+                        change: ChangeType::Creation,
+                        ..Default::default()
+                    },
+                )]),
+                tx: transaction(),
+                ..Default::default()
+            }],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn test_missing_components_reads_live_and_committing_blocks() {
+        let mut reorg_buffer = ReorgBuffer::new();
+        reorg_buffer
+            .insert_block(component_creation_block(1, "c1"))
+            .unwrap();
+        reorg_buffer
+            .insert_block(get_block_changes(2))
+            .unwrap();
+        reorg_buffer
+            .insert_block(component_creation_block(3, "c3"))
+            .unwrap();
+
+        // Blocks 1 and 2 move to the committing section, block 3 stays live.
+        reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+
+        let c1 = "c1".to_string();
+        let c3 = "c3".to_string();
+        let ghost = "ghost".to_string();
+        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+
+        let missing = reorg_buffer.missing_components(ids.clone());
+        assert_eq!(missing, HashSet::from([ghost.clone()]));
+
+        // Releasing block 1 drops its creation from the history.
+        reorg_buffer.release_committed(2);
+        let missing = reorg_buffer.missing_components(ids);
+        assert_eq!(missing, HashSet::from([c1, ghost]));
+    }
+
     #[test]
     fn test_count_blocks_before() {
         let mut reorg_buffer = ReorgBuffer::new();
@@ -1109,6 +1274,47 @@ mod test {
         let unknown = reorg_buffer.drain_blocks_until(999);
 
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn arc_same_timestamp_blocks_enter_persistence_in_number_order() {
+        let timestamp = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        for number in 40..=42 {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    chain: Chain::Arc,
+                    block: Block::new(
+                        number,
+                        Chain::Arc,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        timestamp,
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let drained = reorg_buffer
+            .drain_into_committing(42)
+            .unwrap();
+
+        assert_eq!(
+            drained
+                .iter()
+                .map(|entry| entry.block.number)
+                .collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+        assert_eq!(
+            reorg_buffer
+                .newest()
+                .map(|entry| entry.block.number),
+            Some(42)
+        );
     }
 
     #[test]
@@ -1342,8 +1548,13 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    // The `committed_oldest_no` case pins current behavior: the oldest buffered block
+    // reports `Committed` although it is still only buffered (the oldest buffered block is
+    // `db_committed + 1`). `services::state::window::DeltaWindow::commit_status` documents this
+    // off-by-one and deliberately diverges from it.
     #[rstest]
     #[case::committed_no(BlockNumberOrTimestamp::Number(0), CommitStatus::Committed)]
+    #[case::committed_oldest_no(BlockNumberOrTimestamp::Number(1), CommitStatus::Committed)]
     #[case::committed_ts(
         BlockNumberOrTimestamp::Timestamp("2020-01-01T00:00:00".parse().unwrap()),
         CommitStatus::Committed

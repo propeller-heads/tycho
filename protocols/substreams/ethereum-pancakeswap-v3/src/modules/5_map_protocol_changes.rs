@@ -3,6 +3,7 @@ use crate::pb::pancakeswap::v3::{
     Events, LiquidityChanges, TickDeltas,
 };
 use itertools::Itertools;
+use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap},
     str::FromStr,
@@ -20,8 +21,16 @@ use super::store_deltas::{
 
 type PoolAddress = Vec<u8>;
 
+#[derive(Debug, Default, Deserialize, PartialEq)]
+struct Params {
+    /// Protocol fee, per direction, that `initialize` sets on every pool. PancakeSwap V3 picks it
+    /// by fee tier; forks that use one constant for every tier set it here.
+    default_protocol_fee: Option<u64>,
+}
+
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
+    params: String,
     block: eth::Block,
     created_pools: BlockChanges,
     events: Events,
@@ -32,7 +41,10 @@ pub fn map_protocol_changes(
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
+    let params: Params = serde_qs::from_str(&params)
+        .map_err(|err| anyhow::anyhow!("Invalid map_protocol_changes params {params:?}: {err}"))?;
     let changes = collect_transaction_changes(
+        &params,
         created_pools,
         events,
         balances_map_deltas,
@@ -47,6 +59,7 @@ pub fn map_protocol_changes(
 
 #[allow(clippy::too_many_arguments)]
 fn collect_transaction_changes(
+    params: &Params,
     created_pools: BlockChanges,
     events: Events,
     balances_map_deltas: BlockBalanceDeltas,
@@ -136,7 +149,7 @@ fn collect_transaction_changes(
     events
         .pool_events
         .into_iter()
-        .flat_map(event_to_attributes_updates)
+        .flat_map(|event| event_to_attributes_updates(event, params))
         .for_each(|(tx, pool_address, attr)| {
             let builder = transaction_changes
                 .entry(tx.index)
@@ -154,10 +167,13 @@ fn collect_transaction_changes(
         .collect()
 }
 
-fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddress, Attribute)> {
+fn event_to_attributes_updates(
+    event: PoolEvent,
+    params: &Params,
+) -> Vec<(Transaction, PoolAddress, Attribute)> {
     match event.r#type.as_ref().unwrap() {
         pool_event::Type::Initialize(initalize) => {
-            let (zero_to_one, one_to_zero) = fee_to_default_protocol_fees(event.fee);
+            let (zero_to_one, one_to_zero) = default_protocol_fees(event.fee, params);
             vec![
                 (
                     event
@@ -265,6 +281,13 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddres
     }
 }
 
+fn default_protocol_fees(fee: u64, params: &Params) -> (u64, u64) {
+    match params.default_protocol_fee {
+        Some(protocol_fee) => (protocol_fee, protocol_fee),
+        None => fee_to_default_protocol_fees(fee),
+    }
+}
+
 // Map the pool fee to the default protocol fees.
 // For the reference implementation see https://github.com/pancakeswap/pancake-v3-contracts/blob/5cc479f0c5a98966c74d94700057b8c3ca629afd/projects/v3-core/contracts/PancakeV3Pool.sol#L298-L306
 fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
@@ -273,7 +296,47 @@ fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
         500 => (3400, 3400),
         2500 => (3200, 3200),
         10000 => (3200, 3200),
-        _ => panic!("Unexpected fee value"),
+        _ => panic!(
+            "Unexpected fee value {fee}: PancakeSwap V3 sets no default protocol fee for it. A fork \
+             that uses one default for every fee tier must pass `default_protocol_fee` to \
+             map_protocol_changes"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+
+    #[test]
+    fn test_default_protocol_fees_follow_pancakeswap_fee_tiers_without_params() {
+        let params: Params = serde_qs::from_str("").unwrap();
+
+        assert_eq!(params, Params::default());
+        assert_eq!(default_protocol_fees(100, &params), (3300, 3300));
+        assert_eq!(default_protocol_fees(500, &params), (3400, 3400));
+        assert_eq!(default_protocol_fees(2500, &params), (3200, 3200));
+        assert_eq!(default_protocol_fees(10000, &params), (3200, 3200));
+    }
+
+    #[test]
+    fn test_default_protocol_fee_param_applies_to_every_fee() {
+        let params: Params = serde_qs::from_str("default_protocol_fee=1000").unwrap();
+
+        for fee in [50, 100, 200, 500, 2000, 10000, 30000] {
+            assert_eq!(default_protocol_fees(fee, &params), (1000, 1000));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Unexpected fee value 50")]
+    fn test_unknown_fee_without_param_panics() {
+        default_protocol_fees(50, &Params::default());
+    }
+
+    #[test]
+    fn test_invalid_default_protocol_fee_is_rejected() {
+        assert!(serde_qs::from_str::<Params>("default_protocol_fee=ten").is_err());
     }
 }
 
@@ -460,6 +523,7 @@ mod tests {
     }
     fn collect_ticks(ticks: TickDeltas, deltas: StoreDeltas) -> Vec<TransactionChanges> {
         collect_transaction_changes(
+            &Params::default(),
             Default::default(),
             Default::default(),
             Default::default(),

@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "robinhood_ekubo_v3"
-  version: v0.2.3
+  version: v0.2.4
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:
@@ -24,10 +24,12 @@ binaries:
 
 # The Ve33 extension address of the Robinhood deployment (see the v3.2.0
 # release notes of EkuboProtocol/evm-contracts). Enables Ve33 pool handling
-# in map_events and map_components.
+# in map_events and map_components. The SignedExclusiveSwap extension is also
+# deployed per chain; map_components tags pools on the Robinhood deployment
+# with `is_exclusive`.
 params:
   map_events: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
-  map_components: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953"
+  map_components: "ve33_address=0xD18685a514E59b06d59824e16Db07e73345d9953&signed_exclusive_swap_address=0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"
 
 modules:
   # Stage 1

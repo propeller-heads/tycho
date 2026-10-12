@@ -6,11 +6,13 @@ pub mod cowamm;
 mod cpmm;
 pub mod curve;
 pub mod ekubo;
+mod ekubo_common;
 pub mod ekubo_v3;
 pub mod erc4626;
 pub mod etherfi;
 pub mod filters;
 pub mod fluid;
+pub mod lido_v4;
 pub mod lunarbase;
 pub mod native_wrapper;
 pub mod pancakeswap_v2;
@@ -26,7 +28,6 @@ pub mod uniswap_v4;
 pub mod utils;
 pub mod velodrome_slipstreams;
 pub mod vm;
-
 #[cfg(test)]
 mod test_utils {
     use std::collections::HashMap;

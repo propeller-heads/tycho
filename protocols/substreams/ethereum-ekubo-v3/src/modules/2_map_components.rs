@@ -9,7 +9,7 @@ use tycho_substreams::models::{
 };
 
 use crate::{
-    addresses::{CORE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_ADDRESS},
+    addresses::CORE_ADDRESS,
     pb::ekubo::{
         block_transaction_events::transaction_events::{pool_log::Event, PoolLog},
         BlockTransactionEvents,
@@ -19,6 +19,7 @@ use crate::{
 #[substreams::handlers::map]
 fn map_components(params: String, block_tx_events: BlockTransactionEvents) -> BlockChanges {
     let ve33_address = crate::params::ve33_address(&params);
+    let signed_exclusive_swap_address = crate::params::signed_exclusive_swap_address(&params);
 
     BlockChanges {
         block: None,
@@ -30,7 +31,12 @@ fn map_components(params: String, block_tx_events: BlockTransactionEvents) -> Bl
                     .pool_logs
                     .into_iter()
                     .filter_map(|log| {
-                        maybe_create_component(log, block_tx_events.timestamp, ve33_address)
+                        maybe_create_component(
+                            log,
+                            block_tx_events.timestamp,
+                            ve33_address,
+                            signed_exclusive_swap_address,
+                        )
                     })
                     .multiunzip();
 
@@ -55,6 +61,7 @@ fn maybe_create_component(
     log: PoolLog,
     timestamp: u64,
     ve33_address: Option<Address>,
+    signed_exclusive_swap_address: Option<Address>,
 ) -> Option<(ProtocolComponent, EntityChanges, Vec<BalanceChange>)> {
     let Event::PoolInitialized(pi) = log.event.unwrap() else {
         return None;
@@ -147,7 +154,7 @@ fn maybe_create_component(
         },
     ];
 
-    if pool_config.extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+    if Some(pool_config.extension) == signed_exclusive_swap_address {
         static_att.push(Attribute {
             change: ChangeType::Creation.into(),
             name: "is_exclusive".to_string(),

@@ -15,6 +15,9 @@ uint32 constant _10_PCT = 10_000_000; // 10%
 uint32 constant _50_PCT = 50_000_000; // 50%
 uint32 constant _100_PCT = 100_000_000; // 100%
 
+// Router fee receiver passed to the constructor by every test contract here.
+address constant _ROUTER_FEE_RECEIVER = address(0xFEE);
+
 /// @dev Helper to sum all fee amounts from the returned array
 function _sumFees(FeeRecipient[] memory fees) pure returns (uint256 total) {
     for (uint256 i = 0; i < fees.length; i++) {
@@ -26,7 +29,7 @@ contract FeeCalculatorTest is Constants {
     FeeCalculator feeCalculator;
 
     function setUp() public {
-        feeCalculator = new FeeCalculator(FEE_SETTER);
+        feeCalculator = new FeeCalculator(FEE_SETTER, _ROUTER_FEE_RECEIVER);
     }
 
     function testCalculateOnlyRouterFeeOnOutput() public {
@@ -95,7 +98,7 @@ contract FeeCalculatorTest is Constants {
         // amountOut = 1 ether - 0.02 ether = 0.98 ether
         assertEq(amountOut, 0.98 ether);
         // Router fee
-        assertEq(feeRecipients[0].recipient, address(this));
+        assertEq(feeRecipients[0].recipient, _ROUTER_FEE_RECEIVER);
         assertEq(feeRecipients[0].feeAmount, 0.002 ether);
         // Client fee
         assertEq(feeRecipients[1].recipient, BOB);
@@ -218,7 +221,7 @@ contract FeeCalculatorTest is Constants {
 
         assertEq(amountOut, 1 ether);
         // Router fee
-        assertEq(feeRecipients[0].recipient, address(this));
+        assertEq(feeRecipients[0].recipient, _ROUTER_FEE_RECEIVER);
         assertEq(feeRecipients[0].feeAmount, 0);
         // Client fee
         assertEq(feeRecipients[1].recipient, ALICE);
@@ -250,7 +253,7 @@ contract FeeCalculatorTest is Constants {
         // amountOut = 1 ether - 0.015 ether = 0.985 ether
         assertEq(amountOut, 0.985 ether);
         // Router fee
-        assertEq(feeRecipients[0].recipient, address(this));
+        assertEq(feeRecipients[0].recipient, _ROUTER_FEE_RECEIVER);
         assertEq(feeRecipients[0].feeAmount, 0);
         // Client fee
         assertEq(feeRecipients[1].recipient, BOB);
@@ -289,7 +292,7 @@ contract FeeCalculatorTest is Constants {
         //    amountOut = 1 ether - 0.019 ether - 0.006 ether= 0.975 ether
         assertEq(amountOut, 0.975 ether);
         // Router fee
-        assertEq(feeRecipients[0].recipient, address(this));
+        assertEq(feeRecipients[0].recipient, _ROUTER_FEE_RECEIVER);
         assertEq(feeRecipients[0].feeAmount, 0.006 ether);
         // Client fee
         assertEq(feeRecipients[1].recipient, BOB);
@@ -459,7 +462,7 @@ contract FeeCalculatorTest is Constants {
         //    amountOut = 1 - 0.019 - 0.006 = 0.975 ether
         assertEq(amountOut, 0.975 ether);
         // Router fee
-        assertEq(feeRecipients[0].recipient, address(this));
+        assertEq(feeRecipients[0].recipient, _ROUTER_FEE_RECEIVER);
         assertEq(feeRecipients[0].feeAmount, 0.006 ether);
         // Client fee
         assertEq(feeRecipients[1].recipient, ALICE);
@@ -562,7 +565,7 @@ contract FeeCalculatorConfigTest is Constants {
     FeeCalculator feeCalculator;
 
     function setUp() public {
-        feeCalculator = new FeeCalculator(FEE_SETTER);
+        feeCalculator = new FeeCalculator(FEE_SETTER, _ROUTER_FEE_RECEIVER);
     }
 
     // ROUTER FEE ON OUTPUT TESTS
@@ -745,6 +748,19 @@ contract FeeCalculatorConfigTest is Constants {
     }
 
     // FEE RECEIVER TESTS
+    function testConstructorSetsFeeReceiver() public {
+        vm.expectEmit(true, true, false, false);
+        emit FeeCalculator.RouterFeeReceiverUpdated(address(0), BOB);
+        FeeCalculator calculator = new FeeCalculator(FEE_SETTER, BOB);
+
+        assertEq(calculator.getRouterFeeReceiver(), BOB);
+    }
+
+    function testConstructorRejectsZeroFeeReceiver() public {
+        vm.expectRevert(FeeCalculator__AddressZero.selector);
+        new FeeCalculator(FEE_SETTER, address(0));
+    }
+
     function testSetRouterFeeReceiver() public {
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeReceiver(BOB);
@@ -832,9 +848,10 @@ contract FeeCalculatorConfigTest is Constants {
         // Default fees should be zero
         assertEq(feeCalculator.getRouterFeeOnOutput(), 0);
         assertEq(feeCalculator.getRouterFeeOnClientFee(), 0);
-        // Default fee receiver should be the contract deployer
-        assertEq(feeCalculator.getRouterFeeReceiver(), address(this));
-        assertFalse(feeCalculator.getPositiveSlippageEnabled());
+        // The fee receiver is whatever the constructor was given
+        assertEq(feeCalculator.getRouterFeeReceiver(), _ROUTER_FEE_RECEIVER);
+        // Positive slippage capture starts enabled
+        assertTrue(feeCalculator.getPositiveSlippageEnabled());
     }
 
     function testMaximumFee() public {
@@ -1017,11 +1034,8 @@ contract FeeCalculatorSlippageTest is Constants {
     FeeCalculator feeCalculator;
 
     function setUp() public {
-        feeCalculator = new FeeCalculator(FEE_SETTER);
-        vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(ADMIN);
-        feeCalculator.setPositiveSlippageEnabled(true);
-        vm.stopPrank();
+        // Positive slippage capture is enabled from the constructor
+        feeCalculator = new FeeCalculator(FEE_SETTER, ADMIN);
     }
 
     function testRouterKeepsAllPositiveSlippage() public view {

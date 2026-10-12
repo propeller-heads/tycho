@@ -1169,13 +1169,14 @@ where
                         }
                     }
                 }
-                sleep(self.retry_cooldown).await;
                 // A run that processed blocks is a healthy run — reset the counter so
-                // transient failures after a long successful period get a fresh retry budget.
+                // transient failures after a long successful period get a fresh retry budget,
+                // and restart at once: the resubscribe waits for the websocket anyway.
                 if made_progress {
                     retry_count = 0;
                 } else {
                     retry_count += 1;
+                    sleep(self.retry_cooldown).await;
                 }
             }
             if let Some(e) = final_error {
@@ -3136,6 +3137,71 @@ mod test {
         // The task should complete (not hang) after max retries
         let task_result = tokio::time::timeout(Duration::from_secs(2), jh).await;
         assert!(task_result.is_ok(), "Synchronizer task should complete after max retries");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_restart_after_healthy_run_skips_cooldown() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+
+        let mut deltas_client = MockDeltasClient::new();
+        let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
+        let mut resubscribed_tx = Some(resubscribed_tx);
+        let mut open_senders = Vec::new();
+        let mut calls = 0;
+        deltas_client
+            .expect_subscribe()
+            .returning(move |_, _| {
+                calls += 1;
+                let (tx, rx) = channel(10);
+                if calls == 1 {
+                    // Deliver one block, then close the channel like a websocket reset does.
+                    let block = Block { number: 1, ..Default::default() };
+                    tx.try_send(BlockAggregatedChanges { block, ..Default::default() })
+                        .unwrap();
+                } else {
+                    if let Some(notify) = resubscribed_tx.take() {
+                        let _ = notify.send(std::time::Instant::now());
+                    }
+                    open_senders.push(tx);
+                }
+                Ok((Uuid::default(), rx))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+
+        let cooldown = Duration::from_secs(5);
+        let mut state_sync = ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "test-protocol"),
+            true,
+            ComponentFilter::with_tvl_range(0.0, 1000.0),
+            3,
+            cooldown,
+            false,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            ArcDeltasClient(Arc::new(deltas_client)),
+            10_u64,
+        );
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let started = std::time::Instant::now();
+        let (handle, _rx) = state_sync.start().await;
+        let resubscribed_at = timeout(cooldown * 2, resubscribed_rx)
+            .await
+            .expect("synchronizer should resubscribe")
+            .unwrap();
+        let (_jh, close_tx) = handle.split();
+        let _ = close_tx.send(());
+
+        assert!(resubscribed_at - started < Duration::from_secs(1));
     }
 
     #[test_log::test(tokio::test)]

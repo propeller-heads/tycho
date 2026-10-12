@@ -48,6 +48,7 @@ class Chain(str, Enum):
     polygon = "polygon"
     plasma = "plasma"
     robinhood = "robinhood"
+    arc = "arc"
 
 
 class CustomChain(BaseModel):

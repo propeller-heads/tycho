@@ -18,7 +18,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::enums::FeeAmount;
+use super::fee_tier::{fee_serde, FeeTier};
 use crate::evm::protocol::{
     clmm::clmm_swap_to_price,
     safe_math::{safe_add_u256, safe_sub_u256},
@@ -59,7 +59,8 @@ const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_INITIALI
 pub struct UniswapV3State {
     liquidity: u128,
     sqrt_price: U256,
-    fee: FeeAmount,
+    #[serde(with = "fee_serde")]
+    fee: u32,
     tick: i32,
     ticks: TickList,
 }
@@ -70,33 +71,23 @@ impl UniswapV3State {
     /// # Arguments
     /// - `liquidity`: The initial liquidity of the pool.
     /// - `sqrt_price`: The square root of the current price.
-    /// - `fee`: The fee tier for the pool.
+    /// - `fee`: The pool's fee and tick spacing. A [`FeeAmount`](super::enums::FeeAmount) implies
+    ///   the canonical Uniswap V3 spacing for its fee; pass a [`FeeTier`] for pools whose spacing
+    ///   is set independently.
     /// - `tick`: The current tick of the pool.
     /// - `ticks`: A vector of `TickInfo` representing the tick information for the pool.
+    ///
+    /// Errors when a tick index is not a multiple of the tick spacing or the ticks are unsorted.
     pub fn new(
         liquidity: u128,
         sqrt_price: U256,
-        fee: FeeAmount,
+        fee: impl Into<FeeTier>,
         tick: i32,
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
-        let spacing = UniswapV3State::get_spacing(fee);
-        let tick_list = TickList::from(spacing, ticks)?;
-        Ok(UniswapV3State { liquidity, sqrt_price, fee, tick, ticks: tick_list })
-    }
-
-    fn get_spacing(fee: FeeAmount) -> u16 {
-        match fee {
-            FeeAmount::Lowest => 1,
-            FeeAmount::Lowest2 => 2,
-            FeeAmount::Lowest3 => 3,
-            FeeAmount::Lowest4 => 4,
-            FeeAmount::Low => 10,
-            FeeAmount::MediumLow => 50,
-            FeeAmount::Medium => 60,
-            FeeAmount::MediumHigh => 100,
-            FeeAmount::High => 200,
-        }
+        let fee = fee.into();
+        let tick_list = TickList::from(fee.tick_spacing(), ticks)?;
+        Ok(UniswapV3State { liquidity, sqrt_price, fee: fee.fee(), tick, ticks: tick_list })
     }
 
     fn swap(
@@ -175,7 +166,7 @@ impl UniswapV3State {
                 UniswapV3State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one),
                 state.liquidity,
                 state.amount_remaining,
-                self.fee as u32,
+                self.fee,
             )?;
             state.sqrt_price = sqrt_price;
 
@@ -258,7 +249,7 @@ impl UniswapV3State {
 #[typetag::serde]
 impl ProtocolSim for UniswapV3State {
     fn fee(&self) -> f64 {
-        (self.fee as u32) as f64 / 1_000_000.0
+        self.fee as f64 / 1_000_000.0
     }
 
     fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
@@ -524,7 +515,7 @@ impl ProtocolSim for UniswapV3State {
                     &params.token_in().address,
                     &params.token_out().address,
                     target,
-                    self.fee as u32,
+                    self.fee,
                     Sign::Positive,
                     |zero_for_one, amount_specified, sqrt_price_limit| {
                         self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
@@ -586,9 +577,59 @@ mod tests {
 
     use super::*;
     use crate::{
-        evm::protocol::utils::uniswap::sqrt_price_math::get_sqrt_price_q96,
+        evm::protocol::{
+            uniswap_v3::enums::FeeAmount, utils::uniswap::sqrt_price_math::get_sqrt_price_q96,
+        },
         protocol::models::{DecoderContext, TryFromWithBlock},
     };
+
+    fn serde_test_state(fee: impl Into<FeeTier>) -> UniswapV3State {
+        UniswapV3State::new(
+            1_000_000,
+            U256::from(79228162514264337593543950336u128),
+            fee,
+            0,
+            vec![TickInfo::new(-600, 1_000_000).unwrap(), TickInfo::new(600, -1_000_000).unwrap()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_serialize_fee_amount_fee_as_variant_name() {
+        let state = serde_test_state(FeeAmount::Medium);
+
+        let json = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(json["fee"], Value::from("Medium"));
+        assert_eq!(serde_json::from_value::<UniswapV3State>(json).unwrap(), state);
+    }
+
+    #[test]
+    fn test_serialize_fee_outside_fee_amount_as_number() {
+        let state = serde_test_state(FeeTier::new(50, 10).unwrap());
+
+        let json = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(json["fee"], Value::from(50));
+        assert_eq!(serde_json::from_value::<UniswapV3State>(json).unwrap(), state);
+    }
+
+    #[test]
+    fn test_deserialize_fee_as_number_for_fee_amount_fee() {
+        let state = serde_test_state(FeeAmount::Medium);
+        let mut json = serde_json::to_value(&state).unwrap();
+        json["fee"] = Value::from(3000);
+
+        assert_eq!(serde_json::from_value::<UniswapV3State>(json).unwrap(), state);
+    }
+
+    #[test]
+    fn test_deserialize_rejects_unknown_fee_name() {
+        let mut json = serde_json::to_value(serde_test_state(FeeAmount::Medium)).unwrap();
+        json["fee"] = Value::from("Unknown");
+
+        assert!(serde_json::from_value::<UniswapV3State>(json).is_err());
+    }
 
     #[test]
     fn test_get_amount_out_full_range_liquidity() {
@@ -1444,7 +1485,10 @@ mod tests_forks {
     use tycho_common::{hex_bytes::Bytes, models::Chain};
 
     use super::*;
-    use crate::protocol::models::{DecoderContext, TryFromWithBlock};
+    use crate::{
+        evm::protocol::uniswap_v3::enums::FeeAmount,
+        protocol::models::{DecoderContext, TryFromWithBlock},
+    };
 
     #[tokio::test]
     async fn test_pancakeswap_get_amount_out() {

@@ -25,29 +25,79 @@ for any protocol indexed by Tycho.
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
     `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
-    not protocols
+    not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
+    `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
+    Unichain, and Pons V2 is the native handler for Robinhood
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
 - **`rfq/`**: RFQ clients for off-chain market makers (`rfq/protocols/`: `bebop`, `hashflow`,
-  `liquorice`, `metric`). Only Bebop streams over WebSocket; the rest poll over HTTP
+  `liquorice`, `metric`, `native`). Only Bebop streams over WebSocket; the rest poll over HTTP.
+  `with_fallback_router()` on the Bebop, Hashflow and Metric builders labels components
+  `fallback:rfq:bebop` / `fallback:rfq:hashflow` / `fallback:rfq:metric`, so they execute through
+  those venues' fallback routers. Off by default: those routers are not deployed yet.
+  Hashflow, Liquorice, Bebop and Native stream in one of two `rfq::models::ComponentLayout`s,
+  set on the client builder. `PerPair` (default) streams one component per token pair, decoded
+  by the per-pair state (`state.rs`, `decoder.rs`). `AllPairs` streams one component for all
+  token pairs under a `<venue>_all_pairs` stream name, decoded by the all-pairs state
+  (`all_pairs_state.rs`, `all_pairs_decoder.rs`). The all-pairs format is the one
+  `rfq/protocols/component.rs` defines: the `books` state attribute and the `swap_directions`
+  static attribute. `rfq/protocols/maker_price_levels.rs` picks the market maker for
+  Hashflow and Liquorice. The Bebop and Native all-pairs states delegate pricing to their per-pair
+  states. `rfq::models::QuoteRule` says how often one route may quote
+  the venue, carried as the `quote_rule` static attribute of an all-pairs component: Hashflow
+  and Liquorice builders set it (`quote_rule`, every maker once by default); Bebop and Native
+  name no maker and always quote once. Metric stays one component per pool: its executor takes
+  the pool from the component id
+- **`snapshot_feed/`**: the latest-value feed layer, both ends. `SnapshotFeed` is the contract a
+  feed implements: `run(self, publisher)` drives it, and the `Publisher` it is handed — which
+  nothing outside the crate can construct — owns the `watch` channel, so reading a feed is the only
+  way to run one. Readers are `SnapshotFeedStream` (one feed as a stream of events),
+  `SnapshotFeedStreams` (any number, keyed, one await point) and `SnapshotFeedWatch` (receiver
+  clones for a consumer that prices on demand). `http`/`ws` hold the two transport loops: a
+  provider implements `HttpSource` or `WsSource`, and the loop polls or reads for it, counts
+  failures, backs off, and withdraws a snapshot nobody refreshed. The trait and the readers are
+  unconditional; everything with a transport in it is behind `book-feeds`
+- **`book/`**: what the off-chain venues' feeds share — `Book`/`BookSnapshot` (one pair's book, and
+  a venue's complete set), `BookFeedConfig` (chain, token universe, minimum TVL), `levels` (the
+  validated price ladder and the arithmetic over it), `sim` (direction, scaling, fills, limits),
+  `tvl`, `component` (pair ids and components) and `quote_tokens`. The `BookFeed*` aliases fill the
+  snapshot types into the feed readers
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
-  Titan WebSocket's per-pair quote-ladder snapshots directly into `Update`s (no indexer feed
-  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder. Components are
-  identified as `pricelevelstream:{pamm}`. A new builder serves nothing: `with_known_pamms`
-  registers the known-good venues and denies known-unexecutable ones, `add_pamm` registers
-  individual ones, `deny_pamm` excludes one (dropping any registration and blocking
-  auto-detection), and opt-in auto-detection additionally serves unknown venues under their
-  address (`pricelevelstream:{0xaddress}`). Precedence: between `add_pamm` and `deny_pamm` for
-  the same address the later call wins; `with_known_pamms` defaults never override either,
-  regardless of call order. `build` emits venues on Titan's PropAMMRouter whitelist under
-  `propammfallback:{pamm}` instead, so tycho-execution routes their swaps through the router
-  (Uniswap V3 fallback on venue revert); it reads that whitelist once on the first poll via
-  `RPC_URL`, and warns and stays on the direct path without it. `without_fallback_router` skips
-  the read and keeps every venue on the direct path. Venues may overlap with other integration
-  paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by venue where
-  double-counting matters
+  Titan WebSocket's per-pair quote-ladder frames directly into `Update`s (no indexer feed
+  round-trip); `PriceLevelStreamState` quotes by interpolating the ladder and refuses to quote
+  once its frame is one slot old (`quotable_until`, monotonic, never serialized, ignored by
+  `eq`; `without_quote_guard` on the builder turns it off for slow quoters). Frames are best
+  effort, so `tracker.rs` never removes a component because a frame omits it. It gives every
+  component its own deadline and emits `removed_pairs` only when the component's data is
+  `stale_after` old; the next accepted frame carrying the component re-adds it. Frames are
+  accepted only if their wire `timestamp` is younger than `stale_after`, not more than one slot
+  in the future, not older than the newest accepted one (equal allowed), and their block neither
+  regresses nor jumps more than one block per elapsed slot plus 2; the block frontier lives in
+  `ServingState::Serving`, so it exists only while something is served. The windows and their
+  defaults are listed under `# Freshness contract` in `price_level_stream/mod.rs`; every window
+  is a multiple of `SLOT` in `mod.rs`; the `stale_after` setter caps its value at
+  `MAX_STALE_AFTER` (one hour). `build()` is an `async_stream` loop that selects over frames and
+  a timer set to the earliest component deadline, and the only place that reads a clock: the
+  tracker gets both clocks injected through `Now`. `titan.rs` reconnects
+  when no frame parses within the idle timeout; pings, unparsable text and the consumer's own
+  pauses between polls do not count. `telemetry.rs` emits `price_level_stream_*` metrics through
+  the `metrics` facade, with label values as enums there and a frame-age histogram at
+  acceptance. Per-venue series start at zero, and no label carries a wire value except the
+  address of an auto-detected venue. Components are identified as `pricelevelstream:{pamm}`. A
+  new builder serves nothing: `with_known_pamms` registers the known-good venues and denies
+  known-unexecutable ones, `add_pamm` registers individual ones, `deny_pamm` excludes one
+  (dropping any registration and blocking auto-detection), and opt-in auto-detection
+  additionally serves unknown venues under their address (`pricelevelstream:{0xaddress}`), at
+  most 64 per process. Precedence: between `add_pamm` and `deny_pamm` for the same address the
+  later call wins; `with_known_pamms` defaults never override either, regardless of call order.
+  By default `build` emits every venue under `fallback:{pamm}`, so tycho-execution routes their
+  swaps through `TychoFallbackRouter` (retry on a solver-named fallback pool when the venue
+  reverts); `without_fallback_router` keeps every venue on the direct `pricelevelstream:` path.
+  Consumers cannot tell a stale removal from a retired venue. Venues may overlap with other
+  integration paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by
+  venue where double-counting matters
 
 ## Simulation Approaches
 
@@ -64,12 +114,32 @@ fallback for protocols too complex to port, not a default.
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
 
+## Pending-block state for hybrid/VM protocols
+
+`apply_deltas_ephemeral` applies only `state_deltas`; nothing on the pending path writes to the
+VM database, so `apply_deltas_ephemeral` can't read the pending state from there. A protocol
+whose `delta_transition` re-reads the VM would therefore quote a pending block against confirmed
+state. Fluid and Curve close that gap the same way:
+
+1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
+   `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
+   accounts a `PendingBlock` carries.
+2. It reads the protocol's state under those overrides (`fluid::call_resolver`,
+   `curve::read_pool_readings`) and puts the result in a state-delta attribute
+   (`pool_reserves_adjusted`, `pool_state_adjusted`).
+3. `delta_transition` branches on that attribute and rebuilds from it, falling back to the VM read
+   when it is absent.
+
+Reading under the pending block's own number and timestamp matters: anything with on-chain time
+math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
+
 ## Features
 
 | Feature | Default | Contents |
 |---------|---------|----------|
 | `evm` | yes | `revm`, `SimulationEngine`, all EVM protocol impls |
 | `rfq` | yes | RFQ WebSocket client and protocol adapters |
+| `book-feeds` | yes | The `book/` layer and the `snapshot_feed` transport loops |
 | `price-level-stream` | yes | Titan pAMM price level stream client |
 | `network_tests` | no | Gates tests that require live network access |
 

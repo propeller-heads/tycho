@@ -59,12 +59,10 @@ shows up as a failure.
     the finalized block), samples pair states, validates `get_limits` / `get_amount_out`. Marks
     the served venues stale in metrics when no Titan message arrives within
     `--price-level-stream-stale-threshold-secs`. Execution is simulated at the quoted block with
-    the overrides `oracle_overrides.rs` collected for it. Venues on the PropAMMRouter whitelist
-    are served under `propammfallback:*` and execute through the router; the others stay on
-    `pricelevelstream:*`. Both families resolve through their single `pricelevelstream` /
-    `propammfallback` entry in `executor_addresses.json` (the generic PropAMMExecutor and the
-    PropAMMFallbackExecutor). Without overrides for its venue a swap falls to the router's Uniswap
-    V3 fallback, counted per venue by
+    the overrides `oracle_overrides.rs` collected for it. Venues are served under `fallback:*`
+    and execute through `TychoFallbackRouter`, resolving through the single `fallback` entry in
+    `executor_addresses.json`. Without overrides for its venue a swap falls to the fallback pool
+    named in its `user_data`, counted per venue by
     `tycho_integration_price_level_oracle_override_misses_total` (Titan published none for that
     block) or `tycho_integration_price_level_oracle_override_unserved_total` (Titan serves no
     channel for the venue); a venue called directly reverts `StaleUpdate`

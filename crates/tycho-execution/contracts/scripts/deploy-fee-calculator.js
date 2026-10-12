@@ -8,10 +8,17 @@ async function main() {
 
     // The routerFeeSetter is the address that will be granted
     // ROUTER_FEE_SETTER_ROLE to manage fee configuration.
-    const routerFeeSetter = resolveRolesNetwork(network).ROUTER_FEE_SETTER[0];
+    const networkRoles = resolveRolesNetwork(network);
+    const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
+    // The routerFeeReceiver owns the vault balance every router fee is credited
+    // to. It must be an address that can call withdraw() on the router — the
+    // CREATE2 factory below deploys the contract but cannot withdraw, which is
+    // why the receiver is a constructor argument rather than the deployer.
+    const routerFeeReceiver = networkRoles.ROUTER_FEE_RECEIVER[0];
 
     console.log(`Deploying FeeCalculator to ${network} with:`);
     console.log(`- routerFeeSetter: ${routerFeeSetter}`);
+    console.log(`- routerFeeReceiver: ${routerFeeReceiver}`);
 
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);
@@ -28,7 +35,7 @@ async function main() {
     const FeeCalculator =
         await ethers.getContractFactory("FeeCalculator");
     const deployTx =
-        FeeCalculator.getDeployTransaction(routerFeeSetter);
+        FeeCalculator.getDeployTransaction(routerFeeSetter, routerFeeReceiver);
     const bytecode = deployTx.data;
 
     const salt = ethers.utils.id(`FeeCalculator-${network}`);
@@ -83,7 +90,7 @@ async function main() {
             network,
             address: computedAddress,
             contractFqn: "src/FeeCalculator.sol:FeeCalculator",
-            constructorArgs: [routerFeeSetter],
+            constructorArgs: [routerFeeSetter, routerFeeReceiver],
         });
         console.log(
             "FeeCalculator verified successfully on blockchain explorer!"

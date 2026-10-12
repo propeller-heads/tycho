@@ -1,83 +1,43 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
-import {IExecutor} from "@interfaces/IExecutor.sol";
-import {IPropAMMRouter} from "@interfaces/IPropAMMRouter.sol";
-import {TransferManager} from "../TransferManager.sol";
-
-error PropAMMFallbackExecutor__InvalidDataLength();
+import {
+    FallbackExecutor,
+    FallbackExecutor__InvalidDataLength
+} from "./FallbackExecutor.sol";
+import {TychoFallbackRouter} from "../fallback/TychoFallbackRouter.sol";
+import {PropAMMFallbackRouter} from "../fallback/PropAMMFallbackRouter.sol";
 
 /// @title PropAMMFallbackExecutor
-/// @notice Swaps against a pAMM through Titan's PropAMMRouter, which falls back to a single-hop
-/// Uniswap V3 pool when the venue reverts.
-/// @dev Same calldata as `PropAMMExecutor`, different call target. Calling the venue directly lets
-/// a stale maker quote revert the whole route, which is why integrator simulations fail on routes
-/// that execute fine in a Titan block.
-///
-/// Only venues whitelisted on the PropAMMRouter work here; others keep using `PropAMMExecutor`.
-///
-/// `amountOutMin` is 0 on the router call: any non-zero value would make the Uniswap fallback
-/// revert on price for the trades it exists to rescue. The TychoRouter's route-level `minAmountOut`
-/// is the binding check, so the caller must set it low enough for the Uniswap leg to clear.
-contract PropAMMFallbackExecutor is IExecutor {
-    /// @notice The PropAMMRouter serving Titan's pAMM ecosystem, on Ethereum mainnet.
-    /// @dev Hardcoded rather than a constructor argument. There is one deployment, it sits behind a
-    /// UUPS proxy so upgrades keep this address, and a wrong value here would route every swap to an
-    /// arbitrary contract. Source: https://github.com/lambdaclass/propamm-router-contracts
-    IPropAMMRouter public constant PROPAMM_ROUTER =
-        IPropAMMRouter(0x4DdF368080CD7946db5b459aD591c350158175e1);
-
-    function fundsExpectedAddress(
-        bytes calldata /* data */
-    )
-        external
-        view
-        returns (address receiver)
-    {
-        return msg.sender;
-    }
+/// @notice Runs one swap through `PropAMMFallbackRouter`.
+contract PropAMMFallbackExecutor is FallbackExecutor {
+    constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
     // slither-disable-next-line locked-ether
     function swap(uint256 amountIn, bytes calldata data, address receiver)
         external
         payable
     {
-        (address venue, address tokenIn, address tokenOut) = _decodeData(data);
-
-        // slither-disable-next-line unused-return
-        PROPAMM_ROUTER.swapViaVenueV1(
-            venue, tokenIn, tokenOut, amountIn, 0, receiver, block.timestamp
-        );
+        uint256 fallbackOffset = _fallbackOffset(data);
+        TychoFallbackRouter.Swap memory swap_ = TychoFallbackRouter.Swap({
+            tokenIn: address(bytes20(data[0:20])),
+            tokenOut: address(bytes20(data[20:40])),
+            amountIn: amountIn,
+            receiver: receiver
+        });
+        PropAMMFallbackRouter(fallbackRouter)
+            .swap(swap_, address(bytes20(data[40:60])), data[fallbackOffset:]);
     }
 
-    function getTransferData(bytes calldata data)
-        external
-        pure
-        returns (
-            TransferManager.TransferType transferType,
-            address receiver,
-            address tokenIn,
-            address tokenOut,
-            bool outputToRouter
-        )
-    {
-        (, tokenIn, tokenOut) = _decodeData(data);
-        transferType = TransferManager.TransferType.ProtocolWillDebit;
-        receiver = address(PROPAMM_ROUTER);
-        outputToRouter = false;
-    }
-
-    function _decodeData(bytes calldata data)
+    function _fallbackOffset(bytes calldata data)
         internal
         pure
-        returns (address venue, address tokenIn, address tokenOut)
+        override
+        returns (uint256)
     {
-        if (data.length != 60) {
-            revert PropAMMFallbackExecutor__InvalidDataLength();
+        if (data.length <= 60) {
+            revert FallbackExecutor__InvalidDataLength(data.length);
         }
-
-        venue = address(bytes20(data[0:20]));
-        tokenIn = address(bytes20(data[20:40]));
-        tokenOut = address(bytes20(data[40:60]));
+        return 60;
     }
 }

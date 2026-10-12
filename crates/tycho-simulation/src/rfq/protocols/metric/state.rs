@@ -74,6 +74,16 @@ impl MetricState {
         }
     }
 
+    /// The quoted price of the book side `direction` trades against: the bid when selling
+    /// token0, the ask when buying it. `None` when the pool quotes no price on that side.
+    fn quoted_price(&self, direction: MetricDirection) -> Result<Option<f64>, SimulationError> {
+        let price = match direction {
+            MetricDirection::ZeroForOne => self.bid_ask.bid_price()?,
+            MetricDirection::OneForZero => self.bid_ask.ask_price()?,
+        };
+        Ok(price)
+    }
+
     fn quote_with_depth(
         &self,
         direction: MetricDirection,
@@ -128,15 +138,18 @@ impl ProtocolSim for MetricState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let bid = self.bid_ask.bid_price()?;
-        let ask = self.bid_ask.ask_price()?;
-        let mid = (bid + ask) / 2.0;
+        let price = match (self.bid_ask.bid_price()?, self.bid_ask.ask_price()?) {
+            (Some(bid), Some(ask)) => (bid + ask) / 2.0,
+            (Some(bid), None) => bid,
+            (None, Some(ask)) => ask,
+            (None, None) => return Err(SimulationError::RecoverableError("No liquidity".into())),
+        };
         if base.address == self.base_token.address && quote.address == self.quote_token.address {
-            Ok(mid)
+            Ok(price)
         } else if base.address == self.quote_token.address &&
             quote.address == self.base_token.address
         {
-            Ok(1.0 / mid)
+            Ok(1.0 / price)
         } else {
             Err(SimulationError::InvalidInput(
                 format!(
@@ -155,6 +168,9 @@ impl ProtocolSim for MetricState {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let direction = self.direction(&token_in.address, &token_out.address)?;
+        let Some(price) = self.quoted_price(direction)? else {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        };
         let max_output = match direction {
             MetricDirection::ZeroForOne => self.bid_ask.total_token1_available()?,
             MetricDirection::OneForZero => self.bid_ask.total_token0_available()?,
@@ -188,8 +204,8 @@ impl ProtocolSim for MetricState {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10_f64.powi(token_in.decimals as i32);
         let flat_amount_out_human = match direction {
-            MetricDirection::ZeroForOne => amount_in_human * self.bid_ask.bid_price()?,
-            MetricDirection::OneForZero => amount_in_human / self.bid_ask.ask_price()?,
+            MetricDirection::ZeroForOne => amount_in_human * price,
+            MetricDirection::OneForZero => amount_in_human / price,
         };
         let amount_out =
             BigUint::from_f64(flat_amount_out_human * 10_f64.powi(token_out.decimals as i32))
@@ -221,18 +237,21 @@ impl ProtocolSim for MetricState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let direction = self.direction(&sell_token, &buy_token)?;
+        let Some(price) = self.quoted_price(direction)? else {
+            return Ok((BigUint::zero(), BigUint::zero()));
+        };
         // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap, depth
         // side, and token decimals.
         let (sell_per_buy, aggregate, bins, sell_decimals, buy_decimals) = match direction {
             MetricDirection::ZeroForOne => (
-                1.0 / self.bid_ask.bid_price()?,
+                1.0 / price,
                 self.bid_ask.total_token1_available()?,
                 &self.bid_ask.depth.bids,
                 self.base_token.decimals,
                 self.quote_token.decimals,
             ),
             MetricDirection::OneForZero => (
-                self.bid_ask.ask_price()?,
+                price,
                 self.bid_ask.total_token0_available()?,
                 &self.bid_ask.depth.asks,
                 self.quote_token.decimals,
@@ -517,6 +536,106 @@ mod tests {
         )
         .unwrap();
         MetricState::new(weth, usdc, metadata, bid_ask, client)
+    }
+
+    /// A book with an ask side only: one bin selling 1 WETH for 3011 USDC.
+    fn state_without_bid() -> MetricState {
+        let mut state = state();
+        state.bid_ask.bid_adj = BigUint::zero();
+        state.bid_ask.depth.asks = vec![depth_bin("1000000000000000000", "3011000000")];
+        state
+    }
+
+    /// A book with a bid side only: one bin buying 1 WETH for 2999 USDC.
+    fn state_without_ask() -> MetricState {
+        let mut state = state();
+        state.bid_ask.ask_adj = BigUint::from(u128::MAX);
+        state.bid_ask.depth.bids = vec![depth_bin("2999000000", "1000000000000000000")];
+        state
+    }
+
+    #[test]
+    fn test_book_without_bid_trades_only_the_ask_side() {
+        let state = state_without_bid();
+        let ask = state
+            .bid_ask
+            .ask_price()
+            .unwrap()
+            .unwrap();
+
+        assert!(state.bid_ask.is_quotable());
+        assert_eq!(
+            state
+                .spot_price(&weth(), &usdc())
+                .unwrap(),
+            ask
+        );
+        assert_eq!(
+            state
+                .get_limits(weth().address, usdc().address)
+                .unwrap(),
+            (BigUint::zero(), BigUint::zero())
+        );
+        let Err(SimulationError::RecoverableError(msg)) =
+            state.get_amount_out(big("100000000000000000"), &weth(), &usdc())
+        else {
+            panic!("selling WETH into a book without a bid must fail");
+        };
+        assert_eq!(msg, "No liquidity");
+        assert_eq!(
+            state
+                .get_limits(usdc().address, weth().address)
+                .unwrap(),
+            (big("3011000000"), big("1000000000000000000"))
+        );
+    }
+
+    #[test]
+    fn test_book_without_ask_trades_only_the_bid_side() {
+        let state = state_without_ask();
+        let bid = state
+            .bid_ask
+            .bid_price()
+            .unwrap()
+            .unwrap();
+
+        assert!(state.bid_ask.is_quotable());
+        assert_eq!(
+            state
+                .spot_price(&weth(), &usdc())
+                .unwrap(),
+            bid
+        );
+        assert_eq!(
+            state
+                .get_limits(usdc().address, weth().address)
+                .unwrap(),
+            (BigUint::zero(), BigUint::zero())
+        );
+        let Err(SimulationError::RecoverableError(msg)) =
+            state.get_amount_out(big("300000000"), &usdc(), &weth())
+        else {
+            panic!("buying WETH from a book without an ask must fail");
+        };
+        assert_eq!(msg, "No liquidity");
+        assert_eq!(
+            state
+                .get_limits(weth().address, usdc().address)
+                .unwrap(),
+            (big("1000000000000000000"), big("2999000000"))
+        );
+    }
+
+    #[test]
+    fn test_book_without_quotes_has_no_spot_price() {
+        let mut state = state();
+        state.bid_ask.bid_adj = BigUint::zero();
+        state.bid_ask.ask_adj = BigUint::from(u128::MAX);
+
+        let Err(SimulationError::RecoverableError(msg)) = state.spot_price(&weth(), &usdc()) else {
+            panic!("a book without quotes has no spot price");
+        };
+        assert_eq!(msg, "No liquidity");
     }
 
     #[test]

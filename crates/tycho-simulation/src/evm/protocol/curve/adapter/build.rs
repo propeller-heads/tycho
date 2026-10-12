@@ -90,10 +90,14 @@ impl std::error::Error for BuildError {}
 /// The consumer fills in the fields relevant to the pool's [`CurveVariant`],
 /// then calls [`build_pool`] to get a `crate::evm::protocol::curve::math::Pool` ready for swap
 /// computation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct RawPoolState {
     /// Which Curve variant this pool is.
     pub variant: CurveVariant,
+
+    /// Admin share of the swap fee, scaled by 1e10. Required for StableSwap execution state.
+    #[serde(default)]
+    pub admin_fee: Option<U256>,
 
     /// Token balances in native token units (wei). **Updates every block.**
     ///
@@ -255,6 +259,7 @@ impl Default for RawPoolState {
             token_decimals: Vec::new(),
             amp: U256::ZERO,
             fee: None,
+            admin_fee: None,
             mid_fee: None,
             out_fee: None,
             fee_gamma: None,
