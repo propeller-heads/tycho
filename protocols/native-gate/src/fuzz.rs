@@ -109,10 +109,15 @@ pub fn candidates(
             }
         }
     }
-    let history =
-        context
-            .history
-            .samples(context.pool, sell, buy, context.prices, &mut rng, budget);
+    let history = context.history.samples(
+        context.pool,
+        sell,
+        buy,
+        sell_per_buy(state, sell, buy),
+        context.prices,
+        &mut rng,
+        budget,
+    );
     buckets
         .entry(Bucket::History)
         .or_default()
@@ -179,6 +184,16 @@ pub fn candidates(
         }
     }
     picked
+}
+
+/// Raw sell-token units per raw buy-token unit at the pool's spot price, to express a past buy
+/// size as a sell amount.
+fn sell_per_buy(state: &dyn ProtocolSim, sell: &Token, buy: &Token) -> Option<f64> {
+    let sell_per_buy = state
+        .spot_price(buy, sell)
+        .ok()
+        .filter(|price| price.is_finite() && *price > 0.0)?;
+    Some(sell_per_buy * 10f64.powi(sell.decimals as i32 - buy.decimals as i32))
 }
 
 /// Finds amounts where the native gas estimate steps up, by sweeping log-spaced amounts up to

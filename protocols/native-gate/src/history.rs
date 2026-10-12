@@ -94,14 +94,18 @@ impl History {
 
     /// Draws up to `n` sell amounts from history for one pool direction.
     ///
-    /// Takes the pool's own past amounts of the sell token as they are, its past amounts of the
-    /// buy token converted at Tycho's token prices, and past trade values from other pools
-    /// converted into the sell token. Each draw is also tried one wei to either side.
+    /// Takes the pool's own past amounts of the sell token as they are, and its past amounts of
+    /// the buy token converted at `sell_per_buy` (raw sell units per raw buy unit, e.g. from the
+    /// pool's spot price). From other pools it takes past amounts of the sell token as they are,
+    /// and, when Tycho's token prices are loaded, past trade values in any token converted into
+    /// the sell token. Each draw is also tried one wei to either side.
+    #[allow(clippy::too_many_arguments)]
     pub fn samples(
         &self,
         pool: Option<Address>,
         sell: &Token,
         buy: &Token,
+        sell_per_buy: Option<f64>,
         prices: &HashMap<Bytes, f64>,
         rng: &mut StdRng,
         n: usize,
@@ -110,25 +114,27 @@ impl History {
         let buy_address = Address::from_slice(&buy.address);
         let sell_price = prices.get(&sell.address).copied();
         let buy_price = prices.get(&buy.address).copied();
-        let own: &[(Address, BigUint)] = pool
-            .and_then(|pool| self.by_pool.get(&pool))
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let sell_per_buy = sell_per_buy.or(match (sell_price, buy_price) {
+            (Some(sell_price), Some(buy_price)) => Some(sell_price / buy_price),
+            _ => None,
+        });
 
         let mut same_token = Vec::new();
         let mut converted = Vec::new();
-        for (token, amount) in own {
-            if *token == sell_address {
-                same_token.push(amount.clone());
-            } else if *token == buy_address {
-                if let (Some(sell_price), Some(buy_price), Some(value)) =
-                    (sell_price, buy_price, amount.to_f64())
-                {
-                    converted.push(from_f64(value / buy_price * sell_price));
+        let mut other_same_token = Vec::new();
+        for (owner, transfers) in &self.by_pool {
+            let own = Some(*owner) == pool;
+            for (token, amount) in transfers {
+                if *token == sell_address {
+                    if own { &mut same_token } else { &mut other_same_token }.push(amount.clone());
+                } else if own && *token == buy_address {
+                    if let (Some(rate), Some(value)) = (sell_per_buy, amount.to_f64()) {
+                        converted.push(from_f64(value * rate));
+                    }
                 }
             }
         }
-        let other_pools: Vec<BigUint> = match sell_price {
+        let other_tokens: Vec<BigUint> = match sell_price {
             Some(sell_price) => self
                 .eth_values
                 .iter()
@@ -138,12 +144,14 @@ impl History {
         };
 
         let mut drawn = Vec::new();
-        for (label, values) in [
+        let sources = [
             ("pool_sell_token", &same_token),
             ("pool_buy_token", &converted),
-            ("other_pools", &other_pools),
-        ] {
-            for base in values.choose_multiple(rng, n.div_ceil(3)) {
+            ("other_pools_sell_token", &other_same_token),
+            ("other_pools_any_token", &other_tokens),
+        ];
+        for (label, values) in sources {
+            for base in values.choose_multiple(rng, n.div_ceil(sources.len())) {
                 if base.is_zero() {
                     continue;
                 }
@@ -184,6 +192,39 @@ mod tests {
     }
 
     #[test]
+    fn test_samples_convert_buy_sizes_at_the_given_rate_without_prices() {
+        let (pool, other_pool) = (Address::repeat_byte(9), Address::repeat_byte(8));
+        let (weth, usdc) = (Address::repeat_byte(1), Address::repeat_byte(2));
+        let history = History {
+            by_pool: HashMap::from([
+                (pool, vec![(usdc, BigUint::from(4_000_000_000u64))]),
+                (other_pool, vec![(weth, BigUint::from(3u64) * BigUint::from(10u64).pow(18))]),
+            ]),
+            eth_values: vec![],
+        };
+        // 4000 USDC per WETH: 1e18 raw WETH per 4000e6 raw USDC.
+        let rate = 1e18 / 4000e6;
+
+        let samples = history.samples(
+            Some(pool),
+            &token(weth, 18),
+            &token(usdc, 6),
+            Some(rate),
+            &HashMap::new(),
+            &mut StdRng::seed_from_u64(1),
+            40,
+        );
+
+        assert!(
+            samples.contains(&(Source::History("pool_buy_token", 0), BigUint::from(10u64).pow(18)))
+        );
+        assert!(samples.contains(&(
+            Source::History("other_pools_sell_token", 0),
+            BigUint::from(3u64) * BigUint::from(10u64).pow(18)
+        )));
+    }
+
+    #[test]
     fn test_samples_convert_buy_and_other_pool_sizes_into_the_sell_token() {
         let (pool, other_pool) = (Address::repeat_byte(9), Address::repeat_byte(8));
         let (weth, usdc) = (Address::repeat_byte(1), Address::repeat_byte(2));
@@ -209,8 +250,15 @@ mod tests {
             .push((usdc, BigUint::from(2_000_000_000u64)));
         let mut rng = StdRng::seed_from_u64(1);
 
-        let samples =
-            history.samples(Some(pool), &token(weth, 18), &token(usdc, 6), &prices, &mut rng, 30);
+        let samples = history.samples(
+            Some(pool),
+            &token(weth, 18),
+            &token(usdc, 6),
+            None,
+            &prices,
+            &mut rng,
+            40,
+        );
 
         let exact: Vec<_> = samples
             .iter()
@@ -220,7 +268,7 @@ mod tests {
         for expected in [
             ("history:pool_sell_token+0", "500000000000000000"),
             ("history:pool_buy_token+0", "500000000000000000"),
-            ("history:other_pools+0", "2000000000000000000"),
+            ("history:other_pools_any_token+0", "2000000000000000000"),
         ] {
             assert!(
                 exact.contains(&(expected.0.to_string(), expected.1.to_string())),
