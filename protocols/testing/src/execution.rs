@@ -65,6 +65,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("topaz_cl", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("raphael_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map
 });
 

@@ -124,6 +124,11 @@ fn register_exchanges(
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("topaz_cl", tvl_filter.clone(), None)
+                .exchange::<AerodromeSlipstreamsState>(
+                    "raphael_slipstreams",
+                    tvl_filter.clone(),
+                    None,
+                )
         }
         _ => {}
     }

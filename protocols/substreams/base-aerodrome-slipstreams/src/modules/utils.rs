@@ -107,6 +107,15 @@ pub struct Params {
     /// Deployment block of the earliest configured dynamic fee module, when it is known.
     #[serde(default)]
     pub first_dynamic_fee_module_block: Option<u64>,
+    /// Dynamic fee module to mark every new pool with at creation, as a hex address.
+    ///
+    /// A pool is otherwise marked by its first event from a configured module. That is enough
+    /// while the module's `defaultScalingFactor` is zero, because a pool it holds no config for
+    /// then pays its tick spacing fee. A module with a non-zero default charges a dynamic fee to
+    /// every pool, so a manifest whose factory set such a module before creating its first pool
+    /// names it here.
+    #[serde(default)]
+    pub creation_dynamic_fee_module: Option<String>,
 }
 
 impl Params {
@@ -129,7 +138,25 @@ impl Params {
 
 #[cfg(test)]
 mod tests {
-    use super::{dynamic_fee_config_initialized_key, dynamic_fee_config_key, tick_spacing_fee_key};
+    use super::{
+        dynamic_fee_config_initialized_key, dynamic_fee_config_key, tick_spacing_fee_key, Params,
+    };
+
+    #[test]
+    fn creation_dynamic_fee_module_is_optional() {
+        let query = "factories[]=11&dynamic_fee_modules[]=22&protocol_type_name=pool";
+
+        let without = Params::parse_from_query(query).expect("valid params");
+        let with = Params::parse_from_query(&format!("{query}&creation_dynamic_fee_module=22"))
+            .expect("valid params");
+
+        assert_eq!(without.creation_dynamic_fee_module, None);
+        assert_eq!(
+            with.creation_dynamic_fee_module
+                .as_deref(),
+            Some("22")
+        );
+    }
 
     #[test]
     fn dynamic_fee_config_keys_are_scoped_by_pool() {
