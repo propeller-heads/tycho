@@ -123,3 +123,73 @@ pub(crate) fn continued_limits(
             .unwrap_or_default(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::U256;
+    use rstest::rstest;
+
+    use super::*;
+    use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+    fn token(byte: u8) -> Bytes {
+        Bytes::from([byte; 20].to_vec())
+    }
+
+    /// Prices an amount on a book of `depth` atomic units that pays 2 out for 1 in and costs 100
+    /// gas. An amount past the depth is a partial fill.
+    fn book(depth: u64) -> impl Fn(BigUint) -> Result<GetAmountOutResult, SimulationError> {
+        move |amount_in| {
+            let filled = amount_in
+                .clone()
+                .min(BigUint::from(depth));
+            let result = GetAmountOutResult {
+                amount: filled * 2u8,
+                gas: BigUint::from(100u8),
+                new_state: Box::new(UniswapV2State::new(U256::from(1), U256::from(1))),
+            };
+            if amount_in > BigUint::from(depth) {
+                return Err(SimulationError::InvalidInput("partial".into(), Some(result)));
+            }
+            Ok(result)
+        }
+    }
+
+    #[rstest]
+    #[case::other_pair(1, 3)]
+    #[case::opposite_direction(2, 1)]
+    fn filled_on_pair_refuses_another_pair_or_direction(#[case] token_in: u8, #[case] out: u8) {
+        let fill = Some(PairFill::after(None, &token(1), &token(2), &BigUint::from(5u8)));
+        let result = filled_on_pair(&fill, &token(token_in), &token(out), "Venue");
+        assert!(matches!(
+            result,
+            Err(SimulationError::RecoverableError(message)) if message == "Venue already quoted in this route"
+        ));
+    }
+
+    #[test]
+    fn continued_amount_out_pays_the_merged_output_less_the_filled_one() {
+        let result =
+            continued_amount_out(book(10), &BigUint::from(4u8), &BigUint::from(3u8)).unwrap();
+        assert_eq!(result.amount, BigUint::from(6u8));
+        assert_eq!(result.gas, BigUint::from(0u8));
+    }
+
+    #[test]
+    fn continued_amount_out_past_the_depth_is_partial() {
+        let result = continued_amount_out(book(10), &BigUint::from(4u8), &BigUint::from(7u8));
+        let Err(SimulationError::InvalidInput(message, Some(partial))) = result else {
+            panic!("Expected a partial fill, got {result:?}");
+        };
+        assert_eq!(message, "partial");
+        assert_eq!(partial.amount, BigUint::from(12u8));
+        assert_eq!(partial.gas, BigUint::from(0u8));
+    }
+
+    #[test]
+    fn continued_limits_are_the_limits_less_the_fill() {
+        let limits = (BigUint::from(10u8), BigUint::from(20u8));
+        let result = continued_limits(book(10), limits, &BigUint::from(4u8)).unwrap();
+        assert_eq!(result, (BigUint::from(6u8), BigUint::from(12u8)));
+    }
+}
