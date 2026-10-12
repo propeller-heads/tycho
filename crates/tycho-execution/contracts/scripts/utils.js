@@ -19,6 +19,20 @@ const BLOCKSCOUT_NETWORKS = {
     },
 };
 
+// Chains whose explorer reads verification from Sourcify. Arcscan exposes an
+// Etherscan-shaped verifysourcecode route, but it reports "Pass - Verified"
+// without the verification ever reaching Sourcify, so the explorer keeps
+// showing the contract as unverified. Submitting to Sourcify directly is what
+// the explorer page actually reflects.
+const SOURCIFY_NETWORKS = {
+    arc: {
+        chainId: 5042,
+        browserUrl: "https://arc-scan.org/",
+    },
+};
+
+const SOURCIFY_API = "https://sourcify.dev/server/v2";
+
 // Cloudflare answers 403 to requests carrying a curl or node User-Agent.
 const USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -209,8 +223,101 @@ async function verifyOnBlockscout({network, address, contractFqn, constructorArg
 }
 
 /**
+ * Read a contract's Sourcify match. Returns null when Sourcify has no record.
+ */
+async function sourcifyMatch(chainId, address) {
+    const res = await fetch(`${SOURCIFY_API}/contract/${chainId}/${address}`);
+    if (res.status === 404) {
+        return null;
+    }
+    if (!res.ok) {
+        throw new Error(`HTTP ${res.status} from Sourcify contract lookup`);
+    }
+    return (await res.json()).match;
+}
+
+/**
+ * Wait for a Sourcify verification job to finish.
+ *
+ * Sourcify compiles the submitted standard JSON and compares it with the
+ * on-chain bytecode; a job ends either with a match or with an error that
+ * names the reason.
+ */
+async function pollSourcifyVerification(verificationId) {
+    const url = `${SOURCIFY_API}/verify/${verificationId}`;
+    for (let attempt = 0; attempt < 60; attempt++) {
+        const res = await fetch(url);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status} polling Sourcify job ${verificationId}`);
+        }
+        const job = await res.json();
+        if (job.isJobCompleted) {
+            if (job.error) {
+                throw new Error(
+                    `Sourcify rejected the verification: ${JSON.stringify(job.error)}`
+                );
+            }
+            return job.contract.match;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    throw new Error(`Timed out waiting for Sourcify job ${verificationId}`);
+}
+
+/**
+ * Verify on Sourcify with the standard JSON input from the artifact's own
+ * build-info, so compiler settings match the deployment by construction.
+ * Sourcify needs no constructor arguments: it matches the runtime bytecode.
+ */
+async function verifyOnSourcify({network, address, contractFqn}) {
+    const config = SOURCIFY_NETWORKS[network];
+    if (!config) {
+        throw new Error(`No Sourcify config for network "${network}"`);
+    }
+
+    console.log(`Verifying on Sourcify (chain ${config.chainId})...`);
+    const existing = await sourcifyMatch(config.chainId, address);
+    if (existing) {
+        console.log(
+            `Already verified (${existing}): ${config.browserUrl}address/${address}#code`
+        );
+        return;
+    }
+
+    const contractsDir = path.resolve(__dirname, "..");
+    const {standardJson, compilerVersion} = getHardhatStandardJsonInput(
+        contractsDir,
+        contractFqn
+    );
+
+    const res = await fetch(
+        `${SOURCIFY_API}/verify/${config.chainId}/${address}`,
+        {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify({
+                stdJsonInput: JSON.parse(standardJson),
+                compilerVersion,
+                contractIdentifier: contractFqn,
+            }),
+        }
+    );
+    const body = await res.json();
+    if (!res.ok) {
+        throw new Error(
+            `HTTP ${res.status} from Sourcify: ${JSON.stringify(body).slice(0, 500)}`
+        );
+    }
+
+    console.log(`Verification submitted: job ${body.verificationId}`);
+    const match = await pollSourcifyVerification(body.verificationId);
+    console.log(`Verified (${match}): ${config.browserUrl}address/${address}#code`);
+}
+
+/**
  * Verify on whichever explorer the network uses: Blockscout's native v2 API for
- * Blockscout chains, hardhat-verify's Etherscan flow everywhere else.
+ * Blockscout chains, Sourcify for chains whose explorer reads from it,
+ * hardhat-verify's Etherscan flow everywhere else.
  *
  * @param {string} network Hardhat network name
  * @param {string} address Deployed contract address
@@ -226,6 +333,10 @@ async function verifyOnExplorer({network, address, contractFqn, constructorArgs}
             contractFqn,
             constructorArgs,
         });
+        return;
+    }
+    if (SOURCIFY_NETWORKS[network]) {
+        await verifyOnSourcify({network, address, contractFqn});
         return;
     }
 
@@ -304,7 +415,82 @@ async function proposeTransaction(safeAddress, txData, signer, methodName) {
     return safeTxHash;
 }
 
+// Deterministic Deployment Proxy
+// More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
+const CREATE2_FACTORY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
+
+/**
+ * Deploys `contractName` through the CREATE2 factory, then verifies it on
+ * Tenderly and on the network's block explorer.
+ *
+ * The address is derived from the bytecode and the constructor arguments, so an
+ * existing contract there is this exact build. The deployment is then skipped,
+ * which makes the script re-runnable when verification has to be retried.
+ *
+ * @returns the contract's address.
+ */
+async function deployCreate2({contractName, contractFqn, args, network}) {
+    const [deployer] = await ethers.getSigners();
+    console.log(`Deploying with account: ${deployer.address}`);
+    console.log(
+        `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
+    );
+    console.log(`Using CREATE2 factory at: ${CREATE2_FACTORY}`);
+
+    const factory = await ethers.getContractFactory(contractName);
+    const bytecode = factory.getDeployTransaction(...args).data;
+    const salt = ethers.utils.id(`${contractName}-${network}`);
+    const address = ethers.utils.getCreate2Address(
+        CREATE2_FACTORY,
+        salt,
+        ethers.utils.keccak256(bytecode)
+    );
+    console.log(`${contractName} will be deployed to: ${address}`);
+
+    const deployed = (await ethers.provider.getCode(address)) !== "0x";
+    if (deployed) {
+        console.log(`${contractName} already deployed, skipping deployment`);
+    } else {
+        const tx = await deployer.sendTransaction({
+            to: CREATE2_FACTORY,
+            data: ethers.utils.concat([salt, bytecode]),
+            gasLimit: 3_000_000,
+        });
+        await tx.wait();
+        console.log(`${contractName} deployed to: ${address}`);
+    }
+
+    try {
+        await hre.tenderly.verify({name: contractName, address});
+        console.log("Contract verified successfully on Tenderly");
+    } catch (error) {
+        console.error("Error during contract verification:", error);
+    }
+
+    if (!deployed) {
+        console.log("Waiting for 1 minute before verifying the contract...");
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+    }
+
+    try {
+        await verifyOnExplorer({
+            network,
+            address,
+            contractFqn,
+            constructorArgs: args,
+        });
+        console.log(
+            `${contractName} verified successfully on blockchain explorer!`
+        );
+    } catch (error) {
+        console.error(`Error during blockchain explorer verification:`, error);
+    }
+
+    return address;
+}
+
 module.exports = {
+    deployCreate2,
     proposeOrSendTransaction,
     resolveRolesNetwork,
     verifyOnExplorer,

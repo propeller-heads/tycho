@@ -25,7 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -66,6 +66,8 @@ use uuid::Uuid;
 use zstd;
 
 use crate::{client_metadata::CLIENT_METADATA_HEADER, TYCHO_SERVER_VERSION};
+
+pub(crate) const DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE: usize = 128;
 
 #[derive(Error, Debug)]
 pub enum DeltasError {
@@ -478,7 +480,7 @@ impl WsDeltasClient {
             auth_key: auth_key.map(|s| s.to_string()),
             inner: Arc::new(Mutex::new(None)),
             ws_buffer_size: 128,
-            subscription_buffer_size: 128,
+            subscription_buffer_size: DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE,
             conn_notify: Arc::new(Notify::new()),
             max_reconnects,
             retry_cooldown,
@@ -493,29 +495,9 @@ impl WsDeltasClient {
         self
     }
 
-    // Construct a new client with custom buffer sizes (for testing)
-    #[cfg(test)]
-    pub fn new_with_custom_buffers(
-        ws_uri: &str,
-        auth_key: Option<&str>,
-        ws_buffer_size: usize,
-        subscription_buffer_size: usize,
-    ) -> Result<Self, DeltasError> {
-        let uri = ws_uri
-            .parse::<Uri>()
-            .map_err(|e| DeltasError::UriParsing(ws_uri.to_string(), e.to_string()))?;
-        Ok(Self {
-            uri,
-            auth_key: auth_key.map(|s| s.to_string()),
-            inner: Arc::new(Mutex::new(None)),
-            ws_buffer_size,
-            subscription_buffer_size,
-            conn_notify: Arc::new(Notify::new()),
-            max_reconnects: 5,
-            retry_cooldown: Duration::from_millis(0),
-            dead: Arc::new(AtomicBool::new(false)),
-            client_metadata_header: None,
-        })
+    pub(crate) fn with_subscription_buffer_size(mut self, subscription_buffer_size: usize) -> Self {
+        self.subscription_buffer_size = subscription_buffer_size;
+        self
     }
 
     /// Ensures that the client is connected.
@@ -909,12 +891,20 @@ impl DeltasClient for WsDeltasClient {
         let jh = tokio::spawn(async move {
             let mut retry_count = 0;
             let mut result = Err(DeltasError::NotConnected);
+            let mut last_attempt = Instant::now();
 
             'retry: while retry_count < this.max_reconnects {
                 info!(?ws_uri, retry_count, "Connecting to WebSocket server");
+                // The cooldown limits attempts to one per `retry_cooldown`. After a connection
+                // that outlived it, reconnect at once.
                 if retry_count > 0 {
-                    sleep(this.retry_cooldown).await;
+                    sleep(
+                        this.retry_cooldown
+                            .saturating_sub(last_attempt.elapsed()),
+                    )
+                    .await;
                 }
+                last_attempt = Instant::now();
 
                 let request = build_ws_handshake_request(
                     &ws_uri,
@@ -1077,6 +1067,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::stream::TychoStreamBuilder;
 
     #[derive(Clone)]
     enum ExpectedComm {
@@ -1314,6 +1305,19 @@ mod tests {
                 .unwrap(),
             format!("tycho-client-{}", env!("CARGO_PKG_VERSION")).as_str()
         );
+    }
+
+    #[test]
+    fn test_new_with_reconnects_preserves_default_subscription_buffer_size() {
+        let client = WsDeltasClient::new_with_reconnects(
+            "ws://localhost:4242",
+            None,
+            3,
+            Duration::from_secs(1),
+        )
+        .expect("a valid websocket URI should construct a client");
+
+        assert_eq!(client.subscription_buffer_size, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE);
     }
 
     #[tokio::test]
@@ -1651,6 +1655,40 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_reconnect_skips_cooldown_after_long_connection() {
+        let hold = Duration::from_secs(1);
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                let _ = accepted_tx.send(std::time::Instant::now());
+                sleep(hold).await;
+                drop(stream);
+            }
+        });
+        let client =
+            WsDeltasClient::new_with_reconnects(&format!("ws://{addr}"), None, 3, hold * 4 / 5)
+                .unwrap();
+
+        let _jh = client.connect().await.unwrap();
+
+        let first = accepted_rx.recv().await.unwrap();
+        let second = timeout(Duration::from_secs(5), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // The connection outlived the cooldown, so the reconnect does not wait for it.
+        let gap = second - first;
+        assert!(gap < hold + hold / 2, "reconnect waited {:?}", gap - hold);
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_subscribe_dead_client_after_max_attempts() {
         let (addr, _) = mock_bad_connection_tycho_ws(true).await;
         let client = WsDeltasClient::new_with_reconnects(
@@ -1711,7 +1749,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_buffer_full_triggers_unsubscribe() {
+    async fn test_stream_builder_buffer_size_limits_subscription_channel() {
         // Expected communication sequence for buffer full scenario
         let exp_comm = {
             [
@@ -1810,14 +1848,12 @@ mod tests {
 
         let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
 
-        // Create client with very small buffer size (1) to easily trigger BufferFull
-        let client = WsDeltasClient::new_with_custom_buffers(
-            &format!("ws://{addr}"),
-            None,
-            128, // ws_buffer_size
-            1,   // subscription_buffer_size - this will trigger BufferFull easily
-        )
-        .unwrap();
+        // Build the client through the public stream builder so the test observes its configured
+        // capacity on the real subscription channel.
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
 
         let jh = client
             .connect()

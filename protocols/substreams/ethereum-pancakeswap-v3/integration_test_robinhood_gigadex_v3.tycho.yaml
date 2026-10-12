@@ -1,0 +1,42 @@
+substreams_yaml_path: ./robinhood-gigadex-v3.yaml
+protocol_system: "gigadex_v3"
+protocol_type_names:
+  - "gigadex_v3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # WETH / USDG at fee 50 (0.005%), tick spacing 10: the pool with the most activity on the factory.
+  # Its fee has no `FeeAmount` variant, so it only simulates through the `tick_spacing` attribute.
+  - name: test_weth_usdg_fee_50_pool
+    # PoolCreated, Initialize, SetLmPoolEvent and SetFeeProtocol all land in the creation tx.
+    start_block: 59352731
+    # First Mint at 59360128, first Swap at 59360246.
+    stop_block: 59360246
+    expected_components:
+      - id: "0xf4d0171f995d576b972aa982080eaf4da456cf9e"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          fee: "0x32"
+          tick_spacing: "0x0a"
+        creation_tx: "0x363e7f26cf7fc11e3a108ac2ae316274bfa5ab83d3f551f754ad25c85b25506f"
+        skip_simulation: false
+        skip_execution: false
+  # USDG / GLD at fee 200 with tick spacing 4, where the `FeeAmount` mapping implies spacing 2.
+  - name: test_usdg_gld_fee_200_spacing_4_pool
+    start_block: 56404708
+    # First Mint at 56406113, first Swap at 56406452.
+    stop_block: 56406452
+    expected_components:
+      - id: "0xc1173d3133e0eccd4099b0c98c04b68ef41465a7"
+        tokens:
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+          - "0xC9a981FEE1F9DEc688bb123ccDeCc63D0deBFC4e" # GLD
+        static_attributes:
+          fee: "0x00c8"
+          tick_spacing: "0x04"
+        creation_tx: "0x35a3eec76d55b5c58e51027aaa2deebb43d75437747d63512925bd5608360be9"
+        skip_simulation: false
+        skip_execution: false

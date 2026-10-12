@@ -5,7 +5,7 @@ use std::{
 };
 
 use ekubo_sdk::{
-    chain::evm::{EvmPoolKey, EvmTokenAmount},
+    chain::evm::{EvmPoolKey, EvmTokenAmount, EVM_MAX_SQRT_RATIO, EVM_MIN_SQRT_RATIO},
     U256,
 };
 use num_bigint::BigUint;
@@ -16,7 +16,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -26,8 +29,9 @@ use super::pool::{
     twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
 };
 use crate::evm::protocol::{
+    ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
     ekubo_v3::{
-        addresses::SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+        addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
         pool::{
             boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
         },
@@ -68,12 +72,46 @@ fn sqrt_price_q128_to_f64(
 
 impl EkuboV3State {
     /// Zero unless the extension forces the swap through `Core.forward`.
+    ///
+    /// The pool key carries no chain, so a SignedExclusiveSwap address from any deployment counts.
     fn forward_overhead_gas(&self) -> u64 {
-        if self.key().config.extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        let extension = self.key().config.extension;
+        if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS
+            .iter()
+            .any(|(_, deployment)| *deployment == extension)
+        {
             SIGNED_EXCLUSIVE_SWAP_GAS
         } else {
             0
         }
+    }
+}
+
+impl EkuboSwapToPrice for EkuboV3State {
+    type SqrtRatio = U256;
+
+    fn sqrt_ratio_in_range(sqrt_ratio: &BigUint) -> Option<U256> {
+        let sqrt_ratio = U256::try_from_be_slice(&sqrt_ratio.to_bytes_be())?;
+        (EVM_MIN_SQRT_RATIO..=EVM_MAX_SQRT_RATIO)
+            .contains(&sqrt_ratio)
+            .then_some(sqrt_ratio)
+    }
+
+    fn current_sqrt_ratio(&self) -> U256 {
+        self.sqrt_ratio()
+    }
+
+    fn quote_to_limit(
+        &self,
+        token_in: &Token,
+        amount: i128,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<(i128, u128, Self), SimulationError> {
+        let token = Address::try_from(&token_in.address[..]).map_err(|err| {
+            SimulationError::InvalidInput(format!("token_in invalid: {err}"), None)
+        })?;
+        let quote = self.quote(EvmTokenAmount { token, amount }, sqrt_ratio_limit)?;
+        Ok((quote.consumed_amount, quote.calculated_amount, quote.new_state))
     }
 }
 
@@ -114,7 +152,7 @@ impl ProtocolSim for EkuboV3State {
             })?,
         };
 
-        let quote = self.quote(token_amount)?;
+        let quote = self.quote(token_amount, None)?;
 
         if quote.calculated_amount > i128::MAX as u128 {
             return Err(SimulationError::RecoverableError(
@@ -163,11 +201,18 @@ impl ProtocolSim for EkuboV3State {
         self.finish_transition(delta.updated_attributes, delta.deleted_attributes)
     }
 
-    fn query_pool_swap(
-        &self,
-        params: &tycho_common::simulation::protocol_sim::QueryPoolSwapParams,
-    ) -> Result<tycho_common::simulation::protocol_sim::PoolSwap, SimulationError> {
-        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    /// Solves [`SwapConstraint::PoolTargetPrice`] natively with a sqrt ratio limit. This path
+    /// ignores `min_amount_in`, `max_amount_in` and `tolerance`, and returns no price points.
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+            SwapConstraint::PoolTargetPrice { target, .. } => {
+                // Ekubo v3 spot prices have no fee markup.
+                swap_to_target_price(self, params, target, 0)
+            }
+        }
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -217,7 +262,7 @@ mod tests {
     use rstest_reuse::apply;
 
     use super::*;
-    use crate::evm::protocol::ekubo_v3::test_cases::*;
+    use crate::evm::protocol::{ekubo_common::test_helpers::*, ekubo_v3::test_cases::*};
 
     /// Both pools price identically, so the gas gap is exactly the forward overhead.
     #[rstest]
@@ -307,5 +352,53 @@ mod tests {
         state
             .get_amount_out(max_amount_in, &token0, &token1)
             .expect("quoting with limit");
+    }
+
+    #[rstest]
+    #[case::full_range(full_range(), 0.95)]
+    #[case::mev_capture_with_fee(mev_capture(), 0.999_995)]
+    #[case::stableswap(stableswap(), 0.99)]
+    #[case::twamm(twamm(), 0.99)]
+    fn test_query_pool_swap_target_price_lands_in_band(
+        #[case] case: TestCase,
+        #[case] multiplier: f64,
+    ) {
+        assert_lands_in_band(
+            &case.state_after_transition,
+            &case.token0(),
+            &case.token1(),
+            multiplier,
+        );
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_above_spot(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_target_above_spot_rejected(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_at_spot(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_target_at_spot_gives_zero_swap(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_out_of_range(full_range: TestCase) {
+        let state = &full_range.state_after_transition;
+        assert_out_of_range_falls_back(state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[rstest]
+    fn test_query_pool_swap_target_price_empty_pool(full_range: TestCase) {
+        let state = empty_full_range_state();
+        assert_missed_limit_falls_back(&state, &full_range.token0(), &full_range.token1());
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_price_virtual_orders_past_target() {
+        let case = twamm();
+        let state = &case.state_after_transition;
+        assert_virtual_orders_applied_before_direction_check(state, &case.token0(), &case.token1());
     }
 }

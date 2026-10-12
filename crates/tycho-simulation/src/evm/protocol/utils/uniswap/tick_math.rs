@@ -16,7 +16,7 @@ pub(crate) const MAX_SQRT_RATIO: U256 =
     U256::from_limbs([6743328256752651558u64, 17280870778742802505u64, 4294805859u64, 0]);
 
 pub(crate) fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError> {
-    if tick.abs() > MAX_TICK {
+    if !(MIN_TICK..=MAX_TICK).contains(&tick) {
         return Err(SimulationError::FatalError(format!(
             "Tick {} is outside valid range [{}, {}]",
             tick, -MAX_TICK, MAX_TICK

@@ -107,14 +107,18 @@ impl EkuboPool for MevResistPool {
         self.base_pool_state.liquidity = liquidity;
     }
 
-    fn quote(&self, token_amount: TokenAmount) -> Result<EkuboPoolQuote, SimulationError> {
+    fn quote(
+        &self,
+        token_amount: TokenAmount,
+        sqrt_ratio_limit: Option<U256>,
+    ) -> Result<EkuboPoolQuote, SimulationError> {
         let first_swap_this_block = self.active_tick.is_some();
 
         let quote = self
             .imp
             .quote(QuoteParams {
                 token_amount,
-                sqrt_ratio_limit: None,
+                sqrt_ratio_limit,
                 override_state: Some(MEVResistPoolState {
                     last_update_time: 0,
                     base_pool_state: self.base_pool_state,

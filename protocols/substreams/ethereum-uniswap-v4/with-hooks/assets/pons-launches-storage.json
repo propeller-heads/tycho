@@ -1,0 +1,83 @@
+{
+  "description": "Raw eth_getStorageAt responses backing the on-chain fixtures in src/storage.rs and src/pons.rs. Pons MemeHook launches[poolId] on Robinhood (chain id 4663). A pool's base slot is keccak256(poolId || uint256(10)); its word 4 is that slot plus 4.",
+  "endpoint": "https://rpc.mainnet.chain.robinhood.com",
+  "contract": "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+  "calls": [
+    {
+      "pool_id": "0x18c178f47be974b35b88b5f58a452d745b5410764c7fa114dd6cfebe86d3b46d",
+      "slot_name": "launches[poolId] word 0 (registered at low byte 0)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getStorageAt",
+        "params": [
+          "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+          "0xe37c20a04046455d80c1bb1695b0374864ee27081b38911bef0ef8155a911965",
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": "0x00000000000000000000b7667b0d7f70002c5ba451a58b7e98ca8582e76d0001"
+      }
+    },
+    {
+      "pool_id": "0x18c178f47be974b35b88b5f58a452d745b5410764c7fa114dd6cfebe86d3b46d",
+      "slot_name": "launches[poolId] word 4 (creatorTaxBps 0 at low byte 20, hookFeeBps 100 at low byte 26)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "eth_getStorageAt",
+        "params": [
+          "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+          "0xe37c20a04046455d80c1bb1695b0374864ee27081b38911bef0ef8155a911969",
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": "0x0000012c006413880bb80000263ed295dafae1d9aadd6e56c4b6f9f38ee019dd"
+      }
+    },
+    {
+      "pool_id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+      "slot_name": "launches[poolId] word 0 (registered at low byte 0)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "eth_getStorageAt",
+        "params": [
+          "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+          "0x0048adbd8de985267f35480231e60bb522837a5ce3130ae7a76b0ac25bbc9819",
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": "0x00000000000000000000ab5983fe30f186055095305c862b0e097dab3b520101"
+      }
+    },
+    {
+      "pool_id": "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289",
+      "slot_name": "launches[poolId] word 4 (creatorTaxBps 100 at low byte 20, hookFeeBps 100 at low byte 26)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "eth_getStorageAt",
+        "params": [
+          "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044",
+          "0x0048adbd8de985267f35480231e60bb522837a5ce3130ae7a76b0ac25bbc981d",
+          "latest"
+        ]
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": "0x0000012c006413880bb80064263ed295dafae1d9aadd6e56c4b6f9f38ee019dd"
+      }
+    }
+  ]
+}

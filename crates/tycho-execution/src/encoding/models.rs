@@ -239,6 +239,10 @@ pub struct Swap {
     estimated_amount_in: Option<BigUint>,
     /// Estimated gas usage for this swap by simulation
     estimated_gas: BigUint,
+    /// For an RFQ swap, how far below its price levels the maker's signed quote may land, in basis
+    /// points, before encoding fails. `None` encodes whatever the maker signs.
+    #[serde(default)]
+    max_signed_quote_shortfall_bps: Option<u32>,
 }
 
 impl Swap {
@@ -257,6 +261,7 @@ impl Swap {
             protocol_state: None,
             estimated_amount_in: None,
             estimated_gas,
+            max_signed_quote_shortfall_bps: None,
         }
     }
 
@@ -281,6 +286,13 @@ impl Swap {
     /// Sets the estimated amount in for RFQ protocols
     pub fn with_estimated_amount_in(mut self, estimated_amount_in: BigUint) -> Self {
         self.estimated_amount_in = Some(estimated_amount_in);
+        self
+    }
+
+    /// Fails the encoding of an RFQ swap whose signed quote lands more than `max_shortfall_bps`
+    /// below the amount its price levels give for the same input. Other swaps ignore it.
+    pub fn with_max_signed_quote_shortfall_bps(mut self, max_shortfall_bps: u32) -> Self {
+        self.max_signed_quote_shortfall_bps = Some(max_shortfall_bps);
         self
     }
 
@@ -314,6 +326,10 @@ impl Swap {
 
     pub fn estimated_gas(&self) -> &BigUint {
         &self.estimated_gas
+    }
+
+    pub fn max_signed_quote_shortfall_bps(&self) -> Option<u32> {
+        self.max_signed_quote_shortfall_bps
     }
 }
 

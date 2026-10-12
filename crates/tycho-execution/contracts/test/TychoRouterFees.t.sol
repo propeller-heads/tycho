@@ -68,7 +68,6 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
     function testSingleSwapWithAllFeeTypes() public {
         // Set up fees: 1% router fee on output, 2% client fee, 10% router fee on client fee
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
         feeCalculator.setRouterFeeOnOutput(1_000_000); // 1%
         feeCalculator.setRouterFeeOnClientFee(10_000_000); // 10%
         vm.stopPrank();
@@ -207,6 +206,48 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         assertEq(clientFeeReceiverBalance, expectedFeeAmount);
     }
 
+    /// The constructor default, which the shared setup switches off: the router
+    /// keeps everything the pool produced above the quote.
+    function testSingleSwapCapturesPositiveSlippage() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(true);
+
+        uint256 amountIn = 1 ether;
+        // 1 WETH buys 2018.8 DAI on the USV2 pool, quoted at a round 2000
+        uint256 quotedAmountOut = 2000 ether;
+        uint256 poolAmountOut = 2018817438608734439722;
+
+        deal(WETH_ADDR, ALICE, amountIn);
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(tychoRouterAddr, amountIn);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+        uint256 amountOut = tychoRouter.singleSwap(
+            amountIn,
+            WETH_ADDR,
+            DAI_ADDR,
+            quotedAmountOut,
+            quotedAmountOut,
+            ALICE,
+            noClientFee(),
+            swap
+        );
+        vm.stopPrank();
+
+        // ALICE receives the quote, the surplus is credited to the router
+        assertEq(amountOut, quotedAmountOut);
+        assertEq(IERC20(DAI_ADDR).balanceOf(ALICE), quotedAmountOut);
+        assertEq(
+            tychoRouter.balanceOf(
+                routerFeeReceiver, uint256(uint160(DAI_ADDR))
+            ),
+            poolAmountOut - quotedAmountOut
+        );
+    }
+
     function testSingleSwapWithFeesAndContribution() public {
         // Tests swapping WETH -> DAI on a USV2 pool with fees and client contribution
         // Swap is 1 WETH for      2018.8 DAI (2018817438608734439722, gross output)
@@ -216,7 +257,6 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // Remaining = 2018.8 - 40.38 = 1978.42 < 2000 so client contributes ~21.56 DAI (max 22)
 
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
         feeCalculator.setRouterFeeOnOutput(1_000_000); // 1%
         vm.stopPrank();
 
@@ -714,7 +754,6 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // ALICE (tx.origin) has a custom 1% router fee that overrides the 2% default.
         // No client signature is provided, so tx.origin is used for the fee lookup.
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
         feeCalculator.setRouterFeeOnOutput(2_000_000); // 2% default
         feeCalculator.setCustomRouterFeeOnOutput(ALICE, 1_000_000); // 1% override for ALICE
         vm.stopPrank();
@@ -770,7 +809,6 @@ contract TychoRouterFeesTest is TychoRouterTestSetup {
         // A signed client fee for clientFeeReceiver is also provided.
         // The signed clientFeeReceiver's fee (default, 0%) should be used, not ALICE's 2%.
         vm.startPrank(FEE_SETTER);
-        feeCalculator.setRouterFeeReceiver(routerFeeReceiver);
         feeCalculator.setCustomRouterFeeOnOutput(ALICE, 2_000_000); // 2% for tx.origin
         vm.stopPrank();
 

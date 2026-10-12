@@ -5,7 +5,8 @@ use tycho_common::{models::Chain, Bytes};
 
 use super::client::NativeClient;
 use crate::rfq::{
-    constants::get_native_auth, errors::RFQError, protocols::utils::default_quote_tokens_for_chain,
+    constants::get_native_auth, errors::RFQError, models::ComponentLayout,
+    protocols::utils::default_quote_tokens_for_chain,
 };
 
 pub struct NativeClientBuilder {
@@ -16,6 +17,7 @@ pub struct NativeClientBuilder {
     quote_tokens: Option<HashSet<Bytes>>,
     poll_time: Duration,
     quote_timeout: Duration,
+    component_layout: ComponentLayout,
 }
 
 impl NativeClientBuilder {
@@ -28,6 +30,7 @@ impl NativeClientBuilder {
             quote_tokens: None,
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
+            component_layout: ComponentLayout::PerPair,
         }
     }
 
@@ -56,6 +59,13 @@ impl NativeClientBuilder {
         self
     }
 
+    /// The components the client streams. One per pair, by default. Register a `PerPair` client
+    /// with `NativeState` and a `AllPairs` client with `NativeAllPairsState`.
+    pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
+    }
+
     pub fn quote_timeout(mut self, quote_timeout: Duration) -> Self {
         self.quote_timeout = quote_timeout;
         self
@@ -76,5 +86,6 @@ impl NativeClientBuilder {
             self.poll_time,
             self.quote_timeout,
         )
+        .map(|client| client.with_component_layout(self.component_layout))
     }
 }

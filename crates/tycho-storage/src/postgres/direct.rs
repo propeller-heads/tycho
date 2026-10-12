@@ -11,8 +11,8 @@ use tycho_common::{
     models::{
         self,
         blockchain::{
-            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracingParams,
-            TracingResult, Transaction,
+            Block, EntryPoint, EntryPointWithTracingParams, TracedEntryPoint, TracedEntryPoints,
+            TracingParams, TracingResult, Transaction,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -688,6 +688,21 @@ impl EntryPointGateway for DirectGateway {
             })?;
         self.state_gateway
             .get_tracing_results(entry_points, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_traced_entry_points_by_component(
+        &self,
+        filter: EntryPointFilter,
+        pagination_params: Option<&PaginationParams>,
+    ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
+            })?;
+        self.state_gateway
+            .get_traced_entry_points_by_component(filter, pagination_params, &mut conn)
             .await
     }
 }

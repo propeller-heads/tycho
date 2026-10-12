@@ -166,7 +166,7 @@ mod hooks_tests {
         let mut block = Block { number: 23120299, ..Default::default() };
 
         // Create the transaction trace based on the real transaction
-        // Index 0 assumes this was the first transaction in the block
+        // Assuming this was the first transaction in the block for simplicity
         let mut tx = TransactionTrace { index: 0, ..Default::default() };
         tx.hash = hex::decode("b2347c7bd922fe5c7f5027523e3f3b4c2e72e7b535e4d0ddd2f4ea4f21c6edbf")
             .unwrap();

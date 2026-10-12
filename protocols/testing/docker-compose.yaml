@@ -41,6 +41,7 @@ services:
       MODE: "${MODE:-range}"
       DATABASE_URL: postgres://postgres:mypassword@db:5432/tycho_indexer_0
       RPC_URL: "${RPC_URL}"
+      ARC_RPC_URL: "${ARC_RPC_URL:-}"
       BASE_RPC_URL: "${BASE_RPC_URL:-}"
       ARBITRUM_RPC_URL: "${ARBITRUM_RPC_URL:-}"
       UNICHAIN_RPC_URL: "${UNICHAIN_RPC_URL:-}"

@@ -120,6 +120,7 @@ fn register_exchanges(
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+                .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
         }

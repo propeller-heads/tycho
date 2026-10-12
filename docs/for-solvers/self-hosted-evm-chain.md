@@ -133,7 +133,7 @@ chains:
       symbol: "ETH"
       decimals: 18
     wrapped_native:                   # wrapped native token (e.g. WETH)
-      address: "0x0000000000000000000000000000000000000000"
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # Ethereum WETH; replace with your chain's wrapper
       symbol: "WETH"
       decimals: 18
     default_tvl_thresholds:           # TVL gates (in native token units) for component tracking
@@ -146,7 +146,7 @@ chains:
 <tr><td><code>chain_id</code></td><td>EVM chain id.</td></tr>
 <tr><td><code>block_time_secs</code></td><td>Average block time in seconds.</td></tr>
 <tr><td><code>native</code></td><td>Native gas token: <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
-<tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
+<tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>. Use the wrapper deployed on your chain. If <code>wrapped_native.address</code> equals <code>native.address</code>, Tycho treats the chain as having no wrapper and injects no <code>native_wrapper</code> component.</td></tr>
 <tr><td><code>default_tvl_thresholds</code></td><td>Liquidity gates in <strong>native-token units</strong> (e.g. ETH), read by downstream consumers (solvers, tycho-simulation) to decide which components to track — not by the indexer. Size <code>low</code>/<code>medium</code> to the USD floor you want at the native token's price; the Ethereum defaults target roughly $20k / $200k.</td></tr>
 </tbody></table>
 

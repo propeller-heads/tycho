@@ -10,7 +10,8 @@ use tycho_common::{
 use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
-        biguint_to_u256, bytes_to_address, create_encoding_runtime, on_blocking_thread, SafeRuntime,
+        biguint_to_u256, bytes_to_address, check_signed_quote, create_encoding_runtime,
+        on_blocking_thread, SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -103,6 +104,7 @@ impl SwapEncoder for BebopSwapEncoder {
                         .await
                 })
             })??;
+            check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
             let bebop_calldata = signed_quote
                 .quote_attributes
                 .get("calldata")

@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
-license.workspace = true
+license-file.workspace = true
 categories.workspace = true
 # readme intentionally omitted — binary crate, not published to crates.io
 

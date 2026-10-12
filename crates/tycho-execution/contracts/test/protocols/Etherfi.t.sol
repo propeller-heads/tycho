@@ -4,6 +4,77 @@ import "../TychoRouterTestSetup.sol";
 import "../TestUtils.sol";
 import "@src/executors/EtherfiExecutor.sol";
 import {Constants} from "../Constants.sol";
+import {Vm} from "forge-std/Vm.sol";
+
+// Match the `ethereum-etherfi` snapshot block so indexing and execution
+// tests use the same contract implementations and state.
+uint256 constant ETHERFI_FORK_BLOCK = 25940000;
+
+// `LiquidityPool` slot 207: `totalValueOutOfLp` in the low 128 bits, `totalValueInLp` in the
+// high 128 bits.
+uint256 constant LIQUIDITY_POOL_VALUE_SLOT = 207;
+
+interface IEtherfiRedemptionManagerView {
+    function tokenToRedemptionInfo(address token)
+        external
+        view
+        returns (
+            uint64 capacity,
+            uint64 remaining,
+            uint64 lastRefill,
+            uint64 refillRate,
+            uint16 exitFeeSplitToTreasuryInBps,
+            uint16 exitFeeInBps,
+            uint16 lowWatermarkInBpsOfTvl
+        );
+
+    function totalRedeemableAmount(address token)
+        external
+        view
+        returns (uint256);
+}
+
+/// Raises the pool's liquid ether until `amount` is redeemable, and reverts if it is not.
+///
+/// The fork state has insufficient liquidity above the redemption floor.
+/// Sets `totalValueInLp` and the pool's ETH balance to cover `amount` while
+/// preserving `totalValueOutOfLp`, then checks the redemption manager's limit.
+function openEtherfiRedemptions(
+    Vm vm,
+    address liquidityPool,
+    address redemptionManager,
+    address ethSentinel,
+    uint256 amount
+) {
+    bytes32 slot = bytes32(LIQUIDITY_POOL_VALUE_SLOT);
+    uint256 totalValueOutOfLp =
+        uint256(vm.load(liquidityPool, slot)) & type(uint128).max;
+    (,,,,,, uint16 lowWatermarkInBpsOfTvl) = IEtherfiRedemptionManagerView(
+            redemptionManager
+        ).tokenToRedemptionInfo(ethSentinel);
+
+    // Solve `inLp - bps * (inLp + outOfLp) / 10000 = amount` for `inLp`, rounded up.
+    uint256 bps = uint256(lowWatermarkInBpsOfTvl);
+    uint256 totalValueInLp =
+        (amount * 10000 + bps * totalValueOutOfLp) / (10000 - bps) + 1;
+    require(
+        totalValueInLp <= type(uint128).max, "totalValueInLp overflows uint128"
+    );
+
+    vm.store(
+        liquidityPool,
+        slot,
+        bytes32((totalValueInLp << 128) | totalValueOutOfLp)
+    );
+    // `_checkTotalValueInLp` requires the pool to hold the ether it accounts for.
+    vm.deal(liquidityPool, totalValueInLp);
+
+    require(
+        IEtherfiRedemptionManagerView(redemptionManager)
+            .totalRedeemableAmount(ethSentinel) >= amount,
+        "redemptions still closed"
+    );
+}
 
 contract EtherfiExecutorExposed is EtherfiExecutor {
     constructor(
@@ -37,8 +108,7 @@ contract EtherfiExecutorTest is Constants, TestUtils {
     EtherfiExecutorExposed etherfiExposed;
 
     function setUp() public {
-        uint256 forkBlock = 24332199;
-        vm.createSelectFork(vm.rpcUrl("mainnet"), forkBlock);
+        vm.createSelectFork(vm.rpcUrl("mainnet"), ETHERFI_FORK_BLOCK);
         etherfiExposed = new EtherfiExecutorExposed(
             ETH_ADDR,
             EETH_ADDR,
@@ -150,6 +220,9 @@ contract EtherfiExecutorTest is Constants, TestUtils {
     }
 
     function testSwapEethToEth() public {
+        openEtherfiRedemptions(
+            vm, LIQUIDITY_POOL_ADDR, REDEMPTION_MANAGER_ADDR, ETH_ADDR, 10 ether
+        );
         uint256 minted = _mintEethToExecutor(1 ether);
         bytes memory protocolData = abi.encodePacked(EtherfiDirection.EethToEth);
 
@@ -174,11 +247,14 @@ contract EtherfiExecutorTest is Constants, TestUtils {
 
 contract TychoRouterForEtherfiTest is TychoRouterTestSetup {
     function getForkBlock() public pure override returns (uint256) {
-        return 24332199;
+        return ETHERFI_FORK_BLOCK;
     }
 
     function testSingleEtherfiUnwrapIntegration() public {
         // weeth -> (unwrap) -> eeth -> (RedemptionManager) -> eth
+        openEtherfiRedemptions(
+            vm, LIQUIDITY_POOL_ADDR, REDEMPTION_MANAGER_ADDR, ETH_ADDR, 10 ether
+        );
         deal(WEETH_ADDR, BOB, 1 ether);
         uint256 balanceBefore = BOB.balance;
 

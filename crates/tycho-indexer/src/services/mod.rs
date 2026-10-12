@@ -26,6 +26,11 @@ use crate::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
         middleware::{compression_middleware, rpc_metrics_middleware},
+        state::{
+            service::StateService,
+            shadow::{self, Sampler, Shadow},
+            window::{new_windows, DiscardSink, FoldSink},
+        },
     },
 };
 
@@ -37,10 +42,15 @@ mod client_metadata;
 mod debug;
 mod deltas_buffer;
 mod middleware;
+mod off_worker;
 mod rpc;
+mod state;
 mod ws;
 
 pub use middleware::PlansConfig;
+pub use state::{
+    cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
+};
 
 /// Helper struct to build Tycho services such as HTTP and WS server.
 pub struct ServicesBuilder<G> {
@@ -57,6 +67,27 @@ pub struct ServicesBuilder<G> {
     protocol_systems: Vec<String>,
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
+    window_config: WindowConfig,
+    /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
+    /// database.
+    entity_cache: EntityCacheSetup<Arc<EntityCache>>,
+    /// Share of state requests that shadow mode compares.
+    shadow_sample_rate: f64,
+}
+
+/// Resolves with the first error either service task produces, or with `Ok` once both end
+/// cleanly. A task that ends cleanly on its own does not end the join, so the shutdown
+/// sequence still drains the server.
+async fn join_services(
+    tasks: [JoinHandle<Result<(), ExtractionError>>; 2],
+) -> Result<(), ExtractionError> {
+    let flattened = tasks.map(|task| async move {
+        task.await.unwrap_or_else(|join_err| {
+            Err(ExtractionError::Unknown(format!("Service task panicked: {join_err}")))
+        })
+    });
+    try_join_all(flattened).await?;
+    Ok(())
 }
 
 impl<G> ServicesBuilder<G>
@@ -76,7 +107,33 @@ where
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
             pending_deltas_rxs: Vec::new(),
+            window_config: WindowConfig::default(),
+            entity_cache: EntityCacheSetup::Off,
+            shadow_sample_rate: 0.0,
         }
+    }
+
+    /// Sets the retention depth and fold batch of every extractor's `DeltaWindow`.
+    pub fn window_config(mut self, v: WindowConfig) -> Self {
+        self.window_config = v;
+        self
+    }
+
+    /// Sets which path answers the state endpoints, and the entity cache behind it.
+    ///
+    /// The cache must be fully loaded: the windows fold into it and requests read it from the
+    /// first block on. Ignored without extractors: the standalone rpc server has no windows, so
+    /// it always runs as [`EntityCacheSetup::Off`].
+    pub fn entity_cache(mut self, setup: EntityCacheSetup<EntityCache>) -> Self {
+        self.entity_cache = setup.map(Arc::new);
+        self
+    }
+
+    /// Sets the share of state requests that `shadow` compares, from 0.0 to 1.0. Other modes
+    /// ignore it.
+    pub fn shadow_sample_rate(mut self, rate: f64) -> Self {
+        self.shadow_sample_rate = rate;
+        self
     }
 
     /// Sets protocol systems that use Dynamic Contract Indexing (DCI).
@@ -144,7 +201,7 @@ where
         // If no extractors are registered, run the server without spawning extractor-related tasks.
         if self.extractor_handles.is_empty() {
             info!("Starting standalone rpc server");
-            self.start_server(None, open_api, None)
+            self.start_server(None, open_api, None, EntityCacheSetup::Off)
         } else {
             info!("Starting full server");
             self.start_server_with_deltas(open_api)
@@ -157,10 +214,21 @@ where
         mut self,
         openapi: utoipa::openapi::OpenApi,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let pending_deltas = PendingDeltas::new(
+        let sink: Arc<dyn FoldSink> = match self.entity_cache.cache() {
+            Some(cache) => cache.clone(),
+            None => Arc::new(DiscardSink),
+        };
+        let windows = new_windows(
             self.extractor_handles
                 .keys()
                 .map(|e_id| e_id.name.as_str()),
+            self.window_config,
+        );
+        let pending_deltas = PendingDeltas::from_windows(windows.clone(), sink);
+        info!(
+            depth = self.window_config.depth,
+            min_fold_batch = self.window_config.min_fold_batch,
+            "DeltaWindow configured"
         );
 
         let pending_deltas_rxs = std::mem::take(&mut self.pending_deltas_rxs);
@@ -180,16 +248,36 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
-        let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
-        let (server_handle, server_task) =
-            self.start_server(Some(ws_data), openapi, Some(Arc::new(pending_deltas)))?;
+        let state_service = match self.entity_cache.clone() {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(cache) => {
+                let service = Arc::new(StateService::new(windows, cache));
+                EntityCacheSetup::Shadow(Shadow::new(
+                    service,
+                    Sampler::new(self.shadow_sample_rate),
+                ))
+            }
+            EntityCacheSetup::Serve(cache) => {
+                EntityCacheSetup::Serve(Arc::new(StateService::new(windows, cache)))
+            }
+        };
+        if matches!(state_service, EntityCacheSetup::Shadow(_)) {
+            shadow::register_metrics(self.shadow_sample_rate);
+            info!(
+                sample_rate = self.shadow_sample_rate,
+                "Entity cache shadow comparison configured"
+            );
+        }
 
-        let task = tokio::spawn(async move {
-            try_join_all(vec![deltas_task, server_task])
-                .await
-                .map_err(|err| ExtractionError::Unknown(err.to_string()))?;
-            Ok(())
-        });
+        let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
+        let (server_handle, server_task) = self.start_server(
+            Some(ws_data),
+            openapi,
+            Some(Arc::new(pending_deltas)),
+            state_service,
+        )?;
+
+        let task = tokio::spawn(join_services([deltas_task, server_task]));
 
         Ok((server_handle, task))
     }
@@ -200,17 +288,21 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
-        let rpc_data = web::Data::new(rpc::RpcHandler::new(
-            self.db_gateway,
-            pending_deltas,
-            tracer,
-            self.plans_config,
-            self.dci_protocols,
-            self.protocol_systems,
-        ));
+        let rpc_data = web::Data::new(
+            rpc::RpcHandler::new(
+                self.db_gateway,
+                pending_deltas,
+                tracer,
+                self.plans_config,
+                self.dci_protocols,
+                self.protocol_systems,
+            )
+            .with_state_service(state_service),
+        );
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()
@@ -296,6 +388,10 @@ where
 
             app
         })
+        // The default is 512 threads divided across the workers. A worker that serves most
+        // connections could then queue state jobs behind each other inside tokio, although the
+        // `OffWorker` pools already bound how many run. Idle blocking threads exit after 10 s.
+        .worker_max_blocking_threads(512)
         .keep_alive(std::time::Duration::from_secs(60)) // prevents early connection closures
         // Allows clients up to 30 seconds to reconnect before forcefully closing the connection.
         // This prevents us from closing a connection the client is expecting to be able to reuse.
@@ -310,5 +406,58 @@ where
                 .map_err(|err| ExtractionError::Unknown(err.to_string()))
         });
         Ok((handle, task))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn never() -> JoinHandle<Result<(), ExtractionError>> {
+        tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+    }
+
+    #[tokio::test]
+    async fn join_services_returns_the_error_of_a_failed_task() {
+        let failing = tokio::spawn(async { Err(ExtractionError::Unknown("boom".to_string())) });
+
+        let res = join_services([failing, never()]).await;
+
+        assert!(matches!(res, Err(ExtractionError::Unknown(msg)) if msg == "boom"));
+    }
+
+    #[tokio::test]
+    async fn join_services_reports_a_panic_as_an_error() {
+        let panicking: JoinHandle<Result<(), ExtractionError>> =
+            tokio::spawn(async { panic!("kaboom") });
+
+        let res = join_services([panicking, never()]).await;
+
+        assert!(matches!(res, Err(ExtractionError::Unknown(msg)) if msg.contains("panicked")));
+    }
+
+    #[tokio::test]
+    async fn join_services_waits_for_the_other_task_after_a_clean_exit() {
+        let clean = tokio::spawn(async { Ok(()) });
+
+        let res =
+            tokio::time::timeout(Duration::from_millis(100), join_services([clean, never()])).await;
+
+        assert!(res.is_err(), "a clean exit must not resolve the join");
+    }
+
+    #[tokio::test]
+    async fn join_services_is_ok_when_both_tasks_end_cleanly() {
+        let first = tokio::spawn(async { Ok(()) });
+        let second = tokio::spawn(async { Ok(()) });
+
+        let res = join_services([first, second]).await;
+
+        assert!(res.is_ok());
     }
 }

@@ -8,7 +8,7 @@ use crate::{
     evm::{
         engine_db::{create_engine, SHARED_TYCHO_DB},
         protocol::{
-            curve::{state::CurveState, variant, vm},
+            curve::{adapter::build_pool, state::CurveState, variant, vm},
             vm::utils::load_stateless_contracts,
         },
     },
@@ -80,9 +80,17 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
             coins.len(),
             &engine,
         )?;
-        let pool = vm::decode_from_vm(&engine, &pool_alloy, resolved, &decimals)?;
-
-        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool))
+        let raw = vm::read_raw_pool_state(
+            &engine,
+            &pool_alloy,
+            resolved,
+            &decimals,
+            &Default::default(),
+        )?;
+        let pool = build_pool(&raw).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("curve build_pool failed: {e}"))
+        })?;
+        Ok(CurveState::new(pool_address, coins, decimals, resolved, pool, raw.admin_fee))
     }
 }
 

@@ -61,6 +61,14 @@ def test_decode_extractor_identity_known_chain():
     assert ident.chain == Chain.ethereum
 
 
+def test_decode_extractor_identity_arc_round_trip():
+    ident = ExtractorIdentity(chain="arc", name="uniswap_v4")
+
+    assert ident.chain == Chain.arc
+    assert ident.json() == '{"chain": "arc", "name": "uniswap_v4"}'
+    assert ExtractorIdentity.parse_raw(ident.json()) == ident
+
+
 def test_decode_extractor_identity_custom_chain():
     ident = ExtractorIdentity(chain=CUSTOM_CHAIN_JSON, name="my_extractor")
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.4
+
+- Read the SignedExclusiveSwap extension address from the `map_components`
+  params (`signed_exclusive_swap_address=0x...`) instead of a hardcoded
+  constant, so each chain tags `is_exclusive` on its own deployment. The
+  Ethereum and Robinhood manifests each carry their deployment's address;
+  omitting the param disables the `is_exclusive` attribute.
+
 ## v0.2.3
 
 - Track Ve33 pool swap-fee changes for accurate off-chain quotes. The Ve33
