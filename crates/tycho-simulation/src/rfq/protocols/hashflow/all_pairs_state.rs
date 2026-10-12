@@ -62,6 +62,7 @@ impl ProtocolSim for HashflowAllPairsState {
             .spot_price(&base.address, &quote.address)
     }
 
+    /// See [`crate::rfq::models::QuoteRule`] for how a caller threads the returned states.
     fn get_amount_out(
         &self,
         amount_in: BigUint,
@@ -126,8 +127,8 @@ impl IndicativelyPriced for HashflowAllPairsState {
     /// Asks the market maker `get_amount_out` picks on this state for the same amount, and no
     /// other: a fallback maker could be one the route already fills against.
     ///
-    /// Call it on the state the swap was simulated on, with the simulated amount. On the state
-    /// that swap returned, its maker is used, so the request names another maker or fails.
+    /// Call it on the state before the first swap on the pair, with the merged amount of every
+    /// swap on it. It picks the maker that the last swap on the pair recorded.
     async fn request_signed_quote(
         &self,
         params: GetAmountOutParams,

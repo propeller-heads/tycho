@@ -102,14 +102,19 @@ pub enum ComponentLayout {
     #[default]
     PerPair,
     /// One component for all token pairs, decoded by the venue's all-pairs state, such as
-    /// `HashflowAllPairsState`. A swap marks what it used
+    /// `HashflowAllPairsState`. A swap records its fill
     /// in the state it returns, as the venue's [`QuoteRule`] says.
     AllPairs,
 }
 
 /// How often one route may take quotes from an RFQ venue.
 ///
-/// A swap records what it used in the state it returns, so the next swap on that state sees it.
+/// A swap returns a state that records its fill. Under every rule, a later swap on a pair and
+/// direction the route already filled continues that fill: it pays the output of the merged input
+/// less the output so far, at zero gas. The rule counts only the makers used on other pairs.
+///
+/// So the caller of an all-pairs `get_amount_out` merges all swaps on one pair and direction into
+/// one swap, and requests one firm quote on the state before the first of them.
 /// The rule travels with the venue's component as the `quote_rule` static attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

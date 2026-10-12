@@ -146,6 +146,7 @@ impl ProtocolSim for BebopAllPairsState {
             .ok_or_else(|| SimulationError::RecoverableError("No liquidity".into()))
     }
 
+    /// See [`crate::rfq::models::QuoteRule`] for how a caller threads the returned states.
     fn get_amount_out(
         &self,
         amount_in: BigUint,
