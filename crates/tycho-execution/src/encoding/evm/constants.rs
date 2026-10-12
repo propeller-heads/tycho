@@ -134,8 +134,14 @@ pub const UNISWAP_V3_FORKS: &[&str] =
 
 /// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
 /// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
-pub const SLIPSTREAMS_FORKS: &[&str] =
-    &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3", "aero_cl"];
+pub const SLIPSTREAMS_FORKS: &[&str] = &[
+    "aerodrome_slipstreams",
+    "velodrome_slipstreams",
+    "up_v3",
+    "topaz_cl",
+    "ramses_v3",
+    "aero_cl",
+];
 
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for

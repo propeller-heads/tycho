@@ -353,6 +353,7 @@ impl ProtocolStreamProcessor {
                     "pancakeswap_infinity_cl".to_string(),
                     "aero_cl".to_string(),
                     "aero_basic".to_string(),
+                    "topaz_cl".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -479,11 +480,18 @@ impl ProtocolStreamProcessor {
                     None,
                 );
             }
-            // UP on Robinhood Chain deploys the Slipstream contracts verbatim, so it decodes
+            // UP and Topaz CL on Robinhood Chain deploy the Slipstream contracts, so they decode
             // with the same state as Aerodrome.
             "up_v3" => {
                 stream =
                     stream.exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None);
+            }
+            "topaz_cl" => {
+                stream = stream.exchange::<AerodromeSlipstreamsState>(
+                    "topaz_cl",
+                    tvl_filter.clone(),
+                    None,
+                );
             }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);

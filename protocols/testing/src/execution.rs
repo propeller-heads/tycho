@@ -77,6 +77,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
+    map.insert("topaz_cl", SLIPSTREAMS_BYTECODE_JSON);
     map
 });
 

@@ -25,22 +25,27 @@ struct SupportedModule {
     /// A snapshot of state the swap fee manager can change with `setSecondsAgo`, which emits
     /// `SecondsAgoSet`; nothing indexes it, so a change needs a code change here.
     seconds_ago: u32,
+    /// The module's `defaultFeeCap`: the cap on a pool that has no scaling factor of its own.
+    default_fee_cap: u32,
 }
 
-const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 5] = [
     // The three Base modules moved from 600 to 480 in tx 0x42122c80…7550 (block 52,307,488), and
     // 0x87D8 again to 30 in tx 0x1aeb7f17…2ae4 (block 53,228,614).
     SupportedModule {
         address: address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
         seconds_ago: 480,
+        default_fee_cap: DEFAULT_FEE_CAP,
     },
     SupportedModule {
         address: address!("F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785"),
         seconds_ago: 480,
+        default_fee_cap: DEFAULT_FEE_CAP,
     },
     SupportedModule {
         address: address!("87D8f999BBa9343E8099552426775B51C338E8CB"),
         seconds_ago: 30,
+        default_fee_cap: DEFAULT_FEE_CAP,
     },
     // UP on Robinhood Chain. Same module code as the Base deployments above, so the fee resolution
     // below applies unchanged; only its `factory` immutable and the name of its base-fee event
@@ -48,6 +53,18 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 4] = [
     SupportedModule {
         address: address!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"),
         seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: DEFAULT_FEE_CAP,
+    },
+    // Topaz CL on Robinhood Chain. Its `getFee` has no initial-fee branch, which the default
+    // `initial_fee_enabled == false` already skips, and it raises `MAX_BASE_FEE` and
+    // `defaultFeeCap` to 50_000. Its `_getDynamicFee` also has no minimum-cardinality guard, but
+    // a pool at cardinality 1 gets no dynamic component either way (observe either reverts or
+    // extrapolates the current tick), and a pool's cardinality moves from 1 straight to its
+    // `cardinalityNext`, 500 on every Topaz pool so far.
+    SupportedModule {
+        address: address!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"),
+        seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: 50_000,
     },
 ];
 
@@ -67,10 +84,17 @@ pub struct DynamicFeeConfig {
     /// The pool's fee module's `secondsAgo`.
     #[serde(default = "default_seconds_ago")]
     seconds_ago: u32,
+    /// The cap applied while `scaling_factor == 0`, taken from the pool's fee module.
+    #[serde(default = "default_fee_cap")]
+    default_fee_cap: u32,
 }
 
 fn default_seconds_ago() -> u32 {
     DEFAULT_SECONDS_AGO
+}
+
+fn default_fee_cap() -> u32 {
+    DEFAULT_FEE_CAP
 }
 
 impl Default for DynamicFeeConfig {
@@ -94,6 +118,7 @@ impl DynamicFeeConfig {
             initial_fee_enabled,
             initial_fee,
             seconds_ago: DEFAULT_SECONDS_AGO,
+            default_fee_cap: DEFAULT_FEE_CAP,
         }
     }
 
@@ -149,6 +174,7 @@ impl DynamicFeeConfig {
                 .map_err(|err| err.to_string())?
                 .unwrap_or_default(),
             seconds_ago: module.seconds_ago,
+            default_fee_cap: module.default_fee_cap,
         })
     }
 
@@ -295,7 +321,7 @@ fn resolve_dynamic_fee(
     let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
         (dfc.scaling_factor, dfc.fee_cap)
     } else {
-        (DEFAULT_SCALING_FACTOR, DEFAULT_FEE_CAP)
+        (DEFAULT_SCALING_FACTOR, dfc.default_fee_cap)
     };
     // The module runs the TWAP computation for any scaling factor — a zero factor just
     // multiplies the deviation away — so the observe gas is paid whenever the cardinality guard
@@ -501,6 +527,46 @@ mod tests {
         }
 
         assert_eq!(DynamicFeeConfig::from_attributes(&attributes), Ok(DynamicFeeConfig::default()));
+    }
+
+    #[rstest]
+    #[case::up(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 30_000)]
+    #[case::topaz_cl(hex!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"), 40_000)]
+    fn base_fee_without_scaling_factor_is_capped_by_the_module_default(
+        #[case] module: [u8; 20],
+        #[case] expected_fee: u32,
+    ) {
+        // A custom base fee with no scaling factor of its own: the module caps it at its
+        // `defaultFeeCap`, 30_000 for UP and 50_000 for Topaz.
+        let attributes = HashMap::from([
+            (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
+            ("dfc_baseFee".to_string(), Bytes::from(40_000_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(0_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(0_u64.to_be_bytes())),
+        ]);
+        let dfc = DynamicFeeConfig::from_attributes(&attributes)
+            .expect("supported module with complete attributes");
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 100,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+
+        let fee = get_dynamic_fee(&dfc, 3000, 0, 1, 0, 1, &observations, 100, true)
+            .expect("Failed to calculate dynamic fee");
+
+        assert_eq!(fee, ResolvedFee::flat(expected_fee));
+    }
+
+    #[test]
+    fn config_serialized_without_default_fee_cap_takes_the_shared_default() {
+        let serialized = r#"{"base_fee":500,"fee_cap":700,"scaling_factor":6000000,"initial_fee_enabled":false,"initial_fee":0}"#;
+
+        let dfc: DynamicFeeConfig =
+            serde_json::from_str(serialized).expect("pre-existing serialized config");
+
+        assert_eq!(dfc, DynamicFeeConfig::new(500, 700, 6_000_000, false, 0));
     }
 
     #[test]
