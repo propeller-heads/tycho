@@ -123,7 +123,6 @@ fn register_exchanges(
                 .exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None)
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
-                .exchange::<AerodromeSlipstreamsState>("topaz_cl", tvl_filter.clone(), None)
         }
         _ => {}
     }
