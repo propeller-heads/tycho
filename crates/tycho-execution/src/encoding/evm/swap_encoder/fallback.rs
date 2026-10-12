@@ -69,6 +69,14 @@ static SUPPORTED_PROTOCOLS: LazyLock<HashMap<Chain, &'static [FallbackProtocol]>
                     FallbackProtocol::AerodromeV1,
                 ][..],
             ),
+            (
+                Chain::Robinhood,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
         ])
     });
 
@@ -120,13 +128,13 @@ impl FallbackProtocol {
 
 /// The fallback protocol and its pool, from the swap's `user_data` JSON, e.g.
 /// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`.
-struct FallbackSwap {
-    protocol: FallbackProtocol,
+pub(super) struct FallbackSwap {
+    pub(super) protocol: FallbackProtocol,
     data: FallbackSwapData,
 }
 
 impl FallbackSwap {
-    fn from_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
+    pub(super) fn from_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
         let Some(bytes) = user_data
             .as_ref()
             .filter(|bytes| !bytes.is_empty())
@@ -165,7 +173,7 @@ impl FallbackSwap {
     }
 
     /// The protocol byte followed by the protocol data.
-    fn encode(&self) -> Result<Vec<u8>, EncodingError> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, EncodingError> {
         let mut encoded = vec![self.protocol.protocol_byte()];
         encoded.extend(self.data.encode()?);
         Ok(encoded)
@@ -268,7 +276,7 @@ impl FallbackSwapData {
     }
 }
 
-/// Encodes a pAMM swap for `TychoFallbackRouter`, which retries a failing pAMM on the fallback
+/// Encodes a pAMM swap for `PropAMMFallbackRouter`, which retries a failing pAMM on the fallback
 /// protocol named in the swap's `user_data`.
 ///
 /// # Fields
@@ -526,6 +534,8 @@ mod tests {
         assert!(!FallbackProtocol::AerodromeV1.supported_on(Chain::Ethereum));
         assert!(FallbackProtocol::AerodromeV1.supported_on(Chain::Base));
         assert!(!FallbackProtocol::Curve.supported_on(Chain::Base));
+        assert!(FallbackProtocol::UniswapV4.supported_on(Chain::Robinhood));
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Robinhood));
         // No router.
         assert!(!FallbackProtocol::UniswapV3.supported_on(Chain::Plasma));
     }

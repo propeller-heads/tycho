@@ -96,6 +96,19 @@ impl GatewayBuilder {
         Ok((cached_gw, handle))
     }
 
+    /// Like `build`, plus a gateway for request handling with its own connection pool, so a
+    /// burst of requests never makes extractors or the database writer wait for a connection.
+    ///
+    /// Returns the extraction gateway, the request gateway and the database writer task.
+    pub async fn build_with_rpc_gateway(
+        self,
+    ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
+        let rpc_pool = postgres::new_pool(&self.database_url)?;
+        let (extraction_gw, writer) = self.build().await?;
+        let rpc_gw = extraction_gw.with_pool(rpc_pool);
+        Ok((extraction_gw, rpc_gw, writer))
+    }
+
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
         let pool = postgres::connect(&self.database_url).await?;
 
@@ -139,5 +152,45 @@ impl GatewayBuilder {
 
         let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)
+    }
+}
+
+#[cfg(test)]
+mod test_serial_db {
+    use std::time::Duration;
+
+    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+
+    use super::*;
+    use crate::postgres::testing::run_against_db;
+
+    #[tokio::test]
+    async fn build_with_rpc_gateway_keeps_request_connections_apart_serial_db() {
+        run_against_db(|_| async move {
+            let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set");
+            let (extraction_gw, rpc_gw, _writer) = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .build_with_rpc_gateway()
+                .await
+                .expect("gateways should build");
+            let rpc_pool = rpc_gw.pool();
+
+            // Requests hold every request connection; extraction still connects at once.
+            let connect = |pool: &Pool<AsyncPgConnection>| {
+                let pool = pool.clone();
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), pool.get())
+                        .await
+                        .expect("waited for a connection held by the other pool's users")
+                        .expect("pool should connect")
+                }
+            };
+            let mut held = Vec::new();
+            for _ in 0..rpc_pool.status().max_size {
+                held.push(connect(rpc_pool).await);
+            }
+            held.push(connect(extraction_gw.pool()).await);
+        })
+        .await;
     }
 }

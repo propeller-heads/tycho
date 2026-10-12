@@ -124,14 +124,15 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
 /// a quote.
 ///
 /// Detection uses the substreams' static markers:
-/// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx).
+/// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx). A pool carrying it is
+///   kept only if its id is on a trusted list.
 /// - `asset_types` — per-coin Curve NG asset type encoded as a hex int. Standard coins encode as
 ///   `"0x"` / `"0x00"`. An oracle coin (`"0x01"`) is kept only if its entry in `oracles` and
 ///   `method_ids` is a trusted provider. Rebasing (`"0x02"`) and ERC4626 (`"0x03"`) coins are
 ///   always excluded.
 pub fn curve_filter(component: &ComponentWithState) -> bool {
     let attrs = &component.component.static_attributes;
-    if attr_json_list_non_empty(attrs, "rebase_tokens") || has_unsupported_asset_type(attrs) {
+    if has_untrusted_rebase_tokens(component) || has_unsupported_asset_type(attrs) {
         debug!(
             "Filtering out curve pool {} with rate-bearing/rebasing coins (unsupported by hybrid)",
             component.component.id
@@ -169,6 +170,38 @@ fn attr_json_list(attrs: &HashMap<String, Bytes>, key: &str) -> Option<Vec<Strin
 /// when at least one coin rebases).
 fn attr_json_list_non_empty(attrs: &HashMap<String, Bytes>, key: &str) -> bool {
     attr_json_list(attrs, key).is_some_and(|list| !list.is_empty())
+}
+
+/// True when the pool lists `rebase_tokens` and is not on the trusted list below.
+fn has_untrusted_rebase_tokens(component: &ComponentWithState) -> bool {
+    // Pools whose rebasing coins the hybrid quotes correctly. An entry must read each rebasing
+    // coin's balance live through `balanceOf(pool)` rather than caching it in pool storage, so
+    // the substreams' `balanceOf` DCI entrypoint captures every slot a rebase changes and the pool
+    // is re-emitted when it does.
+    //
+    // Both stETH pools hold native ETH, which the pool reads as `self.balance`. That balance is
+    // only correct from tycho-substreams 0.8.2 (#1544): earlier packages missed ETH sent out of
+    // the pool, and the legacy pool's indexed native balance drifted ~299 ETH above the chain.
+    //
+    // Checked on Ethereum on 2026-10-09: the hybrid quote equalled the pool's `get_dy` to the wei
+    // in both directions over 5 ETH swaps (blocks 26152141-26152169), and the 17 slots DCI traces
+    // for `balanceOf(pool)` matched the chain at block 26152079. Executed swaps land 1-2 wei
+    // under the quote because a stETH transfer rounds down to whole shares; `get_dy` does not
+    // model that either.
+    const TRUSTED_REBASE_POOLS: [&str; 2] = [
+        // Lido ETH/stETH, the legacy StableSwap pool.
+        "0xdc24316b9ae028f1497c275eb9192a3ea0f67022",
+        // ETH/stETH-ng, a plain pool from the meta pool factory.
+        "0x21e27a5e5513d6e65c4f830167390997aa84843a",
+    ];
+
+    if !attr_json_list_non_empty(&component.component.static_attributes, "rebase_tokens") {
+        return false;
+    }
+    let id = &component.component.id;
+    !TRUSTED_REBASE_POOLS
+        .iter()
+        .any(|trusted| id.eq_ignore_ascii_case(trusted))
 }
 
 /// True when `asset_types` contains a coin the hybrid cannot quote: any non-standard coin other
@@ -359,13 +392,40 @@ mod tests {
         assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x01"]"#)])));
     }
 
+    fn steth_pool(id: &str) -> ComponentWithState {
+        let mut component = curve_component(&[(
+            "rebase_tokens",
+            r#"["0xae7ab96520de3a18e5e111b5eaab095312d7fe84"]"#,
+        )]);
+        component.component.id = id.to_string();
+        component
+    }
+
     #[test]
     fn curve_excludes_rebase_tokens() {
-        // ETH/ETHx and legacy stETH expose a non-empty rebase_tokens list.
+        // ETH/ETHx exposes a non-empty rebase_tokens list.
         assert!(!curve_filter(&curve_component(&[(
             "rebase_tokens",
             r#"["0xa35b1b31ce002fbf2058d22f30f95d405200a15b"]"#
         )])));
+        // A stETH pool outside the trusted list stays out.
+        assert!(!curve_filter(&steth_pool("0x1111111111111111111111111111111111111111")));
+    }
+
+    #[test]
+    fn curve_keeps_trusted_rebase_pools_regardless_of_id_case() {
+        assert!(curve_filter(&steth_pool("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")));
+        assert!(curve_filter(&steth_pool("0x21e27a5e5513d6e65c4f830167390997aa84843a")));
+    }
+
+    #[test]
+    fn curve_trusted_rebase_pool_still_checks_asset_types() {
+        let mut component = steth_pool("0xdc24316b9ae028f1497c275eb9192a3ea0f67022");
+        component
+            .component
+            .static_attributes
+            .extend(attrs(&[("asset_types", r#"["0x00","0x03"]"#)]));
+        assert!(!curve_filter(&component));
     }
 
     #[test]

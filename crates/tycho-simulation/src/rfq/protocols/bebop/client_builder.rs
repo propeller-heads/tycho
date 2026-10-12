@@ -4,7 +4,9 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::BebopClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError, models::ComponentLayout, protocols::utils::default_quote_tokens_for_chain,
+};
 
 /// `BebopClientBuilder` is a builder pattern implementation for creating instances of
 /// `BebopClient`.
@@ -47,6 +49,8 @@ pub struct BebopClientBuilder {
     origin_address: Option<Bytes>,
     origin_target: Option<Bytes>,
     origin_source: Option<String>,
+    via_fallback_router: bool,
+    component_layout: ComponentLayout,
 }
 
 impl BebopClientBuilder {
@@ -61,7 +65,16 @@ impl BebopClientBuilder {
             origin_address: None,
             origin_target: None,
             origin_source: None,
+            via_fallback_router: false,
+            component_layout: ComponentLayout::PerPair,
         }
+    }
+
+    /// The components the client streams. One per pair, by default. Register a `PerPair` client
+    /// with `BebopState` and a `AllPairs` client with `BebopAllPairsState`.
+    pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
     }
 
     /// Set the tokens for which to monitor prices
@@ -109,6 +122,12 @@ impl BebopClientBuilder {
         self
     }
 
+    /// Executes the swaps through Tycho's `BebopFallbackRouter`. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<BebopClient, RFQError> {
         let quote_tokens;
         if let Some(tokens) = self.quote_tokens {
@@ -117,7 +136,7 @@ impl BebopClientBuilder {
             quote_tokens = default_quote_tokens_for_chain(&self.chain)?
         }
 
-        BebopClient::new(
+        let client = BebopClient::new(
             self.chain,
             self.tokens,
             self.tvl,
@@ -127,6 +146,8 @@ impl BebopClientBuilder {
             self.origin_address,
             self.origin_target,
             self.origin_source,
-        )
+        )?
+        .with_component_layout(self.component_layout);
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

@@ -18,6 +18,7 @@
 
 pub(crate) mod cache;
 pub(crate) mod service;
+pub(crate) mod shadow;
 pub(crate) mod window;
 
 /// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with
@@ -28,8 +29,8 @@ pub enum EntityCacheMode {
     #[default]
     Off,
     /// The cache is loaded at startup and the windows fold into it. Clients get the database
-    /// answer; a sample of requests also runs the cache path and compares the two results
-    /// (ENG-6295).
+    /// answer. On a sample of requests (`--entity-cache-shadow-sample-rate`), the cache path also
+    /// runs and the two answers are compared; see [`shadow`].
     Shadow,
     /// The cache is loaded at startup and the windows fold into it. Clients get the cache answer;
     /// versions the cache cannot rebuild are answered from the database.

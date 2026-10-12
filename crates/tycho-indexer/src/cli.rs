@@ -80,11 +80,18 @@ pub struct GlobalArgs {
     pub delta_window_fold_batch: usize,
 
     /// Which path answers `/contract_state` and `/protocol_state`: `off` reads the database;
-    /// `shadow` serves the database answer and compares it with the entity cache; `serve` serves
-    /// the entity cache answer and reads the database only for versions the cache cannot rebuild.
-    /// The `rpc` command has no entity cache and always runs as `off`.
+    /// `shadow` serves the database answer and, on a sample of requests set by
+    /// `--entity-cache-shadow-sample-rate`, compares it with the entity cache answer; `serve`
+    /// serves the entity cache answer and reads the database for versions the cache cannot
+    /// rebuild and for requests without ids. The `rpc` command has no entity cache and always
+    /// runs as `off`.
     #[clap(long, env = "ENTITY_CACHE_MODE", value_enum, default_value_t = EntityCacheMode::Off)]
     pub entity_cache_mode: EntityCacheMode,
+
+    /// Share of state requests that `shadow` also answers from the entity cache and compares,
+    /// from 0.0 to 1.0. Clients always get the database answer. Other modes ignore it.
+    #[clap(long, env = "ENTITY_CACHE_SHADOW_SAMPLE_RATE", default_value_t = 0.0, value_parser = parse_sample_rate)]
+    pub entity_cache_shadow_sample_rate: f64,
 
     /// Name of the s3 bucket used to retrieve spkgs
     #[clap(env = "TYCHO_S3_BUCKET", long, default_value = "repo.propellerheads-propellerheads")]
@@ -110,6 +117,18 @@ pub struct GlobalArgs {
     /// RPC configuration (URL and retry settings)
     #[command(flatten)]
     pub rpc: RPCArgs,
+}
+
+/// Parses a share from 0.0 to 1.0. Rejects NaN.
+fn parse_sample_rate(value: &str) -> Result<f64, String> {
+    let rate: f64 = value
+        .parse()
+        .map_err(|err| format!("`{value}` is not a number: {err}"))?;
+    if (0.0..=1.0).contains(&rate) {
+        Ok(rate)
+    } else {
+        Err(format!("must be from 0.0 to 1.0, got {rate}"))
+    }
 }
 
 /// RPC configuration arguments (url, retry settings, and potentially others, such as batching)
@@ -373,6 +392,7 @@ mod cli_tests {
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
+                entity_cache_shadow_sample_rate: 0.0,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,
@@ -477,6 +497,46 @@ mod cli_tests {
         assert!(Cli::try_parse_from(args).is_err());
     }
 
+    #[rstest]
+    #[case::none("0.0", 0.0)]
+    #[case::share("0.25", 0.25)]
+    #[case::all("1.0", 1.0)]
+    fn test_arg_parsing_shadow_sample_rate(#[case] value: &'static str, #[case] expected: f64) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-shadow-sample-rate", value]);
+
+        let cli = Cli::try_parse_from(args).expect("parse errored");
+
+        assert_eq!(
+            cli.global_args
+                .entity_cache_shadow_sample_rate,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_arg_parsing_shadow_sample_rate_defaults_to_zero() {
+        let cli = Cli::try_parse_from(args_with_delta_window("128", "1")).expect("parse errored");
+
+        assert_eq!(
+            cli.global_args
+                .entity_cache_shadow_sample_rate,
+            0.0
+        );
+    }
+
+    #[rstest]
+    #[case::negative("-0.1")]
+    #[case::above_one("1.5")]
+    #[case::not_a_number("NaN")]
+    #[case::text("often")]
+    fn test_arg_parsing_rejects_a_bad_shadow_sample_rate(#[case] value: &'static str) {
+        let mut args = args_with_delta_window("128", "1");
+        args.splice(1..1, ["--entity-cache-shadow-sample-rate", value]);
+
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
     #[tokio::test]
     async fn test_arg_parsing_index_cmd() {
         let cli = Cli::try_parse_from(vec![
@@ -510,6 +570,7 @@ mod cli_tests {
                 delta_window_depth: 128,
                 delta_window_fold_batch: 1,
                 entity_cache_mode: EntityCacheMode::Off,
+                entity_cache_shadow_sample_rate: 0.0,
                 s3_bucket: Some("repo.propellerheads-propellerheads".to_string()),
                 server_ip: "0.0.0.0".to_string(),
                 server_port: 4242,

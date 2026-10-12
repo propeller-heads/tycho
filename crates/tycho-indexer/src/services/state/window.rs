@@ -45,7 +45,7 @@ use std::{
 };
 
 use deepsize::DeepSizeOf;
-use metrics::histogram;
+use metrics::{gauge, histogram};
 use tracing::{debug, trace, warn};
 use tycho_common::{
     models::{
@@ -170,12 +170,28 @@ pub(crate) struct DeltaWindow {
     db_committed: Option<u64>,
     /// Highest `finalized_block_height` seen on any inserted message.
     finalized: Option<u64>,
+    /// Moves on every insert (a block or a revert) and every clear. A fold does not move it: it
+    /// runs under the same lock as the insert or the clear that makes it due. Two equal readings
+    /// mean the window did not change in between.
+    generation: u64,
 }
 
 impl DeltaWindow {
     /// Creates an empty window.
     pub(crate) fn new(extractor: String, config: WindowConfig) -> Self {
-        Self { extractor, buffer: ReorgBuffer::new(), config, db_committed: None, finalized: None }
+        Self {
+            extractor,
+            buffer: ReorgBuffer::new(),
+            config,
+            db_committed: None,
+            finalized: None,
+            generation: 0,
+        }
+    }
+
+    /// The change counter; see the `generation` field.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Applies one full-block message to the window.
@@ -196,6 +212,7 @@ impl DeltaWindow {
         &mut self,
         message: &Arc<BlockAggregatedChanges>,
     ) -> Result<(), StorageError> {
+        self.generation += 1;
         if message.revert {
             return self.revert_to(message);
         }
@@ -282,9 +299,25 @@ impl DeltaWindow {
         self.fold_and_evict(count, sink)
     }
 
+    /// Publishes the window's block count and newest block for its extractor, as the gauges
+    /// `delta_window_blocks` and `delta_window_tip_block`. An empty window reports 0 blocks and
+    /// leaves the tip gauge at its last value.
+    pub(crate) fn report_metrics(&self) {
+        let blocks = gauge!("delta_window_blocks", "extractor" => self.extractor.clone());
+        let (Some(oldest), Some(newest)) = (self.buffer.oldest(), self.buffer.newest()) else {
+            blocks.set(0.0);
+            return;
+        };
+        // Buffered blocks are contiguous, so the span from floor to tip is the count.
+        blocks.set((newest.block.number - oldest.block.number + 1) as f64);
+        gauge!("delta_window_tip_block", "extractor" => self.extractor.clone())
+            .set(newest.block.number as f64);
+    }
+
     /// Empties the window and forgets both watermarks. The configuration stays. The next
     /// inserted block starts a new chain, whatever its parent.
     pub(crate) fn clear(&mut self) {
+        self.generation += 1;
         self.buffer = ReorgBuffer::new();
         self.db_committed = None;
         self.finalized = None;
@@ -614,6 +647,32 @@ mod test {
 
     fn revert_msg(number: u64) -> BlockAggregatedChanges {
         BlockAggregatedChanges { revert: true, ..msg(number, 0, None) }
+    }
+
+    #[test]
+    fn generation_moves_on_every_change() {
+        let mut w =
+            DeltaWindow::new(EXTRACTOR.to_string(), WindowConfig { depth: 1, min_fold_batch: 1 });
+        let mut seen = vec![w.generation()];
+
+        w.insert(&Arc::new(msg(1, 1, Some(1))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(msg(2, 1, Some(1))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(msg(3, 2, Some(2))))
+            .unwrap();
+        seen.push(w.generation());
+        w.insert(&Arc::new(revert_msg(3)))
+            .unwrap();
+        seen.push(w.generation());
+        w.clear();
+        seen.push(w.generation());
+
+        let mut distinct = seen.clone();
+        distinct.dedup();
+        assert_eq!(distinct, seen, "every change must move the generation: {seen:?}");
     }
 
     fn with_component_balance(mut m: BlockAggregatedChanges, id: &str) -> BlockAggregatedChanges {
@@ -1013,6 +1072,59 @@ mod test {
                     matches!(value, DebugValue::Histogram(samples) if samples.len() == 7)
             });
         assert!(recorded, "one histogram sample per folded block, labelled by extractor");
+    }
+
+    /// Gauge values recorded for `EXTRACTOR`, by metric name.
+    fn extractor_gauges(
+        snapshotter: &metrics_util::debugging::Snapshotter,
+    ) -> HashMap<String, f64> {
+        use metrics_util::debugging::DebugValue;
+
+        let mut gauges = HashMap::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let ours = key
+                .key()
+                .labels()
+                .any(|l| l.key() == "extractor" && l.value() == EXTRACTOR);
+            if let (true, DebugValue::Gauge(v)) = (ours, value) {
+                gauges.insert(key.key().name().to_string(), v.0);
+            }
+        }
+        gauges
+    }
+
+    #[test]
+    fn report_metrics_publishes_the_block_count_and_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let mut w = window(3, 1);
+        fill(&mut w, 1..=10, 10, Some(10));
+        w.fold_evictable(&RecordingSink::default())
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || w.report_metrics());
+
+        // bound = min(finalized 10, committed 10, tip 10 - 3) = 7, so blocks 8..=10 stay
+        let gauges = extractor_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&3.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), Some(&10.0));
+    }
+
+    #[test]
+    fn report_metrics_on_an_empty_window_reports_zero_blocks_and_no_tip() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let w = window(3, 1);
+
+        metrics::with_local_recorder(&recorder, || w.report_metrics());
+
+        let gauges = extractor_gauges(&snapshotter);
+        assert_eq!(gauges.get("delta_window_blocks"), Some(&0.0));
+        assert_eq!(gauges.get("delta_window_tip_block"), None);
     }
 
     #[test]

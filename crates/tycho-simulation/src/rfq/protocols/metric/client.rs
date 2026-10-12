@@ -53,10 +53,23 @@ pub struct MetricClient {
     api_key: Option<String>,
     poll_time: Duration,
     quote_timeout: Duration,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    MetricClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl MetricClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:metric";
+    /// Components executed through Tycho's `MetricFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:metric";
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
+    }
 
     pub fn new(
         chain: Chain,
@@ -79,6 +92,7 @@ impl MetricClient {
             api_key,
             poll_time,
             quote_timeout,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
     }
 
@@ -95,7 +109,7 @@ impl MetricClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "metric_pool".to_string(),
             chain: self.chain,
             tokens: vec![metadata.token0.clone(), metadata.token1.clone()],
@@ -486,6 +500,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.metadata_endpoint, "https://api.metric.xyz/public/v1/evm/1/metadata");
+    }
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let metadata = metadata();
+        let client = MetricClientBuilder::new(Chain::Ethereum)
+            .with_fallback_router()
+            .build()
+            .unwrap();
+
+        let component = client.create_component_with_state(
+            metadata.pool_address.to_string(),
+            &metadata,
+            &bid_ask(),
+            3000.0,
+        );
+
+        assert_eq!(component.component.protocol_system, MetricClient::FALLBACK_PROTOCOL_SYSTEM);
+        assert_eq!(
+            MetricClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::METRIC_FALLBACK_PROTOCOL_SYSTEM
+        );
     }
 
     #[test]

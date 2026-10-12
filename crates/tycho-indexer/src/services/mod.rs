@@ -28,6 +28,7 @@ use crate::{
         middleware::{compression_middleware, rpc_metrics_middleware},
         state::{
             service::StateService,
+            shadow::{self, Sampler, Shadow},
             window::{new_windows, DiscardSink, FoldSink},
         },
     },
@@ -41,6 +42,7 @@ mod client_metadata;
 mod debug;
 mod deltas_buffer;
 mod middleware;
+mod off_worker;
 mod rpc;
 mod state;
 mod ws;
@@ -69,6 +71,8 @@ pub struct ServicesBuilder<G> {
     /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
     /// database.
     entity_cache: EntityCacheSetup<Arc<EntityCache>>,
+    /// Share of state requests that shadow mode compares.
+    shadow_sample_rate: f64,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -105,6 +109,7 @@ where
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
             entity_cache: EntityCacheSetup::Off,
+            shadow_sample_rate: 0.0,
         }
     }
 
@@ -121,6 +126,13 @@ where
     /// it always runs as [`EntityCacheSetup::Off`].
     pub fn entity_cache(mut self, setup: EntityCacheSetup<EntityCache>) -> Self {
         self.entity_cache = setup.map(Arc::new);
+        self
+    }
+
+    /// Sets the share of state requests that `shadow` compares, from 0.0 to 1.0. Other modes
+    /// ignore it.
+    pub fn shadow_sample_rate(mut self, rate: f64) -> Self {
+        self.shadow_sample_rate = rate;
         self
     }
 
@@ -236,10 +248,26 @@ where
                 "Failed to receive PendingDeltas start signal: {err}"
             ))
         })?;
-        let state_service = self
-            .entity_cache
-            .clone()
-            .map(|cache| Arc::new(StateService::new(windows, cache)));
+        let state_service = match self.entity_cache.clone() {
+            EntityCacheSetup::Off => EntityCacheSetup::Off,
+            EntityCacheSetup::Shadow(cache) => {
+                let service = Arc::new(StateService::new(windows, cache));
+                EntityCacheSetup::Shadow(Shadow::new(
+                    service,
+                    Sampler::new(self.shadow_sample_rate),
+                ))
+            }
+            EntityCacheSetup::Serve(cache) => {
+                EntityCacheSetup::Serve(Arc::new(StateService::new(windows, cache)))
+            }
+        };
+        if matches!(state_service, EntityCacheSetup::Shadow(_)) {
+            shadow::register_metrics(self.shadow_sample_rate);
+            info!(
+                sample_rate = self.shadow_sample_rate,
+                "Entity cache shadow comparison configured"
+            );
+        }
 
         let ws_data = web::Data::new(ws::WsData::new(self.extractor_handles.clone()));
         let (server_handle, server_task) = self.start_server(
@@ -260,7 +288,7 @@ where
         ws_data: Option<web::Data<ws::WsData>>,
         openapi: utoipa::openapi::OpenApi,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-        state_service: EntityCacheSetup<Arc<StateService>>,
+        state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
         let tracer = EVMEntrypointService::new(&self.rpc);
 
@@ -360,6 +388,10 @@ where
 
             app
         })
+        // The default is 512 threads divided across the workers. A worker that serves most
+        // connections could then queue state jobs behind each other inside tokio, although the
+        // `OffWorker` pools already bound how many run. Idle blocking threads exit after 10 s.
+        .worker_max_blocking_threads(512)
         .keep_alive(std::time::Duration::from_secs(60)) // prevents early connection closures
         // Allows clients up to 30 seconds to reconnect before forcefully closing the connection.
         // This prevents us from closing a connection the client is expecting to be able to reuse.

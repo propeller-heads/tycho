@@ -147,6 +147,11 @@ use crate::{
 /// Suggested concurrency level for RPC clients.
 pub const RPC_CLIENT_CONCURRENCY: usize = 4;
 
+/// Default number of contracts per `/contract_state` request. A few large contracts can hold most
+/// of a protocol's storage, so smaller requests let the server build them and the client decode
+/// them in parallel.
+pub const CONTRACT_STATE_CHUNK_SIZE: usize = 100;
+
 /// Parameters for [`RPCClient::get_contract_state`].
 #[derive(Clone, PartialEq, Debug)]
 pub struct ContractStateParams {
@@ -782,7 +787,8 @@ pub trait RPCClient: Send + Sync {
 
     /// Retrieves a snapshot of contract state for a set of contract IDs.
     ///
-    /// If `chunk_size` is `None`, it defaults to the maximum page size.
+    /// If `chunk_size` is `None`, it defaults to [`CONTRACT_STATE_CHUNK_SIZE`], capped at the
+    /// maximum page size.
     async fn get_contract_state_paginated(
         &self,
         params: ContractStatePaginatedParams,
@@ -793,9 +799,10 @@ pub trait RPCClient: Send + Sync {
         let mut sorted_ids = params.contract_ids;
         sorted_ids.sort();
 
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(StateRequestBody::effective_max_page_size(self.compression()) as usize);
+        let chunk_size = params.chunk_size.unwrap_or_else(|| {
+            CONTRACT_STATE_CHUNK_SIZE
+                .min(StateRequestBody::effective_max_page_size(self.compression()) as usize)
+        });
 
         let mut tasks = Vec::new();
         for chunk in sorted_ids.chunks(chunk_size) {
@@ -1531,21 +1538,23 @@ impl RPCClient for HttpRPCClient {
             return Ok(Page::new(vec![], 0, 0, 0));
         }
 
-        let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
-        trace!(?dto_response, "Received contract_state response from Tycho server");
+        // Decoding a large response takes seconds of CPU: run it on the blocking pool, so the
+        // runtime stays responsive and concurrent requests decode in parallel.
+        let (data, pagination) = tokio::task::spawn_blocking(move || {
+            let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
+                .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            trace!(?dto_response, "Received contract_state response from Tycho server");
 
-        let data: Vec<Account> = dto_response
-            .accounts
-            .into_iter()
-            .map(Account::from)
-            .collect();
-        Ok(Page::new(
-            data,
-            dto_response.pagination.total,
-            dto_response.pagination.page,
-            dto_response.pagination.page_size,
-        ))
+            let data: Vec<Account> = dto_response
+                .accounts
+                .into_iter()
+                .map(Account::from)
+                .collect();
+            Ok::<_, RPCError>((data, dto_response.pagination))
+        })
+        .await
+        .map_err(|err| RPCError::Fatal(format!("Decoding contract_state failed: {err}")))??;
+        Ok(Page::new(data, pagination.total, pagination.page, pagination.page_size))
     }
 
     async fn get_protocol_components(
@@ -2116,6 +2125,36 @@ mod tests {
             hex::decode("5c06b7c5b3d910fd33bc2229846f9ddaf91d584d9b196e16636901ac3a77077e")
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_contract_state_paginated_requests_default_sized_chunks() {
+        let mut server = Server::new_async().await;
+        let full_chunks = server
+            .mock("POST", "/v1/contract_state")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "pagination": {"page": 0, "page_size": 100}
+            })))
+            .expect(3)
+            .with_body(GET_CONTRACT_STATE_RESP)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+        let ids: Vec<Bytes> = (0..250u16)
+            .map(|i| Bytes::from(i.to_be_bytes()))
+            .collect();
+
+        let accounts = client
+            .get_contract_state_paginated(
+                ContractStatePaginatedParams::new(Chain::Ethereum, "", RPC_CLIENT_CONCURRENCY)
+                    .with_contract_ids(ids),
+            )
+            .await
+            .expect("get state");
+
+        full_chunks.assert();
+        assert_eq!(accounts.len(), 3);
     }
 
     #[tokio::test]
