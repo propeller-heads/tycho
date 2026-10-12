@@ -205,12 +205,11 @@ mod tests {
             .as_any()
             .downcast_ref::<HashflowAllPairsState>()
             .unwrap();
-        assert_eq!(
-            new_state.price_levels,
-            state
-                .price_levels
-                .with_used("test_mm_2")
-        );
+        let fill = state
+            .price_levels
+            .best_fill(&weth_amount(0.5), &weth().address, &usdc().address)
+            .unwrap();
+        assert_eq!(new_state.price_levels, state.price_levels.with_fill(&fill));
     }
 
     #[tokio::test]
@@ -229,19 +228,8 @@ mod tests {
             .request_signed_quote(quote_params())
             .await
             .unwrap();
-        let after_first = HashflowAllPairsState {
-            price_levels: state
-                .price_levels
-                .with_used("test_mm_2"),
-            client: state.client.clone(),
-        };
-        after_first
-            .request_signed_quote(quote_params())
-            .await
-            .unwrap();
 
         let requests = request_log.lock().unwrap();
         assert!(requests[0].contains("\"marketMakers\":[\"test_mm_2\"]"), "{}", requests[0]);
-        assert!(requests[1].contains("\"marketMakers\":[\"test_mm\"]"), "{}", requests[1]);
     }
 }

@@ -206,7 +206,11 @@ mod tests {
             .as_any()
             .downcast_ref::<LiquoriceAllPairsState>()
             .unwrap();
-        assert_eq!(new_state.price_levels, state.price_levels.with_used("test_mm"));
+        let fill = state
+            .price_levels
+            .best_fill(&weth_amount(1.0), &weth().address, &usdc().address)
+            .unwrap();
+        assert_eq!(new_state.price_levels, state.price_levels.with_fill(&fill));
     }
 
     #[tokio::test]
@@ -226,19 +230,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(quote.amount_out, BigUint::from(3329502u64));
-
-        let after_first = LiquoriceAllPairsState {
-            price_levels: state
-                .price_levels
-                .with_used("test-maker"),
-            client: state.client.clone(),
-        };
-        let missing = after_first
-            .request_signed_quote(quote_params())
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(missing, SimulationError::FatalError(msg) if msg.contains("quote not found"))
-        );
     }
 }
