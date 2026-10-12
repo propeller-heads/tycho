@@ -79,6 +79,19 @@ pub(crate) fn to_whole_units(amount: &BigUint, decimals: u32) -> Result<f64, Sim
     Ok(amount / 10f64.powi(decimals as i32))
 }
 
+/// The price of the next input unit after `filled` units went into `levels`. `None` when `filled`
+/// reaches the depth of `levels`.
+pub fn marginal_price(levels: &[PriceLevel], filled: f64) -> Option<f64> {
+    let mut depth = 0.0;
+    for level in levels {
+        depth += level.quantity;
+        if filled < depth {
+            return Some(level.price);
+        }
+    }
+    None
+}
+
 /// The components an RFQ client streams, and so the state type its stream decodes to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
