@@ -60,6 +60,12 @@ struct Cli {
     /// Protocol systems to check; defaults to the chain's native protocols.
     #[arg(long, value_delimiter = ',')]
     protocols: Option<Vec<String>>,
+    /// Check only these components (ids), instead of sampling pools per protocol.
+    #[arg(long, value_delimiter = ',')]
+    components: Option<Vec<String>>,
+    /// Check every component holding one of these tokens (addresses), across all protocols.
+    #[arg(long, value_delimiter = ',')]
+    tokens: Option<Vec<String>>,
     /// Minimum component TVL in the chain's native token.
     #[arg(long, default_value_t = 20.0)]
     tvl_threshold: f64,
@@ -174,7 +180,27 @@ async fn main() -> miette::Result<()> {
         }
 
         let block = fetch_block(&rpc_tools, block_number).await?;
-        let pools = choose_pools(&components, &changed, &protocols, cli.pools_per_protocol);
+        let pools = match &cli.components {
+            Some(ids) => ids
+                .iter()
+                .map(|id| id.to_lowercase())
+                .filter(|id| components.contains_key(id))
+                .collect(),
+            None => match &cli.tokens {
+                Some(tokens) => components
+                    .iter()
+                    .filter(|(_, component)| {
+                        component.tokens.iter().any(|token| {
+                            tokens.iter().any(|wanted| {
+                                wanted.eq_ignore_ascii_case(&token.address.to_string())
+                            })
+                        })
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                None => choose_pools(&components, &changed, &protocols, cli.pools_per_protocol),
+            },
+        };
         let addresses: Vec<_> = pools
             .iter()
             .filter_map(|id| components.get(id))
