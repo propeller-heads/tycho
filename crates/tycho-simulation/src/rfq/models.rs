@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_client::feed::{BlockHeader, HeaderLike};
-use tycho_common::Bytes;
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 #[derive(Clone, Default, Debug)]
 pub struct TimestampHeader {
@@ -67,6 +69,14 @@ pub fn fill_levels(levels: &[PriceLevel], amount_in: f64) -> (f64, f64) {
         remaining_amount_in -= filled;
     }
     (amount_out, remaining_amount_in)
+}
+
+/// `amount` in whole units of a token with `decimals` decimals.
+pub(crate) fn to_whole_units(amount: &BigUint, decimals: u32) -> Result<f64, SimulationError> {
+    let amount = amount
+        .to_f64()
+        .ok_or_else(|| SimulationError::RecoverableError("Can't convert amount to f64".into()))?;
+    Ok(amount / 10f64.powi(decimals as i32))
 }
 
 /// The components an RFQ client streams, and so the state type its stream decodes to.

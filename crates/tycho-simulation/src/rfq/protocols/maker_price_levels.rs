@@ -5,7 +5,7 @@ use std::{
 };
 
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use tycho_client::feed::synchronizer::ComponentWithState;
@@ -20,7 +20,7 @@ use tycho_common::{
 
 use crate::rfq::{
     errors::RFQError,
-    models::{fill_levels, PriceLevel, QuoteRule},
+    models::{fill_levels, to_whole_units, PriceLevel, QuoteRule},
     protocols::component,
 };
 
@@ -378,13 +378,6 @@ pub fn all_pairs_component(
         rule,
     )?;
     Ok(Some(component))
-}
-
-fn to_whole_units(amount: &BigUint, decimals: u32) -> Result<f64, SimulationError> {
-    let amount = amount
-        .to_f64()
-        .ok_or_else(|| SimulationError::RecoverableError("Can't convert amount to f64".into()))?;
-    Ok(amount / 10f64.powi(decimals as i32))
 }
 
 fn to_atomic_units(amount: f64, decimals: u32) -> Result<BigUint, SimulationError> {
