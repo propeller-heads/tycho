@@ -6,7 +6,8 @@
 //! wei of difference, or a disagreement between a native error and an on-chain revert, is
 //! recorded.
 
-mod ladder;
+mod fuzz;
+mod history;
 mod report;
 mod stream;
 
@@ -35,7 +36,10 @@ use tycho_test::{
     RPCTools,
 };
 
-use crate::report::{Outcome, Point, Report};
+use crate::{
+    history::History,
+    report::{Outcome, Point, Report},
+};
 
 const FEE_CALCULATOR_FIXTURE: &str =
     include_str!("../../testing/fixtures/FeeCalculator.runtime.json");
@@ -65,6 +69,12 @@ struct Cli {
     /// Pools per protocol per checked block, preferring pools that changed in that block.
     #[arg(long, default_value_t = 3)]
     pools_per_protocol: usize,
+    /// On-chain executions per pool and direction in each checked block.
+    #[arg(long, default_value_t = 40)]
+    budget_per_direction: usize,
+    /// Blocks of transfer history to draw realistic swap sizes from.
+    #[arg(long, default_value_t = 900)]
+    history_window: u64,
     /// Seconds between blocks, used to project the execution block like the decoder does.
     #[arg(long, default_value_t = 2)]
     block_time_secs: u64,
@@ -112,6 +122,12 @@ async fn main() -> miette::Result<()> {
     info!(tokens = tokens.len(), "Loaded tokens");
 
     let rpc_tools = RPCTools::new(&cli.rpc_url, &chain).await?;
+    let prices = tycho_test::token_prices::load_token_prices(chain)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("No token prices, history converts no amounts across tokens: {e:?}");
+            HashMap::new()
+        });
     let router_overwrites = zero_fee_router_overwrites()?;
     let run_dir = cli.out_dir.join(
         std::time::SystemTime::now()
@@ -159,7 +175,32 @@ async fn main() -> miette::Result<()> {
 
         let block = fetch_block(&rpc_tools, block_number).await?;
         let pools = choose_pools(&components, &changed, &protocols, cli.pools_per_protocol);
-        let points = quote_ladders(&pools, &components, &states);
+        let addresses: Vec<_> = pools
+            .iter()
+            .filter_map(|id| components.get(id))
+            .filter_map(|component| history::pool_address(&component.id))
+            .collect();
+        let history = History::load(
+            &rpc_tools.provider,
+            &addresses,
+            block_number,
+            cli.history_window,
+            &prices,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!("No transfer history for block {block_number}: {e:?}");
+            History::default()
+        });
+        let points = fuzz_points(
+            &pools,
+            &components,
+            &states,
+            &history,
+            &prices,
+            block_number,
+            cli.budget_per_direction,
+        );
         let overrides =
             (!cli.no_block_override).then(|| projected_block(&block, cli.block_time_secs));
         let outcomes =
@@ -259,11 +300,16 @@ fn choose_pools(
     chosen
 }
 
-/// Quotes every ladder amount natively, in every direction of every chosen pool.
-fn quote_ladders(
+/// Draws seeded candidate amounts for every direction of every chosen pool and quotes them
+/// natively.
+fn fuzz_points(
     pools: &[String],
     components: &HashMap<String, ProtocolComponent>,
     states: &HashMap<String, Box<dyn ProtocolSim>>,
+    history: &History,
+    prices: &HashMap<tycho_common::Bytes, f64>,
+    block_number: u64,
+    budget: usize,
 ) -> Vec<Point> {
     let mut points = Vec::new();
     for id in pools {
@@ -275,18 +321,30 @@ fn quote_ladders(
                 if sell.address == buy.address {
                     continue;
                 }
-                let limit = state
-                    .get_limits(sell.address.clone(), buy.address.clone())
-                    .ok()
-                    .map(|(max_in, _)| max_in);
-                for (rung, amount) in ladder::amounts(sell, limit.as_ref()) {
+                let limit = match state.get_limits(sell.address.clone(), buy.address.clone()) {
+                    Ok((max_in, _)) => Some(max_in),
+                    Err(e) => {
+                        warn!(pool = id, error = ?e, "get_limits failed, fuzzing without a limit");
+                        None
+                    }
+                };
+                let context = fuzz::Context {
+                    limit: limit.as_ref(),
+                    history,
+                    pool: history::pool_address(&component.id),
+                    prices,
+                    seed: fuzz::seed(id, sell, block_number),
+                };
+                for (source, amount) in
+                    fuzz::candidates(state.as_ref(), sell, buy, &context, budget)
+                {
                     let native = state.get_amount_out(amount.clone(), sell, buy);
                     points.push(Point::new(
                         component,
                         state.as_ref(),
                         sell,
                         buy,
-                        rung,
+                        source.to_string(),
                         amount,
                         native,
                     ));
