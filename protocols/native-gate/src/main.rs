@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long, env = "TYCHO_AUTH_KEY", hide_env_values = true)]
     tycho_api_key: String,
     /// Node the swaps execute on. Needs `debug_traceCall` and the state of the streamed blocks.
-    #[arg(long, env = "RPC_URL")]
+    #[arg(long, env = "RPC_URL", hide_env_values = true)]
     rpc_url: String,
     /// Protocol systems to check; defaults to the chain's native protocols.
     #[arg(long, value_delimiter = ',')]
