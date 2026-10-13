@@ -235,14 +235,24 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock. The full copy of
-        // an entry happens here, unless a fold already replaced it in the cache.
+        // Apply the window changes on top of each entry, without holding any lock. The copy of an
+        // entry happens here, unless a fold already replaced it in the cache. The copy leaves out
+        // zero slots that the window does not write, so they are not copied only to be dropped.
         let mut accounts = Vec::with_capacity(page.len());
         for (address, entry) in page.iter().zip(entries) {
-            let entry = entry.map(Arc::unwrap_or_clone);
             let changes = window_changes
                 .get(address)
                 .map_or(&[][..], Vec::as_slice);
+            let entry = entry.map(|entry| {
+                Arc::try_unwrap(entry).unwrap_or_else(|shared| {
+                    let touched = changes
+                        .iter()
+                        .filter_map(|change| change.delta.as_ref())
+                        .flat_map(|delta| delta.slots.keys())
+                        .collect();
+                    shared.served_copy(&touched)
+                })
+            });
             let (mut entry, changes) = match entry {
                 Some(entry) => (entry, changes),
                 // Not cached: build the account from its first delta in the windows and apply the

@@ -28,7 +28,7 @@
 //! so that copy happens at most once per fold instead of once per read.
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
     hash::Hash,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Instant,
@@ -324,6 +324,30 @@ impl From<CachedAccount> for Account {
 }
 
 impl CachedAccount {
+    /// Copies the entry to serve `/contract_state`. Zero slots are not copied, because the
+    /// response leaves them out. A zero slot in `touched` is copied: its timestamp decides if a
+    /// window write to that slot applies.
+    pub(crate) fn served_copy(&self, touched: &HashSet<&StoreKey>) -> Self {
+        Self {
+            chain: self.chain,
+            address: self.address.clone(),
+            title: self.title.clone(),
+            slots: self
+                .slots
+                .iter()
+                .filter(|(key, value)| !value.value.is_zero() || touched.contains(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            native_balance: self.native_balance.clone(),
+            token_balances: self.token_balances.clone(),
+            code: self.code.clone(),
+            updated_at: self.updated_at,
+            balance_modify_tx: self.balance_modify_tx.clone(),
+            code_modify_tx: self.code_modify_tx.clone(),
+            creation_tx: self.creation_tx.clone(),
+        }
+    }
+
     /// Converts the entry into the account that `/contract_state` returns: slots whose value is
     /// zero are left out. A missing slot reads as zero, so the account state is the same.
     pub(crate) fn into_served_account(self) -> Account {
@@ -999,6 +1023,29 @@ mod test {
         cached.apply_block(Some(&delta), None, at(2));
 
         assert_eq!(cached, once);
+    }
+
+    /// Slot 2 was deleted at block 5. An older window write (block 3, e.g. from another
+    /// extractor) must not bring it back, so the copy keeps the touched zero slot and its
+    /// timestamp.
+    #[test]
+    fn account_served_copy_keeps_only_non_zero_and_touched_slots() {
+        let address = addr(1);
+        let mut cached = CachedAccount::from_creation(
+            &creation(&address, [(1, 1), (2, 2), (3, 3)], 10, "0x6000"),
+            None,
+            at(1),
+        );
+        let deleted = HashMap::from([(slot(2), None), (slot(3), None)]);
+        cached.apply_block(Some(&update(&address, deleted)), None, at(5));
+        let older = update(&address, fixtures::optional_slots([(2, 7)]));
+
+        let mut copy = cached.served_copy(&HashSet::from([&slot(2)]));
+        let copied = copy.slots().len();
+        copy.apply_block(Some(&older), None, at(3));
+
+        assert_eq!(copy.into_served_account().slots, fixtures::slots([(1, 1)]));
+        assert_eq!(copied, 2, "slot 3 is zero and not touched");
     }
 
     #[test]
