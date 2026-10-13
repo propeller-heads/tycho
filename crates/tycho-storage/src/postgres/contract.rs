@@ -622,6 +622,8 @@ impl PostgresGateway {
     /// might change to use VersionResult, but for now we keep it simple. Using
     /// anything else then Version::Last is currently not supported.
     ///
+    /// Deleted slots are left out: a missing slot reads as zero.
+    ///
     /// # Parameters
     /// - `chain` The chain for which to retrieve slots for.
     /// - `contracts` Optionally allows filtering by contract address.
@@ -652,6 +654,10 @@ impl PostgresGateway {
                         .le(version_ts)
                         .and(valid_to.gt(version_ts)),
                 )
+                // A deleted slot is stored as NULL and reads as zero, so it is left out. At most
+                // one row of a slot is valid at `version_ts`, so this filter can run before
+                // DISTINCT ON.
+                .filter(value.is_not_null())
                 .order_by((account::id, slot, valid_from.desc(), ordinal.desc()))
                 .select((account::id, slot, value))
                 .distinct_on((account::id, slot))
@@ -2561,6 +2567,35 @@ mod test {
             .unwrap();
 
         assert_eq!(res, exp);
+    }
+
+    /// A deleted slot is stored as NULL. It reads as zero, so it is left out.
+    #[tokio::test]
+    async fn test_get_slots_leaves_out_deleted_slots() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let c0 = Bytes::from("6B175474E89094C44Da98b954EedeAC495271d0F");
+        let c0_id = schema::account::table
+            .filter(schema::account::address.eq(&c0))
+            .select(schema::account::id)
+            .first::<i64>(&mut conn)
+            .await
+            .unwrap();
+        diesel::update(schema::contract_storage::table)
+            .filter(schema::contract_storage::account_id.eq(c0_id))
+            .filter(schema::contract_storage::slot.eq(Bytes::from(2u32).lpad(32, 0)))
+            .set(schema::contract_storage::value.eq(None::<Bytes>))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let res = gw
+            .get_contract_slots(&Chain::Ethereum, Some(slice::from_ref(&c0)), None, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(res, HashMap::from([(c0, contract_slots([(0, 2), (1, 3), (5, 25), (6, 30)]))]));
     }
 
     #[tokio::test]
