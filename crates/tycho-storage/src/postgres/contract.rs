@@ -942,7 +942,7 @@ impl PostgresGateway {
             accounts
         };
 
-        let slots = if include_slots {
+        let mut slots = if include_slots {
             Some(
                 self.get_contract_slots(chain, Some(&page_addresses), version, conn)
                     .await?,
@@ -998,10 +998,9 @@ impl PostgresGateway {
                     None,
                 );
 
-                if let Some(storage) = &slots {
-                    if let Some(contract_slots) = storage.get(&contract.address) {
+                if let Some(storage) = &mut slots {
+                    if let Some(contract_slots) = storage.remove(&contract.address) {
                         contract.slots = contract_slots
-                            .clone()
                             .into_iter()
                             .map(|(k, v)| (k, v.unwrap_or_default()))
                             .collect();
