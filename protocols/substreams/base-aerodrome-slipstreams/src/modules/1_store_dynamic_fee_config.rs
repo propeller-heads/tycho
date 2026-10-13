@@ -1,11 +1,15 @@
-use crate::modules::utils::{
-    dynamic_fee_config_initialized_key, dynamic_fee_config_key, DynamicFeeEvent, Params,
+use crate::{
+    abi::dynamic_swap_fee_module::events::SecondsAgoSet,
+    modules::utils::{
+        dynamic_fee_config_initialized_key, dynamic_fee_config_key, seconds_ago_key,
+        DynamicFeeEvent, Params,
+    },
 };
 use substreams::{
     scalar::BigInt,
     store::{StoreNew, StoreSet, StoreSetBigInt},
 };
-use substreams_ethereum::pb::eth::v2 as eth;
+use substreams_ethereum::{pb::eth::v2 as eth, Event};
 
 fn set_config_value(
     store: &StoreSetBigInt,
@@ -35,6 +39,10 @@ pub fn store_dynamic_fee_config(params: String, block: eth::Block, store: StoreS
     for transaction in block.transactions() {
         for (log, _) in transaction.logs_with_calls() {
             if !dynamic_fee_modules.contains(&log.address) {
+                continue;
+            }
+            if let Some(event) = SecondsAgoSet::match_and_decode(log) {
+                store.set(log.ordinal, seconds_ago_key(&log.address), &event.seconds_ago);
                 continue;
             }
 

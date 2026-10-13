@@ -1,7 +1,9 @@
 use crate::{
+    abi::dynamic_swap_fee_module::events::SecondsAgoSet,
     events::get_log_changed_attributes,
     modules::utils::{
-        dynamic_fee_config_initialized_key, dynamic_fee_config_key, DynamicFeeEvent, Params,
+        dynamic_fee_config_key, fee_module_pools_key, is_first_dynamic_fee_config_event,
+        seconds_ago_key, DynamicFeeEvent, Params, DEFAULT_SECONDS_AGO,
         DYNAMIC_FEE_CONFIG_ATTRIBUTES,
     },
     pb::tycho::evm::aerodrome::Pool,
@@ -11,18 +13,22 @@ use itertools::Itertools;
 use std::{collections::HashMap, vec};
 use substreams::{
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetBigInt, StoreGetProto},
+    scalar::BigInt,
+    store::{StoreGet, StoreGetBigInt, StoreGetProto, StoreGetString},
 };
-use substreams_ethereum::pb::eth::v2::{self as eth};
+use substreams_ethereum::{
+    pb::eth::v2::{self as eth},
+    Event,
+};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
 
-fn is_first_dynamic_fee_config_event(deltas: &StoreDeltas, ordinal: u64, pool: &[u8]) -> bool {
-    deltas.deltas.iter().any(|delta| {
-        delta.ordinal == ordinal &&
-            delta.key == dynamic_fee_config_initialized_key(pool) &&
-            delta.old_value.is_empty()
-    })
+fn seconds_ago_attribute(value: &BigInt) -> Attribute {
+    Attribute {
+        name: "dfc_secondsAgo".into(),
+        value: value.to_signed_bytes_be(),
+        change: ChangeType::Update.into(),
+    }
 }
 
 #[substreams::handlers::map]
@@ -33,6 +39,7 @@ pub fn map_protocol_changes(
     pools_store: StoreGetProto<Pool>,
     dynamic_fee_config_deltas: StoreDeltas,
     dynamic_fee_config_store: StoreGetBigInt,
+    dynamic_fee_module_pools_store: StoreGetString,
     balance_store: StoreDeltas,
     balance_deltas: BlockBalanceDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
@@ -110,6 +117,22 @@ pub fn map_protocol_changes(
                 }
             }
             if processes_dynamic_fee_config && dynamic_fee_modules.contains(&log.address) {
+                if let Some(event) = SecondsAgoSet::match_and_decode(log) {
+                    // The window is module-wide: every pool the module configured follows it.
+                    let pools = dynamic_fee_module_pools_store
+                        .get_at(log.ordinal, fee_module_pools_key(&log.address))
+                        .unwrap_or_default();
+                    for pool in pools
+                        .split(';')
+                        .filter(|pool| !pool.is_empty())
+                    {
+                        builder.add_entity_change(&EntityChanges {
+                            component_id: pool.to_string(),
+                            attributes: vec![seconds_ago_attribute(&event.seconds_ago)],
+                        });
+                    }
+                    continue;
+                }
                 let Some(event) = DynamicFeeEvent::match_and_decode(log) else {
                     continue;
                 };
@@ -145,11 +168,18 @@ pub fn map_protocol_changes(
                                 .to_signed_bytes_be(),
                             change: ChangeType::Update.into(),
                         })
-                        .chain(std::iter::once(Attribute {
-                            name: "dynamic_fee_module".into(),
-                            value: log.address.clone(),
-                            change: ChangeType::Update.into(),
-                        }))
+                        .chain([
+                            seconds_ago_attribute(
+                                &dynamic_fee_config_store
+                                    .get_at(log.ordinal, seconds_ago_key(&log.address))
+                                    .unwrap_or_else(|| BigInt::from(DEFAULT_SECONDS_AGO)),
+                            ),
+                            Attribute {
+                                name: "dynamic_fee_module".into(),
+                                value: log.address.clone(),
+                                change: ChangeType::Update.into(),
+                            },
+                        ])
                         .collect()
                 } else {
                     event
@@ -177,31 +207,4 @@ pub fn map_protocol_changes(
             .collect::<Vec<_>>(),
         storage_changes: vec![],
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use substreams::pb::substreams::{StoreDelta, StoreDeltas};
-
-    use super::{dynamic_fee_config_initialized_key, is_first_dynamic_fee_config_event};
-
-    #[test]
-    fn only_the_first_pool_event_requests_a_complete_snapshot() {
-        let pool = [0x33; 20];
-        let mut deltas = StoreDeltas {
-            deltas: vec![StoreDelta {
-                ordinal: 42,
-                key: dynamic_fee_config_initialized_key(&pool),
-                old_value: Vec::new(),
-                new_value: b"1".to_vec(),
-                ..Default::default()
-            }],
-        };
-
-        assert!(is_first_dynamic_fee_config_event(&deltas, 42, &pool));
-        assert!(!is_first_dynamic_fee_config_event(&deltas, 43, &pool));
-
-        deltas.deltas[0].old_value = b"1".to_vec();
-        assert!(!is_first_dynamic_fee_config_event(&deltas, 42, &pool));
-    }
 }

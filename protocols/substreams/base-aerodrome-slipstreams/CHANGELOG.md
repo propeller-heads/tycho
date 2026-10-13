@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.0
+
+### Added
+
+- Index each fee module's TWAP window as the `dfc_secondsAgo` attribute. A pool's first event
+  from a configured module now snapshots the module's window with its other fee settings, and a
+  module's `SecondsAgoSet` event updates every pool that module has configured. The Base modules
+  were deployed with a 600 s window and all three switched to 480 s at block 52,307,488; Tycho kept
+  quoting the dynamic fee over 600 s.
+- Add the `store_dynamic_fee_module_pools` store, which lists the pools each fee module has
+  configured so a module-wide change can be emitted on each of them.
+
+### Deployment notes
+
+- Both manifests need a full back-process from their initial blocks: the pool lists are built
+  from each pool's first fee module event, and existing pools only get `dfc_secondsAgo` from that
+  replay.
+
 ## v0.1.5
 
 ### Added

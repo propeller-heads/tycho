@@ -65,6 +65,18 @@ modules:
       - params: string
       - source: sf.ethereum.type.v2.Block
 
+  - name: store_dynamic_fee_module_pools
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+      - store: store_dynamic_fee_config
+        mode: deltas
+
   - name: map_balance_changes
     kind: map
     initialBlock: *initial_block
@@ -92,6 +104,7 @@ modules:
       - store: store_dynamic_fee_config
         mode: deltas
       - store: store_dynamic_fee_config
+      - store: store_dynamic_fee_module_pools
       - store: store_pools_balances
         mode: deltas
       - map: map_balance_changes
@@ -102,4 +115,5 @@ params:
   map_tick_spacing_fee: &up_v3_params "factories[]=1ac9dB4a2608ba45D6127B1737949b51Bb54B7F3&dynamic_fee_modules[]=a8Bdc945bE050E451C97f935d7c0D6B0087cF94c&protocol_type_name=up_v3_pool&first_dynamic_fee_module_block=49409694"
   map_pools_created: *up_v3_params
   store_dynamic_fee_config: *up_v3_params
+  store_dynamic_fee_module_pools: *up_v3_params
   map_protocol_changes: *up_v3_params

@@ -4,7 +4,7 @@ use crate::abi::dynamic_swap_fee_module::events::{
 };
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
-use substreams::scalar::BigInt;
+use substreams::{pb::substreams::StoreDeltas, scalar::BigInt};
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
 use substreams_helper::hex::Hexable;
 
@@ -25,6 +25,28 @@ pub fn tick_spacing_fee_key(factory: &[u8], tick_spacing: i32) -> String {
 
 pub fn dynamic_fee_config_initialized_key(pool: &[u8]) -> String {
     dynamic_fee_config_key(pool, "initialized")
+}
+
+/// TWAP window every Base fee module was deployed with, before any `SecondsAgoSet`.
+pub const DEFAULT_SECONDS_AGO: i64 = 600;
+
+/// Key of a fee module's TWAP window, which applies to all of its pools.
+pub fn seconds_ago_key(fee_module: &[u8]) -> String {
+    dynamic_fee_config_key(fee_module, "dfc_secondsAgo")
+}
+
+/// Key of the pools a fee module configured, which a module-wide change is fanned out to.
+pub fn fee_module_pools_key(fee_module: &[u8]) -> String {
+    fee_module.to_hex()
+}
+
+/// Whether the event at `ordinal` is the first event of a configured fee module for `pool`.
+pub fn is_first_dynamic_fee_config_event(deltas: &StoreDeltas, ordinal: u64, pool: &[u8]) -> bool {
+    deltas.deltas.iter().any(|delta| {
+        delta.ordinal == ordinal &&
+            delta.key == dynamic_fee_config_initialized_key(pool) &&
+            delta.old_value.is_empty()
+    })
 }
 
 pub enum DynamicFeeEvent {
@@ -129,7 +151,32 @@ impl Params {
 
 #[cfg(test)]
 mod tests {
-    use super::{dynamic_fee_config_initialized_key, dynamic_fee_config_key, tick_spacing_fee_key};
+    use substreams::pb::substreams::{StoreDelta, StoreDeltas};
+
+    use super::{
+        dynamic_fee_config_initialized_key, dynamic_fee_config_key,
+        is_first_dynamic_fee_config_event, tick_spacing_fee_key,
+    };
+
+    #[test]
+    fn only_the_first_pool_event_requests_a_complete_snapshot() {
+        let pool = [0x33; 20];
+        let mut deltas = StoreDeltas {
+            deltas: vec![StoreDelta {
+                ordinal: 42,
+                key: dynamic_fee_config_initialized_key(&pool),
+                old_value: Vec::new(),
+                new_value: b"1".to_vec(),
+                ..Default::default()
+            }],
+        };
+
+        assert!(is_first_dynamic_fee_config_event(&deltas, 42, &pool));
+        assert!(!is_first_dynamic_fee_config_event(&deltas, 43, &pool));
+
+        deltas.deltas[0].old_value = b"1".to_vec();
+        assert!(!is_first_dynamic_fee_config_event(&deltas, 42, &pool));
+    }
 
     #[test]
     fn dynamic_fee_config_keys_are_scoped_by_pool() {

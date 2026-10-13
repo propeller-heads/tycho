@@ -62,6 +62,18 @@ modules:
       - params: string
       - source: sf.ethereum.type.v2.Block
 
+  - name: store_dynamic_fee_module_pools
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+      - store: store_dynamic_fee_config
+        mode: deltas
+
   - name: map_balance_changes
     kind: map
     initialBlock: *initial_block
@@ -89,6 +101,7 @@ modules:
       - store: store_dynamic_fee_config
         mode: deltas
       - store: store_dynamic_fee_config
+      - store: store_dynamic_fee_module_pools
       - store: store_pools_balances
         mode: deltas
       - map: map_balance_changes
@@ -99,4 +112,5 @@ params:
   map_tick_spacing_fee: &slipstreams_params "factories[]=5e7BB104d84c7CB9B682AaC2F3d509f5F406809A&factories[]=aDe65c38CD4849aDBA595a4323a8C7DdfE89716a&factories[]=f8f2eB4940CFE7d13603DDDD87f123820Fc061Ef&dynamic_fee_modules[]=090b2A6bb475c00e2256e2095A60887cD710803b&dynamic_fee_modules[]=F4Ecd78EBEB6d36CF7f80B5B6B41453515fe2785&dynamic_fee_modules[]=87D8f999BBa9343E8099552426775B51C338E8CB&protocol_type_name=aerodrome_slipstreams_pool&first_dynamic_fee_module_block=44221569"
   map_pools_created: *slipstreams_params
   store_dynamic_fee_config: *slipstreams_params
+  store_dynamic_fee_module_pools: *slipstreams_params
   map_protocol_changes: *slipstreams_params
