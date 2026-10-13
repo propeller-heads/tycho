@@ -407,33 +407,57 @@ fn fuzz_points(
                 if sell.address == buy.address {
                     continue;
                 }
-                let limit = match state.get_limits(sell.address.clone(), buy.address.clone()) {
-                    Ok((max_in, _)) => Some(max_in),
-                    Err(e) => {
-                        warn!(pool = id, error = ?e, "get_limits failed, fuzzing without a limit");
-                        None
+                // A native quote that panics is a finding, not a reason to end the run.
+                let quoted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut quoted = Vec::new();
+                    let limit = match state.get_limits(sell.address.clone(), buy.address.clone()) {
+                        Ok((max_in, _)) => Some(max_in),
+                        Err(e) => {
+                            warn!(pool = id, error = ?e, "get_limits failed, fuzzing without a limit");
+                            None
+                        }
+                    };
+                    let context = fuzz::Context {
+                        limit: limit.as_ref(),
+                        history,
+                        pool: history::pool_address(&component.id),
+                        prices,
+                        seed: fuzz::seed(id, sell, block_number),
+                    };
+                    for (source, amount) in
+                        fuzz::candidates(state.as_ref(), sell, buy, &context, budget)
+                    {
+                        let native = state.get_amount_out(amount.clone(), sell, buy);
+                        quoted.push(Point::new(
+                            component,
+                            state.as_ref(),
+                            sell,
+                            buy,
+                            source.to_string(),
+                            amount,
+                            native,
+                        ));
                     }
-                };
-                let context = fuzz::Context {
-                    limit: limit.as_ref(),
-                    history,
-                    pool: history::pool_address(&component.id),
-                    prices,
-                    seed: fuzz::seed(id, sell, block_number),
-                };
-                for (source, amount) in
-                    fuzz::candidates(state.as_ref(), sell, buy, &context, budget)
-                {
-                    let native = state.get_amount_out(amount.clone(), sell, buy);
-                    points.push(Point::new(
-                        component,
-                        state.as_ref(),
-                        sell,
-                        buy,
-                        source.to_string(),
-                        amount,
-                        native,
-                    ));
+                    quoted
+                }));
+                match quoted {
+                    Ok(quoted) => points.extend(quoted),
+                    Err(panic) => {
+                        let message = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_default();
+                        warn!(
+                            pool = id,
+                            protocol = component.protocol_system,
+                            sell = %sell.address,
+                            buy = %buy.address,
+                            block = block_number,
+                            message,
+                            "Native panic"
+                        );
+                    }
                 }
             }
         }
