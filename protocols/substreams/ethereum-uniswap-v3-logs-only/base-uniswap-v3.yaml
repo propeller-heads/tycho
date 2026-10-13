@@ -81,6 +81,14 @@ modules:
     inputs:
       - map: map_ticks_changes
 
+  - name: store_ticks_gross_liquidity
+    kind: store
+    initialBlock: 1371680
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_events
+
   - name: store_pool_current_tick
     kind: store
     initialBlock: 1371680
@@ -118,6 +126,8 @@ modules:
         mode: deltas
       - map: map_ticks_changes
       - store: store_ticks_liquidity
+        mode: deltas
+      - store: store_ticks_gross_liquidity
         mode: deltas
       - map: map_liquidity_changes
       - store: store_liquidity

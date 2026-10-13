@@ -1,6 +1,9 @@
-use crate::pb::uniswap::v3::{
-    events::{pool_event, PoolEvent},
-    Events, LiquidityChanges, TickDeltas,
+use crate::{
+    modules::tick_key,
+    pb::uniswap::v3::{
+        events::{pool_event, PoolEvent},
+        Events, LiquidityChanges, TickDeltas,
+    },
 };
 use itertools::Itertools;
 use std::{collections::HashMap, str::FromStr, vec};
@@ -20,6 +23,7 @@ pub fn map_protocol_changes(
     balances_store_deltas: StoreDeltas,
     ticks_map_deltas: TickDeltas,
     ticks_store_deltas: StoreDeltas,
+    ticks_gross_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
 ) -> Result<BlockChanges, substreams::errors::Error> {
@@ -72,6 +76,22 @@ pub fn map_protocol_changes(
                 });
         });
 
+    // A tick's gross liquidity before and after each event, keyed by tick and event ordinal.
+    let gross_liquidity: HashMap<(String, u64), (BigInt, BigInt)> = ticks_gross_store_deltas
+        .deltas
+        .into_iter()
+        .map(|delta| {
+            let value = |bytes: Vec<u8>| {
+                if bytes.is_empty() {
+                    BigInt::zero()
+                } else {
+                    BigInt::from_str(&String::from_utf8(bytes).unwrap()).unwrap()
+                }
+            };
+            ((delta.key, delta.ordinal), (value(delta.old_value), value(delta.new_value)))
+        })
+        .collect();
+
     // Insert ticks net-liquidity changes
     ticks_store_deltas
         .deltas
@@ -81,18 +101,20 @@ pub fn map_protocol_changes(
             let new_value_bigint =
                 BigInt::from_str(&String::from_utf8(store_delta.new_value).unwrap()).unwrap();
 
-            // If old value is empty or the int value is 0, it's considered as a creation.
-            let is_creation = store_delta.old_value.is_empty() ||
-                BigInt::from_str(&String::from_utf8(store_delta.old_value).unwrap())
-                    .unwrap()
-                    .is_zero();
+            // The tick exists while its gross liquidity is positive, whatever its net liquidity.
+            let (old_gross, new_gross) = gross_liquidity
+                .get(&(
+                    tick_key(&tick_delta.pool_address, tick_delta.tick_index),
+                    store_delta.ordinal,
+                ))
+                .expect("every tick delta has a gross liquidity delta");
             let attribute_name = format!("ticks/{}/net-liquidity", tick_delta.tick_index);
             let attribute = Attribute {
                 name: attribute_name,
                 value: new_value_bigint.to_signed_bytes_be(),
-                change: if is_creation {
+                change: if old_gross.is_zero() {
                     ChangeType::Creation.into()
-                } else if new_value_bigint.is_zero() {
+                } else if new_gross.is_zero() {
                     ChangeType::Deletion.into()
                 } else {
                     ChangeType::Update.into()

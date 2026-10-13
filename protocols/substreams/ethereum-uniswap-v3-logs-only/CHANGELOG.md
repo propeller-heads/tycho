@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.0
+
+- Keep a tick's `ticks/{index}/net-liquidity` attribute while the tick is initialized, and delete
+  it only when its gross liquidity returns to zero. The package used to delete the attribute when
+  the net liquidity reached zero, but a tick that bounds positions whose liquidity cancels out
+  stays initialized: the pool still ends a swap step there, so the fee rounds per step and
+  simulations that skipped the tick were a few wei off. A new `store_ticks_gross_liquidity` store
+  sums the Mint and Burn amounts of the positions bounded by each tick.
+- Every manifest needs a full back-process: existing zero-net ticks only reappear from a replay.
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding

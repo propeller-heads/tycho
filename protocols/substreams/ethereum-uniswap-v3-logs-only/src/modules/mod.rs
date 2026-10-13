@@ -19,6 +19,7 @@ mod map_store_balance_changes;
 
 #[path = "4_map_and_store_ticks.rs"]
 mod map_store_ticks;
+pub use map_store_ticks::tick_key;
 
 #[path = "4_map_and_store_liquidity.rs"]
 mod map_store_liquidity;
