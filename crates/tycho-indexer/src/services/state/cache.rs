@@ -1415,6 +1415,24 @@ mod test {
     }
 
     #[test]
+    fn fold_creates_an_account_an_earlier_transaction_updated() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let mut delta = update(&address, fixtures::optional_slots([(1, 1)]));
+        delta
+            .merge(creation(&address, [(2, 2)], 10, "0x6000"))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(msg(1), delta))
+            .unwrap();
+
+        let account = cached_account(&cache, &address).unwrap();
+        assert_eq!(account.code, code("0x6000"));
+        assert_eq!(account.slots, fixtures::slots([(1, 1), (2, 2)]));
+    }
+
+    #[test]
     fn fold_keeps_an_account_the_block_deletes() {
         let cache = EntityCache::new();
         let address = addr(1);
