@@ -11,7 +11,13 @@ mod history;
 mod report;
 mod stream;
 
-use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -158,6 +164,7 @@ async fn main() -> miette::Result<()> {
     let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
     let mut checks = 0u64;
     let mut first = true;
+    let mut coverage = Coverage::default();
     while let Some(update) = updates.next().await {
         let update = match update {
             Ok(update) => update,
@@ -204,7 +211,9 @@ async fn main() -> miette::Result<()> {
                     })
                     .map(|(id, _)| id.clone())
                     .collect(),
-                None => choose_pools(&components, &changed, &protocols, cli.pools_per_protocol),
+                None => {
+                    coverage.choose_pools(&components, &changed, &protocols, cli.pools_per_protocol)
+                }
             },
         };
         let addresses: Vec<_> = pools
@@ -240,6 +249,12 @@ async fn main() -> miette::Result<()> {
         report.record(&block, points, outcomes)?;
         report.write_summary()?;
         checks += 1;
+        info!(
+            block = block_number,
+            pools = coverage.pools.len(),
+            tokens = coverage.tokens.len(),
+            "Checked block"
+        );
         if cli
             .max_checks
             .is_some_and(|max| checks >= max)
@@ -289,47 +304,58 @@ fn projected_block(block: &Block, block_time_secs: u64) -> BlockOverrides {
     }
 }
 
-/// Picks up to `per_protocol` pools of each protocol, those that changed in this block first.
-fn choose_pools(
-    components: &HashMap<String, ProtocolComponent>,
-    changed: &[String],
-    protocols: &[String],
-    per_protocol: usize,
-) -> Vec<String> {
-    let mut rng = rand::thread_rng();
-    let mut chosen = Vec::new();
-    for protocol in protocols {
-        let of_protocol = |id: &&String| {
-            components
-                .get(*id)
-                .is_some_and(|c| &c.protocol_system == protocol)
-        };
-        let mut active: Vec<&String> = changed
-            .iter()
-            .filter(of_protocol)
-            .collect();
-        active.shuffle(&mut rng);
-        let mut picked: Vec<String> = active
-            .into_iter()
-            .take(per_protocol)
-            .cloned()
-            .collect();
-        if picked.len() < per_protocol {
-            let mut idle: Vec<&String> = components
-                .keys()
-                .filter(of_protocol)
-                .filter(|id| !picked.contains(id))
+/// The pools and tokens checked so far in this run.
+#[derive(Default)]
+struct Coverage {
+    pools: HashSet<String>,
+    tokens: HashSet<tycho_common::Bytes>,
+}
+
+impl Coverage {
+    /// Picks up to `per_protocol` pools of each protocol and records them as covered.
+    ///
+    /// Unchecked pools come first, those adding the most unchecked tokens ahead; ties go to
+    /// pools that changed in this block, then to chance.
+    fn choose_pools(
+        &mut self,
+        components: &HashMap<String, ProtocolComponent>,
+        changed: &[String],
+        protocols: &[String],
+        per_protocol: usize,
+    ) -> Vec<String> {
+        let changed: HashSet<&String> = changed.iter().collect();
+        let mut rng = rand::thread_rng();
+        let mut chosen = Vec::new();
+        for protocol in protocols {
+            let mut candidates: Vec<(&String, &ProtocolComponent)> = components
+                .iter()
+                .filter(|(_, c)| &c.protocol_system == protocol)
                 .collect();
-            idle.shuffle(&mut rng);
-            picked.extend(
-                idle.into_iter()
-                    .take(per_protocol - picked.len())
-                    .cloned(),
-            );
+            candidates.shuffle(&mut rng);
+            candidates.sort_by_key(|(id, component)| {
+                let new_tokens = component
+                    .tokens
+                    .iter()
+                    .filter(|t| !self.tokens.contains(&t.address))
+                    .count();
+                (self.pools.contains(*id), std::cmp::Reverse(new_tokens), !changed.contains(id))
+            });
+            for (id, component) in candidates
+                .into_iter()
+                .take(per_protocol)
+            {
+                self.pools.insert(id.clone());
+                self.tokens.extend(
+                    component
+                        .tokens
+                        .iter()
+                        .map(|t| t.address.clone()),
+                );
+                chosen.push(id.clone());
+            }
         }
-        chosen.extend(picked);
+        chosen
     }
-    chosen
 }
 
 /// Draws seeded candidate amounts for every direction of every chosen pool and quotes them
