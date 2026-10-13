@@ -511,13 +511,10 @@ impl ProtocolSim for RamsesV3State {
                 continue;
             };
 
-            Arc::make_mut(&mut self.ticks)
-                .set_tick_liquidity(
-                    tick.parse::<i32>()
-                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                    0,
-                )
-                .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+            Arc::make_mut(&mut self.ticks).remove_tick(
+                tick.parse::<i32>()
+                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
+            );
         }
         Ok(())
     }

@@ -514,14 +514,18 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                Arc::make_mut(&mut self.ticks)
-                    .set_tick_liquidity(
-                        parts[1]
-                            .parse::<i32>()
-                            .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
-                    )
+                let tick = parts[1]
+                    .parse::<i32>()
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+                let liquidity = i128::from(value.clone());
+                // The Velodrome package reports a cleared tick as an update to zero.
+                if liquidity == 0 {
+                    Arc::make_mut(&mut self.ticks).remove_tick(tick);
+                } else {
+                    Arc::make_mut(&mut self.ticks)
+                        .set_tick_liquidity(tick, liquidity)
+                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+                }
             }
         }
         // delete ticks - ignores deletes for attributes other than tick liquidity
@@ -529,14 +533,11 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                Arc::make_mut(&mut self.ticks)
-                    .set_tick_liquidity(
-                        parts[1]
-                            .parse::<i32>()
-                            .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        0,
-                    )
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+                Arc::make_mut(&mut self.ticks).remove_tick(
+                    parts[1]
+                        .parse::<i32>()
+                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
+                );
             }
         }
         Ok(())

@@ -715,14 +715,11 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // tick liquidity keys are in the format "ticks/{tick_index}/net_liquidity"
             if key.starts_with("ticks/") {
                 let parts: Vec<&str> = key.split('/').collect();
-                Arc::make_mut(&mut self.ticks)
-                    .set_tick_liquidity(
-                        parts[1]
-                            .parse::<i32>()
-                            .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        0,
-                    )
-                    .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
+                Arc::make_mut(&mut self.ticks).remove_tick(
+                    parts[1]
+                        .parse::<i32>()
+                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
+                );
             }
 
             // observations keys are in the format "observations/{observation_index}"

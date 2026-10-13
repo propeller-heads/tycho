@@ -161,6 +161,8 @@ impl TickList {
         Ok(())
     }
 
+    /// Sets an initialized tick's net liquidity, which may be zero: positions starting and ending
+    /// at the tick can cancel out while it still ends swap steps.
     pub(crate) fn set_tick_liquidity(
         &mut self,
         tick: i32,
@@ -170,19 +172,22 @@ impl TickList {
             .ticks
             .binary_search_by(|t| t.index.cmp(&tick))
         {
-            Ok(existing_idx) => {
-                let tick = &mut self.ticks[existing_idx];
-                tick.net_liquidity = liquidity;
-                if tick.net_liquidity == 0 {
-                    self.ticks.remove(existing_idx);
-                }
-            }
-            Err(insert_idx) => {
-                self.ticks
-                    .insert(insert_idx, TickInfo::new(tick, liquidity)?);
-            }
+            Ok(existing_idx) => self.ticks[existing_idx].net_liquidity = liquidity,
+            Err(insert_idx) => self
+                .ticks
+                .insert(insert_idx, TickInfo::new(tick, liquidity)?),
         }
         Ok(())
+    }
+
+    /// Removes a tick that is no longer initialized, if the list holds it.
+    pub(crate) fn remove_tick(&mut self, tick: i32) {
+        if let Ok(idx) = self
+            .ticks
+            .binary_search_by(|t| t.index.cmp(&tick))
+        {
+            self.ticks.remove(idx);
+        }
     }
 
     fn is_below_smallest(&self, tick: i32) -> bool {
@@ -712,6 +717,37 @@ mod tests {
 
         assert!(tick_list.get_tick(-10).is_none());
         assert!(tick_list.get_tick(10).is_none());
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_keeps_zero_net_ticks_until_removed() {
+        let mut tick_list = create_tick_list();
+
+        tick_list
+            .set_tick_liquidity(20, 0)
+            .unwrap();
+        tick_list
+            .set_tick_liquidity(30, 0)
+            .unwrap();
+        assert_eq!(
+            tick_list
+                .get_tick(20)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+        assert_eq!(
+            tick_list
+                .get_tick(30)
+                .unwrap()
+                .net_liquidity,
+            0
+        );
+
+        tick_list.remove_tick(20);
+        tick_list.remove_tick(50);
+        assert!(tick_list.get_tick(20).is_none());
+        assert_eq!(tick_list.ticks.len(), 3);
     }
 
     #[test]

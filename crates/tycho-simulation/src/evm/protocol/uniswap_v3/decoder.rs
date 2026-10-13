@@ -109,10 +109,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
             .collect();
 
         let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
-                .into_iter()
-                .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
+            Ok(ticks) if !ticks.is_empty() => ticks,
             _ => return Err(InvalidSnapshotError::MissingAttribute("tick_liquidities".to_string())),
         };
 
