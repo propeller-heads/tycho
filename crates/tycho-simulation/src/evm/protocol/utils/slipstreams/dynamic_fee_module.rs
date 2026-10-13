@@ -24,13 +24,26 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 4] = [
 ];
 const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DynamicFeeConfig {
     base_fee: u32,
     fee_cap: u32,
     scaling_factor: u64,
     initial_fee_enabled: bool,
     initial_fee: u32,
+    /// TWAP window of the module, which its owner can change for all of its pools at once.
+    #[serde(default = "default_seconds_ago")]
+    seconds_ago: u32,
+}
+
+impl Default for DynamicFeeConfig {
+    fn default() -> Self {
+        Self::new(0, 0, 0, false, 0)
+    }
+}
+
+fn default_seconds_ago() -> u32 {
+    DEFAULT_SECONDS_AGO
 }
 
 fn is_supported_dynamic_fee_module(fee_module: &[u8]) -> bool {
@@ -47,7 +60,18 @@ impl DynamicFeeConfig {
         initial_fee_enabled: bool,
         initial_fee: u32,
     ) -> Self {
-        Self { base_fee, fee_cap, scaling_factor, initial_fee_enabled, initial_fee }
+        Self {
+            base_fee,
+            fee_cap,
+            scaling_factor,
+            initial_fee_enabled,
+            initial_fee,
+            seconds_ago: DEFAULT_SECONDS_AGO,
+        }
+    }
+
+    pub fn with_seconds_ago(self, seconds_ago: u32) -> Self {
+        Self { seconds_ago, ..self }
     }
 
     /// Builds a config from a full snapshot's attributes.
@@ -92,6 +116,12 @@ impl DynamicFeeConfig {
                 .cloned()
                 .map(u32::from)
                 .unwrap_or_default(),
+            // Indexers that predate the attribute only saw the module's initial window.
+            seconds_ago: attributes
+                .get("dfc_secondsAgo")
+                .cloned()
+                .map(u32::from)
+                .unwrap_or(DEFAULT_SECONDS_AGO),
         })
     }
 
@@ -124,6 +154,9 @@ impl DynamicFeeConfig {
         }
         if let Some(initial_fee) = attributes.get("dfc_initialFee") {
             self.initial_fee = u32::from(initial_fee.clone());
+        }
+        if let Some(seconds_ago) = attributes.get("dfc_secondsAgo") {
+            self.seconds_ago = u32::from(seconds_ago.clone());
         }
         Ok(())
     }
@@ -245,6 +278,7 @@ fn resolve_dynamic_fee(
         observations,
         execution_timestamp,
         scaling_factor,
+        dfc.seconds_ago,
     )?;
     Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
 }
@@ -257,8 +291,9 @@ fn calculate_dynamic_fee(
     observations: &Observations,
     blocktime: u32,
     scaling_factor: u64,
+    seconds_ago: u32,
 ) -> Result<(u32, bool), SimulationError> {
-    if observation_cardinality < (DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO) as u16 {
+    if observation_cardinality < (seconds_ago / MIN_SECONDS_AGO) as u16 {
         // The module returns before reaching the oracle: no observe gas.
         return Ok((0, false));
     };
@@ -267,7 +302,7 @@ fn calculate_dynamic_fee(
     // component instead of failing the whole quote.
     let observed = match observations.observe(
         blocktime,
-        &[DEFAULT_SECONDS_AGO, 0],
+        &[seconds_ago, 0],
         current_tick,
         observation_index,
         liquidity,
@@ -279,7 +314,7 @@ fn calculate_dynamic_fee(
     };
     let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
-            ((tick_cumulatives[1] - tick_cumulatives[0]) / DEFAULT_SECONDS_AGO as i64) as i32
+            ((tick_cumulatives[1] - tick_cumulatives[0]) / seconds_ago as i64) as i32
         }
         _ => return Ok((0, true)),
     };
@@ -473,6 +508,37 @@ mod tests {
             .expect("observe failure should fall back to the base fee, not error");
 
         assert_eq!(fee, ResolvedFee { fee: 3000, observed_twap: true });
+    }
+
+    #[test]
+    fn module_window_sets_the_oracle_history_guard() {
+        // 250 observations cover a 480 s window at the 2 s minimum spacing, but not 600 s.
+        let observations = Observations::new(vec![Observation {
+            block_timestamp: 999_000,
+            initialized: true,
+            index: 0,
+            ..Default::default()
+        }]);
+        let attributes = HashMap::from([
+            (
+                DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(),
+                Bytes::from(SUPPORTED_DYNAMIC_FEE_MODULES[0].as_slice()),
+            ),
+            ("dfc_baseFee".to_string(), Bytes::from(2700_u32.to_be_bytes())),
+            ("dfc_feeCap".to_string(), Bytes::from(30_000_u32.to_be_bytes())),
+            ("dfc_scalingFactor".to_string(), Bytes::from(0_u64.to_be_bytes())),
+            ("dfc_secondsAgo".to_string(), Bytes::from(480_u32.to_be_bytes())),
+        ]);
+        let shortened = DynamicFeeConfig::from_attributes(&attributes).unwrap();
+        let initial = DynamicFeeConfig::new(2700, 30_000, 0, false, 0);
+
+        let resolve = |dfc: &DynamicFeeConfig| {
+            get_dynamic_fee(dfc, 3000, 0, 1, 0, 250, &observations, 1_000_000, true).unwrap()
+        };
+
+        assert_eq!(shortened, initial.with_seconds_ago(480));
+        assert!(resolve(&shortened).observed_twap);
+        assert!(!resolve(&initial).observed_twap);
     }
 
     #[test]
