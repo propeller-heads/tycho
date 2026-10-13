@@ -448,7 +448,7 @@ where
                         .len()
                 );
 
-                let mut proxy_token_accounts: HashMap<Address, AccountUpdate> = HashMap::new();
+                let mut proxy_token_accounts: Vec<AccountUpdate> = Vec::new();
                 let mut storage_by_address: HashMap<Address, ResponseAccount> = HashMap::new();
                 for (key, value) in protocol_msg
                     .snapshots
@@ -466,29 +466,17 @@ where
                         // contract address. This is because the proxy contract uses
                         // delegatecall to the original (implementation) contract.
 
-                        // Handle proxy token accounts
-                        let (impl_addr, proxy_state) = match state_guard
+                        // Handle proxy token accounts. A token that already has a proxy keeps
+                        // its implementation address. Its proxy is rebuilt and replaced, not
+                        // merged: snapshots leave out slots whose value is zero, so merging into
+                        // the old storage would keep stale values, e.g. for a token that was not
+                        // tracked for a while (after a drop in TVL) and is tracked again.
+                        let impl_addr = match state_guard
                             .proxy_token_addresses
                             .get(&original_address)
                         {
-                            Some(impl_addr) => {
-                                // Token already has a proxy contract: rebuild it with the same
-                                // implementation and replace it. Snapshots leave out slots whose
-                                // value is zero, so merging into the old storage would keep stale
-                                // values, e.g. for a token that was not tracked for a while (after
-                                // a drop in TVL) and is tracked again.
-                                let proxy_state = create_proxy_token_account(
-                                    original_address,
-                                    Some(*impl_addr),
-                                    &account.slots,
-                                    value.chain,
-                                    Some(account.native_balance),
-                                );
-                                (*impl_addr, proxy_state)
-                            }
+                            Some(impl_addr) => *impl_addr,
                             None => {
-                                // Token does not have a proxy contract yet, create one
-
                                 // Assign original token contract to new address
                                 let impl_addr = generate_proxy_token_address(
                                     state_guard.proxy_token_addresses.len() as u32,
@@ -496,21 +484,19 @@ where
                                 state_guard
                                     .proxy_token_addresses
                                     .insert(original_address, impl_addr);
-
-                                // Add proxy token contract at original token address
-                                let proxy_state = create_proxy_token_account(
-                                    original_address,
-                                    Some(impl_addr),
-                                    &account.slots,
-                                    value.chain,
-                                    Some(account.native_balance),
-                                );
-
-                                (impl_addr, proxy_state)
+                                impl_addr
                             }
                         };
+                        // Add proxy token contract at original token address
+                        let proxy_state = create_proxy_token_account(
+                            original_address,
+                            Some(impl_addr),
+                            &account.slots,
+                            value.chain,
+                            Some(account.native_balance),
+                        );
 
-                        proxy_token_accounts.insert(original_address, proxy_state);
+                        proxy_token_accounts.push(proxy_state);
 
                         // Assign original token contract to the implementation address
                         let impl_update = ResponseAccount {
@@ -525,33 +511,21 @@ where
                     }
                 }
 
-                // Split proxy accounts by change type. Snapshot proxies are all Creation: new
-                // proxies must overwrite any existing placeholder, and existing ones are replaced.
-                let mut proxy_creates: Vec<AccountUpdate> = Vec::new();
-                let mut proxy_updates: HashMap<Address, AccountUpdate> = HashMap::new();
-                for (addr, update) in proxy_token_accounts {
-                    if matches!(update.change, ChangeType::Creation) {
-                        proxy_creates.push(update);
-                    } else {
-                        proxy_updates.insert(addr, update);
-                    }
-                }
-
                 info!("Updating engine with {} contracts from snapshots", storage_by_address.len());
                 update_engine(
                     SHARED_TYCHO_DB.clone(),
                     header.clone().block(),
                     Some(storage_by_address),
-                    proxy_updates,
+                    HashMap::new(),
                 )
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
-                // Force-overwrite new proxy token accounts so that authoritative vm_storage data
-                // always wins over any empty placeholder previously inserted by engine setup
-                // (which uses init_account / init-if-not-exists).
-                if !proxy_creates.is_empty() {
+                // Force-overwrite proxy token accounts so that authoritative vm_storage data
+                // always wins over the old proxy storage and over any empty placeholder previously
+                // inserted by engine setup (which uses init_account / init-if-not-exists).
+                if !proxy_token_accounts.is_empty() {
                     SHARED_TYCHO_DB
-                        .force_update_accounts(proxy_creates)
+                        .force_update_accounts(proxy_token_accounts)
                         .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
                 }
                 info!("Engine updated");
