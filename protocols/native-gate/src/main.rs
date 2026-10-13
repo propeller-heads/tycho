@@ -98,6 +98,9 @@ struct Cli {
     max_checks: Option<u64>,
     #[arg(long, default_value = "native-gate-out")]
     out_dir: PathBuf,
+    /// Skip the pools and tokens recorded in an earlier run's `coverage.json`.
+    #[arg(long)]
+    resume_coverage: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -150,117 +153,130 @@ async fn main() -> miette::Result<()> {
     );
     let mut report = Report::create(&run_dir)?;
 
-    let mut updates = stream::build(
-        &tycho_url,
-        &cli.tycho_api_key,
-        chain,
-        &protocols,
-        cli.tvl_threshold,
-        &tokens,
-    )
-    .await?;
-
-    let mut components: HashMap<String, ProtocolComponent> = HashMap::new();
-    let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
     let mut checks = 0u64;
-    let mut first = true;
-    let mut coverage = Coverage::default();
-    while let Some(update) = updates.next().await {
-        let update = match update {
-            Ok(update) => update,
-            Err(e) => {
-                warn!("Stream error: {e:?}");
+    let mut coverage = match &cli.resume_coverage {
+        Some(path) => Coverage::load(path)?,
+        None => Coverage::default(),
+    };
+    'stream: loop {
+        let mut updates = stream::build(
+            &tycho_url,
+            &cli.tycho_api_key,
+            chain,
+            &protocols,
+            cli.tvl_threshold,
+            &tokens,
+        )
+        .await?;
+        let mut components: HashMap<String, ProtocolComponent> = HashMap::new();
+        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut first = true;
+        while let Some(update) = updates.next().await {
+            let update = match update {
+                Ok(update) => update,
+                // Every decode error is fatal to the stream, e.g. a block missed while
+                // reconnecting.
+                Err(e) => {
+                    warn!("Stream error, rebuilding the stream: {e:?}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue 'stream;
+                }
+            };
+            components.extend(update.new_pairs);
+            for id in update.removed_pairs.keys() {
+                components.remove(id);
+                states.remove(id);
+            }
+            let changed: Vec<String> = update.states.keys().cloned().collect();
+            states.extend(update.states);
+            let block_number = update.block_number_or_timestamp;
+            // The first update is the snapshot of every component, not the pools that traded.
+            if std::mem::take(&mut first) || block_number % cli.every_n_blocks != 0 {
                 continue;
             }
-        };
-        components.extend(update.new_pairs);
-        for id in update.removed_pairs.keys() {
-            components.remove(id);
-            states.remove(id);
-        }
-        let changed: Vec<String> = update.states.keys().cloned().collect();
-        states.extend(update.states);
-        let block_number = update.block_number_or_timestamp;
-        // The first update is the snapshot of every component, not the pools that traded.
-        if std::mem::take(&mut first) || block_number % cli.every_n_blocks != 0 {
-            continue;
-        }
 
-        let block = match fetch_block(&rpc_tools, block_number).await {
-            Ok(block) => block,
-            Err(e) => {
-                warn!("Skipping block {block_number}: {e:?}");
-                continue;
-            }
-        };
-        let pools = match &cli.components {
-            Some(ids) => ids
-                .iter()
-                .map(|id| id.to_lowercase())
-                .filter(|id| components.contains_key(id))
-                .collect(),
-            None => match &cli.tokens {
-                Some(tokens) => components
+            let block = match fetch_block(&rpc_tools, block_number).await {
+                Ok(block) => block,
+                Err(e) => {
+                    warn!("Skipping block {block_number}: {e:?}");
+                    continue;
+                }
+            };
+            let pools = match &cli.components {
+                Some(ids) => ids
                     .iter()
-                    .filter(|(_, component)| {
-                        component.tokens.iter().any(|token| {
-                            tokens.iter().any(|wanted| {
-                                wanted.eq_ignore_ascii_case(&token.address.to_string())
+                    .map(|id| id.to_lowercase())
+                    .filter(|id| components.contains_key(id))
+                    .collect(),
+                None => match &cli.tokens {
+                    Some(tokens) => components
+                        .iter()
+                        .filter(|(_, component)| {
+                            component.tokens.iter().any(|token| {
+                                tokens.iter().any(|wanted| {
+                                    wanted.eq_ignore_ascii_case(&token.address.to_string())
+                                })
                             })
                         })
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect(),
-                None => {
-                    coverage.choose_pools(&components, &changed, &protocols, cli.pools_per_protocol)
-                }
-            },
-        };
-        let addresses: Vec<_> = pools
-            .iter()
-            .filter_map(|id| components.get(id))
-            .filter_map(|component| history::pool_address(&component.id))
-            .collect();
-        let history = History::load(
-            &rpc_tools.provider,
-            &addresses,
-            block_number,
-            cli.history_window,
-            &prices,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!("No transfer history for block {block_number}: {e:?}");
-            History::default()
-        });
-        let points = fuzz_points(
-            &pools,
-            &components,
-            &states,
-            &history,
-            &prices,
-            block_number,
-            cli.budget_per_direction,
-        );
-        let overrides =
-            (!cli.no_block_override).then(|| projected_block(&block, cli.block_time_secs));
-        let outcomes =
-            execute(&rpc_tools, chain, &points, &block, router_overwrites.clone(), overrides).await;
-        report.record(&block, points, outcomes)?;
-        report.write_summary()?;
-        checks += 1;
-        info!(
-            block = block_number,
-            pools = coverage.pools.len(),
-            tokens = coverage.tokens.len(),
-            "Checked block"
-        );
-        if cli
-            .max_checks
-            .is_some_and(|max| checks >= max)
-        {
-            break;
+                        .map(|(id, _)| id.clone())
+                        .collect(),
+                    None => coverage.choose_pools(
+                        &components,
+                        &changed,
+                        &protocols,
+                        cli.pools_per_protocol,
+                    ),
+                },
+            };
+            let addresses: Vec<_> = pools
+                .iter()
+                .filter_map(|id| components.get(id))
+                .filter_map(|component| history::pool_address(&component.id))
+                .collect();
+            let history = History::load(
+                &rpc_tools.provider,
+                &addresses,
+                block_number,
+                cli.history_window,
+                &prices,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                warn!("No transfer history for block {block_number}: {e:?}");
+                History::default()
+            });
+            let points = fuzz_points(
+                &pools,
+                &components,
+                &states,
+                &history,
+                &prices,
+                block_number,
+                cli.budget_per_direction,
+            );
+            let overrides =
+                (!cli.no_block_override).then(|| projected_block(&block, cli.block_time_secs));
+            let outcomes =
+                execute(&rpc_tools, chain, &points, &block, router_overwrites.clone(), overrides)
+                    .await;
+            report.record(&block, points, outcomes)?;
+            report.write_summary()?;
+            coverage.save(&run_dir.join("coverage.json"))?;
+            checks += 1;
+            info!(
+                block = block_number,
+                pools = coverage.pools.len(),
+                tokens = coverage.tokens.len(),
+                "Checked block"
+            );
+            if cli
+                .max_checks
+                .is_some_and(|max| checks >= max)
+            {
+                break 'stream;
+            }
         }
+        warn!("Stream ended, rebuilding it");
     }
     report.write_summary()?;
     info!(out = %run_dir.display(), "Done");
@@ -305,13 +321,25 @@ fn projected_block(block: &Block, block_time_secs: u64) -> BlockOverrides {
 }
 
 /// The pools and tokens checked so far in this run.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Coverage {
     pools: HashSet<String>,
     tokens: HashSet<tycho_common::Bytes>,
 }
 
 impl Coverage {
+    fn load(path: &std::path::Path) -> miette::Result<Self> {
+        let file = std::fs::File::open(path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to open {}", path.display()))?;
+        serde_json::from_reader(file).into_diagnostic()
+    }
+
+    fn save(&self, path: &std::path::Path) -> miette::Result<()> {
+        let file = std::fs::File::create(path).into_diagnostic()?;
+        serde_json::to_writer(file, self).into_diagnostic()
+    }
+
     /// Picks up to `per_protocol` pools of each protocol and records them as covered.
     ///
     /// Unchecked pools come first, those adding the most unchecked tokens ahead; ties go to

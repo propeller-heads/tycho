@@ -5788,7 +5788,7 @@ dependencies = [
 
 [[package]]
 name = "native-gate"
-version = "0.453.1"
+version = "0.455.0"
 dependencies = [
  "alloy",
  "clap",
