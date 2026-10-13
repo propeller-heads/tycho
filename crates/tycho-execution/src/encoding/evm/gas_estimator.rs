@@ -32,6 +32,7 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "velodrome_slipstreams",
     "up_v3",
     "vm:balancer_v3",
+    "camelot_v3",
 ];
 
 /// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent

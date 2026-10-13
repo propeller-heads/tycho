@@ -18,6 +18,7 @@ use tycho_simulation::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
+            camelot_v3::state::CamelotV3State,
             cowamm::state::CowAMMState,
             curve::CurveState,
             ekubo::state::EkuboState,
@@ -291,6 +292,7 @@ impl ProtocolStreamProcessor {
                     "uniswap_v3".to_string(),
                     "uniswap_v4".to_string(),
                     "pancakeswap_v3".to_string(),
+                    "camelot_v3".to_string(),
                 ]
             }
             _ => vec![],
@@ -411,6 +413,9 @@ impl ProtocolStreamProcessor {
             }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
+            }
+            "camelot_v3" => {
+                stream = stream.exchange::<CamelotV3State>("camelot_v3", tvl_filter.clone(), None);
             }
             "rocketpool" => {
                 stream = stream.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);

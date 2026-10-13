@@ -2,7 +2,8 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
-            aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            camelot_v3::state::CamelotV3State, ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
             filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState, pancakeswap_v2::state::PancakeswapV2State,
@@ -127,6 +128,12 @@ pub fn register_protocol(
                 decoder_context,
             ),
         "up_v3" => stream_builder.exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        "camelot_v3" => stream_builder.exchange_with_decoder_context::<CamelotV3State>(
             protocol_system,
             tvl_filter,
             None,

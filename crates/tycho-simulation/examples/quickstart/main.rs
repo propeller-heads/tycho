@@ -45,6 +45,7 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            camelot_v3::state::CamelotV3State,
             curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State,
@@ -259,6 +260,7 @@ async fn main() {
                 .exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None)
+                .exchange::<CamelotV3State>("camelot_v3", tvl_filter.clone(), None)
         }
         Chain::Polygon => {
             protocol_stream = protocol_stream
