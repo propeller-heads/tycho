@@ -272,7 +272,7 @@ impl UniswapV4State {
             });
         }
 
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -888,8 +888,7 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
@@ -982,11 +981,6 @@ impl ProtocolSim for UniswapV4State {
             // Move to the next tick position
             current_tick = if zero_for_one { next_tick - 1 } else { next_tick };
             current_sqrt_price = sqrt_price_next;
-
-            // If we've consumed all liquidity, no point continuing the loop
-            if current_liquidity == 0 {
-                break;
-            }
         }
 
         // A hook that charges the output reduces what a swapper can actually receive, so the

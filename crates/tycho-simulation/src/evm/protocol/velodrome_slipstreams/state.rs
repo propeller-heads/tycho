@@ -175,7 +175,7 @@ impl VelodromeSlipstreamsState {
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
     ) -> Result<SwapResults, SimulationError> {
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -391,8 +391,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 

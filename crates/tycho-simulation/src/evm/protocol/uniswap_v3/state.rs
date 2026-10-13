@@ -124,7 +124,7 @@ impl UniswapV3State {
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
     ) -> Result<SwapResults, SimulationError> {
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -351,8 +351,7 @@ impl ProtocolSim for UniswapV3State {
         token_in: Bytes,
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If the pool has no liquidity, return zeros for both limits
-        if self.liquidity == 0 {
+        if self.liquidity == 0 && !self.ticks.has_initialized_ticks() {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
@@ -1119,6 +1118,51 @@ mod tests {
         assert_eq!(result.sqrt_price, pool.sqrt_price);
         assert_eq!(get_tick_at_sqrt_ratio(result.sqrt_price).unwrap(), 0);
         assert_eq!(result.tick, pool.tick);
+    }
+
+    #[test]
+    fn test_swap_crosses_into_liquidity_from_an_empty_range() {
+        let liquidity = 100_000_000_000_000_000_000u128;
+        let ticks = vec![
+            TickInfo::new(-120, liquidity as i128).unwrap(),
+            TickInfo::new(120, -(liquidity as i128)).unwrap(),
+        ];
+        let above_range = UniswapV3State::new(
+            0,
+            get_sqrt_ratio_at_tick(600).unwrap(),
+            FeeAmount::Low,
+            600,
+            ticks.clone(),
+        )
+        .unwrap();
+        let at_range_edge = UniswapV3State::new(
+            liquidity,
+            get_sqrt_ratio_at_tick(120).unwrap(),
+            FeeAmount::Low,
+            119,
+            ticks,
+        )
+        .unwrap();
+        let amount = I256::try_from(10u64.pow(17)).unwrap();
+        let (token_0, token_1) = (Bytes::from(vec![1u8; 20]), Bytes::from(vec![2u8; 20]));
+
+        let from_empty = above_range
+            .swap(true, amount, None)
+            .expect("the swap moves through the empty range into liquidity");
+        let from_edge = at_range_edge
+            .swap(true, amount, None)
+            .unwrap();
+
+        assert_eq!(from_empty.amount_calculated, from_edge.amount_calculated);
+        assert_eq!(from_empty.sqrt_price, from_edge.sqrt_price);
+        assert_eq!(
+            above_range
+                .get_limits(token_0.clone(), token_1.clone())
+                .unwrap(),
+            at_range_edge
+                .get_limits(token_0, token_1)
+                .unwrap()
+        );
     }
 
     #[test]
