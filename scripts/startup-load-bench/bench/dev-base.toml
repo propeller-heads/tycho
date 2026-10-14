@@ -59,7 +59,8 @@ state_chunk = 360
 contract_chunk = 100
 ep_chunk = 100
 
-# Scenarios run in this order. A scenario whose result file exists is skipped; the run stops if the pod restarts.
+# Scenarios run in this order. A scenario whose result file exists is skipped. A wave that restarts the pod is
+# recorded as such and the run waits for the pod to come back before the next one.
 [[scenarios]]
 # one client, the baseline
 name = "mix_n1"

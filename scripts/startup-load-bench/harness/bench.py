@@ -8,7 +8,8 @@ usage: bench.py show <config>                        print the resolved run and 
 
 run = show + plan (if missing) + every scenario in config order. Results: <out>/run.json,
 <out>/plan.json, <out>/waves/<scenario>.json. A scenario whose file exists is skipped, so a
-re-run continues where it stopped; the run stops if the target restarts or stops being ready.
+re-run continues where it stopped. A wave that restarts the target is recorded as such and the
+run waits for the target to come back before the next scenario.
 Keys: TYCHO_API_KEY and GRAFANA_API_KEY from the environment or a .env file (cwd or ~).
 """
 import html.parser, json, os, subprocess, sys, time, urllib.request
@@ -89,7 +90,8 @@ def cmd_run(cfg, args, dry):
     with open(os.path.join(out, "run.json"), "w") as f:
         json.dump(run, f, indent=1)
     print(f"target image {run['target_image']}", flush=True)
-    for i, sc in enumerate(scenarios):
+    recovering = True          # the first scenario may wait for a fresh pod; so does the one after a restart
+    for sc in scenarios:
         path = os.path.join(out, "waves", sc["name"] + ".json")
         if os.path.exists(path):
             print(f"skip {sc['name']}: result exists", flush=True)
@@ -97,13 +99,16 @@ def cmd_run(cfg, args, dry):
         if sc["delay_s"]:
             time.sleep(sc["delay_s"])
         print(f"--- {sc['name']} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}", flush=True)
-        s = waves.run(cfg, plan, sc, loadgen, path, max_wait=3600 if i == 0 else 600, log=lambda m: print(m, flush=True))
+        s = waves.run(cfg, plan, sc, loadgen, path, max_wait=3600 if recovering else 600, log=lambda m: print(m, flush=True))
         why = waves.broke(s)
+        recovering = False
         if why:
             print(f"BROKE at {sc['name']}: {why}", flush=True)
             if s["restarts_delta"] or (s["ready_min"] is not None and s["ready_min"] < 1):
-                print("target restarted or not ready: stopping", flush=True)
-                break
+                # Recorded in the wave's result; the next scenario waits up to an hour for the pod
+                # to be back, ready and idle, so a killed pod costs one wave, not the run.
+                print("target restarted or not ready: waiting for it before the next scenario", flush=True)
+                recovering = True
     run["finished"] = time.time()
     with open(os.path.join(out, "run.json"), "w") as f:
         json.dump(run, f, indent=1)
