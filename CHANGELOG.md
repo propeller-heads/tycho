@@ -1,3 +1,29 @@
+## [0.457.0](https://github.com/propeller-heads/tycho/compare/0.456.2...0.457.0) (2026-10-14)
+
+
+### Features
+
+* **execution:** add the PancakeSwap Infinity executor and encoder ([93ac359](https://github.com/propeller-heads/tycho/commit/93ac3591e9527f947d8207d9c716d99c0ae12845))
+* index, simulate and execute PancakeSwap Infinity CL pools ([#1522](https://github.com/propeller-heads/tycho/issues/1522)) ([c6ce73c](https://github.com/propeller-heads/tycho/commit/c6ce73c06138d75b209f841ab09ae96b25dbdd22))
+* **simulation:** register PancakeSwap Infinity CL for consumers ([318c89d](https://github.com/propeller-heads/tycho/commit/318c89d1199d8d1b8f81b5ac4b77af151490e6f9))
+* **substreams:** index PancakeSwap Infinity CL on Robinhood ([e916b0c](https://github.com/propeller-heads/tycho/commit/e916b0cfc1ad65092a8d1569c9ad4dfbddcbdf9f))
+* **substreams:** index PancakeSwap Infinity CL pools on Base and BNB ([e7ff1fb](https://github.com/propeller-heads/tycho/commit/e7ff1fbfdccd30a1105fb74b4088ea5fd6be1fef))
+* **substreams:** take Infinity Vault address as param ([3128a3a](https://github.com/propeller-heads/tycho/commit/3128a3a7d29866e0d487aa3a76bd508fce859177))
+
+
+### Bug Fixes
+
+* **execution:** restore the rfq:metric deploy entries ([f70f2ec](https://github.com/propeller-heads/tycho/commit/f70f2ecf6e0c243339cdcae26f45548afc66851a))
+* **execution:** set origin in the Infinity encoder test context ([3354f2d](https://github.com/propeller-heads/tycho/commit/3354f2d62ae1f8bd5a72c3e612654aa9b99493ae))
+* **execution:** swap credited amount, decode data once ([3d1f3c0](https://github.com/propeller-heads/tycho/commit/3d1f3c0210e1d147b58565aa229bc03b90019764))
+* **substreams:** emit zero `hooks` so tickless Infinity CL pools decode ([a3b5608](https://github.com/propeller-heads/tycho/commit/a3b56081f627e43b92c7c1f2ddd3ab5d23740ebf))
+* **substreams:** only decode CL events the pool manager emitted ([9e9b0ea](https://github.com/propeller-heads/tycho/commit/9e9b0ea55be48d1e89395825259e964cda2a9ce3))
+
+
+### Performance Improvements
+
+* **execution:** skip the redundant decode in the Infinity swap ([f614d1b](https://github.com/propeller-heads/tycho/commit/f614d1b4fc1da7b5d9db6c0085d624f990734851))
+
 ## [0.456.2](https://github.com/propeller-heads/tycho/compare/0.456.1...0.456.2) (2026-10-14)
 
 
