@@ -1,8 +1,9 @@
 # The benchmark runner. launch.sh fills in the three placeholders (config name and the two keys)
 # and applies it to prod-tycho.
 # The source comes from the ConfigMap "tycho-bench" (launch.sh creates it from this directory);
-# the pod builds startup-loadgen, runs bench.py with the chosen config and then serves the
-# results directory on port 8000 until it is deleted (bench.py pull copies them out).
+# the pod serves its results directory on port 8000 from the start (bench.py pull copies files
+# out while the run goes), builds startup-loadgen, runs bench.py with the chosen config and then
+# stays up until it is deleted.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -28,9 +29,11 @@ spec:
           cp /src/Cargo.toml /src/Cargo.lock /bench/loadgen/
           cp /src/main.rs /bench/loadgen/src/
           cp /src/*.toml /bench/bench/ && rm /bench/bench/Cargo.toml
+          (cd /results && python3 -m http.server 8000 --bind 0.0.0.0 >/dev/null 2>&1) &
           cd /bench/harness
           python3 bench.py run "/bench/bench/${BENCH_CONFIG}" --out /results --yes || echo "bench.py exited with $?"
-          cd /results && exec python3 -m http.server 8000 --bind 0.0.0.0
+          echo "run finished; results stay served on port 8000 until the pod is deleted"
+          wait
       env:
         - name: BENCH_CONFIG
           value: "${BENCH_CONFIG}"
