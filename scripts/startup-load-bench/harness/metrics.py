@@ -73,11 +73,18 @@ def block_time(cfg, minutes=10):
     return minutes * 60 / blocks if blocks > 0 else None
 
 
+def _by_cache(cfg, metric):
+    """Per-cache totals; the cache name label is `cache`, or `exported_cache` where the scrape renames it."""
+    out = {}
+    for r in vm(cfg, f'sum by (cache, exported_cache) ({metric}{{{cfg["target"]["pod_selector"]}}})'):
+        out[r["metric"].get("cache") or r["metric"].get("exported_cache", "?")] = float(r["value"][1])
+    return out
+
+
 def counters(cfg):
     sel = cfg["target"]["pod_selector"]
     return {"db_path": vm_by(cfg, f'sum by (reason) (db_path_requests{{{sel}}})', "reason"),
-            "cache_hits": vm_by(cfg, f'sum by (exported_cache) (rpc_cache_hits{{{sel}}})', "exported_cache"),
-            "cache_misses": vm_by(cfg, f'sum by (exported_cache) (rpc_cache_misses{{{sel}}})', "exported_cache")}
+            "cache_hits": _by_cache(cfg, "rpc_cache_hits"), "cache_misses": _by_cache(cfg, "rpc_cache_misses")}
 
 
 def image(cfg):
