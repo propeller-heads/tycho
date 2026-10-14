@@ -38,7 +38,12 @@ def run(cfg, plan, sc, loadgen, out, max_wait=600, log=print):
     th.start()
     time.sleep(1)
     age = sc["version_age"]
-    age_blocks = int((cfg["rules"]["max_version_age_s"] if age == "max" else age) / bt)
+    if age == "max":
+        # As old as the target's plan allows, minus a minute of slack for the tip moving while the
+        # requests are in flight, minus the 5 blocks the base block already sits behind the tip.
+        age_blocks = max(0, int((cfg["rules"]["max_version_age_s"] - 60) / bt) - 5)
+    else:
+        age_blocks = int(age / bt)
     env = {**os.environ, "SPREAD_S": str(sc["spread_s"]), "BLOCK_TIME_S": f"{bt:.3f}", "VERSION_AGE_BLOCKS": str(age_blocks),
            "SINGLE_ID_CALLS": str(sc["single_id_calls"])}
     if sc["profile"]:

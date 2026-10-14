@@ -1,4 +1,4 @@
-# The benchmark runner. launch.sh fills in the three placeholders (config name and the two keys)
+# The benchmark runner. launch.sh fills in the placeholders (config name, extra arguments, the two keys)
 # and applies it to prod-tycho.
 # The source comes from the ConfigMap "tycho-bench" (launch.sh creates it from this directory);
 # the pod serves its results directory on port 8000 from the start (bench.py pull copies files
@@ -31,12 +31,14 @@ spec:
           cp /src/*.toml /bench/bench/ && rm /bench/bench/Cargo.toml
           (cd /results && python3 -m http.server 8000 --bind 0.0.0.0 >/dev/null 2>&1) &
           cd /bench/harness
-          python3 bench.py run "/bench/bench/${BENCH_CONFIG}" --out /results --yes || echo "bench.py exited with $?"
+          python3 bench.py run "/bench/bench/${BENCH_CONFIG}" --out /results --yes ${BENCH_ARGS} || echo "bench.py exited with $?"
           echo "run finished; results stay served on port 8000 until the pod is deleted"
           wait
       env:
         - name: BENCH_CONFIG
           value: "${BENCH_CONFIG}"
+        - name: BENCH_ARGS            # extra bench.py arguments, e.g. --only old_version_n16
+          value: "${BENCH_ARGS}"
         - name: TYCHO_API_KEY
           value: "${TYCHO_API_KEY}"
         - name: GRAFANA_API_KEY
