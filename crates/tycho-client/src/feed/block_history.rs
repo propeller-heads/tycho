@@ -139,10 +139,24 @@ impl BlockHistory {
         let pos = self.determine_block_position(&block)?;
         match pos {
             BlockPosition::NextExpected => {
-                // if the block is NextExpected, but does not fit on top of the latest
-                // block (via parent hash) -> we are dealing with a
-                // revert.
-                if block.revert {
+                if block.revert && self.hash_in_history(&block.hash) {
+                    // A revert names a sealed block by its sealed hash, never a partial (see
+                    // `BlockHeader::revert`), so the target is found by hash. Remove every block
+                    // above the target, then the target: the revert header takes its place. The
+                    // target's parent is not needed.
+                    while let Some(head) = self.history.pop_back() {
+                        let is_target = head.hash == block.hash;
+                        self.reverts
+                            .push(head.hash.clone(), head);
+                        if is_target {
+                            break;
+                        }
+                    }
+                } else if block.revert {
+                    // The history does not hold the target's sealed hash: it holds that height
+                    // only as a partial (the client missed the block's last partial), or not at
+                    // all. Drain to the target's parent instead.
+                    //
                     // A real hash match anywhere in history is always preferred: prefer walking
                     // down to it over stopping early at a same-height partial. Height is only a
                     // fallback for when the fork point is retained solely under an ephemeral
@@ -240,9 +254,7 @@ impl BlockHistory {
 
     /// Determines the blocks position relative to current history.
     ///
-    /// If there is no history we'll return an error here. This will also error if we
-    /// have a single block and we encounter a revert as it will be impossible to
-    /// find the fork block.
+    /// If there is no history we'll return an error here.
     pub fn determine_block_position(
         &self,
         block: &BlockHeader,
@@ -1046,5 +1058,30 @@ mod test {
         let latest = history.latest().unwrap();
         assert!(latest.revert);
         assert!(!latest.is_partial());
+    }
+
+    #[test]
+    fn test_revert_to_the_oldest_block_resolves_without_its_parent() {
+        // The history holds sealed block 10 and a partial of 11, but not block 9. A revert to 10
+        // names 9 as its parent; the target itself is enough to place it.
+        let mut blocks = generate_blocks(1, 10, Some(int_hash(9)));
+        blocks.push(partial_block(11, 0, int_hash(10)));
+        let mut history = BlockHistory::new(blocks, 15).unwrap();
+
+        let revert = BlockHeader {
+            number: 10,
+            hash: int_hash(10),
+            parent_hash: int_hash(9),
+            revert: true,
+            partial_block_index: Some(0),
+            ..Default::default()
+        };
+
+        history
+            .push(revert.clone())
+            .expect("a revert to a held block must resolve");
+
+        assert_eq!(history.latest().unwrap(), &revert);
+        assert!(history.blocks().all(|b| b.number <= 10));
     }
 }

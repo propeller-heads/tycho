@@ -55,9 +55,16 @@ pub struct BlockHeader {
     pub hash: Bytes,
     pub number: u64,
     pub parent_hash: Bytes,
+    /// True when the chain rolled back. The header then names the newest block that stays
+    /// valid. That block is always sealed and carries its sealed hash: the indexer reverts to
+    /// the newest block of its reorg buffer, which holds only sealed blocks. A revert never
+    /// targets a partial block, so do not look for a revert target among partials.
     pub revert: bool,
     pub timestamp: u64,
     /// Index of a partial block update within a block. None for full blocks.
+    ///
+    /// On a revert header this is not a position in the named block: it is the index of the
+    /// dropped partial of the next block, and is None when sealed blocks were reverted too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_block_index: Option<u32>,
 }
@@ -2965,6 +2972,41 @@ mod tests {
         let feed = receive_message(&mut rx).await;
         assert_ready_at(&feed, "uniswap-v2", 5, Some(0));
         assert_ready_at(&feed, "uniswap-v3", 5, Some(0));
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// After a jump the memory holds only block 5. An undo of block 6's partials targets block 5
+    /// itself, whose parent the memory never held.
+    #[test(tokio::test)]
+    async fn test_undo_to_the_first_block_after_a_jump_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        // Both streams jump from block 1 to block 5; its parent, block 4, never arrived.
+        advance_both(&v2, &v3, &mut rx, partial_header_message(5, 0)).await;
+        // The last partial of block 5 carries the sealed hash.
+        let mut sealed_5 = header_message(5);
+        sealed_5.header.partial_block_index = Some(1);
+        advance_both(&v2, &v3, &mut rx, sealed_5).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(6, 0)).await;
+        // Undo of block 6's partials: revert to sealed block 5.
+        advance_both(&v2, &v3, &mut rx, partial_revert_message(5, 0)).await;
+        let mut rebuilt_6 = partial_header_message(6, 0);
+        rebuilt_6.header.hash = Bytes::from(vec![0x60]);
+        advance_both(&v2, &v3, &mut rx, rebuilt_6).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// A revert to a block the memory never held, whose parent is the tip: block 5 reached the
+    /// client only inside a snapshot. The revert must append on top of block 4.
+    #[test(tokio::test)]
+    async fn test_revert_to_an_unseen_block_on_the_tip_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(4)).await;
+        advance_both(&v2, &v3, &mut rx, revert_header_message(5)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(6)).await;
 
         shutdown_block_synchronizer(nanny, rx).await;
     }
