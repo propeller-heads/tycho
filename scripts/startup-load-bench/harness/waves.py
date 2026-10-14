@@ -39,9 +39,11 @@ def run(cfg, plan, sc, loadgen, out, max_wait=600, log=print):
     time.sleep(1)
     age = sc["version_age"]
     if age == "max":
-        # As old as the target's plan allows, minus a minute of slack for the tip moving while the
-        # requests are in flight, minus the 5 blocks the base block already sits behind the tip.
-        age_blocks = max(0, int((cfg["rules"]["max_version_age_s"] - 60) / bt) - 5)
+        # As old as the target's plan allows at the END of the startup: a client pins its version
+        # once and keeps asking for it while the tip moves on, so the slack has to cover the
+        # whole startup (a 16-wave on ethereum takes 75 s, more under load). Minus the 5 blocks
+        # the base block already sits behind the tip.
+        age_blocks = max(0, int((cfg["rules"]["max_version_age_s"] - cfg["rules"]["version_age_slack_s"]) / bt) - 5)
     else:
         age_blocks = int(age / bt)
     env = {**os.environ, "SPREAD_S": str(sc["spread_s"]), "BLOCK_TIME_S": f"{bt:.3f}", "VERSION_AGE_BLOCKS": str(age_blocks),

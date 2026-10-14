@@ -12,6 +12,7 @@ rds_instance = "prod-robinhood"
 [rules]   # what the target's plan lets these clients do; profiles and scenarios stay inside
 tvl_floor = 0.1
 max_version_age_s = 600
+version_age_slack_s = 240   # "max" version age = limit minus this, so the version stays allowed until the startup ends
 
 [[profiles]]
 # Fynd: everything incl. hooks (its key lands on the default plan), Fynd's TVL filter.

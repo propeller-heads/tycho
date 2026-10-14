@@ -22,6 +22,7 @@ def load(path):
     rules = cfg.setdefault("rules", {})
     rules.setdefault("tvl_floor", 0.1)
     rules.setdefault("max_version_age_s", 600)
+    rules.setdefault("version_age_slack_s", 240)   # a startup keeps its pinned version for its whole duration
     m = cfg.setdefault("metrics", {})
     for k, v in METRICS_DEFAULTS.items():
         m.setdefault(k, v)
