@@ -44,10 +44,12 @@ spec:
           value: "${TYCHO_API_KEY}"
         - name: GRAFANA_API_KEY
           value: "${GRAFANA_API_KEY}"
+      # Small requests so the pod fits a slot on an existing node (the load generator discards
+      # response bodies and uses little CPU); the limits leave room for the 64-client waves.
       resources:
         requests:
-          cpu: "2"
-          memory: 4Gi
+          cpu: "1"
+          memory: 2Gi
         limits:
           cpu: "4"
           memory: 8Gi
