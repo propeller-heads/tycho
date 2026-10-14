@@ -1,0 +1,72 @@
+# Runner pod for the startup load benchmark. launch.sh creates it, copies the benchmark
+# directory in and drops /bench/go; the pod then builds startup-loadgen and runs
+# harness/run_all.sh as its main process, so `kubectl logs` carries the whole run.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tycho-bench
+  namespace: prod-tycho-bench
+  labels:
+    app: tycho-bench
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: bench
+      image: rust:1.91-bookworm
+      command:
+        - sh
+        - -c
+        - |
+          apt-get update -qq && apt-get install -y -qq python3 python3-zstandard >/dev/null
+          until [ -f /bench/go ]; do sleep 2; done
+          mkdir -p /bench/h && tar xzf /bench/bundle.tgz -C /bench/h
+          exec /bench/h/harness/run_all.sh
+      envFrom:
+        - secretRef:
+            name: bench-keys
+      env:
+        - name: BENCH_SIDE
+          value: bench
+        - name: BENCH_CHAINS
+          value: "ethereum robinhood"
+        - name: BENCH_SETS
+          value: "realistic worst"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 4Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      volumeMounts:
+        - name: work
+          mountPath: /bench
+  volumes:
+    - name: work
+      emptyDir:
+        sizeLimit: 20Gi
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: karpenter.sh/capacity-type
+                operator: In
+                values: ["on-demand"]
+    # Never share a node with the indexers under test or the live ones.
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          namespaces: ["prod-tycho"]
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - ethereum-tycho-indexer-1
+                  - ethereum-tycho-indexer-2
+                  - robinhood-tycho-indexer-1
+                  - robinhood-tycho-indexer-2
