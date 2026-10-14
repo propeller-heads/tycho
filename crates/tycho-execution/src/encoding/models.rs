@@ -145,6 +145,10 @@ pub struct Solution {
     swaps: Vec<Swap>,
     /// The transfer type to be used in this swap for user's funds (token in)
     user_transfer_type: UserTransferType,
+    /// The end user's EOA (`tx.origin`), for RFQ providers that ask for it. `None` lets the
+    /// provider use its own default.
+    #[serde(default)]
+    origin: Option<Bytes>,
 }
 
 impl Solution {
@@ -169,6 +173,7 @@ impl Solution {
             min_amount_out,
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
+            origin: None,
         }
     }
     pub fn sender(&self) -> &Bytes {
@@ -206,6 +211,10 @@ impl Solution {
         &self.user_transfer_type
     }
 
+    pub fn origin(&self) -> Option<&Bytes> {
+        self.origin.as_ref()
+    }
+
     pub fn with_swaps(mut self, swaps: Vec<Swap>) -> Self {
         self.swaps = swaps;
         self
@@ -213,6 +222,12 @@ impl Solution {
 
     pub fn with_user_transfer_type(mut self, user_transfer_type: UserTransferType) -> Self {
         self.user_transfer_type = user_transfer_type;
+        self
+    }
+
+    /// Sets the end user's EOA (`tx.origin`) that RFQ providers receive with their quote request.
+    pub fn with_origin(mut self, origin: Bytes) -> Self {
+        self.origin = Some(origin);
         self
     }
 }
@@ -239,6 +254,10 @@ pub struct Swap {
     estimated_amount_in: Option<BigUint>,
     /// Estimated gas usage for this swap by simulation
     estimated_gas: BigUint,
+    /// For an RFQ swap, how far below its price levels the maker's signed quote may land, in basis
+    /// points, before encoding fails. `None` encodes whatever the maker signs.
+    #[serde(default)]
+    max_signed_quote_shortfall_bps: Option<u32>,
 }
 
 impl Swap {
@@ -257,6 +276,7 @@ impl Swap {
             protocol_state: None,
             estimated_amount_in: None,
             estimated_gas,
+            max_signed_quote_shortfall_bps: None,
         }
     }
 
@@ -281,6 +301,13 @@ impl Swap {
     /// Sets the estimated amount in for RFQ protocols
     pub fn with_estimated_amount_in(mut self, estimated_amount_in: BigUint) -> Self {
         self.estimated_amount_in = Some(estimated_amount_in);
+        self
+    }
+
+    /// Fails the encoding of an RFQ swap whose signed quote lands more than `max_shortfall_bps`
+    /// below the amount its price levels give for the same input. Other swaps ignore it.
+    pub fn with_max_signed_quote_shortfall_bps(mut self, max_shortfall_bps: u32) -> Self {
+        self.max_signed_quote_shortfall_bps = Some(max_shortfall_bps);
         self
     }
 
@@ -314,6 +341,10 @@ impl Swap {
 
     pub fn estimated_gas(&self) -> &BigUint {
         &self.estimated_gas
+    }
+
+    pub fn max_signed_quote_shortfall_bps(&self) -> Option<u32> {
+        self.max_signed_quote_shortfall_bps
     }
 }
 
@@ -494,11 +525,13 @@ impl PartialEq for PermitDetails {
 ///   solution does not require router address.
 /// * `group_token_in`: Token to be used as the input for the group swap.
 /// * `group_token_out`: Token to be used as the output for the group swap.
+/// * `origin`: The end user's EOA (`tx.origin`), for RFQ providers that ask for it.
 #[derive(Clone, Debug)]
 pub struct EncodingContext {
     pub router_address: Option<Bytes>,
     pub group_token_in: Bytes,
     pub group_token_out: Bytes,
+    pub origin: Option<Bytes>,
 }
 
 #[derive(PartialEq)]

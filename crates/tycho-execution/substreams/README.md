@@ -122,6 +122,10 @@ and the name appears on every trade already stored.
     ('base', '0x...', ARRAY['uniswap_v4']),
 ```
 
+`make check-executors` fails when `config/executor_addresses.json` lists an address that has no
+row here for a chain this package indexes, and CI runs it when either file changes. Name a
+`fallback:<name>` config entry by `<name>` alone, so `fallback:rfq:bebop` is `rfq:bebop`.
+
 To name one in a running database without waiting for a deploy, insert it there as well; the file
 will not fight it.
 

@@ -24,12 +24,12 @@ use itertools::Itertools;
 use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
 use num_traits::{Pow, ToPrimitive, Zero};
-use rand::prelude::IndexedRandom;
+use rand::prelude::{IndexedRandom, SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
-use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
     utils::bytes_to_address, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX,
@@ -37,9 +37,16 @@ use tycho_execution::encoding::evm::{
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
-    rfq::protocols::{
-        hashflow::{client::HashflowClient, state::HashflowState},
-        liquorice::{client::LiquoriceClient, state::LiquoriceState},
+    rfq::{
+        models::ComponentLayout,
+        protocols::{
+            component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
+            hashflow::{
+                all_pairs_state::HashflowAllPairsState, client::HashflowClient,
+                state::HashflowState,
+            },
+            liquorice::{client::LiquoriceClient, state::LiquoriceState},
+        },
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
     utils::load_all_tokens,
@@ -103,6 +110,12 @@ struct Cli {
     /// Disable RFQ protocols
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
+
+    /// Stream RFQ venues as one component for all token pairs where the client supports it. A
+    /// swap then limits how often the route may quote the venue again. One component per pair by
+    /// default.
+    #[arg(long, default_value_t = false)]
+    rfq_all_pairs: bool,
 
     /// Run PAMM RFQ protocols.
     #[arg(long, default_value_t = true)]
@@ -264,6 +277,74 @@ const TOKEN_PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60)
 /// and gas estimates. Capping the input to a realistic value (~10k USD at recent ETH prices) keeps
 /// simulation and the dashboard gas estimates representative.
 const MAX_INPUT_VALUE_ETH: f64 = 5.0;
+
+/// Swap directions simulated per RFQ component. One RFQ component covers a whole chain, and each
+/// direction costs one firm quote and one transaction simulation.
+const MAX_RFQ_SWAP_DIRECTIONS: usize = 10;
+
+/// The directions an RFQ component quotes, as token pairs.
+fn rfq_swap_directions(attribute: &Bytes, tokens: &[Token]) -> Result<Vec<(Token, Token)>, String> {
+    let tokens: HashMap<&Bytes, &Token> = tokens
+        .iter()
+        .map(|token| (&token.address, token))
+        .collect();
+    let mut directions = Vec::new();
+    for (token_in, token_out) in decode_swap_directions(attribute)? {
+        let (Some(token_in), Some(token_out)) = (tokens.get(&token_in), tokens.get(&token_out))
+        else {
+            return Err(format!(
+                "Swap direction {token_in} -> {token_out} names a token the component does not carry"
+            ));
+        };
+        directions.push(((*token_in).clone(), (*token_out).clone()));
+    }
+    Ok(directions)
+}
+
+/// A random sample of at most [`MAX_RFQ_SWAP_DIRECTIONS`] directions.
+fn sample_rfq_swap_directions(mut directions: Vec<(Token, Token)>) -> Vec<(Token, Token)> {
+    directions.shuffle(&mut rand::rng());
+    directions.truncate(MAX_RFQ_SWAP_DIRECTIONS);
+    directions
+}
+
+/// The one direction a per-pair Hashflow or Liquorice state quotes. `None` for every other state.
+///
+/// Reads the state because `ProtocolComponent::from_with_tokens` reorders `component.tokens`.
+fn rfq_pair_direction(state: &dyn ProtocolSim) -> Option<(Token, Token)> {
+    if let Some(state) = state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+    {
+        return Some((state.base_token.clone(), state.quote_token.clone()));
+    }
+    let state = state
+        .as_any()
+        .downcast_ref::<LiquoriceState>()?;
+    Some((state.base_token.clone(), state.quote_token.clone()))
+}
+
+/// The smallest input a Hashflow market maker on the pair accepts, in atomic units. A maker
+/// declines an amount below its first level.
+fn hashflow_min_amount_in(
+    state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+) -> Option<BigUint> {
+    if let Some(state) = state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+    {
+        let first_level = state.levels.levels.first()?;
+        let min_amount_in = BigUint::from(first_level.quantity.ceil() as u128);
+        return Some(min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals));
+    }
+    state
+        .as_any()
+        .downcast_ref::<HashflowAllPairsState>()?
+        .price_levels
+        .minimum_amount_in(&token_in.address, &token_out.address)
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -442,7 +523,11 @@ async fn run(cli: Cli) -> miette::Result<()> {
             Duration::from_secs(cli.skip_messages_duration),
             cli.run_pamm_protocols,
         )
-        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"));
+        .unwrap_or_else(|e| panic!("Failed to create RFQ stream processor: {e}"))
+        .with_component_layout(match cli.rfq_all_pairs {
+            true => ComponentLayout::AllPairs,
+            false => ComponentLayout::PerPair,
+        });
         rfq_handle = Some(
             rfq_stream_processor
                 .run_stream(&all_tokens, rfq_tx)
@@ -1593,43 +1678,31 @@ async fn process_state(
         error!("Component has less than 2 tokens, skipping...");
         return HashMap::new();
     }
-    let mut min_amount = BigUint::ZERO;
-    // Get all the possible swap directions
-    let swap_directions = match component.protocol_system.as_str() {
-        HashflowClient::PROTOCOL_SYSTEM => {
-            // Hashflow only supports swaps between the requested base and quote tokens
-            // WARN: we read from state because the component.tokens original order
-            // is modified here: src/protocol/models.rs: ProtocolComponent::from_with_tokens
-            let state = match state
-                .as_any()
-                .downcast_ref::<HashflowState>()
-            {
-                Some(s) => s.clone(),
+    // An RFQ all-pairs component names every token the venue quotes; its swap directions attribute
+    // says which of them are paired.
+    let swap_directions = match component
+        .static_attributes
+        .get(SWAP_DIRECTIONS_ATTRIBUTE)
+    {
+        Some(attribute) => match rfq_swap_directions(attribute, &component.tokens) {
+            Ok(directions) => sample_rfq_swap_directions(directions),
+            Err(e) => {
+                error!("Invalid swap directions attribute, skipping: {e}");
+                return HashMap::new();
+            }
+        },
+        None if [HashflowClient::PROTOCOL_SYSTEM, LiquoriceClient::PROTOCOL_SYSTEM]
+            .contains(&component.protocol_system.as_str()) =>
+        {
+            match rfq_pair_direction(state.as_ref()) {
+                Some(direction) => vec![direction],
                 None => {
-                    warn!("Failed to downcast state to HashflowState");
+                    warn!("Failed to downcast state of {} component", component.protocol_system);
                     return HashMap::new();
                 }
-            };
-            // The smallest amount acceptable for hashflow is the amount of the first level, random
-            // small amounts are not accepted. The amount in will be capped to this value
-            let min_amount_in = BigUint::from(state.levels.levels[0].quantity.ceil() as u128);
-            min_amount = min_amount_in * BigUint::from(10u32).pow(state.base_token.decimals);
-            vec![(state.base_token, state.quote_token)]
+            }
         }
-        LiquoriceClient::PROTOCOL_SYSTEM => {
-            let state = match state
-                .as_any()
-                .downcast_ref::<LiquoriceState>()
-            {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Failed to downcast state to LiquoriceState");
-                    return HashMap::new();
-                }
-            };
-            vec![(state.base_token, state.quote_token)]
-        }
-        _ => component
+        None => component
             .tokens
             .iter()
             .permutations(2)
@@ -1702,7 +1775,9 @@ async fn process_state(
             debug!("Calculated amount_in is zero, skipping...");
             continue;
         }
-        amount_in = amount_in.max(min_amount.clone());
+        if let Some(min_amount_in) = hashflow_min_amount_in(state.as_ref(), token_in, token_out) {
+            amount_in = amount_in.max(min_amount_in);
+        }
 
         // Safety bound for tokens missing from the price snapshot, whose limit is left uncapped:
         // avoids the "amount exceeds 96 bits" error seen on Uniswap V3/V4 with very high limits.
@@ -2175,10 +2250,74 @@ fn format_error_chain(e: &miette::Error) -> String {
 mod tests {
     use clap::Parser;
     use rstest::rstest;
+    use tycho_common::models::{token::Token, Chain};
 
     use super::{
-        is_oracle_stale_revert, pamm_venue, should_fetch_block_by_number, Cli, TychoState,
+        is_oracle_stale_revert, pamm_venue, rfq_swap_directions, sample_rfq_swap_directions,
+        should_fetch_block_by_number, Bytes, Cli, TychoState, MAX_RFQ_SWAP_DIRECTIONS,
     };
+
+    /// A token whose address is `byte` repeated, so each one differs.
+    fn token(byte: u8) -> Token {
+        Token::new(
+            &Bytes::from(vec![byte; 20]),
+            &format!("T{byte}"),
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    /// The attribute the all-pairs component carries: token in, then token out, 20 bytes each.
+    fn swap_directions_attribute(directions: &[(&Token, &Token)]) -> Bytes {
+        let mut encoded = Vec::new();
+        for (token_in, token_out) in directions {
+            encoded.extend_from_slice(&token_in.address);
+            encoded.extend_from_slice(&token_out.address);
+        }
+        encoded.into()
+    }
+
+    #[test]
+    fn rfq_swap_directions_reads_the_attribute() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b), (&b, &a)]);
+
+        let directions = rfq_swap_directions(&attribute, &[a.clone(), b.clone()]).unwrap();
+
+        assert_eq!(directions, [(a.clone(), b.clone()), (b, a)]);
+    }
+
+    #[test]
+    fn rfq_swap_directions_names_a_token_the_component_lacks() {
+        let (a, b) = (token(1), token(2));
+        let attribute = swap_directions_attribute(&[(&a, &b)]);
+
+        let result = rfq_swap_directions(&attribute, &[a]);
+
+        assert!(result.is_err_and(|message| message.contains("does not carry")));
+    }
+
+    #[test]
+    fn sample_rfq_swap_directions_caps_the_count() {
+        let tokens: Vec<Token> = (0..=MAX_RFQ_SWAP_DIRECTIONS as u8)
+            .map(token)
+            .collect();
+        let directions: Vec<(Token, Token)> = tokens
+            .iter()
+            .map(|token_in| (token_in.clone(), tokens[0].clone()))
+            .collect();
+        assert!(directions.len() > MAX_RFQ_SWAP_DIRECTIONS);
+
+        let sampled = sample_rfq_swap_directions(directions.clone());
+
+        assert_eq!(sampled.len(), MAX_RFQ_SWAP_DIRECTIONS);
+        for direction in &sampled {
+            assert!(directions.contains(direction));
+        }
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]

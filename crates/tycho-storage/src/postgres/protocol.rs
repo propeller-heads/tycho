@@ -134,6 +134,19 @@ impl PostgresGateway {
         }
     }
 
+    /// Returns the components of `chain` that match all given filters, and the number of matching
+    /// components on all pages.
+    ///
+    /// - `system`: only components of this protocol system.
+    /// - `ids`: only components with these external ids.
+    /// - `min_tvl`: only components with a TVL greater than this value. A component without a TVL
+    ///   row never matches; a NaN TVL matches every value.
+    /// - `pagination`: the page to return, in ascending database id order. Without it, all matching
+    ///   components are returned, in no particular order.
+    ///
+    /// Soft-deleted components are returned too. When the component index is enabled and `system`
+    /// is given without `ids`, the index selects the page and counts the matches; Postgres then
+    /// loads only the components on the page.
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_protocol_components(
         &self,
@@ -146,6 +159,19 @@ impl PostgresGateway {
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
         use super::schema::{protocol_component::dsl::*, transaction::dsl::*};
         let chain_id_value = self.get_chain_id(chain)?;
+
+        if let (Some(component_index), Some(system_name), None) =
+            (&self.component_index, &system, ids)
+        {
+            let system_id = self.get_protocol_system_id(system_name)?;
+            if let Some(page) = component_index.query(chain, system_id, min_tvl, pagination_params)
+            {
+                let components = self
+                    .get_protocol_components_by_db_ids(chain, &page.ids, conn)
+                    .await?;
+                return Ok(WithTotal { entity: components, total: Some(page.total) });
+            }
+        }
 
         let mut count_query = protocol_component
             .left_join(schema::component_tvl::table)
@@ -238,6 +264,43 @@ impl PostgresGateway {
             .await?;
 
         Ok(WithTotal { entity: res, total: Some(count) })
+    }
+
+    /// Loads the components with the given database ids, in ascending id order. Ids without a row
+    /// are skipped.
+    async fn get_protocol_components_by_db_ids(
+        &self,
+        chain: &Chain,
+        db_ids: &[i64],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ProtocolComponent>, StorageError> {
+        if db_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = schema::protocol_component::table
+            .inner_join(
+                schema::transaction::table
+                    .on(schema::protocol_component::creation_tx.eq(schema::transaction::id)),
+            )
+            .filter(schema::protocol_component::id.eq_any(db_ids))
+            .order_by(schema::protocol_component::id.asc())
+            .select((orm::ProtocolComponent::as_select(), schema::transaction::hash))
+            .load::<(orm::ProtocolComponent, TxHash)>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        if rows.len() != db_ids.len() {
+            warn!(
+                n_requested = db_ids.len(),
+                n_found = rows.len(),
+                "Requested component ids without a component row"
+            );
+        }
+        let rows = rows
+            .into_iter()
+            .map(|(component, tx_hash)| (component, Some(tx_hash)))
+            .collect();
+        self.build_protocol_components(rows, chain, conn)
+            .await
     }
 
     #[instrument(level = Level::DEBUG, skip(self, orm_protocol_components, conn))]
@@ -1960,6 +2023,7 @@ impl PostgresGateway {
 
         if let Some(pagination) = pagination_params {
             query = query
+                .order_by(ct::protocol_component_id)
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }

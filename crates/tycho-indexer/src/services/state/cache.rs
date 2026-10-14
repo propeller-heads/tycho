@@ -30,7 +30,10 @@
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     hash::Hash,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    },
     time::Instant,
 };
 
@@ -482,6 +485,9 @@ impl From<CachedComponentState> for ProtocolComponentState {
 /// The long-lived entity store. See the module doc for the data model and locking.
 pub struct EntityCache {
     state: RwLock<CacheState>,
+    /// Number of folded blocks. Bumped under the write lock, so a reader that took the read lock
+    /// after a fold also reads the bumped value.
+    folds: AtomicU64,
 }
 
 /// The maps behind the lock.
@@ -509,7 +515,13 @@ impl EntityCache {
     pub(crate) fn new() -> Self {
         Self {
             state: RwLock::new(CacheState { accounts: HashMap::new(), components: HashMap::new() }),
+            folds: AtomicU64::new(0),
         }
+    }
+
+    /// Number of blocks folded into the cache since it was built.
+    pub(crate) fn folds(&self) -> u64 {
+        self.folds.load(Ordering::Relaxed)
     }
 
     /// Builds the cache from the live state of `chain` in one snapshot read through `gateway`.
@@ -563,6 +575,7 @@ impl EntityCache {
                 accounts: account_entries,
                 components: component_entries,
             }),
+            folds: AtomicU64::new(0),
         }
     }
 
@@ -726,6 +739,8 @@ impl FoldSink for EntityCache {
         let mut state = self.write_lock();
         state.fold_components(block);
         state.fold_accounts(block);
+        self.folds
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -1455,6 +1470,24 @@ mod test {
         cache.fold(&block).unwrap();
 
         assert!(cached_account(&cache, &address).is_none());
+    }
+
+    #[test]
+    fn fold_creates_an_account_an_earlier_transaction_updated() {
+        let cache = EntityCache::new();
+        let address = addr(1);
+        let mut delta = update(&address, fixtures::optional_slots([(1, 1)]));
+        delta
+            .merge(creation(&address, [(2, 2)], 10, "0x6000"))
+            .unwrap();
+
+        cache
+            .fold(&with_account_delta(msg(1), delta))
+            .unwrap();
+
+        let account = cached_account(&cache, &address).unwrap();
+        assert_eq!(account.code, code("0x6000"));
+        assert_eq!(account.slots, fixtures::slots([(1, 1), (2, 2)]));
     }
 
     #[test]

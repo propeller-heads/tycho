@@ -1,4 +1,8 @@
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
 use tycho_client::feed::{BlockHeader, HeaderLike};
+use tycho_common::Bytes;
 
 #[derive(Clone, Default, Debug)]
 pub struct TimestampHeader {
@@ -12,5 +16,161 @@ impl HeaderLike for TimestampHeader {
 
     fn block_number_or_timestamp(self) -> u64 {
         self.timestamp
+    }
+}
+
+/// One level of a market maker's book: `quantity` base tokens at `price` quote tokens each,
+/// both in whole units.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceLevel {
+    #[serde(
+        rename = "q",
+        deserialize_with = "deserialize_string_to_f64",
+        serialize_with = "serialize_f64_to_string"
+    )]
+    pub quantity: f64,
+    #[serde(
+        rename = "p",
+        deserialize_with = "deserialize_string_to_f64",
+        serialize_with = "serialize_f64_to_string"
+    )]
+    pub price: f64,
+}
+
+fn deserialize_string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.parse()
+        .map_err(serde::de::Error::custom)
+}
+
+fn serialize_f64_to_string<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+/// Consumes `levels` in order until `amount_in` is filled or they run out. Returns the amount
+/// out and the amount in that no level filled.
+pub fn fill_levels(levels: &[PriceLevel], amount_in: f64) -> (f64, f64) {
+    let mut remaining_amount_in = amount_in;
+    let mut amount_out = 0.0;
+    for level in levels {
+        if remaining_amount_in <= 0.0 {
+            break;
+        }
+        let filled = remaining_amount_in.min(level.quantity);
+        amount_out += filled * level.price;
+        remaining_amount_in -= filled;
+    }
+    (amount_out, remaining_amount_in)
+}
+
+/// The components an RFQ client streams, and so the state type its stream decodes to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentLayout {
+    /// One component per token pair, decoded by the venue's per-pair state, such as
+    /// `HashflowState`. A swap leaves the state
+    /// unchanged, so one route may quote the pair again.
+    #[default]
+    PerPair,
+    /// One component for all token pairs, decoded by the venue's all-pairs state, such as
+    /// `HashflowAllPairsState`. A swap marks what it used
+    /// in the state it returns, as the venue's [`QuoteRule`] says.
+    AllPairs,
+}
+
+/// How often one route may take quotes from an RFQ venue.
+///
+/// A swap records what it used in the state it returns, so the next swap on that state sees it.
+/// The rule travels with the venue's component as the `quote_rule` static attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteRule {
+    /// Every market maker quotes once per route. Only for a venue that names its makers and lets
+    /// the taker pick one.
+    OncePerMaker,
+    /// The venue quotes once per route.
+    OncePerVenue,
+}
+
+impl QuoteRule {
+    pub const ATTRIBUTE: &'static str = "quote_rule";
+    const ALL: [QuoteRule; 2] = [QuoteRule::OncePerMaker, QuoteRule::OncePerVenue];
+
+    /// The rule as its static attribute value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuoteRule::OncePerMaker => "once_per_maker",
+            QuoteRule::OncePerVenue => "once_per_venue",
+        }
+    }
+
+    /// The rule a component's static attributes carry, if any.
+    pub fn from_attributes(
+        attributes: &HashMap<String, Bytes>,
+    ) -> Result<Option<QuoteRule>, String> {
+        let Some(value) = attributes.get(Self::ATTRIBUTE) else {
+            return Ok(None);
+        };
+        Self::ALL
+            .into_iter()
+            .find(|rule| rule.as_str().as_bytes() == value.as_ref())
+            .map(Some)
+            .ok_or_else(|| {
+                format!("Unknown quote_rule attribute: {}", String::from_utf8_lossy(value))
+            })
+    }
+
+    /// Whether `market_maker` may still quote after the makers in `used` did.
+    pub fn allows(self, used: &HashSet<String>, market_maker: &str) -> bool {
+        match self {
+            QuoteRule::OncePerMaker => !used.contains(market_maker),
+            QuoteRule::OncePerVenue => used.is_empty(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_levels_stops_when_levels_run_out() {
+        let levels = vec![
+            PriceLevel { quantity: 1.0, price: 3000.0 },
+            PriceLevel { quantity: 2.0, price: 2999.0 },
+        ];
+        assert_eq!(fill_levels(&levels, 1.0), (3000.0, 0.0));
+        assert_eq!(fill_levels(&levels, 2.0), (5999.0, 0.0));
+        assert_eq!(fill_levels(&levels, 5.0), (8998.0, 2.0));
+    }
+
+    #[test]
+    fn quote_rule_attribute_round_trip() {
+        for rule in [QuoteRule::OncePerMaker, QuoteRule::OncePerVenue] {
+            let attributes = HashMap::from([(
+                QuoteRule::ATTRIBUTE.to_string(),
+                rule.as_str().as_bytes().into(),
+            )]);
+            assert_eq!(QuoteRule::from_attributes(&attributes), Ok(Some(rule)));
+        }
+    }
+
+    #[test]
+    fn quote_rule_attribute_absent() {
+        assert_eq!(QuoteRule::from_attributes(&HashMap::new()), Ok(None));
+    }
+
+    #[test]
+    fn quote_rule_attribute_unknown_value() {
+        let attributes =
+            HashMap::from([(QuoteRule::ATTRIBUTE.to_string(), b"twice_per_venue".into())]);
+        let result = QuoteRule::from_attributes(&attributes);
+        assert!(matches!(result, Err(message) if message.contains("twice_per_venue")));
     }
 }

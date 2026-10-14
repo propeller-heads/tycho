@@ -16,8 +16,10 @@ import {
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
 import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {FallbackExecutor} from "../src/executors/FallbackExecutor.sol";
-import {TychoFallbackRouter} from "../src/fallback/TychoFallbackRouter.sol";
+import {
+    PropAMMFallbackExecutor
+} from "../src/executors/PropAMMFallbackExecutor.sol";
+import {PropAMMFallbackRouter} from "../src/fallback/PropAMMFallbackRouter.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
 import {
@@ -140,8 +142,8 @@ contract TychoRouterTestSetup is
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
     SkyExecutor public skyExecutor;
-    TychoFallbackRouter public fallbackRouter;
-    FallbackExecutor public fallbackExecutor;
+    PropAMMFallbackRouter public propAMMFallbackRouter;
+    PropAMMFallbackExecutor public propAMMFallbackExecutor;
 
     FeeCalculator feeCalculator;
     address routerFeeReceiver;
@@ -292,12 +294,13 @@ contract TychoRouterTestSetup is
             nativeExecutor = new NativeExecutor(nativeRouterV6);
         }
 
-        fallbackRouter = new TychoFallbackRouter(
+        propAMMFallbackRouter = new PropAMMFallbackRouter(
             poolManager,
             FLUIDV1_LIQUIDITY,
             IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
         );
-        fallbackExecutor = new FallbackExecutor(address(fallbackRouter));
+        propAMMFallbackExecutor =
+            new PropAMMFallbackExecutor(address(propAMMFallbackRouter));
         // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
         // Native always deploy, so appending it shifts no address before it.
         lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
@@ -331,7 +334,7 @@ contract TychoRouterTestSetup is
         executors[23] = address(bopAMMExecutor);
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
-        executors[26] = address(fallbackExecutor);
+        executors[26] = address(propAMMFallbackExecutor);
         executors[27] = address(lidoV4Executor);
         uint256 nextExecutorIndex = 28;
         if (skyDeployable) {

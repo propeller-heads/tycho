@@ -10,8 +10,8 @@ use tycho_common::{
 use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
-        biguint_to_u256, bytes_to_address, create_encoding_runtime, on_blocking_thread,
-        record_signed_quote_deviation, SafeRuntime,
+        biguint_to_u256, bytes_to_address, check_signed_quote, create_encoding_runtime,
+        on_blocking_thread, SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -96,6 +96,7 @@ impl SwapEncoder for BebopSwapEncoder {
                 token_out,
                 sender: router_address.clone(),
                 receiver: router_address,
+                origin: encoding_context.origin.clone(),
             };
             let signed_quote = on_blocking_thread(|| {
                 self.runtime_handle.block_on(async {
@@ -104,7 +105,7 @@ impl SwapEncoder for BebopSwapEncoder {
                         .await
                 })
             })??;
-            record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
+            check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
             let bebop_calldata = signed_quote
                 .quote_attributes
                 .get("calldata")
@@ -252,6 +253,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = BebopSwapEncoder::new(

@@ -45,6 +45,7 @@ RUN resolve_base() { \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \
@@ -94,6 +95,7 @@ RUN resolve_base() { \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
             arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
             ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
             ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
             unichain-curve) echo "ethereum-curve" ;; \

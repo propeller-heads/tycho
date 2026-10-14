@@ -15,8 +15,8 @@ use tycho_common::{
 use crate::encoding::{
     errors::EncodingError,
     evm::utils::{
-        bytes_to_address, create_encoding_runtime, on_blocking_thread,
-        record_signed_quote_deviation, SafeRuntime,
+        bytes_to_address, check_signed_quote, create_encoding_runtime, on_blocking_thread,
+        SafeRuntime,
     },
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
@@ -109,11 +109,12 @@ impl SwapEncoder for NativeSwapEncoder {
                         token_out: swap.token_out().address.clone(),
                         sender: sender.clone(),
                         receiver: sender,
+                        origin: None,
                     })
                     .await
             })
         })??;
-        record_signed_quote_deviation(swap, protocol_state.as_ref(), &signed_quote);
+        check_signed_quote(swap, protocol_state.as_ref(), &signed_quote)?;
         // NativeClient already bound response.amountIn and order.sellerTokenAmount to the requested
         // amount. Store that validated quote baseline in the executor header so it can detect
         // under- or over-delivery at execution time.
@@ -254,6 +255,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
@@ -319,6 +321,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
@@ -386,6 +389,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
@@ -431,6 +435,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
