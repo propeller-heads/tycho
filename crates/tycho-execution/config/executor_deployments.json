@@ -173,6 +173,10 @@
         "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
       ]
     },
+    "flamm": {
+      "contract": "FLAMMExecutor",
+      "args": ["0x1BfcE014774D0DD7e04bC595D46Fa09F7dCCF45f"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
