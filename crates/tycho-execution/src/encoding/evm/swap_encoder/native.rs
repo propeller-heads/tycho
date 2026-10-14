@@ -109,6 +109,7 @@ impl SwapEncoder for NativeSwapEncoder {
                         token_out: swap.token_out().address.clone(),
                         sender: sender.clone(),
                         receiver: sender,
+                        origin: None,
                     })
                     .await
             })
@@ -254,6 +255,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
@@ -319,6 +321,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = NativeSwapEncoder::new(
@@ -386,6 +389,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
@@ -431,6 +435,7 @@ mod test {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),

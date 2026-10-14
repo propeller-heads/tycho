@@ -94,6 +94,7 @@ pub fn quote_params() -> GetAmountOutParams {
         token_out: wbtc().address,
         sender: router.clone(),
         receiver: router,
+        origin: None,
     }
 }
 

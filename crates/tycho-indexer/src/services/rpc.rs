@@ -28,7 +28,7 @@ use tycho_common::{
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
     services::{
-        cache::RpcCache,
+        cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
@@ -183,6 +183,20 @@ where
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
         }
+    }
+
+    /// Turns the given response caches off. A request to an endpoint whose cache is off always
+    /// runs the full path and stores nothing.
+    pub(crate) fn with_disabled_caches(mut self, kinds: &[RpcCacheKind]) -> Self {
+        for kind in kinds {
+            match kind {
+                RpcCacheKind::ContractStorage => self.contract_storage_cache.disable(),
+                RpcCacheKind::ProtocolState => self.protocol_state_cache.disable(),
+                RpcCacheKind::ProtocolComponents => self.component_cache.disable(),
+                RpcCacheKind::TracedEntryPoints => self.traced_entry_point_cache.disable(),
+            }
+        }
+        self
     }
 
     /// Sets which path answers the state endpoints.
@@ -3337,6 +3351,44 @@ mod tests {
         assert_eq!(tokens.tokens.len(), 2);
         assert_eq!(tokens.tokens[0].symbol, "USDC");
         assert_eq!(tokens.tokens[1].symbol, "WETH");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_cache_sends_every_request_to_the_gateway() {
+        let mut gw = MockGateway::new();
+        // The component cache is off: both identical requests reach the gateway.
+        gw.expect_get_protocol_components()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
+
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            component_ids: None,
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+
+        for _ in 0..2 {
+            let components = req_handler
+                .get_protocol_components(&request)
+                .await
+                .unwrap();
+            assert!(components
+                .protocol_components
+                .is_empty());
+        }
     }
 
     #[tokio::test]

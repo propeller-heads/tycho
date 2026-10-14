@@ -14,10 +14,19 @@ pub struct GatewayBuilder {
     retention_horizon: NaiveDateTime,
     chains: Vec<Chain>,
     token_cache: bool,
+    component_index: bool,
 }
 
 /// How often the token cache polls for token rows modified by other processes.
 const TOKEN_CACHE_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often the component index polls for new components and changed TVL.
+const COMPONENT_INDEX_REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often the component index reads all components and TVL again, to correct what the polls
+/// cannot see (see the `component_index` module docs).
+const COMPONENT_INDEX_FULL_RELOAD_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
 
 impl GatewayBuilder {
     pub fn new(database_url: &str) -> Self {
@@ -44,6 +53,15 @@ impl GatewayBuilder {
     /// the long-running `index` and `rpc` services.
     pub fn enable_token_cache(mut self) -> Self {
         self.token_cache = true;
+        self
+    }
+
+    /// Counts and pages `get_protocol_components` requests by protocol system from an in-memory
+    /// index instead of SQL; Postgres only loads the components on the requested page. Costs a
+    /// full component load at startup, two queries on Postgres indexes every second, a read of the
+    /// TVL rows that changed, and a full reload every hour.
+    pub fn set_component_index(mut self, enabled: bool) -> Self {
+        self.component_index = enabled;
         self
     }
 
@@ -76,11 +94,12 @@ impl GatewayBuilder {
             self.retention_horizon,
             self.token_cache
                 .then_some(self.chains.as_slice()),
+            self.component_index
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
-        if let Some(token_cache) = &inner_gw.token_cache {
-            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
-        }
+        spawn_refresh_tasks(&inner_gw, &pool);
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
@@ -96,6 +115,19 @@ impl GatewayBuilder {
         Ok((cached_gw, handle))
     }
 
+    /// Like `build`, plus a gateway for request handling with its own connection pool, so a
+    /// burst of requests never makes extractors or the database writer wait for a connection.
+    ///
+    /// Returns the extraction gateway, the request gateway and the database writer task.
+    pub async fn build_with_rpc_gateway(
+        self,
+    ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
+        let rpc_pool = postgres::new_pool(&self.database_url)?;
+        let (extraction_gw, writer) = self.build().await?;
+        let rpc_gw = extraction_gw.with_pool(rpc_pool);
+        Ok((extraction_gw, rpc_gw, writer))
+    }
+
     pub async fn build_gw(self) -> Result<CachedGateway, StorageError> {
         let pool = postgres::connect(&self.database_url).await?;
 
@@ -104,11 +136,12 @@ impl GatewayBuilder {
             self.retention_horizon,
             self.token_cache
                 .then_some(self.chains.as_slice()),
+            self.component_index
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
-        if let Some(token_cache) = &inner_gw.token_cache {
-            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
-        }
+        spawn_refresh_tasks(&inner_gw, &pool);
         let (tx, _) = mpsc::channel(10);
 
         let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());
@@ -131,13 +164,70 @@ impl GatewayBuilder {
             self.retention_horizon,
             self.token_cache
                 .then_some(self.chains.as_slice()),
+            self.component_index
+                .then(|| self.single_chain())
+                .transpose()?,
         )
         .await?;
-        if let Some(token_cache) = &inner_gw.token_cache {
-            token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
-        }
+        spawn_refresh_tasks(&inner_gw, &pool);
 
         let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)
+    }
+}
+
+fn spawn_refresh_tasks(
+    gateway: &PostgresGateway,
+    pool: &diesel_async::pooled_connection::deadpool::Pool<diesel_async::AsyncPgConnection>,
+) {
+    if let Some(token_cache) = &gateway.token_cache {
+        token_cache.spawn_refresh_task(pool.clone(), TOKEN_CACHE_REFRESH_PERIOD);
+    }
+    if let Some(component_index) = &gateway.component_index {
+        component_index.spawn_refresh_task(
+            pool.clone(),
+            COMPONENT_INDEX_REFRESH_PERIOD,
+            COMPONENT_INDEX_FULL_RELOAD_INTERVAL,
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_serial_db {
+    use std::time::Duration;
+
+    use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+
+    use super::*;
+    use crate::postgres::testing::run_against_db;
+
+    #[tokio::test]
+    async fn build_with_rpc_gateway_keeps_request_connections_apart_serial_db() {
+        run_against_db(|_| async move {
+            let db_url = std::env::var("DATABASE_URL").expect("Database URL must be set");
+            let (extraction_gw, rpc_gw, _writer) = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .build_with_rpc_gateway()
+                .await
+                .expect("gateways should build");
+            let rpc_pool = rpc_gw.pool();
+
+            // Requests hold every request connection; extraction still connects at once.
+            let connect = |pool: &Pool<AsyncPgConnection>| {
+                let pool = pool.clone();
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), pool.get())
+                        .await
+                        .expect("waited for a connection held by the other pool's users")
+                        .expect("pool should connect")
+                }
+            };
+            let mut held = Vec::new();
+            for _ in 0..rpc_pool.status().max_size {
+                held.push(connect(rpc_pool).await);
+            }
+            held.push(connect(extraction_gw.pool()).await);
+        })
+        .await;
     }
 }

@@ -278,6 +278,9 @@ pub struct GetAmountOutParams {
     pub token_out: Bytes,
     pub sender: Bytes,
     pub receiver: Bytes,
+    /// The end user's EOA (`tx.origin`), for RFQ providers that ask for it. `None` lets the
+    /// provider use its own default.
+    pub origin: Option<Bytes>,
 }
 
 impl From<dto::ProtocolStateDelta> for ProtocolComponentStateDelta {

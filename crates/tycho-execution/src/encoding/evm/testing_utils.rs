@@ -1,5 +1,10 @@
 // This module is used in integration tests as well
-use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -32,6 +37,9 @@ pub struct MockRFQState {
     /// How long `request_signed_quote` waits before it answers, like a network round trip.
     #[serde(default)]
     pub delay: Duration,
+    /// The `origin` of every `request_signed_quote` call, in call order.
+    #[serde(skip)]
+    pub received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
 }
 #[typetag::serde]
 impl ProtocolSim for MockRFQState {
@@ -106,6 +114,10 @@ impl IndicativelyPriced for MockRFQState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
+        self.received_origins
+            .lock()
+            .unwrap()
+            .push(params.origin.clone());
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
@@ -124,6 +136,16 @@ impl IndicativelyPriced for MockRFQState {
 
 /// Builds a Bebop swap whose signed quote arrives after `delay`.
 pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) -> Swap {
+    recording_bebop_swap(token_in, token_out, delay, Arc::default())
+}
+
+/// Builds a Bebop swap that pushes the `origin` of each quote request onto `received_origins`.
+pub fn recording_bebop_swap(
+    token_in: Bytes,
+    token_out: Bytes,
+    delay: Duration,
+    received_origins: Arc<Mutex<Vec<Option<Bytes>>>>,
+) -> Swap {
     let state = MockRFQState {
         quote_amount_in: None,
         quote_amount_out: BigUint::from(1_000u64),
@@ -134,6 +156,7 @@ pub fn delayed_bebop_swap(token_in: Bytes, token_out: Bytes, delay: Duration) ->
             ("tx_to".to_string(), Bytes::from("0xbbbbbBB520d69a9775E85b458C58c648259FAD5F")),
         ]),
         delay,
+        received_origins,
     };
     Swap::new(
         ProtocolComponent {
