@@ -3,6 +3,8 @@
 //! Deployment-specific values (addresses, storage-layout slots) come from
 //! [`crate::config::DeploymentConfig`]; the constants here are ABI-level (function selectors,
 //! event topics) that are fixed by the contract code itself.
+use std::collections::{HashMap, HashSet};
+
 use ethabi::{ParamType, Token};
 use keccak_hash::keccak;
 use substreams::{
@@ -130,6 +132,125 @@ pub fn books_for_token(
             .map(|c| vec![c.id])
             .unwrap_or_default()
     }
+}
+
+/// The book's asset (non-hub) token — the token that is not USDC.
+///
+/// Returns `None` for a malformed component with no non-USDC token.
+pub fn asset_token(component: &ProtocolComponent, usdc: &[u8]) -> Option<Vec<u8>> {
+    component
+        .tokens
+        .iter()
+        .find(|t| t.as_slice() != usdc)
+        .cloned()
+}
+
+/// Component ids of books a token used to back before a newer book superseded them.
+///
+/// BopAMM re-lists an asset under a fresh, higher asset id rather than delisting the old book, so
+/// a token is backed by exactly one live book: the newest. Any already-created book for
+/// `asset_token` with an asset id below `new_asset_id` has been re-listed and is stale. Callers
+/// use this to pause and drain the superseded book when its replacement is created.
+pub fn superseded_books_for_token(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    store: &StoreGetProto<ProtocolComponent>,
+) -> Vec<String> {
+    superseded_books_from(asset_token, new_asset_id, |i| store.get_last(format!("book:{i}")))
+}
+
+/// Testable core of [`superseded_books_for_token`] over a probe of asset id -> component, so the
+/// selection logic can be exercised without the WASM store.
+fn superseded_books_from(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    probe: impl Fn(u64) -> Option<ProtocolComponent>,
+) -> Vec<String> {
+    (0..new_asset_id)
+        .filter_map(|i| {
+            let component = probe(i)?;
+            component
+                .tokens
+                .iter()
+                .any(|t| t.as_slice() == asset_token)
+                .then_some(component.id)
+        })
+        .collect()
+}
+
+/// Component id of the book that currently holds a token's inventory before a newer book replaces
+/// it: the highest asset id below `new_asset_id` that backs `asset_token`, or `None` if this is the
+/// token's first book.
+///
+/// Only this book carries a non-zero accumulated balance. Every book below it was already drained
+/// to zero when its own replacement was created, so draining the whole superseded set (rather than
+/// just this one) would push those already-emptied books negative.
+pub fn previous_live_book_for_token(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    store: &StoreGetProto<ProtocolComponent>,
+) -> Option<String> {
+    previous_live_book_from(asset_token, new_asset_id, |i| store.get_last(format!("book:{i}")))
+}
+
+/// Testable core of [`previous_live_book_for_token`] over a probe of asset id -> component.
+fn previous_live_book_from(
+    asset_token: &[u8],
+    new_asset_id: u64,
+    probe: impl Fn(u64) -> Option<ProtocolComponent>,
+) -> Option<String> {
+    (0..new_asset_id).rev().find_map(|i| {
+        let component = probe(i)?;
+        component
+            .tokens
+            .iter()
+            .any(|t| t.as_slice() == asset_token)
+            .then_some(component.id)
+    })
+}
+
+/// Component ids of every book a higher-id book has superseded across the venue.
+///
+/// A token is backed by exactly one live book — the highest asset id, since BopAMM re-lists an
+/// asset under a fresh higher id rather than delisting. Every lower-id book for the same asset
+/// token is superseded and must stay paused, even across a global settlement unpause (which would
+/// otherwise resurrect a dead book whose stale quote reverts `StaleUpdate`).
+pub fn superseded_book_ids(
+    store: &StoreGetProto<ProtocolComponent>,
+    usdc: &[u8],
+) -> HashSet<String> {
+    superseded_book_ids_from(usdc, |i| store.get_last(format!("book:{i}")))
+}
+
+/// Testable core of [`superseded_book_ids`] over a probe of asset id -> component.
+fn superseded_book_ids_from(
+    usdc: &[u8],
+    probe: impl Fn(u64) -> Option<ProtocolComponent>,
+) -> HashSet<String> {
+    let mut books: Vec<(u64, String, Vec<u8>)> = Vec::new();
+    let mut i = 0u64;
+    while let Some(component) = probe(i) {
+        if let Some(token) = asset_token(&component, usdc) {
+            books.push((i, component.id, token));
+        }
+        i += 1;
+    }
+    let mut live_id: HashMap<Vec<u8>, u64> = HashMap::new();
+    for (asset_id, _, token) in &books {
+        let entry = live_id
+            .entry(token.clone())
+            .or_insert(*asset_id);
+        *entry = (*entry).max(*asset_id);
+    }
+    books
+        .into_iter()
+        .filter(|(asset_id, _, token)| {
+            live_id
+                .get(token)
+                .is_some_and(|live| asset_id < live)
+        })
+        .map(|(_, id, _)| id)
+        .collect()
 }
 
 /// Reads a big-endian `u64` from a left-padded attribute value.
@@ -356,6 +477,84 @@ mod tests {
     fn enumerate_books_from_empty_store_yields_nothing() {
         let books = enumerate_books_from(|_| None);
         assert!(books.is_empty());
+    }
+
+    fn book_component(asset_id: u64, asset: &[u8], usdc: &[u8]) -> ProtocolComponent {
+        let mut tokens = vec![asset.to_vec(), usdc.to_vec()];
+        tokens.sort_unstable();
+        ProtocolComponent::new(&component_id(&SETTLEMENT, asset_id)).with_tokens(&tokens)
+    }
+
+    #[test]
+    fn superseded_books_from_returns_older_books_for_the_same_token() {
+        let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let wbtc = hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
+        // book 0 = WETH (old), book 1 = WBTC, book 2 = WETH (re-listing).
+        let probe = |i: u64| match i {
+            0 => Some(book_component(0, &weth, &usdc)),
+            1 => Some(book_component(1, &wbtc, &usdc)),
+            2 => Some(book_component(2, &weth, &usdc)),
+            _ => None,
+        };
+        // The new WETH book (asset id 2) supersedes only the older WETH book (asset id 0), never
+        // the WBTC book that merely shares USDC.
+        assert_eq!(superseded_books_from(&weth, 2, probe), vec![component_id(&SETTLEMENT, 0)]);
+        // The WBTC book is the first for its token: it supersedes nothing.
+        assert!(superseded_books_from(&wbtc, 1, probe).is_empty());
+    }
+
+    #[test]
+    fn previous_live_book_returns_only_the_most_recent_superseded_book() {
+        let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let wbtc = hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
+        // WETH re-listed twice: book 0 -> book 2 -> book 5. book 1 = WBTC.
+        let probe = |i: u64| match i {
+            0 => Some(book_component(0, &weth, &usdc)),
+            1 => Some(book_component(1, &wbtc, &usdc)),
+            2 => Some(book_component(2, &weth, &usdc)),
+            5 => Some(book_component(5, &weth, &usdc)),
+            _ => None,
+        };
+        // Creating book 5 must drain only book 2 (the live book holding the balance), never book 0
+        // which was already drained to zero when book 2 replaced it.
+        assert_eq!(previous_live_book_from(&weth, 5, probe), Some(component_id(&SETTLEMENT, 2)));
+        // Creating book 2 drains book 0.
+        assert_eq!(previous_live_book_from(&weth, 2, probe), Some(component_id(&SETTLEMENT, 0)));
+        // The token's first book supersedes nothing.
+        assert_eq!(previous_live_book_from(&weth, 0, probe), None);
+        // WBTC's only book has no predecessor.
+        assert_eq!(previous_live_book_from(&wbtc, 1, probe), None);
+    }
+
+    #[test]
+    fn asset_token_returns_the_non_usdc_side() {
+        let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let component = book_component(0, &weth, &usdc);
+        assert_eq!(asset_token(&component, &usdc), Some(weth));
+    }
+
+    #[test]
+    fn superseded_book_ids_flags_all_but_the_newest_per_token() {
+        let usdc = hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let wbtc = hex::decode("2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap();
+        // book 0 = WETH (old), 1 = WBTC, 2 = WETH (re-listing).
+        let probe = |i: u64| match i {
+            0 => Some(book_component(0, &weth, &usdc)),
+            1 => Some(book_component(1, &wbtc, &usdc)),
+            2 => Some(book_component(2, &weth, &usdc)),
+            _ => None,
+        };
+        let superseded = superseded_book_ids_from(&usdc, probe);
+        // Only the older WETH book (id 0) is superseded; the live WETH (2) and the sole WBTC (1)
+        // remain live.
+        assert_eq!(superseded.len(), 1);
+        assert!(superseded.contains(&component_id(&SETTLEMENT, 0)));
+        assert!(!superseded.contains(&component_id(&SETTLEMENT, 2)));
+        assert!(!superseded.contains(&component_id(&SETTLEMENT, 1)));
     }
 
     #[test]
