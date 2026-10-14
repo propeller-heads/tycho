@@ -33,6 +33,7 @@ members = [
     "ethereum-liquidityparty",
     "ethereum-fermiswap",
     "ethereum-bopamm",
+    "base-tessera",
     "ethereum-ring-swap-v2",
     "ethereum-sky",
     "polygon-ramses-v3",

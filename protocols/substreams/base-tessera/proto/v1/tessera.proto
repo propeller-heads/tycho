@@ -1,0 +1,20 @@
+syntax = "proto3";
+package tessera.v1;
+import "tycho/evm/v1/common.proto";
+
+// Only committed writes relevant to Tessera; transactions with no matches are omitted.
+message BlockStorageChanges {
+  repeated TransactionStorageChanges transactions = 1;
+}
+message TransactionStorageChanges {
+  tycho.evm.v1.Transaction tx = 1;
+  // Sorted by execution ordinal, including repeated writes and clears.
+  repeated StorageChange writes = 2;
+}
+message StorageChange {
+  bytes address = 1;
+  bytes key = 2;
+  bytes old_value = 3;
+  bytes new_value = 4;
+  uint64 ordinal = 5;
+}

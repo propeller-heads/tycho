@@ -25,7 +25,7 @@ use crate::encoding::{
             metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
             native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder, tessera::TesseraSwapEncoder,
             uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
             uniswap_v4::UniswapV4SwapEncoder,
         },
@@ -179,6 +179,9 @@ impl SwapEncoderRegistry {
             }
             "ekubo_v3" => {
                 Ok(Box::new(EkuboV3SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "vm:tessera" => {
+                Ok(Box::new(TesseraSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:bopamm" => {
                 Ok(Box::new(BopAMMSwapEncoder::new(executor_address, self.chain, config)?))

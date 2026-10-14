@@ -50,19 +50,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
                 .attributes
                 .get(&address_key)
             {
-                let encoded_address = hex::encode(encoded_address_bytes);
-                // Stateless contracts address are UTF-8 encoded
-                let address_hex = encoded_address
-                    .strip_prefix("0x")
-                    .unwrap_or(&encoded_address);
-
-                let decoded = match hex::decode(address_hex) {
-                    Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                        Ok(decoded_string) => decoded_string,
-                        Err(_) => continue,
-                    },
-                    Err(_) => continue,
-                };
+                // The wire value is UTF-8 address text; anything else is rejected.
+                let decoded = String::from_utf8(encoded_address_bytes.to_vec()).map_err(|_| {
+                    InvalidSnapshotError::ValueError(format!("{address_key} must be UTF-8"))
+                })?;
 
                 let code_key = format!("stateless_contract_code_{index}");
                 let code = snapshot
@@ -428,7 +419,6 @@ mod tests {
         .unwrap();
 
         let res_pool = res;
-
         assert_eq!(
             res_pool.get_balance_owner(),
             Some(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap())
@@ -452,5 +442,33 @@ mod tests {
         assert_eq!(spot_price_caller("balancer_v3"), Some(Address::ZERO));
         assert_eq!(spot_price_caller("balancer_v2"), None);
         assert_eq!(spot_price_caller("curve"), None);
+    }
+    #[tokio::test]
+    async fn test_snapshot_rejects_non_utf8_dependency() {
+        let component = vm_component();
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: component.id.clone(),
+                attributes: HashMap::from([(
+                    "stateless_contract_addr_0".into(),
+                    Bytes::from(vec![0xff]),
+                )]),
+                balances: HashMap::new(),
+            },
+            component,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+        let result = EVMPoolState::try_from_with_header(
+            snapshot,
+            BlockHeader::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &DecoderContext::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(InvalidSnapshotError::ValueError(message)) if message.contains("UTF-8"))
+        );
     }
 }
