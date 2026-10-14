@@ -9,7 +9,6 @@
 //!
 //! usage: startup-loadgen <plan.json> <n> <base_block> <out.json>
 //! env:   TYCHO_API_KEY     API key sent as the Authorization header (required)
-//!        USER_PLAN         sent as X-User-Plan when set (paths without an auth-proxy)
 //!        SPREAD_S=0        start offsets drawn uniformly over this many seconds
 //!        BLOCK_TIME_S=12   a startup that starts t seconds later pins base_block + t/BLOCK_TIME_S
 //!        VERSION_AGE_BLOCKS=0  every startup pins this many blocks behind its start block
@@ -31,6 +30,10 @@ const TIMEOUT_S: u64 = 300;
 struct Plan {
     chain: String,
     url: String,
+    /// Sent as `X-User-Plan` when set: on a path without an auth-proxy the indexer applies this
+    /// plan's restrictions from the header.
+    #[serde(default)]
+    user_plan: Option<String>,
     token_pages: usize,
     profiles: Vec<Profile>,
 }
@@ -82,8 +85,7 @@ struct Ctx {
     client: reqwest::Client,
     url: String,
     key: String,
-    /// Sent as `X-User-Plan` when set: the in-cluster path has no auth-proxy to add it, and the
-    /// indexer applies the plan's restrictions from this header.
+    /// Sent as `X-User-Plan` when set (see `Plan::user_plan`).
     plan: Option<String>,
     t0: Instant,
     startup: usize,
@@ -310,9 +312,6 @@ async fn main() {
     });
     let forced = std::env::var("PROFILE").ok();
     let key = std::env::var("TYCHO_API_KEY").expect("TYCHO_API_KEY");
-    let user_plan = std::env::var("USER_PLAN")
-        .ok()
-        .filter(|p| !p.is_empty());
 
     // Weighted, deterministic profile assignment: smooth weighted round-robin, so a wave of 4
     // already mixes profiles instead of taking the first profile's whole weight first.
@@ -373,7 +372,7 @@ async fn main() {
             client,
             url: plan.url.clone(),
             key: key.clone(),
-            plan: user_plan.clone(),
+            plan: plan.user_plan.clone(),
             t0,
             startup: i,
             profile: profile.name.clone(),

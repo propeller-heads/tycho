@@ -1,12 +1,12 @@
-# Runner pod for the startup load benchmark. launch.sh creates it, copies the benchmark
-# directory in and drops /bench/go; the pod then builds startup-loadgen and runs
-# harness/run_all.sh as its main process. /bench is a persistent volume (k8s/pvc.yaml): plans and
-# results survive a pod death, and a re-run of launch.sh continues where the run stopped.
+# The benchmark runner. launch.sh fills in the three placeholders (config name and the two keys)
+# and applies it to prod-tycho.
+# The source comes from the ConfigMap "tycho-bench" (launch.sh creates it from this directory);
+# the pod builds startup-loadgen, runs bench.py with the chosen config and then serves the
+# results directory on port 8000 until it is deleted (bench.py pull copies them out).
 apiVersion: v1
 kind: Pod
 metadata:
   name: tycho-bench
-  namespace: prod-tycho-bench
   labels:
     app: tycho-bench
   annotations:
@@ -21,20 +21,23 @@ spec:
         - sh
         - -c
         - |
+          set -e
           apt-get update -qq && apt-get install -y -qq python3 python3-zstandard >/dev/null
-          until [ -f /bench/go ]; do sleep 2; done
-          mkdir -p /bench/h && tar xzf /bench/bundle.tgz -C /bench/h
-          exec /bench/h/harness/run_all.sh
-      envFrom:
-        - secretRef:
-            name: bench-keys
+          mkdir -p /bench/harness /bench/loadgen/src /bench/bench /results
+          cp /src/*.py /bench/harness/
+          cp /src/Cargo.toml /src/Cargo.lock /bench/loadgen/
+          cp /src/main.rs /bench/loadgen/src/
+          cp /src/*.toml /bench/bench/ && rm /bench/bench/Cargo.toml
+          cd /bench/harness
+          python3 bench.py run "/bench/bench/${BENCH_CONFIG}" --out /results --yes || echo "bench.py exited with $?"
+          cd /results && exec python3 -m http.server 8000 --bind 0.0.0.0
       env:
-        - name: BENCH_SIDE
-          value: bench
-        - name: BENCH_CHAINS
-          value: "ethereum robinhood"
-        - name: BENCH_SETS
-          value: "realistic worst"
+        - name: BENCH_CONFIG
+          value: "${BENCH_CONFIG}"
+        - name: TYCHO_API_KEY
+          value: "${TYCHO_API_KEY}"
+        - name: GRAFANA_API_KEY
+          value: "${GRAFANA_API_KEY}"
       resources:
         requests:
           cpu: "2"
@@ -43,12 +46,12 @@ spec:
           cpu: "4"
           memory: 8Gi
       volumeMounts:
-        - name: work
-          mountPath: /bench
+        - name: src
+          mountPath: /src
   volumes:
-    - name: work
-      persistentVolumeClaim:
-        claimName: tycho-bench-work
+    - name: src
+      configMap:
+        name: tycho-bench
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -57,11 +60,10 @@ spec:
               - key: karpenter.sh/capacity-type
                 operator: In
                 values: ["on-demand"]
-    # Never share a node with the indexers under test or the live ones.
+    # Never share a node with an indexer.
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - topologyKey: kubernetes.io/hostname
-          namespaces: ["prod-tycho"]
           labelSelector:
             matchExpressions:
               - key: app.kubernetes.io/name

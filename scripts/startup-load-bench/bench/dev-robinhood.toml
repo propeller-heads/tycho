@@ -1,0 +1,176 @@
+# dev-robinhood: the dev robinhood host, through its public auth-proxy (runs from anywhere)
+
+[target]
+name = "dev-robinhood"
+chain = "robinhood"
+url = "https://tycho-robinhood-dev.propellerheads.xyz"
+# plan_header: not set, the auth-proxy in front of this host sets X-User-Plan from the key
+pod_selector = 'namespace="dev-tycho", pod=~"robinhood-tycho-indexer-[0-9a-f]+-[a-z0-9]+"'
+live_pod_selector = 'namespace="prod-tycho", pod=~"robinhood-tycho-indexer-.*"'   # the live pod, to measure how far the target falls behind
+
+[rules]   # what the target's plan lets these clients do; profiles and scenarios stay inside
+tvl_floor = 0.1
+max_version_age_s = 600
+
+[[profiles]]
+# Fynd: everything incl. hooks (its key lands on the default plan), Fynd's TVL filter.
+name = "fynd"
+weight = 2
+tvl_gt = 0.4545
+protocols = "all"
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# Most solvers: all protocols incl. hooks, one page each, then poll state in 360s and entry points in 100s.
+name = "solver_hooks"
+weight = 4
+tvl_gt = 5.0
+protocols = "all"
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# Same shape but 5 pages of hooks at 2550 = near the plan floor; the heaviest entry-point reader.
+name = "solver_floor_hooks"
+weight = 1
+tvl_gt = 0.1
+protocols = "all"
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# A frontend: 7 pages of uniswap_v4, 11 of uniswap_v3, 13 x 500 of hooks: the broadest client at the floor.
+name = "low_tvl_broad"
+weight = 1
+tvl_gt = 0.1
+protocols = "all"
+page_size = 500
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+sort_contracts = false
+
+[[profiles]]
+# Native-only clients: no entry points.
+name = "state_only"
+weight = 2
+tvl_gt = 1.0
+protocols = ["uniswap_v2", "uniswap_v3", "uniswap_v4", "ekubo_v3", "ramses_v3", "up_v3"]
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+no_dci = true
+
+[[profiles]]
+# A solver on v4/v3/v2 only, pages of 500 with ids, state in chunks of 100 (and tens of thousands of single-id polls a day).
+name = "solver_pages_500"
+weight = 1
+tvl_gt = 10.0
+protocols = ["uniswap_v4", "uniswap_v3", "uniswap_v2"]
+page_size = 500
+state_chunk = 100
+contract_chunk = 100
+ep_chunk = 100
+no_dci = true
+
+# Scenarios run in this order. A scenario whose result file exists is skipped; the run stops if the pod restarts.
+[[scenarios]]
+# one client, the baseline
+name = "mix_n1"
+set = "realistic"
+startups = 1
+
+[[scenarios]]
+name = "mix_n8"
+set = "realistic"
+startups = 8
+
+[[scenarios]]
+name = "mix_n16"
+set = "realistic"
+startups = 16
+
+[[scenarios]]
+name = "mix_n32"
+set = "realistic"
+startups = 32
+
+[[scenarios]]
+name = "mix_n64"
+set = "realistic"
+startups = 64
+
+[[scenarios]]
+# 32 clients starting over one minute
+name = "staggered_n32_60s"
+set = "realistic"
+startups = 32
+spread_s = 60
+
+[[scenarios]]
+# 64 clients starting over five minutes
+name = "staggered_n64_300s"
+set = "realistic"
+startups = 64
+spread_s = 300
+
+[[scenarios]]
+# the broadest client the plan allows: every protocol at the TVL floor
+name = "broad_floor_n4"
+set = "worst"
+startups = 4
+profile = "low_tvl_broad"
+
+[[scenarios]]
+name = "broad_floor_n8"
+set = "worst"
+startups = 8
+profile = "low_tvl_broad"
+
+[[scenarios]]
+name = "broad_floor_n16"
+set = "worst"
+startups = 16
+profile = "low_tvl_broad"
+
+[[scenarios]]
+# versions as old as the plan allows: below the delta window on fast chains
+name = "old_version_n16"
+set = "worst"
+startups = 16
+version_age = "max"
+
+[[scenarios]]
+# the same wave three times with 20 s between them, without waiting for idle
+name = "crashloop_a_n16"
+set = "worst"
+startups = 16
+
+[[scenarios]]
+name = "crashloop_b_n16"
+set = "worst"
+startups = 16
+wait_idle = false
+delay_s = 20
+
+[[scenarios]]
+name = "crashloop_c_n16"
+set = "worst"
+startups = 16
+wait_idle = false
+delay_s = 20
+
+[[scenarios]]
+# pollers: 50 one-id components + one-id state request pairs per protocol per client
+name = "hammer_n16"
+set = "worst"
+startups = 16
+single_id_calls = 50
