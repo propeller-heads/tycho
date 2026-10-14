@@ -88,6 +88,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("LiquidityParty", "ethereum", "vm:liquidityparty");
         _executor("LunarBase", "base", "lunarbase");
         _executor("MaverickV2", "ethereum", "vm:maverick_v2");
+        _executor("PancakeswapInfinity", "base", "pancakeswap_infinity_cl");
         _executor("RingSwapV2", "ethereum", "ring_swap_v2");
         _executor("RingSwapV2Bsc", "bsc", "ring_swap_v2");
         _executor("Sky", "ethereum", "sky");

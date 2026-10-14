@@ -1,0 +1,31 @@
+substreams_yaml_path: ./robinhood-pancakeswap-infinity-cl.yaml
+protocol_system: "pancakeswap_infinity_cl"
+protocol_type_names:
+  - "pancakeswap_infinity_cl_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted.
+initialized_accounts:
+tests:
+  # Hookless static-fee WETH/USDG pool, the most traded Infinity pool on Robinhood. Minted in the
+  # creation transaction, so simulation can quote from the first block. The stop block reaches the
+  # first swap at 57,670,560, which exercises the tick and sqrt-price update path.
+  - name: test_weth_usdg_pool
+    start_block: 57615463
+    stop_block: 57671060
+    expected_components:
+      - id: "0xdde13ccbbcd10c5fc3351c284eabc77114d2a88078eb1cfd20062124e939d4cf"
+        tokens:
+          - "0x0bd7d308f8e1639fab988df18a8011f41eacad73" # WETH
+          - "0x5fc5360d0400a0fd4f2af552add042d716f1d168" # USDG
+        static_attributes:
+          key_lp_fee: "0x5a"
+          tick_spacing: "0x01"
+        creation_tx: "0x416f2044c26a4063042c618780db5c2fa5b32193070418b8c62f9643efbeda5e"
+        skip_simulation: false
+        # The executor fixture bakes the Base Vault and pool managers into its immutables, and
+        # Robinhood has no executor deployment entry yet (no BinPoolManager there, which the
+        # constructor requires). Indexing and simulation only until that lands.
+        skip_execution: true
