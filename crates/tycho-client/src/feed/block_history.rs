@@ -51,7 +51,8 @@ impl BlockHistory {
     /// Create a new BlockHistory from a vector of headers.
     ///
     /// The latest block and all connected block preceeding it are added to the history.
-    /// Detached blocks are skipped.
+    /// Detached blocks are skipped. The history also keeps the oldest block's parent, by hash
+    /// only, so a revert to it finds its target.
     pub fn new(mut history: Vec<BlockHeader>, size: usize) -> Result<Self, BlockHistoryError> {
         // sort history by block number in descending order
         history.sort_by_key(|h| h.number);
@@ -120,6 +121,17 @@ impl BlockHistory {
 
         // Reverse to get oldest->newest order
         connected_chain.reverse();
+
+        if let Some(oldest) = connected_chain.first() {
+            if oldest.number > 0 && !oldest.parent_hash.is_empty() {
+                let parent = BlockHeader {
+                    number: oldest.number - 1,
+                    hash: oldest.parent_hash.clone(),
+                    ..Default::default()
+                };
+                connected_chain.insert(0, parent);
+            }
+        }
 
         let cache_size = NonZeroUsize::new(size * 10).ok_or(BlockHistoryError::InvalidCacheSize)?;
         debug!(tip = opt(&connected_chain.last()), "InitBlockHistory");
@@ -296,7 +308,12 @@ impl BlockHistory {
                 .oldest()
                 .ok_or(BlockHistoryError::EmptyHistory)?;
 
-            if block.number < oldest.number {
+            // The oldest entry may be the hash-only parent of the oldest block: another block at
+            // its height is as unknown as one below the history.
+            let beside_parent_entry = oldest.parent_hash.is_empty() &&
+                block.number == oldest.number &&
+                block.hash != oldest.hash;
+            if block.number < oldest.number || beside_parent_entry {
                 // if this block is older than the oldest block in our history it means it is
                 // delayed.
                 BlockPosition::Delayed
@@ -494,9 +511,9 @@ mod test {
 
         let history = BlockHistory::new(blocks, 10).expect("failed to create history");
 
-        // All four connected blocks are retained despite the duplicate.
-        assert_eq!(history.history.len(), 4);
-        assert_eq!(history.oldest().unwrap().number, 5);
+        // All four connected blocks and block 5's parent are retained despite the duplicate.
+        assert_eq!(history.history.len(), 5);
+        assert_eq!(history.oldest().unwrap().number, 4);
         assert_eq!(history.latest().unwrap().number, 8);
     }
 
@@ -515,7 +532,11 @@ mod test {
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![7, 8, 9, 10], "ancestry must survive the ephemeral-hash break");
+        assert_eq!(
+            retained,
+            vec![6, 7, 8, 9, 10],
+            "ancestry must survive the ephemeral-hash break"
+        );
     }
 
     #[test]
@@ -544,7 +565,7 @@ mod test {
             .collect();
         assert_eq!(
             retained,
-            vec![323, 324, 325, 326],
+            vec![322, 323, 324, 325, 326],
             "canonical 324 and its ancestor 323 must survive"
         );
         assert_eq!(
@@ -594,8 +615,8 @@ mod test {
 
         let history = BlockHistory::new(blocks, 10).expect("failed to create history");
 
-        // Should only contain the original 5 connected blocks
-        assert_eq!(history.history.len(), 5);
+        // Should only contain the original 5 connected blocks and the oldest one's parent
+        assert_eq!(history.history.len(), 6);
         // Verify chain connectivity
         let blocks: Vec<_> = history.history.iter().collect();
         for pair in blocks.windows(2) {
@@ -1054,10 +1075,33 @@ mod test {
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![7, 8, 9, 10]);
+        assert_eq!(retained, vec![6, 7, 8, 9, 10]);
         let latest = history.latest().unwrap();
         assert!(latest.revert);
         assert!(!latest.is_partial());
+    }
+
+    /// A block at the height of the hash-only parent entry, under another hash, is as unknown as
+    /// a block below the history.
+    #[rstest]
+    #[case::block(false)]
+    #[case::revert(true)]
+    fn test_other_block_at_the_parent_entry_height_is_delayed(#[case] revert: bool) {
+        let history = BlockHistory::new(generate_blocks(3, 10, None), 15).unwrap();
+        let block = BlockHeader {
+            number: 9,
+            hash: random_hash(),
+            parent_hash: int_hash(8),
+            revert,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            history
+                .determine_block_position(&block)
+                .expect("must classify, not error"),
+            BlockPosition::Delayed
+        );
     }
 
     #[test]

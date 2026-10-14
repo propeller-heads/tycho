@@ -1627,9 +1627,11 @@ mod tests {
             .collect();
         assert_eq!(
             retained,
-            vec![400],
+            vec![399, 400],
             "detached advanced block must not be stitched to old history"
         );
+        let parent = new_history.oldest().unwrap();
+        assert!(parent.parent_hash.is_empty(), "block 399 must be the hash-only parent entry");
     }
 
     /// Companion regression test for the same crash with a *partial* advanced block — the
@@ -1675,7 +1677,7 @@ mod tests {
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![323, 324, 325, 326]);
+        assert_eq!(retained, vec![322, 323, 324, 325, 326]);
     }
 
     /// Full prod sequence behind the Base outages: partial-advanced reinit, the stream proceeds
@@ -1731,7 +1733,7 @@ mod tests {
             .blocks()
             .map(|b| b.number)
             .collect();
-        assert_eq!(retained, vec![323, 324, 325, 326]);
+        assert_eq!(retained, vec![322, 323, 324, 325, 326]);
         let latest = new_history.latest().unwrap();
         assert_eq!(latest.number, 326);
         assert!(latest.revert);
@@ -3007,6 +3009,56 @@ mod tests {
         advance_both(&v2, &v3, &mut rx, header_message(4)).await;
         advance_both(&v2, &v3, &mut rx, revert_header_message(5)).await;
         advance_both(&v2, &v3, &mut rx, header_message(6)).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// The reviewer's sequence. Both streams are Delayed at block 3 when they resubscribe. The
+    /// synchronizer snapshots at sealed block 4 and emits partial 5(0): block 4 never arrives as a
+    /// message. Then an undo to sealed 4, the rebuilt block 5 sealed, partial 6(0), and an undo to
+    /// sealed 5.
+    #[test(tokio::test)]
+    async fn test_undo_to_the_snapshot_block_after_a_resubscribe_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        advance_both(&v2, &v3, &mut rx, header_message(3)).await;
+        // Both streams are silent for a round and turn Delayed.
+        receive_message(&mut rx).await;
+        // The first message after the resubscribe and the undo of its block are queued together.
+        for sync in [&v2, &v3] {
+            sync.send_header(partial_header_message(5, 0))
+                .await
+                .expect("send failed");
+            sync.send_header(partial_revert_message(4, 0))
+                .await
+                .expect("send failed");
+        }
+        receive_message(&mut rx).await;
+        let mut sealed_5 = header_message(5);
+        sealed_5.header.partial_block_index = Some(0);
+        advance_both(&v2, &v3, &mut rx, sealed_5).await;
+        advance_both(&v2, &v3, &mut rx, partial_header_message(6, 0)).await;
+        advance_both(&v2, &v3, &mut rx, partial_revert_message(5, 0)).await;
+        let mut sealed_6 = header_message(6);
+        sealed_6.header.partial_block_index = Some(0);
+        advance_both(&v2, &v3, &mut rx, sealed_6).await;
+
+        shutdown_block_synchronizer(nanny, rx).await;
+    }
+
+    /// Full blocks. Both streams jump from block 1 to block 5, then a one-block reorg replaces
+    /// block 5: revert to block 4, which the memory only knows as block 5's parent.
+    #[test(tokio::test)]
+    async fn test_one_block_reorg_right_after_a_jump_resolves() {
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(5)).await;
+        advance_both(&v2, &v3, &mut rx, revert_header_message(4)).await;
+        let mut new_5 = header_message(5);
+        new_5.header.hash = Bytes::from(vec![0x55]);
+        advance_both(&v2, &v3, &mut rx, new_5.clone()).await;
+        let mut new_6 = header_message(6);
+        new_6.header.parent_hash = new_5.header.hash.clone();
+        advance_both(&v2, &v3, &mut rx, new_6).await;
 
         shutdown_block_synchronizer(nanny, rx).await;
     }
