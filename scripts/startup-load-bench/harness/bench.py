@@ -135,7 +135,7 @@ def _walk(base, path=""):
             continue
         if h.endswith("/"):
             yield from _walk(base, path + h)
-        elif not h.endswith((".tmp", ".lg", ".part")):
+        elif not h.endswith((".tmp", ".lg", ".part", ".plan.json")):   # per-wave scratch files
             yield path + h
 
 
