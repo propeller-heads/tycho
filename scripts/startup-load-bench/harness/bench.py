@@ -4,7 +4,7 @@
 usage: bench.py show <config>                        print the resolved run and exit
        bench.py plan <config> [--out DIR]            build the plan (the ids every profile fetches today)
        bench.py run  <config> [--out DIR] [--only a,b] [--sets realistic,worst] [--yes]
-       bench.py pull <local dir> [--namespace NS] [--pod NAME] [--once] [--url URL]
+       bench.py pull <local dir> <target> [--namespace NS] [--once] [--url URL]
 
 run = show + plan (if missing) + every scenario in config order. Results: <out>/run.json,
 <out>/plan.json, <out>/waves/<scenario>.json. A scenario whose file exists is skipped, so a
@@ -159,7 +159,10 @@ def _pull(base, dest):
 def cmd_pull(args):
     """Copies the results out of the runner pod (it serves its results directory on port 8000)
     through a port-forward, which needs only get + portforward on pods."""
-    dest, ns, pod, url = args[0], arg(args, "--namespace", "prod-tycho"), arg(args, "--pod", "tycho-bench"), arg(args, "--url")
+    dest, ns, url = args[0], arg(args, "--namespace", "prod-tycho"), arg(args, "--url")
+    pod = arg(args, "--pod") or ("tycho-bench-" + args[1] if len(args) > 1 and not args[1].startswith("--") else None)
+    if not pod and not url:
+        raise SystemExit("pull: give the target name (the pod is tycho-bench-<target>) or --pod / --url")
     while True:
         pf = None
         try:

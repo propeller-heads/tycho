@@ -19,10 +19,13 @@ config files, and the pod. Keys come from the environment or a `.env` next to th
 
 ```sh
 ./launch.sh bench/ethereum-1.toml
-kubectl -n prod-tycho logs -f tycho-bench                 # the resolved run, then one line per wave
-python3 harness/bench.py pull ./results                   # copies results out every 2 minutes
-kubectl -n prod-tycho delete pod/tycho-bench configmap/tycho-bench
+kubectl -n prod-tycho logs -f tycho-bench-ethereum-1       # the resolved run, then one line per wave
+python3 harness/bench.py pull ./results ethereum-1         # copies results out every 2 minutes
+kubectl -n prod-tycho delete pod/tycho-bench-ethereum-1
+kubectl -n prod-tycho delete configmap/tycho-bench         # when no runner is left
 ```
+
+The pod is named after the target, so two targets can run at the same time from two launches.
 
 The pod builds `startup-loadgen` itself (`rust:1.91-bookworm`), runs every scenario of the
 config, and then serves its results directory on a port. `bench.py pull` reaches it through a

@@ -1,4 +1,4 @@
-# The benchmark runner. launch.sh fills in the placeholders (config name, extra arguments, the two keys)
+# The benchmark runner. launch.sh fills in the placeholders (target name, config, extra arguments, the two keys)
 # and applies it to prod-tycho.
 # The source comes from the ConfigMap "tycho-bench" (launch.sh creates it from this directory);
 # the pod serves its results directory on port 8000 from the start (bench.py pull copies files
@@ -7,9 +7,10 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: tycho-bench
+  name: tycho-bench-${BENCH_NAME}      # one pod per target, so two targets can run side by side
   labels:
     app: tycho-bench
+    target: "${BENCH_NAME}"
   annotations:
     karpenter.sh/do-not-disrupt: "true"
 spec:

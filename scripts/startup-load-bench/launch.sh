@@ -4,9 +4,11 @@
 # Needs TYCHO_API_KEY and GRAFANA_API_KEY (environment or ./.env) and a kubectl context on the
 # prod cluster. Creates two objects in prod-tycho: the ConfigMap "tycho-bench" with this
 # directory's source and config files, and the pod "tycho-bench".
-#   follow:   kubectl -n prod-tycho logs -f tycho-bench
-#   results:  python3 harness/bench.py pull ./results        (repeats every 2 minutes)
-#   remove:   kubectl -n prod-tycho delete pod/tycho-bench configmap/tycho-bench
+# The pod is named tycho-bench-<target>, so several targets can run at the same time.
+#   follow:   kubectl -n prod-tycho logs -f tycho-bench-ethereum-1
+#   results:  python3 harness/bench.py pull ./results ethereum-1      (repeats every 2 minutes)
+#   remove:   kubectl -n prod-tycho delete pod/tycho-bench-ethereum-1
+#             kubectl -n prod-tycho delete configmap/tycho-bench       (when no runner is left)
 set -euo pipefail
 cd "$(dirname "$0")"
 CONFIG="${1:?usage: launch.sh bench/<target>.toml [bench.py run arguments]}"
@@ -21,5 +23,6 @@ files=()
 for f in harness/*.py bench/*.toml loadgen/Cargo.toml loadgen/Cargo.lock loadgen/src/main.rs; do files+=("--from-file=$f"); done
 kubectl -n "$NS" create configmap tycho-bench "${files[@]}" --dry-run=client -o yaml | kubectl apply -f -
 export BENCH_CONFIG="$(basename "$CONFIG")"
+export BENCH_NAME="${BENCH_CONFIG%.toml}"
 python3 -c 'import os, sys; print(os.path.expandvars(sys.stdin.read()))' < k8s/pod.yaml | kubectl -n "$NS" apply -f -
-echo "started $BENCH_CONFIG $BENCH_ARGS: kubectl -n $NS logs -f tycho-bench"
+echo "started $BENCH_CONFIG $BENCH_ARGS: kubectl -n $NS logs -f tycho-bench-$BENCH_NAME"
