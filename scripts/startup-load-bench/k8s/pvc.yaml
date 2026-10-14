@@ -1,0 +1,13 @@
+# Work volume of the runner pod: plans and wave results. Survives the pod; deleted with the
+# namespace. Pull the results out first (harness/pull.py).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tycho-bench-work
+  namespace: prod-tycho-bench
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 20Gi

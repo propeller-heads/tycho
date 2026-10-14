@@ -2,8 +2,11 @@
 # Starts the benchmark in the cluster against the idle prod -1 indexers.
 #   TYCHO_API_KEY=... GRAFANA_API_KEY=... ./launch.sh
 # Both keys may also come from ~/.env. Needs a kubectl context that can create namespaces,
-# secrets and pods. Follow the run with:   kubectl -n prod-tycho-bench logs -f tycho-bench
-# Stop and remove everything:              kubectl delete namespace prod-tycho-bench
+# secrets, volumes and pods.
+# Follow the run:      kubectl -n prod-tycho-bench logs -f tycho-bench
+# Pull the results:    python3 harness/pull.py <local dir>      (works with read-only access)
+# Resume after a pod death:  delete the pod, run ./launch.sh again; finished waves are skipped.
+# Remove everything:   kubectl delete namespace prod-tycho-bench   (pull first: the volume goes too)
 set -euo pipefail
 cd "$(dirname "$0")"
 NS=prod-tycho-bench
@@ -18,6 +21,7 @@ tar czf bundle.tgz --exclude=./loadgen/target --exclude=./harness/load --exclude
 kubectl get namespace $NS >/dev/null 2>&1 || kubectl create namespace $NS
 kubectl -n $NS create secret generic bench-keys --from-literal=TYCHO_API_KEY="$TYCHO" --from-literal=GRAFANA_API_KEY="$GRAF" \
   --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f k8s/pvc.yaml
 kubectl apply -f k8s/runner-pod.yaml
 kubectl -n $NS wait --for=condition=Ready pod/tycho-bench --timeout=600s
 kubectl cp bundle.tgz $NS/tycho-bench:/bench/bundle.tgz

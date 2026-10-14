@@ -1,6 +1,7 @@
 # Runner pod for the startup load benchmark. launch.sh creates it, copies the benchmark
 # directory in and drops /bench/go; the pod then builds startup-loadgen and runs
-# harness/run_all.sh as its main process, so `kubectl logs` carries the whole run.
+# harness/run_all.sh as its main process. /bench is a persistent volume (k8s/pvc.yaml): plans and
+# results survive a pod death, and a re-run of launch.sh continues where the run stopped.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -46,8 +47,8 @@ spec:
           mountPath: /bench
   volumes:
     - name: work
-      emptyDir:
-        sizeLimit: 20Gi
+      persistentVolumeClaim:
+        claimName: tycho-bench-work
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:

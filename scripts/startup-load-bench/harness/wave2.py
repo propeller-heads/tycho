@@ -3,8 +3,9 @@
 
 usage: wave2.py <chain> <set> [tag]     set = realistic | worst | all | smoke
 Every scenario writes load/waves2/<chain>_<tag>_<scenario>.json and one JSON summary line to stdout.
+Scenarios whose result file exists are skipped, so a restarted run continues where it stopped.
 """
-import base64, gzip, json, os, subprocess, sys, threading, time, urllib.parse, urllib.request
+import json, os, subprocess, sys, threading, time, urllib.parse, urllib.request
 from chain import GRAFANA, L, LOADGEN, S, SIDE, USER_PLAN, VM_UID, env, host, tips
 from wave import NS, POD_RE, pod_metrics, poll_health, series, wait_idle, broke
 
@@ -111,15 +112,12 @@ def run(chain, name, n, spread=0.0, tag="v2", envx=None, idle_limit=0.4, max_wai
         "cache_hits_delta": delta(before["cache_hits"], after["cache_hits"]), "cache_misses_delta": delta(before["cache_misses"], after["cache_misses"]),
         "db_cpu_max": rds_cpu(chain, start, end),
     }
-    json.dump({"summary": summary, "metrics": m, "health": health, "startups": sts, "records": recs}, open(out, "w"))
+    # Written through a temp name so a concurrent pull (pull.py) never sees a half-written file.
+    json.dump({"summary": summary, "metrics": m, "health": health, "startups": sts, "records": recs}, open(out + ".tmp", "w"))
+    os.replace(out + ".tmp", out)
     if os.path.exists(out + ".lg"):
         os.remove(out + ".lg")
     print(json.dumps({k: (round(v, 2) if isinstance(v, float) else v) for k, v in summary.items() if k not in ("loadgen_stderr", "start", "end")}), flush=True)
-    if SIDE != "dev":
-        # The pod's stdout is the only channel back: one gzip+base64 line per wave (metrics are left out,
-        # they can be queried again from Grafana with the start/end stamps in the summary).
-        payload = gzip.compress(json.dumps({"summary": summary, "health": health, "startups": sts, "records": recs}).encode())
-        print(f"RESULT {os.path.basename(out)} {base64.b64encode(payload).decode()}", flush=True)
     return summary
 
 
@@ -160,6 +158,9 @@ if __name__ == "__main__":
     chain, which = sys.argv[1], sys.argv[2]
     tag = sys.argv[3] if len(sys.argv) > 3 else "v2"
     for i, (name, n, spread, envx) in enumerate(scenarios(chain, which)):
+        if os.path.exists(f"{L}/waves2/{chain}_{tag}_{name}.json"):
+            print(f"skip {name}: result exists", flush=True)     # a restarted run continues where it stopped
+            continue
         if name.startswith("crashloop_b") or name.startswith("crashloop_c"):
             time.sleep(20)
             s = run(chain, name, n, spread, tag, envx, idle_limit=99)   # do not wait for idle: that is the point
