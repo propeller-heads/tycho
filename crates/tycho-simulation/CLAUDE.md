@@ -109,7 +109,38 @@ for any protocol indexed by Tycho.
   reverts); `without_fallback_router` keeps every venue on the direct `pricelevelstream:` path.
   Consumers cannot tell a stale removal from a retired venue. Venues may overlap with other
   integration paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by
-  venue where double-counting matters
+  venue where double-counting matters.
+  `build` also opens a **second Titan socket** by default (`pamm_quote_stream_v2`; endpoint via
+  `override_endpoint` or `TITAN_PAMM_QUOTE_STREAM_URL`, off via `without_simulation_overrides`),
+  carrying the account state Titan simulated each venue on to price its ladders. `titan.rs`'s
+  `validate` refuses a venue entry **whole** (20/32-byte identities, hex quantities incl. odd-digit
+  balances, a build `timestamp`, 1:1 `assetPairs`/`pairSequences`, no `code`/full `state`, caps 32
+  accounts / 512 slots / 64 KiB measured on raw slot+word bytes); `overrides.rs` holds what it
+  accepts in a fail-closed `OverrideBuffer` keyed by `(canonical venue, sorted pair)` — the sequence
+  is **not** part of `PairKey`: a key holds a pair's recent sequences together, and the stamping
+  lookup adds the sequence as its discriminator — with one slot of lifetime fixed at admission and
+  never extended by a replay, 8 builds per key across all of that pair's sequences, 1,024
+  `(venue, pair)` keys, 16 entries per frame × 32 pairs per entry, newest-built wins, a same-build
+  conflicting payload poisons that build as a *recency bar* (older builds refused, newer ones still
+  supersede), plus a rotating sweep so a key no lookup visits still expires. `tracker.rs` stamps at
+  state construction on the **full identity only**: `PairProvenance` merges the books of one (venue,
+  pair), so books disagreeing on their version — or naming none — leave the state unstamped, and
+  the stamped clone's `expires_at` narrows to `min(ladder deadline, snapshot deadline)` while the
+  shared retained snapshot keeps its own. The snapshot rides inside the state as the serialized
+  `overrides` field (`PammSimulationOverrides`; no u128 at any serialization boundary — sequences
+  stay transient; `eq` compares it, `consumed()` keeps it, old recordings read back `None`).
+  Quoting never reads it: a dead/malformed second socket, a refused entry, an empty buffer, an
+  unreadable reference and the opt-out all end in a state that quotes and carries no snapshot.
+  `telemetry.rs` adds `override_match_total{outcome}` (5 `MatchResult` outcomes),
+  `override_buffer_total{event}` (17 `IngestEvent`s) and `refused_override_entries_total{reason}`
+  (10 `EntryRejection`s) — those three registered at zero only while stamping is on — plus
+  `invalid_provenance_total` (per **served** book, unreadable references only), which is registered
+  **unconditionally**, because the provenance read sits on the price level path: the series exists
+  at zero under `without_simulation_overrides`, so its presence is no evidence that stamping is on.
+  It also adds a `socket` label (`price_levels`/`quote_stream`) to the already-released
+  `frames_rejected_total`/`reconnects_total`, which **changes the identity of those two series**.
+  This path's provenance is the price level stream's own; `evm/override_stream/` is the separate
+  per-simulation override path of the `vm:` protocols and stays untouched
 
 ## Simulation Approaches
 

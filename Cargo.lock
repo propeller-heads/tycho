@@ -9988,6 +9988,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "strum 0.25.0",
  "strum_macros 0.25.3",
  "tempfile",
  "thiserror 1.0.69",

@@ -17,6 +17,8 @@ use tycho_common::{
     Bytes,
 };
 
+use super::overrides::PammSimulationOverrides;
+
 /// How long the ladders of one frame stay quotable: one slot. Titan quotes the pending block, so
 /// a ladder older than that is not fillable directly (the venue reverts `StaleUpdate`) and must
 /// not be priced.
@@ -58,6 +60,12 @@ pub struct PriceLevelStreamState {
     /// frames they came from.
     #[serde(skip)]
     quotable_until: Option<Instant>,
+    /// The simulated pre-state the ladders were priced on, when the frame carrying them named
+    /// one. Unlike `quotable_until` this is persisted: it is the provenance of the price, so a
+    /// recording replays it and
+    /// [`with_simulation_overrides`](Self::with_simulation_overrides) is the only setter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overrides: Option<PammSimulationOverrides>,
 }
 
 impl PriceLevelStreamState {
@@ -76,13 +84,33 @@ impl PriceLevelStreamState {
             quotes.sort_by(|a, b| a.amount_in.cmp(&b.amount_in));
             quotes.dedup_by(|a, b| a.amount_in == b.amount_in);
         }
-        Self { token0, token1, quotes_0_to_1, quotes_1_to_0, gas_cost, quotable_until: None }
+        Self {
+            token0,
+            token1,
+            quotes_0_to_1,
+            quotes_1_to_0,
+            gas_cost,
+            quotable_until: None,
+            overrides: None,
+        }
     }
 
     /// Sets the monotonic instant from which this state refuses every query.
     pub fn with_quotable_until(mut self, until: Instant) -> Self {
         self.quotable_until = Some(until);
         self
+    }
+
+    /// Attaches the simulated pre-state the ladders were priced on.
+    pub fn with_simulation_overrides(mut self, overrides: PammSimulationOverrides) -> Self {
+        self.overrides = Some(overrides);
+        self
+    }
+
+    /// The simulated pre-state the ladders were priced on, or `None` if the frame that carried
+    /// them named none.
+    pub fn simulation_overrides(&self) -> Option<&PammSimulationOverrides> {
+        self.overrides.as_ref()
     }
 
     /// The monotonic instant from which this state refuses every query, or `None` if it never
@@ -166,6 +194,9 @@ impl PriceLevelStreamState {
     /// The state after a fill: both ladders are consumed. The snapshot quotes fills of the
     /// pre-fill venue only — post-fill pricing is unknown in either direction until the next
     /// snapshot, and re-reading the cumulative ladder would double-count the maker's liquidity.
+    ///
+    /// The simulation overrides survive: they are the state the consumed fill was priced on, and
+    /// a consumer encoding the swap needs them after the quote, not only during it.
     fn consumed(&self) -> Box<dyn ProtocolSim> {
         Box::new(Self {
             token0: self.token0.clone(),
@@ -174,6 +205,7 @@ impl PriceLevelStreamState {
             quotes_1_to_0: Vec::new(),
             gas_cost: self.gas_cost.clone(),
             quotable_until: self.quotable_until,
+            overrides: self.overrides.clone(),
         })
     }
 }
@@ -296,9 +328,13 @@ impl ProtocolSim for PriceLevelStreamState {
         self
     }
 
-    /// Equal when the pair, both ladders and the gas cost match. `quotable_until` is left out:
-    /// it is per-process metadata that never survives serialization, and a consumer that skips
-    /// a state because it equals the one it holds keeps quoting on the older guard.
+    /// Equal when the pair, both ladders, the gas cost and the simulation overrides match.
+    ///
+    /// The overrides are part of the price: the same ladders priced on different account state
+    /// are different quotes, and a consumer that skips a state because it equals the one it
+    /// holds would keep simulating on the superseded snapshot. `quotable_until` is left out
+    /// instead: it is per-process metadata that never survives serialization, and skipping a
+    /// state only leaves the consumer on the older, stricter guard.
     fn eq(&self, other: &dyn ProtocolSim) -> bool {
         other
             .as_any()
@@ -311,12 +347,14 @@ impl ProtocolSim for PriceLevelStreamState {
                     quotes_1_to_0,
                     gas_cost,
                     quotable_until: _,
+                    overrides,
                 } = other;
                 &self.token0 == token0 &&
                     &self.token1 == token1 &&
                     &self.quotes_0_to_1 == quotes_0_to_1 &&
                     &self.quotes_1_to_0 == quotes_1_to_0 &&
-                    &self.gas_cost == gas_cost
+                    &self.gas_cost == gas_cost &&
+                    &self.overrides == overrides
             })
     }
 }
@@ -328,9 +366,38 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        super::test_support::{token, USDC, WBTC, WETH},
+        super::{
+            convert::ladders_for_book,
+            overrides::test_overrides,
+            test_support::{captured_book, token, tokens, USDC, WBTC, WETH},
+        },
         *,
     };
+
+    /// The tag typetag writes for this state, as it appears in a recording.
+    const TAG: &str = r#""PriceLevelStreamState""#;
+
+    /// A recording written before the state carried overrides, verbatim: it has no `overrides`
+    /// key at all, and its `BigUint` amounts are sequences of base-2^32 digits.
+    const LEGACY_STATE: &str = r#"{
+      "token0": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "token1": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "quotes_0_to_1": [{"amount_in": [100000000], "amount_out": [1215752192, 23]}],
+      "quotes_1_to_0": [{"amount_in": [1215752192, 23], "amount_out": [99000000]}],
+      "gas_cost": [120000]
+    }"#;
+
+    /// A recording of an adjacently tagged state with the tag before the content, as typetag
+    /// itself writes it.
+    fn tag_first(tag: &str, state: &str) -> String {
+        format!(r#"{{"protocol":{tag},"state":{state}}}"#)
+    }
+
+    /// The same two fields the other way round: the order that makes typetag buffer the whole
+    /// state before it knows what to read it as.
+    fn content_first(tag: &str, state: &str) -> String {
+        format!(r#"{{"state":{state},"protocol":{tag}}}"#)
+    }
 
     fn wbtc() -> Token {
         token(WBTC, "WBTC", 8)
@@ -358,6 +425,34 @@ mod tests {
             vec![quote(100_000_000_000, 99_000_000), quote(200_000_000_000, 190_000_000)],
             BigUint::from(120_000u64),
         )
+    }
+
+    /// The TaurusFi WETH/USDC ladders of the captured live frame, converted as the stream
+    /// converts them: 14 bids and 11 asks of the amounts Titan actually quoted.
+    fn captured_state() -> PriceLevelStreamState {
+        let tokens = tokens();
+        let book = captured_book("TaurusFi", "WETH", "USDC");
+        let weth = tokens
+            .get(&weth().address)
+            .expect("WETH is admitted");
+        let usdc = tokens
+            .get(&usdc().address)
+            .expect("USDC is admitted");
+        let (bids, asks) = ladders_for_book(&book, weth, usdc);
+        PriceLevelStreamState::new(
+            weth.address.clone(),
+            usdc.address.clone(),
+            bids.expect("the captured bids convert"),
+            asks.expect("the captured asks convert"),
+            BigUint::from(120_000u64),
+        )
+    }
+
+    #[test]
+    fn captured_state_carries_the_whole_captured_book() {
+        let state = captured_state();
+        assert_eq!(state.quotes_0_to_1.len(), 14);
+        assert_eq!(state.quotes_1_to_0.len(), 11);
     }
 
     #[test]
@@ -635,5 +730,169 @@ mod tests {
         assert!(state()
             .with_quotable_until(until)
             .eq(&state().with_quotable_until(until + Duration::from_secs(1))));
+    }
+
+    #[test]
+    fn with_simulation_overrides_sets_and_exposes_the_snapshot() {
+        assert_eq!(state().simulation_overrides(), None);
+        assert_eq!(
+            state()
+                .with_simulation_overrides(test_overrides())
+                .simulation_overrides(),
+            Some(&test_overrides())
+        );
+    }
+
+    /// Unlike `quotable_until`, the snapshot is part of the price: the same ladders priced on
+    /// different account state are different quotes, so a consumer that drops a state because it
+    /// equals the one it holds would keep re-simulating on the superseded snapshot.
+    #[test]
+    fn eq_compares_the_overrides() {
+        let stamped = || state().with_simulation_overrides(test_overrides());
+        assert!(stamped().eq(&stamped()));
+        assert!(!state().eq(&stamped()));
+        assert!(!stamped().eq(&state()));
+
+        let mut rebuilt = test_overrides();
+        rebuilt.built_at_ns += 1;
+        assert!(!stamped().eq(&state().with_simulation_overrides(rebuilt)));
+    }
+
+    /// The consumed ladders are empty, but the successor still names the state the fill was
+    /// priced on.
+    #[test]
+    fn successor_state_keeps_the_overrides() {
+        let state = state().with_simulation_overrides(test_overrides());
+        let result = state
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .expect("fresh state quotes");
+        let successor = result
+            .new_state
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert_eq!(successor.simulation_overrides(), Some(&test_overrides()));
+    }
+
+    /// A real captured ladder carrying a real snapshot survives both serde_json shapes. Nothing
+    /// in the snapshot is wider than `u64` precisely so that it does: a `serde_json::Value`
+    /// cannot hold a wider integer at all.
+    #[test]
+    fn an_override_bearing_captured_state_round_trips_as_text_and_as_a_value() {
+        let state = captured_state().with_simulation_overrides(test_overrides());
+
+        let text = serde_json::to_string(&state).expect("serializes");
+        let from_text: PriceLevelStreamState =
+            serde_json::from_str(&text).expect("reads back from text");
+        assert_eq!(from_text.simulation_overrides(), Some(&test_overrides()));
+        assert!(state.eq(&from_text));
+
+        let value = serde_json::to_value(&state).expect("serializes into a Value");
+        let from_value: PriceLevelStreamState =
+            serde_json::from_value(value).expect("reads back from a Value");
+        assert_eq!(from_value.simulation_overrides(), Some(&test_overrides()));
+        assert!(state.eq(&from_value));
+    }
+
+    /// The same state through a boxed `dyn ProtocolSim`, in both orders typetag's adjacent tag
+    /// can arrive in. The order decides the path: with the tag first typetag streams the state
+    /// straight into its deserializer, while with the content first it buffers the whole state
+    /// into its own `Content` enum and replays it — and that buffer, like a `serde_json::Value`,
+    /// holds no integer wider than `u64`.
+    #[rstest]
+    #[case::tag_before_content(tag_first)]
+    #[case::content_before_tag(content_first)]
+    fn an_override_bearing_captured_state_round_trips_through_a_boxed_protocol_sim(
+        #[case] recording: fn(&str, &str) -> String,
+    ) {
+        let state = captured_state().with_simulation_overrides(test_overrides());
+        // The tag these recordings carry is the one typetag itself writes.
+        assert!(serde_json::to_string(&state as &dyn ProtocolSim)
+            .expect("serializes")
+            .starts_with(&format!(r#"{{"protocol":{TAG},"#)));
+        let text = recording(TAG, &serde_json::to_string(&state).expect("serializes"));
+
+        let boxed: Box<dyn ProtocolSim> = serde_json::from_str(&text).expect("reads back");
+
+        assert!(state.eq(boxed.as_ref()));
+        let read = boxed
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert_eq!(read.simulation_overrides(), Some(&test_overrides()));
+    }
+
+    /// The persisted key is literally `overrides`, at the top level of the state object — in the
+    /// typed form and inside typetag's `state` content alike.
+    ///
+    /// Renaming the field, or giving it a serde rename, would silently break every recording
+    /// rather than fail loudly: the old key would be ignored as an unknown field and the state
+    /// would read back unstamped. That is by design for recordings that genuinely predate the
+    /// field (see `a_legacy_typed_recording_reads_back_unstamped`), which is exactly why the name
+    /// itself has to be pinned here.
+    #[test]
+    fn the_persisted_snapshot_key_is_named_overrides() {
+        let state = captured_state().with_simulation_overrides(test_overrides());
+
+        let text = serde_json::to_string(&state).expect("serializes");
+        assert!(text.contains(r#""overrides":"#), "no `overrides` key in the state JSON");
+
+        let typed = serde_json::to_value(&state).expect("serializes");
+        let boxed = serde_json::to_value(&state as &dyn ProtocolSim).expect("serializes");
+        for json in [&typed, &boxed["state"]] {
+            let snapshot = json
+                .as_object()
+                .expect("an object")
+                .get("overrides")
+                .expect("the state object names the snapshot `overrides`");
+            let read: PammSimulationOverrides =
+                serde_json::from_value(snapshot.clone()).expect("the snapshot under that key");
+            assert_eq!(read, test_overrides());
+        }
+    }
+
+    /// A recording made before the field existed reads back as a state that was priced on no
+    /// snapshot, rather than failing on the missing key.
+    #[test]
+    fn a_legacy_typed_recording_reads_back_unstamped() {
+        let read: PriceLevelStreamState = serde_json::from_str(LEGACY_STATE).expect("reads back");
+        assert_eq!(read.simulation_overrides(), None);
+        assert_eq!(read.quotes_0_to_1, vec![quote(100_000_000, 100_000_000_000)]);
+        assert_eq!(read.quotes_1_to_0, vec![quote(100_000_000_000, 99_000_000)]);
+    }
+
+    /// The same legacy recording boxed, in both tag orders: the content-first path buffers the
+    /// absent key as absent too.
+    #[rstest]
+    #[case::tag_before_content(tag_first)]
+    #[case::content_before_tag(content_first)]
+    fn a_legacy_boxed_recording_reads_back_unstamped(#[case] recording: fn(&str, &str) -> String) {
+        let boxed: Box<dyn ProtocolSim> =
+            serde_json::from_str(&recording(TAG, LEGACY_STATE)).expect("reads back");
+        let read = boxed
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert_eq!(read.simulation_overrides(), None);
+        assert_eq!(read.quotes_0_to_1, vec![quote(100_000_000, 100_000_000_000)]);
+    }
+
+    /// And a state priced on no snapshot writes that same legacy shape, so a recording made now
+    /// stays readable by a consumer that has not learned the field.
+    #[test]
+    fn a_state_without_overrides_serializes_without_the_key() {
+        let json = serde_json::to_value(state()).expect("serializes");
+        assert!(json
+            .as_object()
+            .expect("an object")
+            .get("overrides")
+            .is_none());
+
+        let json = serde_json::to_value(&state() as &dyn ProtocolSim).expect("serializes");
+        assert!(json["state"]
+            .as_object()
+            .expect("an object")
+            .get("overrides")
+            .is_none());
     }
 }

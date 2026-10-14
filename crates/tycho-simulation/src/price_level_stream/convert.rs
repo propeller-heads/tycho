@@ -186,6 +186,7 @@ mod tests {
         super::{
             config::SYMBOL_BINDINGS,
             test_support::{captured_book, captured_books, token, PAMM, USDC, WBTC, WETH},
+            titan::Provenance,
         },
         *,
     };
@@ -251,6 +252,7 @@ mod tests {
             quote_address: Bytes::from_str(PAMM).expect("venue address"),
             token1: "WBTC".to_string(),
             token2: "USDC".to_string(),
+            calculated_from: Provenance::Absent,
             asks,
             bids,
         }
@@ -277,6 +279,7 @@ mod tests {
             quote_address: Bytes::from_str(PAMM).expect("venue address"),
             token1: "WBTC".to_string(),
             token2: "USDC".to_string(),
+            calculated_from: Provenance::Absent,
             asks: vec![level(80801.55138978669, 0.00012376), level(80800.59272606572, 0.00021089)],
             bids: vec![level(80773.61600000001, 0.0005), level(80773.6106, 0.005)],
         };

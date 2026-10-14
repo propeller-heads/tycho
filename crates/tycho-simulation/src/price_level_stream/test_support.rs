@@ -26,7 +26,7 @@ use tycho_common::{
 
 use super::{
     config::PriceLevelStreamConfig,
-    titan::{TitanBook, TitanPriceLevelMessage},
+    titan::{TitanBook, TitanOverrideMessage, TitanPriceLevelMessage},
 };
 
 /// The FermiSwapper router, one of the default venues.
@@ -39,6 +39,8 @@ pub(super) const KIPSELI_STREAMED: &str = "0xc9a956b5196dfe110debe8781857bc8b97d
 pub(super) const WBTC: &str = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
 pub(super) const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 pub(super) const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+pub(super) const USDT: &str = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+pub(super) const CBBTC: &str = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
 
 pub(super) fn address(hex: &str) -> Bytes {
     Bytes::from_str(hex).expect("hex address")
@@ -67,6 +69,19 @@ pub(super) fn token_map(tokens: impl IntoIterator<Item = Token>) -> HashMap<Byte
 /// deployments, as a consumer's token metadata.
 pub(super) fn tokens() -> HashMap<Bytes, Token> {
     token_map([token(WBTC, "WBTC", 8), token(USDC, "USDC", 6), token(WETH, "WETH", 18)])
+}
+
+/// Every bound asset the 2026-10-08 captures quote, as a consumer's token metadata: [`tokens`]
+/// plus USDT and cbBTC, so no captured book goes unserved for want of a token the consumer admits.
+/// `NVDAx`, the one other symbol the capture quotes, is bound by nothing and stays unserved.
+pub(super) fn captured_tokens() -> HashMap<Bytes, Token> {
+    token_map([
+        token(WBTC, "WBTC", 8),
+        token(USDC, "USDC", 6),
+        token(WETH, "WETH", 18),
+        token(USDT, "USDT", 6),
+        token(CBBTC, "cbBTC", 8),
+    ])
 }
 
 pub(super) type FakeConnection = WebSocketStream<TcpStream>;
@@ -108,6 +123,34 @@ impl FakeTitan {
                     };
                     handler(index, socket).await;
                 });
+            }
+        });
+        Self { addr, connections, accept_task: Some(accept_task) }
+    }
+
+    /// A fake that accepts TCP connections and never completes the WebSocket handshake, so a
+    /// client's connect hangs until its own [`connect_timeout`] fires.
+    ///
+    /// [`connect_timeout`]: super::stream::PriceLevelStreamBuilder::connect_timeout
+    pub(super) async fn spawn_hung() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener
+            .local_addr()
+            .expect("local addr");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        let accept_task = tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Held rather than answered: dropping the socket would let the client's connect
+                // fail at once instead of hanging, which is the opposite of the case.
+                accepted.push(socket);
             }
         });
         Self { addr, connections, accept_task: Some(accept_task) }
@@ -230,4 +273,84 @@ pub(super) fn captured_frame_text(maker: &str, block: u64, ts: u64) -> String {
         .collect();
     assert!(!books.is_empty(), "no captured book of {maker}");
     serde_json::json!({ "slot": 1, "block": block, "ts": ts, "books": books }).to_string()
+}
+
+/// The price level frame of the 2026-10-08 capture whose books [`CAPTURED_OVERRIDES`] priced: six
+/// of its twenty books name a pair version an entry of that override frame advertises, which is
+/// the join the two sockets exist for. [`CAPTURED_MESSAGE`], captured one frame earlier, predates
+/// every one of those entries and joins none of them.
+const JOINED_MESSAGE: &str =
+    include_str!("test_responses/pamm_price_levels_v2_1791475494807834809.json");
+
+/// The override frame captured verbatim from the live `pamm_quote_stream_v2` socket (2026-10-08),
+/// one entry per venue Titan priced in that build round.
+const CAPTURED_OVERRIDES: &str =
+    include_str!("test_responses/pamm_quote_stream_v2_1791475494921154915.json");
+
+/// The books of [`JOINED_MESSAGE`], verbatim.
+pub(super) fn joined_books() -> Vec<TitanBook> {
+    serde_json::from_str::<TitanPriceLevelMessage>(JOINED_MESSAGE)
+        .expect("the captured frame parses")
+        .books
+}
+
+/// [`JOINED_MESSAGE`] re-stamped with `block`/`ts`, as raw JSON: every book verbatim, so a stream
+/// reading it joins exactly what Titan sent, judged against a clock of the reading host.
+pub(super) fn joined_frame_text(block: u64, ts: u64) -> String {
+    let frame = restamped(JOINED_MESSAGE, "block", |_| block);
+    restamped(&frame, "ts", |_| ts)
+}
+
+/// [`CAPTURED_OVERRIDES`], parsed.
+pub(super) fn captured_override_frame() -> TitanOverrideMessage {
+    serde_json::from_str(CAPTURED_OVERRIDES).expect("the captured override frame parses")
+}
+
+/// [`CAPTURED_OVERRIDES`] as raw JSON, shifted so that its newest venue entry is stamped
+/// `newest_built_at_ns`.
+///
+/// The shift is what lets a capture stand in for live traffic a reading host judges against its
+/// own clock. It is uniform, so the entries keep the 71.6 ms spread of build stamps the capture
+/// holds instead of collapsing onto one instant; everything else, the pair versions included, is
+/// verbatim.
+pub(super) fn shifted_override_text(newest_built_at_ns: u64) -> String {
+    let newest = captured_override_frame()
+        .venues
+        .iter()
+        .filter_map(|venue| venue.timestamp)
+        .max()
+        .expect("a stamped venue entry");
+    restamped(CAPTURED_OVERRIDES, "timestamp", |built_at_ns| {
+        newest_built_at_ns - (newest - built_at_ns)
+    })
+}
+
+/// `frame` with the value of every `"key": <digits>` field replaced by `restamp` of it, as text.
+///
+/// Text surgery rather than a `serde_json::Value` round trip, which is the obvious way and the
+/// wrong one: a `Value` holds no integer wider than a `u64`, so the pair versions of either
+/// capture — every one of them above `u64::MAX` — would come back out as an `f64`, and the join
+/// the two sockets exist for would quietly stop joining.
+fn restamped(frame: &str, key: &str, restamp: impl Fn(u64) -> u64) -> String {
+    let field = format!("\"{key}\": ");
+    let mut restamped = String::with_capacity(frame.len());
+    let mut rest = frame;
+    let mut fields = 0;
+    while let Some(start) = rest.find(&field) {
+        let (head, tail) = rest.split_at(start + field.len());
+        restamped.push_str(head);
+        let digits = tail.len() -
+            tail.trim_start_matches(|character: char| character.is_ascii_digit())
+                .len();
+        let (value, tail) = tail.split_at(digits);
+        let value: u64 = value
+            .parse()
+            .unwrap_or_else(|_| panic!("\"{key}\" is not an integer field"));
+        restamped.push_str(&restamp(value).to_string());
+        rest = tail;
+        fields += 1;
+    }
+    assert!(fields > 0, "the captured frame carries no \"{key}\" field");
+    restamped.push_str(rest);
+    restamped
 }

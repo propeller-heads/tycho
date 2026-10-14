@@ -26,7 +26,10 @@ chrono = { workspace = true }
 derive_more = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` backs the price level stream's lenient `calculated_from` decode. Another dependency
+# happens to enable it today; declaring it keeps this crate building on its own, since a dependent
+# resolves features per crate.
+serde_json = { workspace = true, features = ["raw_value"] }
 toml = { workspace = true }
 typetag = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
@@ -53,7 +56,10 @@ num-traits = { workspace = true }
 # Used by the vendored Curve math/adapter modules (src/evm/protocol/curve/{math,adapter}).
 alloy-primitives = { version = "1.5", features = ["serde"], optional = true }
 
-# Enum utilities
+# Enum utilities. `strum` carries the traits the derives generate impls of — `IntoEnumIterator` and
+# `EnumCount`, which the price level stream's telemetry enumerates its label vocabulary through so
+# that a new enum variant cannot miss its pre-initialised series.
+strum = { workspace = true }
 strum_macros = { workspace = true }
 
 # Tycho dependencies
