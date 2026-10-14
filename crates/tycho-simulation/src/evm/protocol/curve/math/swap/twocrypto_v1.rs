@@ -376,4 +376,28 @@ mod tests {
         assert!(!num.is_zero(), "numerator is zero");
         assert!(!den.is_zero(), "denominator is zero");
     }
+
+    #[test]
+    fn oversized_input_returns_none_like_the_reverting_pool() {
+        // Pool 0xc89570207c5ba1b0e3cd372172ccaefb173db270 at block 26184500, where get_dy reverts.
+        let dy = get_amount_out(
+            &[
+                U256::from(4_147_755_463_574_275_724u128),
+                U256::from(10_643_974_677_402_619_567_407u128),
+            ],
+            &[U256::from(1u64), U256::from(1u64)],
+            U256::from(397_726_564_841_182u64),
+            U256::from(8_381_095_355_286_574_049u128),
+            U256::from(400_000u64),
+            U256::from(145_000_000_000_000u64),
+            U256::from(26_000_000u64),
+            U256::from(45_000_000u64),
+            U256::from(230_000_000_000_000u64),
+            true,
+            0,
+            1,
+            U256::from(i128::MAX as u128),
+        );
+        assert_eq!(dy, None);
+    }
 }

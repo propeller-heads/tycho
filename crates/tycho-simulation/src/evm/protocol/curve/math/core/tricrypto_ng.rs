@@ -171,9 +171,9 @@ pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Op
             continue;
         }
         let yfprime = yfprime - _dyfprime;
-        let fprime = yfprime / y;
-        let y_minus = mul1 / fprime;
-        let y_plus = (yfprime + WAD * d) / fprime + y_minus * WAD / k0;
+        let fprime = yfprime.checked_div(y)?;
+        let y_minus = mul1.checked_div(fprime)?;
+        let y_plus = (yfprime + WAD * d) / fprime + (y_minus * WAD).checked_div(k0)?;
         let y_minus = y_minus + WAD * s / fprime;
         if y_plus < y_minus {
             y = y_prev / U256::from(2);

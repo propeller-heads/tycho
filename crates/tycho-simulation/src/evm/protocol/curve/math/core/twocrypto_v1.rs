@@ -35,7 +35,7 @@ pub fn newton_y_2(
 ) -> Option<U256> {
     let n = U256::from(2u64);
     let x_j = x[1 - j];
-    let mut y = d * d / (x_j * U256::from(4u64));
+    let mut y = (d * d).checked_div(x_j * U256::from(4u64))?;
     let k0_i = WAD * n * x_j / d;
     let convergence_limit = {
         let a = x_j / U256::from(10u128.pow(14));
@@ -64,9 +64,9 @@ pub fn newton_y_2(
             continue;
         }
         let yfprime = yfprime - _dyfprime;
-        let fprime = yfprime / y;
-        let y_minus = mul1 / fprime;
-        let y_plus = (yfprime + WAD * d) / fprime + y_minus * WAD / k0;
+        let fprime = yfprime.checked_div(y)?;
+        let y_minus = mul1.checked_div(fprime)?;
+        let y_plus = (yfprime + WAD * d) / fprime + (y_minus * WAD).checked_div(k0)?;
         let y_minus = y_minus + WAD * s / fprime;
         if y_plus < y_minus {
             y = y_prev / U256::from(2);

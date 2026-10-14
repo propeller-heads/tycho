@@ -127,7 +127,7 @@ pub fn newton_y_2_ng(
     }
     let n = U256::from(2u64);
     let x_j = x[1 - i];
-    let mut y = d * d / (x_j * U256::from(4u64));
+    let mut y = (d * d).checked_div(x_j * U256::from(4u64))?;
     let k0_i = WAD * n * x_j / d;
     if k0_i < U256::from(10u128.pow(36)) / lim_mul || k0_i > lim_mul {
         return None;
@@ -156,9 +156,9 @@ pub fn newton_y_2_ng(
             continue;
         }
         let yfprime = yfprime - _dyfprime;
-        let fprime = yfprime / y;
-        let y_minus = mul1 / fprime;
-        let y_plus = (yfprime + WAD * d) / fprime + y_minus * WAD / k0;
+        let fprime = yfprime.checked_div(y)?;
+        let y_minus = mul1.checked_div(fprime)?;
+        let y_plus = (yfprime + WAD * d) / fprime + (y_minus * WAD).checked_div(k0)?;
         let y_minus = y_minus + WAD * s / fprime;
         if y_plus < y_minus {
             y = y_prev / U256::from(2);
