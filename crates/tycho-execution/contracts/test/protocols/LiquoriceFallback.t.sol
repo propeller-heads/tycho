@@ -69,7 +69,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// The signed price needs no comparison, so the fallback pool is never quoted.
-    function testLiquoriceFills() public {
+    function testInputAtSignedAmount() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
 
         vm.expectCall(
@@ -108,7 +108,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
 
     /// The settlement cannot pull the signed amount from a smaller input, so the fallback fills
     /// the whole leg.
-    function testInputBelowSignedAmountFallsBack() public {
+    function testInputBelowSignedAmount() public {
         uint256 amountIn = SIGNED_USDC_IN / 2;
         deal(USDC_ADDR, address(router), amountIn);
         uint256 fallbackOut = _quoteFallback(amountIn);
@@ -121,7 +121,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// An expired quote reverts in the settlement, so the fallback fills the whole leg.
-    function testExpiredQuoteFallsBack() public {
+    function testExpiredQuote() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
         vm.warp(EXPIRY + 1);
         uint256 fallbackOut = _quoteFallback(SIGNED_USDC_IN);
@@ -133,7 +133,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
-    function testRejectsUnknownSelector() public {
+    function testUnknownSelector() public {
         bytes4 transfer = IERC20.transfer.selector;
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -143,7 +143,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _swap(SIGNED_USDC_IN, abi.encodePacked(transfer));
     }
 
-    function testRejectsCalldataWithoutSelector() public {
+    function testCalldataWithoutSelector() public {
         vm.expectRevert(
             abi.encodeWithSelector(
                 LiquoriceFallbackRouter__InvalidDataLength.selector, 3
@@ -152,7 +152,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _swap(SIGNED_USDC_IN, hex"9935c8");
     }
 
-    function testConstructorRejectsZeroAddress() public {
+    function testConstructorZeroAddress() public {
         vm.expectRevert(LiquoriceFallbackRouter__AddressZero.selector);
         new LiquoriceFallbackRouter(
             IPoolManager(POOL_MANAGER),
@@ -197,7 +197,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// The length prefix says the settlement calldata runs to the end, leaving no fallback.
-    function testExecutorRejectsDataWithoutFallback() public {
+    function testExecutorDataWithoutFallback() public {
         bytes memory settlementCalldata = SETTLE_SINGLE_CALLDATA;
         bytes memory data = abi.encodePacked(
             USDC_ADDR,
@@ -213,7 +213,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         executor.getTransferData(data);
     }
 
-    function testExecutorRejectsMissingLengthPrefix() public {
+    function testExecutorMissingLengthPrefix() public {
         bytes memory data = abi.encodePacked(USDC_ADDR, WETH_ADDR);
         vm.expectRevert(
             abi.encodeWithSelector(
