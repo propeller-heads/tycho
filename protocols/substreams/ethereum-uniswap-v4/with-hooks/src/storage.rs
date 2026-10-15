@@ -94,6 +94,13 @@ impl TxStorageWrites {
             .map(|(_, new_value)| new_value)
     }
 
+    /// Every changed slot with the value it held before and after the transaction.
+    pub fn iter(&self) -> impl Iterator<Item = (&Word, &Word, &Word)> {
+        self.slots
+            .iter()
+            .map(|(slot, (old_value, new_value))| (slot, old_value, new_value))
+    }
+
     /// Whether the transaction changed no slot of the contract.
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()

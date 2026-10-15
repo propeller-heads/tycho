@@ -1,6 +1,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod abi;
+pub mod dynamic_lp_fee;
 pub mod pb;
 pub mod pons;
 pub mod storage;
