@@ -953,6 +953,29 @@ mod tests {
     }
 
     #[test]
+    fn test_delta_transition_deleting_an_absent_tick_leaves_the_ticks_unchanged() {
+        let mut pool = UniswapV3State::new(
+            1000,
+            U256::from_str("1000").unwrap(),
+            FeeAmount::Low,
+            100,
+            vec![TickInfo::new(255760, 10000).unwrap(), TickInfo::new(255900, -10000).unwrap()],
+        )
+        .unwrap();
+        let ticks_before = pool.ticks.clone();
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::new(),
+            deleted_attributes: HashSet::from(["ticks/255800/net_liquidity".to_string()]),
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(pool.ticks, ticks_before);
+    }
+
+    #[test]
     fn test_delta_transition() {
         let mut pool = UniswapV3State::new(
             1000,
