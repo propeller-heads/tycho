@@ -28,7 +28,6 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::Deserialize;
 use tokio::{
     runtime::Handle,
-    select,
     signal::unix::{signal, SignalKind},
     task::JoinHandle,
 };
@@ -825,20 +824,13 @@ async fn run_analyze_tokens(
     let rpc_client = global_args.rpc.build_client()?;
 
     create_tracing_subscriber();
-    let (cached_gw, gw_writer_thread) = GatewayBuilder::new(&global_args.database_url)
+    // No write executor: `build` would claim the writer epoch and fence the running indexer.
+    // The analysis writes only through `update_tokens`, which does not use the executor.
+    let cached_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[analyzer_args.chain])
-        .build()
+        .build_gw()
         .await?;
-    let cached_gw = Arc::new(cached_gw);
-    let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone());
-    select! {
-         res = analyze_thread => {
-            res?;
-         },
-         res = gw_writer_thread => {
-            res?;
-        }
-    }
+    analyze_tokens(analyzer_args, &rpc_client, Arc::new(cached_gw)).await?;
     Ok(())
 }
 
