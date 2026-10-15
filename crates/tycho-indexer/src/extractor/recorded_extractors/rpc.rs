@@ -67,7 +67,8 @@ impl TokenPreProcessor for TokenMetadata {
 
 /// A tracer whose entry points read two slots of their target, one slot of the contract the
 /// target delegates to at the traced block, and the target's WETH balance slot. A new address
-/// in the target's implementation slot retriggers the trace.
+/// in the target's implementation slot retriggers the trace. Tracing
+/// [`streams::UNTRACEABLE`] always fails.
 pub(super) fn tracer() -> MockEntryPointTracer {
     let mut tracer = MockEntryPointTracer::new();
     tracer
@@ -75,7 +76,12 @@ pub(super) fn tracer() -> MockEntryPointTracer {
         .returning(|block_hash, entry_points| {
             entry_points
                 .into_iter()
-                .map(|entry_point| Ok(trace(&block_hash, entry_point)))
+                .map(|entry_point| {
+                    if entry_point.entry_point.target == streams::UNTRACEABLE.target() {
+                        return Err(format!("{} reverts", entry_point.entry_point.external_id));
+                    }
+                    Ok(trace(&block_hash, entry_point))
+                })
                 .collect()
         });
     tracer

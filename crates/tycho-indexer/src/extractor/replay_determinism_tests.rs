@@ -41,6 +41,15 @@ async fn test_serial_db_replayed_blocks_emit_the_original_messages(
             .last()
             .map(block_number)
             .expect("the first run fed blocks");
+        // A relaxation, not coverage: a restart after the DCI stream's paused pool ran out of
+        // trace retries replays differently (deferred bug 16).
+        if let Some(differs_from) = kind.replays_differ_from() {
+            assert!(
+                tip < differs_from,
+                "the restart must come before block {differs_from}, which a restarted extractor \
+                 replays differently"
+            );
+        }
 
         // A fresh extractor resumes from what the first run committed, as after a real restart;
         // the first run's own last processed block is its in-memory tip.

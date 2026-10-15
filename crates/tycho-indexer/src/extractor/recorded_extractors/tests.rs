@@ -487,6 +487,23 @@ async fn the_tracer_traces_every_entry_point_in_request_order_the_same_way_every
 }
 
 #[tokio::test]
+async fn the_tracer_fails_the_untraceable_entry_point_every_time() {
+    let untraceable = EntryPointWithTracingParams::new(
+        EntryPoint::new("ep".into(), streams::UNTRACEABLE.target(), "f()".into()),
+        TracingParams::RPCTracer(RPCTracerParams::new(None, Bytes::from("0x01"))),
+    );
+    let tracer = rpc::tracer();
+
+    for block in [1_u64, 2] {
+        let traces = tracer
+            .trace(Bytes::from(block).lpad(32, 0), vec![untraceable.clone()])
+            .await;
+
+        assert!(matches!(traces.as_slice(), [Err(_)]), "{traces:?}");
+    }
+}
+
+#[tokio::test]
 async fn the_account_extractor_returns_every_requested_account_the_same_way_every_time() {
     let block = Block { number: 7, ..Default::default() };
     let requests = vec![

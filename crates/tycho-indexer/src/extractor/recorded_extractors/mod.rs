@@ -66,6 +66,20 @@ impl ExtractorKind {
         }
     }
 
+    /// The first block of this kind's stream that an extractor restarted before it replays
+    /// differently from the original run, because of a known bug, if any. Replay tests restart
+    /// below it.
+    ///
+    /// The DCI does not persist its trace retry counts (deferred bug 16), so a restarted
+    /// extractor retries the paused pool's trace in the block where the original run had run out
+    /// of retries.
+    pub(super) fn replays_differ_from(self) -> Option<u64> {
+        match self {
+            Self::Native => None,
+            Self::Dci => Some(streams::DCI_RETRIES_RUN_OUT_AT),
+        }
+    }
+
     /// The protocol type of every component in this kind's stream.
     fn protocol_type(self) -> ProtocolType {
         match self {

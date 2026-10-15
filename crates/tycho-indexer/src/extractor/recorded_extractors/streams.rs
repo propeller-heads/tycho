@@ -93,30 +93,45 @@ const TKNB: FixtureToken = FixtureToken {
     price: None,
 };
 
+/// The block of the DCI stream in which an update of the paused pool no longer retries its
+/// trace, because the retries ran out. The DCI keeps retry counts in memory only (deferred bug
+/// 16): an extractor restarted after this block retries the trace again and emits a `paused`
+/// attribute the original run did not.
+pub(super) const DCI_RETRIES_RUN_OUT_AT: u64 = 13;
+
 /// Every token the recorded streams use.
 pub(super) const TOKENS: [&FixtureToken; 6] = [&WETH, &USDC, &DAI, &USDT, &TKNA, &TKNB];
 
-/// An entry point of the DCI stream, traced with one calldata.
-struct FixtureEntryPoint {
+/// An entry point of the DCI stream, traced with one calldata and, optionally, a caller.
+pub(super) struct FixtureEntryPoint {
     id: &'static str,
     target: [u8; 20],
     calldata: u8,
+    caller: Option<[u8; 20]>,
 }
 
 impl FixtureEntryPoint {
-    fn target(&self) -> Address {
+    pub(super) fn target(&self) -> Address {
         Address::from(self.target)
     }
 }
 
 const EP_A: FixtureEntryPoint =
-    FixtureEntryPoint { id: "ep_a", target: [0x0a; 20], calldata: 0x01 };
+    FixtureEntryPoint { id: "ep_a", target: [0x0a; 20], calldata: 0x01, caller: None };
 const EP_B: FixtureEntryPoint =
-    FixtureEntryPoint { id: "ep_b", target: [0x0b; 20], calldata: 0x02 };
+    FixtureEntryPoint { id: "ep_b", target: [0x0b; 20], calldata: 0x02, caller: None };
 const EP_C: FixtureEntryPoint =
-    FixtureEntryPoint { id: "ep_c", target: [0x0c; 20], calldata: 0x03 };
+    FixtureEntryPoint { id: "ep_c", target: [0x0c; 20], calldata: 0x03, caller: None };
 const EP_D: FixtureEntryPoint =
-    FixtureEntryPoint { id: "ep_d", target: [0x0d; 20], calldata: 0x04 };
+    FixtureEntryPoint { id: "ep_d", target: [0x0d; 20], calldata: 0x04, caller: None };
+
+/// The entry point the mocked tracer fails to trace, every time.
+pub(super) const UNTRACEABLE: FixtureEntryPoint = FixtureEntryPoint {
+    id: "ep_untraceable",
+    target: [0x0f; 20],
+    calldata: 0x05,
+    caller: Some(SENDER),
+};
 
 /// Sender and recipient of every recorded transaction.
 const SENDER: [u8; 20] = [0x5e; 20];
@@ -267,6 +282,10 @@ pub(super) fn native(delivery: Delivery) -> RecordedStream {
 /// shared by several components, retriggered by a new implementation address, and traced on
 /// orphaned branches; the traced contracts' storage changes, including a token's tracked and
 /// untracked slots. Branches are orphaned like in the native stream.
+///
+/// One pool's entry point never traces: the pool is paused, and every later update of the pool
+/// retries the trace until the retries run out in block [`DCI_RETRIES_RUN_OUT_AT`]. Retries on
+/// orphaned branches do not count.
 pub(super) fn dci() -> RecordedStream {
     use ChangeType::{Creation, Update};
 
@@ -286,14 +305,22 @@ pub(super) fn dci() -> RecordedStream {
         .balance("vm_pool_a", &USDC, 2_000)
         .entry_point("vm_pool_a", &EP_A)]);
     let delegate_a1 = delegate(&oracle_a, &stream.hash_at(1));
-    // 2: the traced contracts change.
-    stream.block(vec![Tx::new()
-        .contract(pool_contract_update([0xa1; 20], 110))
-        .balance("vm_pool_a", &WETH, 1_100)
-        .storage(&oracle_a, slot(0), word(1), word(2))
-        .storage(&weth, balance_slot(&oracle_a), word(10), word(20))
-        .storage(&weth, slot(9), word(1), word(2))
-        .native_balance(&delegate_a1, 5_000)]);
+    // 2: the traced contracts change, and a pool whose entry point fails to trace is paused.
+    stream.block(vec![
+        Tx::new()
+            .contract(pool_contract_update([0xa1; 20], 110))
+            .balance("vm_pool_a", &WETH, 1_100)
+            .storage(&oracle_a, slot(0), word(1), word(2))
+            .storage(&weth, balance_slot(&oracle_a), word(10), word(20))
+            .storage(&weth, slot(9), word(1), word(2))
+            .native_balance(&delegate_a1, 5_000),
+        Tx::new()
+            .create(vm_pool("vm_pool_f", [&DAI, &USDC], [0xf6; 20]))
+            .contract(pool_contract([0xf6; 20], 500))
+            .balance("vm_pool_f", &DAI, 100)
+            .balance("vm_pool_f", &USDC, 200)
+            .entry_point("vm_pool_f", &UNTRACEABLE),
+    ]);
     // 3: a second pool shares the traced entry point and brings its own.
     stream.block(vec![Tx::new()
         .create(vm_pool("vm_pool_b", [&DAI, &TKNA], [0xb1; 20]))
@@ -347,15 +374,20 @@ pub(super) fn dci() -> RecordedStream {
             address_word(&implementation_b5),
             address_word(&Address::from([0xef; 20])),
         )
-        .balance("vm_pool_c", &USDT, 310)]);
+        .balance("vm_pool_c", &USDT, 310)
+        .balance("vm_pool_f", &DAI, 101)]);
     stream.undo_to(5);
-    // 6: the entry point traced on the orphaned branch, traced again.
-    stream.block(vec![Tx::new()
-        .create(vm_pool("vm_pool_d", [&USDT, &TKNB], [0xd1; 20]))
-        .contract(pool_contract([0xd1; 20], 400))
-        .balance("vm_pool_d", &USDT, 800)
-        .balance("vm_pool_d", &TKNB, 900)
-        .entry_point("vm_pool_d", &EP_C)]);
+    // 6: the entry point traced on the orphaned branch, traced again. The paused pool retries
+    // its trace a second time: the retry on the orphaned branch was undone.
+    stream.block(vec![
+        Tx::new()
+            .create(vm_pool("vm_pool_d", [&USDT, &TKNB], [0xd1; 20]))
+            .contract(pool_contract([0xd1; 20], 400))
+            .balance("vm_pool_d", &USDT, 800)
+            .balance("vm_pool_d", &TKNB, 900)
+            .entry_point("vm_pool_d", &EP_C),
+        Tx::new().balance("vm_pool_f", &DAI, 102),
+    ]);
     // 7: a pool shares an entry point traced in a committed block.
     stream.block(vec![
         Tx::new()
@@ -376,11 +408,12 @@ pub(super) fn dci() -> RecordedStream {
         )
         .balance("vm_pool_b", &DAI, 540)]);
     let delegate_b8 = delegate(&oracle_b, &stream.hash_at(8));
-    // 9
+    // 9: the paused pool's third trace.
     stream.block(vec![Tx::new()
         .contract(pool_contract_update([0xa1; 20], 120))
         .storage(&delegate_b8, slot(0), word(1), word(6))
-        .storage(&oracle_a, slot(0), word(2), word(7))]);
+        .storage(&oracle_a, slot(0), word(2), word(7))
+        .attributes("vm_pool_f", &[("fee", 10, Creation)])]);
     // 10
     stream.block(vec![Tx::new()
         .attributes("vm_pool_a", &[("fee", 25, Update)])
@@ -389,7 +422,8 @@ pub(super) fn dci() -> RecordedStream {
     // 11 and 12, orphaned below by nested undo signals: an entry point traced, then retriggered.
     stream.block(vec![Tx::new()
         .entry_point("vm_pool_a", &EP_D)
-        .storage(&oracle_a, slot(0), word(7), word(8))]);
+        .storage(&oracle_a, slot(0), word(7), word(8))
+        .balance("vm_pool_f", &USDC, 210)]);
     stream.block(vec![Tx::new().storage(&oracle_d, slot(0), word(1), word(2))]);
     stream.undo_to(11);
     let delegate_d11 = delegate(&oracle_d, &stream.hash_at(11));
@@ -400,12 +434,20 @@ pub(super) fn dci() -> RecordedStream {
         address_word(&Address::from([0xf1; 20])),
     )]);
     stream.undo_to(10);
-    // 11 to 14: the entry point of the orphaned branch, traced on the canonical one.
+    // 11 to 14: the entry point of the orphaned branch, traced on the canonical one. The paused
+    // pool's fourth and fifth traces fail too, and its update in block 13 retries no more
+    // (`DCI_RETRIES_RUN_OUT_AT`).
     stream.block(vec![Tx::new()
         .storage(&oracle_a, slot(0), word(7), word(10))
-        .balance("vm_pool_a", &WETH, 1_200)]);
-    stream.block(vec![Tx::new().entry_point("vm_pool_b", &EP_D)]);
-    stream.block(vec![Tx::new().storage(&oracle_d, slot(0), word(1), word(3))]);
+        .balance("vm_pool_a", &WETH, 1_200)
+        .balance("vm_pool_f", &USDC, 220)]);
+    stream.block(vec![
+        Tx::new().entry_point("vm_pool_b", &EP_D),
+        Tx::new().attributes("vm_pool_f", &[("fee", 11, Update)]),
+    ]);
+    stream.block(vec![Tx::new()
+        .storage(&oracle_d, slot(0), word(1), word(3))
+        .balance("vm_pool_f", &DAI, 103)]);
     stream.block(vec![Tx::new()
         .attributes("vm_pool_b", &[("fee", 6, Update)])
         .balance("vm_pool_e", &WETH, 70)]);
@@ -813,7 +855,9 @@ impl Tx {
                 entrypoint_id: entry_point.id.to_string(),
                 component_id: Some(component_id.to_string()),
                 trace_data: Some(TraceData::Rpc(pb::RpcTraceData {
-                    caller: None,
+                    caller: entry_point
+                        .caller
+                        .map(|caller| caller.to_vec()),
                     calldata: vec![0x67, 0x9a, 0xef, 0xce, entry_point.calldata],
                 })),
             });
