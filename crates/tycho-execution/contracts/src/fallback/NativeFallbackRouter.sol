@@ -55,7 +55,11 @@ contract NativeFallbackRouter is TychoFallbackRouter {
     /// @notice Runs the Native quote and, only if it fails, `fallbackSwap`. The quote trades all
     /// of `swap_.amountIn`; Native reverts when it strays too far from the signed amount, and the
     /// fallback then fills the leg.
-    /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
+    /// @param nativeData `[signedAmountIn: 32][tradeRFQT calldata]`, with `actualSellerAmount` and
+    /// `actualMinOutputAmount` left zero.
+    /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first. Invalid
+    /// `nativeData` (too short, another selector, a zero amount, a preset override) reverts the
+    /// call instead of falling back.
     function swap(
         Swap calldata swap_,
         bytes calldata nativeData,
