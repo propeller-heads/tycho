@@ -1,7 +1,7 @@
 //! Random extractor histories, with reverts built the way the indexer builds them.
 
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -172,9 +172,6 @@ impl History {
 ///   re-creates a deleted component would otherwise bring it back without its state.
 /// - Absent attributes are always created, never updated, and an account is created only when it
 ///   has no slots, since the indexer looks prior values up without regard to deletions.
-/// - An attribute is deleted, alone or with its component, only once the block that created it is
-///   finalized. A revert omits an attribute its range both created and deleted, so a client that
-///   applied the creation but not the deletion would keep the attribute after the revert.
 ///
 /// An upgraded extractor writes a marker slot for every block it emits, so its replay differs
 /// from the original blocks.
@@ -457,8 +454,7 @@ impl<'a> Generator<'a> {
             None => (1, Bytes::from(0u64).lpad(32, 0), &empty),
         };
         let block = Block::new(number, CHAIN, hash, parent_hash, NaiveDateTime::default());
-        let young = young_attributes(&self.chain, self.finalized);
-        Arc::new(draw_block(&mut self.rng, self.config, block, state, &young))
+        Arc::new(draw_block(&mut self.rng, self.config, block, state))
     }
 
     /// Sends `content` as the next block, with the current watermarks and version marker.
@@ -551,31 +547,12 @@ fn mark(message: &mut BlockAggregatedChanges, version: u32) {
         .insert(marker, delta);
 }
 
-/// The attributes whose current value was first created above `finalized`, so a revert can still
-/// undo their creation.
-fn young_attributes(chain: &[ChainBlock], finalized: u64) -> HashSet<(ComponentId, AttrStoreKey)> {
-    let mut young = HashSet::new();
-    for block in chain.iter().skip(finalized as usize) {
-        for (id, delta) in &block.message.state_deltas {
-            for name in &delta.deleted_attributes {
-                young.remove(&(id.clone(), name.clone()));
-            }
-            for name in &delta.created_attributes {
-                young.insert((id.clone(), name.clone()));
-            }
-        }
-    }
-    young
-}
-
-/// Random deltas for `block` on top of `state`, without watermarks. `young` attributes are not
-/// deleted.
+/// Random deltas for `block` on top of `state`, without watermarks.
 fn draw_block(
     rng: &mut StdRng,
     config: &HistoryConfig,
     block: Block,
     state: &DeltaStateModel,
-    young: &HashSet<(ComponentId, AttrStoreKey)>,
 ) -> BlockAggregatedChanges {
     let tx = block.hash.clone();
     let mut message = BlockAggregatedChanges {
@@ -595,17 +572,8 @@ fn draw_block(
             absent.push(id);
         }
     }
-    let deletable: Vec<ComponentId> = live
-        .iter()
-        .filter(|id| {
-            !young
-                .iter()
-                .any(|(component, _)| component == *id)
-        })
-        .cloned()
-        .collect();
-    if !deletable.is_empty() && rng.gen_bool(DELETE_COMPONENT) {
-        let deleted = pick(rng, &deletable).clone();
+    if !live.is_empty() && rng.gen_bool(DELETE_COMPONENT) {
+        let deleted = pick(rng, &live).clone();
         delete_component(&mut message, state, &deleted);
         live.retain(|id| id != &deleted);
     }
@@ -619,7 +587,7 @@ fn draw_block(
     };
     for id in &live {
         if rng.gen_bool(CHANGE_COMPONENT) {
-            change_component(rng, &mut message, state, id, ComponentAge::Existing(young));
+            change_component(rng, &mut message, state, id, ComponentAge::Existing);
         }
     }
 
@@ -717,12 +685,11 @@ fn create_component(
 }
 
 /// Whether a component a block changes already existed.
-enum ComponentAge<'a> {
+enum ComponentAge {
     /// The block creates the component.
     New,
-    /// The component existed; the attributes it holds that a revert could still undo the
-    /// creation of are not deleted.
-    Existing(&'a HashSet<(ComponentId, AttrStoreKey)>),
+    /// The component existed.
+    Existing,
 }
 
 /// Writes or deletes some attributes, balances and TVL of `id`.
@@ -740,14 +707,11 @@ fn change_component(
             continue;
         }
         let name = name.to_string();
-        let (exists, deletable) = match age {
-            ComponentAge::New => (false, false),
-            ComponentAge::Existing(young) => {
-                let exists = held.is_some_and(|attributes| attributes.contains_key(&name));
-                (exists, exists && !young.contains(&(id.clone(), name.clone())))
-            }
+        let exists = match age {
+            ComponentAge::New => false,
+            ComponentAge::Existing => held.is_some_and(|attributes| attributes.contains_key(&name)),
         };
-        if deletable && rng.gen_bool(DELETE_ATTRIBUTE) {
+        if exists && rng.gen_bool(DELETE_ATTRIBUTE) {
             delta.deleted_attributes.insert(name);
             continue;
         }
@@ -770,7 +734,7 @@ fn change_component(
         ComponentAge::New => message.new_protocol_components[id]
             .tokens
             .clone(),
-        ComponentAge::Existing(_) => state.components[id].tokens.clone(),
+        ComponentAge::Existing => state.components[id].tokens.clone(),
     };
     if rng.gen_bool(CHANGE_COMPONENT) {
         let mut balances = HashMap::new();
@@ -885,8 +849,8 @@ fn update_dci(
 enum AttrRevert {
     /// The attribute had a value before the range: restore it.
     ExistedBefore,
-    /// The range created the attribute: delete it if it is still alive at the end of the range.
-    CreatedInRange { alive: bool },
+    /// The range created the attribute: delete it, also when the range deleted it again.
+    CreatedInRange,
 }
 
 /// One event on an attribute, in chronological order, like the indexer's `AttrEvent`.
@@ -896,26 +860,18 @@ enum AttrEvent {
     Deleted,
 }
 
-/// Records `event` on an attribute: its first event decides its class, later events only whether
-/// an attribute created in the range is still alive.
+/// Records `event` on an attribute: its first event decides its class.
 fn classify(
     classes: &mut HashMap<(ComponentId, AttrStoreKey), AttrRevert>,
     (component_id, name): (&ComponentId, &AttrStoreKey),
     event: AttrEvent,
 ) {
-    match classes.entry((component_id.clone(), name.clone())) {
-        Entry::Occupied(mut held) => {
-            if let AttrRevert::CreatedInRange { alive } = held.get_mut() {
-                *alive = !matches!(event, AttrEvent::Deleted);
-            }
-        }
-        Entry::Vacant(slot) => {
-            slot.insert(match event {
-                AttrEvent::Created => AttrRevert::CreatedInRange { alive: true },
-                AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
-            });
-        }
-    }
+    classes
+        .entry((component_id.clone(), name.clone()))
+        .or_insert(match event {
+            AttrEvent::Created => AttrRevert::CreatedInRange,
+            AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
+        });
 }
 
 /// The revert message the indexer sends when the chain drops every block of `reverted`, back to
@@ -1015,8 +971,7 @@ fn revert_message(target: &ChainBlock, reverted: &[ChainBlock]) -> BlockAggregat
                 .get(&id)
                 .and_then(|attributes| attributes.get(&name))
                 .cloned(),
-            AttrRevert::CreatedInRange { alive: true } => None,
-            AttrRevert::CreatedInRange { alive: false } => continue,
+            AttrRevert::CreatedInRange => None,
         };
         let delta = state_deltas
             .entry(id.clone())
@@ -1259,5 +1214,43 @@ mod test {
         assert!(revert.new_tokens.is_empty());
         assert!(revert.component_tvl.is_empty());
         assert_eq!(revert.dci_update, DCIUpdate::default());
+    }
+
+    #[test]
+    fn a_revert_deletes_an_attribute_its_range_created_and_deleted() {
+        let mut created_a = ProtocolComponentStateDelta::new(
+            "pool",
+            HashMap::from([("a".to_string(), one(1))]),
+            HashSet::new(),
+        );
+        created_a
+            .created_attributes
+            .insert("a".to_string());
+        let deleted_a =
+            ProtocolComponentStateDelta::new("pool", HashMap::new(), HashSet::from(["a".into()]));
+        let chain = chain_of(&[
+            Arc::new(BlockAggregatedChanges {
+                new_protocol_components: HashMap::from([(
+                    "pool".to_string(),
+                    component("pool", ChangeType::Creation),
+                )]),
+                ..(*full_block(1, 0, 0)).clone()
+            }),
+            Arc::new(BlockAggregatedChanges {
+                state_deltas: HashMap::from([("pool".to_string(), created_a)]),
+                ..(*full_block(2, 0, 0)).clone()
+            }),
+            Arc::new(BlockAggregatedChanges {
+                state_deltas: HashMap::from([("pool".to_string(), deleted_a)]),
+                ..(*full_block(3, 0, 0)).clone()
+            }),
+        ]);
+
+        let revert = revert_message(&chain[0], &chain[1..]);
+
+        // A client that applied block 2 and missed block 3 catches up through the revert.
+        let mut client = chain[1].state.clone();
+        client.apply(&revert);
+        assert_eq!(client.component_attributes, chain[0].state.component_attributes);
     }
 }
