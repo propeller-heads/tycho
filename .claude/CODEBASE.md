@@ -158,6 +158,15 @@ Blocks enter `ReorgBuffer` immediately but only reach the DB via
 `drain_blocks_until(finalized_height)`. The DB always reflects canonical chain state. Pending
 blocks are served to RPC via `PendingDeltasBuffer`.
 
+### Single writer, many servers
+
+Several `index` processes can share one database for high availability. A Postgres advisory lock
+elects one leader that commits finalized blocks; the others extract and serve WS/RPC as followers,
+retaining finalized blocks until the leader's `extraction_state` shows them committed. A follower
+takes over without a restart when it gets the lock. Every write transaction checks the
+`writer_epoch` row, so a former leader cannot write after a takeover. See `tycho-indexer/CLAUDE.md`
+(Leader election) and `tycho-storage/CLAUDE.md` (Writer fencing).
+
 ### Temporal versioning
 
 Every mutable Postgres entity carries `valid_from`/`valid_to`. `apply_versioning()` sets

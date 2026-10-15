@@ -26,7 +26,10 @@ use tycho_common::{
 };
 
 use crate::{
-    extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+    extractor::{
+        reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+        writer_status::WriterStatus,
+    },
     services::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
@@ -137,6 +140,9 @@ pub struct RpcHandler<G, T> {
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
     off_worker: OffWorker,
+    /// Role of this process as database writer, read by the health endpoint. `None` for a
+    /// process that never writes extraction results.
+    writer_status: Option<WriterStatus>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -151,6 +157,7 @@ where
         plans_config: PlansConfig,
         dci_protocols: Vec<String>,
         protocol_systems: Vec<String>,
+        writer_status: Option<WriterStatus>,
     ) -> Self {
         const ONE_MB: u64 = 1_024 * 1_024;
         const HUNDRED_MB: u64 = ONE_MB * 100;
@@ -192,6 +199,7 @@ where
             protocol_systems,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
+            writer_status,
         }
     }
 
@@ -548,6 +556,10 @@ where
             "Version finality calculated!"
         );
 
+        // Known gap on a follower that lags the leader by more than the finality delay: an
+        // uncommitted version reads the database at `Latest`, which can already hold the leader's
+        // newer commits (see crates/tycho-indexer/CLAUDE.md, "Why extractor messages must be
+        // broadcast to the RPC service").
         match request_version_commit_status {
             CommitStatus::Committed => {
                 Ok((Version(request_version.clone(), VersionKind::Last), None))
@@ -1022,6 +1034,10 @@ where
             .await
         {
             Ok(component_data) => {
+                // Known gap: the window learns the committed height only from the next block
+                // message, so a component the database already holds can also come from the
+                // window here and appear twice (see "Why extractor messages must be broadcast to
+                // the RPC service" in crates/tycho-indexer/CLAUDE.md).
                 let db_total = component_data.total.unwrap_or_default();
                 let total = db_total + buffered_components.len() as i64;
                 let mut components = component_data.entity;
@@ -1661,21 +1677,42 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
     }
 }
 
+/// How long a leader may go without confirming its leader lock before it reports unhealthy.
+///
+/// A leader confirms its lock every second. A leader that stops confirming but keeps the lock
+/// blocks every other process from taking over, so it must be restarted.
+const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Health check endpoint
 ///
-/// This endpoint is used to check the health of the service.
+/// This endpoint is used to check the health of the service. It fails with 503 while this
+/// process is the database writer but has not confirmed its leader lock for 30 seconds.
 #[utoipa::path(
     get,
     path = "/v1/health",
     responses(
         (status = 200, description = "OK", body=Health),
+        (status = 503, description = "The database writer stopped confirming its lock", body=Health),
     ),
     security(
          ("apiKey" = [])
     )
 )]
-pub async fn health() -> Result<HttpResponse, RpcError> {
-    Ok(HttpResponse::Ok().json(dto::Health::Ready))
+pub async fn health<G: Gateway, T: EntryPointTracer>(
+    handler: web::Data<RpcHandler<G, T>>,
+) -> HttpResponse {
+    let since_confirmed = handler
+        .writer_status
+        .as_ref()
+        .and_then(WriterStatus::time_since_lead_confirmed);
+    match since_confirmed {
+        Some(elapsed) if elapsed > LEAD_CONFIRMATION_LIMIT => HttpResponse::ServiceUnavailable()
+            .json(dto::Health::NotReady(format!(
+                "Leader has not confirmed its leader lock for {}s",
+                elapsed.as_secs()
+            ))),
+        _ => HttpResponse::Ok().json(dto::Health::Ready),
+    }
 }
 
 #[cfg(test)]
@@ -1937,6 +1974,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::StateRequestBody {
@@ -1992,6 +2030,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
 
@@ -2063,6 +2102,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(setup)
     }
@@ -2084,6 +2124,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let result = handler
@@ -2130,6 +2171,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
     }
@@ -2183,6 +2225,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(state_service);
 
@@ -2807,6 +2850,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
     }
@@ -2922,6 +2966,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::StateRequestBody {
@@ -3237,6 +3282,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
         let response = req_handler
             .add_entry_points(&req_body)
@@ -3311,7 +3357,8 @@ mod tests {
             expected_upserted_tracing_results,
         );
 
-        let req_handler = RpcHandler::new(gw, None, tracer, PlansConfig::default(), vec![], vec![]);
+        let req_handler =
+            RpcHandler::new(gw, None, tracer, PlansConfig::default(), vec![], vec![], None);
         let response = req_handler
             .add_entry_points(&req_body)
             .await
@@ -3429,6 +3476,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         // Request for two protocol components
@@ -3602,6 +3650,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         // request for 2 tokens that are in the DB (WETH and USDC)
@@ -3657,6 +3706,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
 
@@ -3717,6 +3767,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolStateRequestBody {
@@ -3805,6 +3856,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolComponentsRequestBody {
@@ -3905,6 +3957,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolComponentsRequestBody {
@@ -3991,6 +4044,7 @@ mod tests {
             plans_config_with_restrictions(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4057,6 +4111,7 @@ mod tests {
             plans_config_with_restrictions(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4115,6 +4170,7 @@ plans:
             config.clone(),
             vec![],
             vec![],
+            None,
         );
 
         let restrictions = handler_free
@@ -4169,6 +4225,7 @@ plans:
             PlansConfig::default(),
             dci_protocols.clone(),
             protocol_systems,
+            None,
         );
 
         let request = dto::ProtocolSystemsRequestBody {
@@ -4201,6 +4258,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let allowed: HashSet<String> =
@@ -4236,6 +4294,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let allowed: HashSet<String> = HashSet::from([
@@ -4284,6 +4343,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let request = dto::ProtocolSystemsRequestBody {
@@ -4312,6 +4372,7 @@ plans:
             plans_config_with_restrictions(),
             vec![],
             active_systems,
+            None,
         );
 
         let app = test::init_service(
@@ -4402,6 +4463,7 @@ plans:
             plans_config_restricted_history(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4472,6 +4534,7 @@ plans:
             plans_config_restricted_history(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(

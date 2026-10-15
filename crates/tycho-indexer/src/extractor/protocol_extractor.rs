@@ -2653,7 +2653,8 @@ mod test {
         fn follower() -> (Self, WriterStatus) {
             let (role, role_rx) = tokio::sync::watch::channel(Role::Follower);
             let (heights, heights_rx) = tokio::sync::watch::channel(HashMap::new());
-            (Self { role, heights }, WriterStatus::new(role_rx, heights_rx))
+            let (_, confirmed_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
+            (Self { role, heights }, WriterStatus::new(role_rx, heights_rx, confirmed_rx))
         }
 
         fn leader_committed(&self, height: u64) {
