@@ -14,7 +14,7 @@ use metrics::{counter, gauge, Label};
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{BlockAggregatedChanges, Command, Response, WebSocketMessage},
-    models::{error::WebsocketError, ExtractorIdentity},
+    models::{blockchain, error::WebsocketError, ExtractorIdentity},
 };
 use uuid::Uuid;
 
@@ -40,6 +40,19 @@ pub struct WsData {
 impl WsData {
     pub fn new(extractors: MessageSenderMap) -> Self {
         Self { subscribers: Arc::new(extractors) }
+    }
+}
+
+/// `message` as a subscription with this `include_state` receives it: without state and account
+/// updates when `include_state` is false.
+pub(super) fn subscriber_message(
+    message: &blockchain::BlockAggregatedChanges,
+    include_state: bool,
+) -> BlockAggregatedChanges {
+    if include_state {
+        message.clone().into()
+    } else {
+        message.drop_state().into()
     }
 }
 
@@ -308,11 +321,7 @@ impl WsActor {
                                 }
                             }
 
-                            let result = if include_state {
-                                (*item).clone().into()
-                            } else {
-                                item.drop_state().into()
-                            };
+                            let result = subscriber_message(&item, include_state);
 
                             yield ExtractorEvent::Message(subscription_id, Box::new(result));
                         }
