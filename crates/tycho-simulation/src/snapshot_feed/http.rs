@@ -47,10 +47,6 @@ pub struct HttpFeedConfig {
 /// The values every HTTP feed builder starts from. The relation among them worth keeping through
 /// a retune: the withdrawal age outlasts a poll that hangs to its deadline, so one slow poll does
 /// not blank the book.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) fn default_http_feed_config() -> HttpFeedConfig {
     HttpFeedConfig {
         poll_interval: Duration::from_secs(5),
@@ -222,25 +218,47 @@ fn polled_snapshots<S: HttpSource>(
     }
 }
 
-/// Sends `request` and returns its body. A transport failure or a non-success status is a
-/// [`FeedError::Connection`]; `what` names the resource in the message (e.g. "Hashflow price
-/// levels").
+/// Reads, in the body a venue answered a failing status with, its own words for something it
+/// will not serve at all — a chain it does not price, say. That answer is a
+/// [`FeedError::Fatal`] rather than the retryable [`FeedError::Connection`], since another
+/// attempt gets the same one. Every fetch here takes one, because what a failing status means
+/// is the venue's to say and not this module's.
+///
+/// A plain `fn`, so the verdict rests on what the venue said and on nothing else.
+pub(crate) type RefusalCheck = fn(&str) -> bool;
+
+/// For a venue that refuses nothing outright, so every failing answer is worth another attempt.
+pub(crate) fn nothing_refused(_body: &str) -> bool {
+    false
+}
+
+/// Sends `request` and returns its body. A transport failure is a [`FeedError::Connection`], a
+/// failing status whatever `refused` makes of it; `what` names the resource in the message
+/// (e.g. "Hashflow price levels").
 ///
 /// For an API that reports failures inside the body of an otherwise successful response, which
 /// therefore has to be classified before it is parsed. [`fetch_json`] is the plain case.
-pub(crate) async fn fetch_bytes(request: RequestBuilder, what: &str) -> Result<Bytes, FeedError> {
+pub(crate) async fn fetch_bytes(
+    request: RequestBuilder,
+    what: &str,
+    refused: RefusalCheck,
+) -> Result<Bytes, FeedError> {
     let response = request
         .send()
         .await
         .map_err(|e| FeedError::Connection(format!("Failed to fetch {what}: {e}")))?;
-    read_bytes(response, what).await
+    read_bytes(response, what, refused).await
 }
 
-/// Reads `response`'s body, failing a non-success status with whatever the server said. `what`
-/// names the resource, as in [`fetch_bytes`].
-async fn read_bytes(response: Response, what: &str) -> Result<Bytes, FeedError> {
+/// Reads `response`'s body, failing a non-success status with whatever the server said — as a
+/// refusal when `refused` recognises it there. `what` names the resource, as in [`fetch_bytes`].
+async fn read_bytes(
+    response: Response,
+    what: &str,
+    refused: RefusalCheck,
+) -> Result<Bytes, FeedError> {
     // The body is read before the status is judged, so a failing response can report what the
-    // server said.
+    // server said, and so the venue can be asked what it meant by it.
     let status = response.status();
     let body = response
         .bytes()
@@ -248,35 +266,35 @@ async fn read_bytes(response: Response, what: &str) -> Result<Bytes, FeedError> 
         .map_err(|e| FeedError::Connection(format!("Failed to read {what} response: {e}")))?;
 
     if !status.is_success() {
-        return Err(FeedError::Connection(format!(
-            "{what} HTTP error {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        let said = String::from_utf8_lossy(&body);
+        let message = format!("{what} HTTP error {status}: {said}");
+        return Err(if refused(&said) {
+            FeedError::Fatal(message)
+        } else {
+            FeedError::Connection(message)
+        });
     }
     Ok(body)
 }
 
-/// Sends `request` and parses its JSON body. A transport failure or a non-success status is a
-/// [`FeedError::Connection`], an unparseable body a [`FeedError::Parsing`]; `what` names the
-/// resource in both (e.g. "Hashflow price levels").
+/// Sends `request` and parses its JSON body, fetching as [`fetch_bytes`] does; an unparseable
+/// body is a [`FeedError::Parsing`] naming `what`.
 pub(crate) async fn fetch_json<T: DeserializeOwned>(
     request: RequestBuilder,
     what: &str,
+    refused: RefusalCheck,
 ) -> Result<T, FeedError> {
-    parse_json(&fetch_bytes(request, what).await?, what)
+    parse_json(&fetch_bytes(request, what, refused).await?, what)
 }
 
 /// Parses `response`'s JSON body, the second half of [`fetch_json`] for a caller that sends the
 /// request itself.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub(crate) async fn read_json<T: DeserializeOwned>(
     response: Response,
     what: &str,
+    refused: RefusalCheck,
 ) -> Result<T, FeedError> {
-    parse_json(&read_bytes(response, what).await?, what)
+    parse_json(&read_bytes(response, what, refused).await?, what)
 }
 
 fn parse_json<T: DeserializeOwned>(body: &[u8], what: &str) -> Result<T, FeedError> {
@@ -288,31 +306,63 @@ fn parse_json<T: DeserializeOwned>(body: &[u8], what: &str) -> Result<T, FeedErr
 /// and JSON body. Serves until the runtime drops it.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::net::SocketAddr;
+    use std::{
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::TcpListener,
     };
 
-    /// A running mock server, and where it listens.
+    /// One canned HTTP response; `(status_line, body)` converts into it.
+    pub struct MockResponse {
+        pub status: &'static str,
+        pub body: String,
+        /// Wait before answering, for tests that exercise request deadlines.
+        pub delay: Duration,
+    }
+
+    impl From<(&'static str, String)> for MockResponse {
+        fn from((status, body): (&'static str, String)) -> Self {
+            MockResponse { status, body, delay: Duration::ZERO }
+        }
+    }
+
+    /// A running mock server: where it listens and how many requests it has answered.
     pub struct MockHttpServer {
-        address: SocketAddr,
+        pub address: SocketAddr,
+        pub requests: Arc<AtomicUsize>,
     }
 
     impl MockHttpServer {
         pub fn url(&self) -> String {
             format!("http://{}", self.address)
         }
+
+        pub fn request_count(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
     }
 
-    pub async fn spawn_http_server(
-        respond: impl Fn() -> (&'static str, String) + Send + 'static,
+    /// Serves HTTP/1.1 requests until the runtime drops it. `route` maps the request target
+    /// (path plus query string) to a response; a target it returns `None` for gets a 404. Each
+    /// request is counted before `route` runs, so a route closure holding its own counter can
+    /// answer per attempt.
+    pub async fn spawn_http_server<R: Into<MockResponse>>(
+        route: impl Fn(&str) -> Option<R> + Send + 'static,
     ) -> MockHttpServer {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&requests);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let mut reader = BufReader::new(stream);
@@ -324,7 +374,20 @@ pub(crate) mod test_support {
                 {
                     continue;
                 }
-                let (status, body) = respond();
+                served.fetch_add(1, Ordering::SeqCst);
+                let target = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default();
+                let response = route(target)
+                    .map(Into::into)
+                    .unwrap_or_else(|| {
+                        MockResponse::from(("404 Not Found", format!("no route for {target}")))
+                    });
+
+                tokio::time::sleep(response.delay).await;
+
+                let MockResponse { status, body, .. } = response;
                 let payload = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -336,7 +399,7 @@ pub(crate) mod test_support {
                 let _ = stream.shutdown().await;
             }
         });
-        MockHttpServer { address }
+        MockHttpServer { address, requests }
     }
 }
 
@@ -779,12 +842,16 @@ mod tests {
 
         #[tokio::test]
         async fn parses_a_successful_json_body() {
-            let server = spawn_http_server(|| ("200 OK", r#"{"value":7}"#.to_string())).await;
+            let server =
+                spawn_http_server(|_| Some(("200 OK", r#"{"value":7}"#.to_string()))).await;
 
-            let payload: Payload =
-                fetch_json(reqwest::Client::new().get(format!("{}/x", server.url())), "thing")
-                    .await
-                    .unwrap();
+            let payload: Payload = fetch_json(
+                reqwest::Client::new().get(format!("{}/x", server.url())),
+                "thing",
+                nothing_refused,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(payload, Payload { value: 7 });
         }
@@ -801,11 +868,14 @@ mod tests {
             #[case] body: &'static str,
             #[case] expect_parsing_error: bool,
         ) {
-            let server = spawn_http_server(move || (status, body.to_string())).await;
+            let server = spawn_http_server(move |_| Some((status, body.to_string()))).await;
 
-            let result: Result<Payload, FeedError> =
-                fetch_json(reqwest::Client::new().get(format!("{}/x", server.url())), "thing")
-                    .await;
+            let result: Result<Payload, FeedError> = fetch_json(
+                reqwest::Client::new().get(format!("{}/x", server.url())),
+                "thing",
+                nothing_refused,
+            )
+            .await;
 
             match result {
                 Err(FeedError::Parsing(msg)) if expect_parsing_error => {
@@ -830,9 +900,12 @@ mod tests {
                 .local_addr()
                 .unwrap();
 
-            let result: Result<Payload, FeedError> =
-                fetch_json(reqwest::Client::new().get(format!("http://{address}/x")), "thing")
-                    .await;
+            let result: Result<Payload, FeedError> = fetch_json(
+                reqwest::Client::new().get(format!("http://{address}/x")),
+                "thing",
+                nothing_refused,
+            )
+            .await;
 
             assert!(matches!(result, Err(FeedError::Connection(msg)) if msg.contains("thing")));
         }

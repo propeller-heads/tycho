@@ -4,12 +4,16 @@
 //! protocol system: two integrations' books for the same pair are two components, and so are the
 //! same venue's book feed and a future native integration of it.
 
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
 use tycho_common::{
     models::{token::Token, Chain},
+    simulation::protocol_sim::ProtocolSim,
     Bytes,
 };
 
-use crate::protocol::models::ProtocolComponent;
+use crate::{book::Book, protocol::models::ProtocolComponent};
 
 /// The id of a book from `base` into `quote`: the protocol system and the two addresses,
 /// concatenated. The order of the two addresses is part of the id, so a venue whose reverse book
@@ -20,12 +24,20 @@ pub fn pair_component_id(protocol_system: &str, base: &Bytes, quote: &Bytes) -> 
     Bytes::from([protocol_system.as_bytes(), base, quote].concat())
 }
 
+/// The id of `market_maker`'s book on that pair: its [`pair_component_id`] followed by the
+/// maker's name, for a venue whose quote comes from the one maker it is asked of.
+pub(crate) fn maker_component_id(
+    protocol_system: &str,
+    base: &Bytes,
+    quote: &Bytes,
+    market_maker: &str,
+) -> Bytes {
+    let pair = pair_component_id(protocol_system, base, quote);
+    Bytes::from([pair.as_ref(), market_maker.as_bytes()].concat())
+}
+
 /// A book's component: no contracts, no static attributes, the two tokens in the book's
 /// orientation. `id` is the pair's identity (see [`pair_component_id`]) or the pool's address.
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
 pub fn pair_component(
     id: Bytes,
     protocol_system: impl Into<String>,
@@ -47,6 +59,34 @@ pub fn pair_component(
     )
 }
 
+/// A state that prices one pair.
+pub trait PairState: ProtocolSim {
+    fn base_token(&self) -> &Token;
+
+    fn quote_token(&self) -> &Token;
+
+    /// The directions this book prices, as `(token sold, token bought)`. Only the state knows
+    /// which sides of it have levels, so only the state can say: a book nobody bids on buys
+    /// nothing, and one with no asks sells nothing, whatever pair it was published as.
+    fn directions(&self) -> Vec<(Bytes, Bytes)>;
+}
+
+/// The book `state` prices, under `id`: the state, the component it belongs to, and when the
+/// venue last updated it.
+pub fn pair_book<S: PairState + 'static>(
+    protocol_system: &str,
+    protocol_type: &str,
+    chain: Chain,
+    id: Bytes,
+    state: S,
+    updated_at: Option<DateTime<Utc>>,
+) -> Book {
+    let base = state.base_token().clone();
+    let quote = state.quote_token().clone();
+    let component = pair_component(id, protocol_system, protocol_type, chain, base, quote);
+    Book { component, state: Arc::new(state), updated_at }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,13 +97,27 @@ mod tests {
     }
 
     #[test]
-    fn the_id_is_the_protocol_system_followed_by_the_two_addresses() {
-        let id = pair_component_id("book:venue", &addr(0x11), &addr(0x22));
+    fn a_makers_id_is_the_pair_id_followed_by_the_maker_name() {
+        let id = maker_component_id("rfq:venue", &addr(0x11), &addr(0x22), "mm1");
 
-        // "book:venue" in ASCII, then the twenty bytes of each address.
+        // "rfq:venue", the twenty bytes of each address, then "mm1", all in ASCII.
         assert_eq!(
             id.to_string(),
-            "0x626f6f6b3a76656e7565\
+            "0x7266713a76656e7565\
+             1111111111111111111111111111111111111111\
+             2222222222222222222222222222222222222222\
+             6d6d31"
+        );
+    }
+
+    #[test]
+    fn the_id_is_the_protocol_system_followed_by_the_two_addresses() {
+        let id = pair_component_id("rfq:venue", &addr(0x11), &addr(0x22));
+
+        // "rfq:venue" in ASCII, then the twenty bytes of each address.
+        assert_eq!(
+            id.to_string(),
+            "0x7266713a76656e7565\
              1111111111111111111111111111111111111111\
              2222222222222222222222222222222222222222"
         );
@@ -73,8 +127,8 @@ mod tests {
     fn the_id_distinguishes_orientation_and_venue() {
         let (a, b) = (addr(1), addr(2));
 
-        assert_ne!(pair_component_id("book:v", &a, &b), pair_component_id("book:v", &b, &a));
+        assert_ne!(pair_component_id("rfq:v", &a, &b), pair_component_id("rfq:v", &b, &a));
         // Two protocol systems' books for the same pair are two components.
-        assert_ne!(pair_component_id("book:v", &a, &b), pair_component_id("v", &a, &b));
+        assert_ne!(pair_component_id("rfq:v", &a, &b), pair_component_id("v", &a, &b));
     }
 }

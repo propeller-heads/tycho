@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tycho_common::simulation::errors::SimulationError;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum RFQError {
     #[error("RFQ connection error: {0}")]
     ConnectionError(String),
@@ -23,6 +23,13 @@ impl From<reqwest::Error> for RFQError {
 
 impl From<RFQError> for SimulationError {
     fn from(err: RFQError) -> Self {
-        SimulationError::FatalError(err.to_string())
+        let message = err.to_string();
+        match err {
+            RFQError::ConnectionError(_) |
+            RFQError::ParsingError(_) |
+            RFQError::QuoteNotFound(_) => SimulationError::RecoverableError(message),
+            RFQError::FatalError(_) => SimulationError::FatalError(message),
+            RFQError::InvalidInput(_) => SimulationError::InvalidInput(message, None),
+        }
     }
 }
