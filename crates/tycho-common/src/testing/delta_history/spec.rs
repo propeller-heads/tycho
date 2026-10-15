@@ -8,14 +8,15 @@ use crate::models::{
     BlockHash,
 };
 
-/// Where a client's view of a history breaks.
+/// Where a client's view of a history breaks. Both fields index [`History::events`], which holds
+/// the restarts as well, not [`History::messages`]; both must point at a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gap {
-    /// Index of the last message the client applied before its subscription ended. The client's
-    /// head after it is the catch-up's `from`.
+    /// The last message the client applied before its subscription ended. The client's head
+    /// after it is the catch-up's `from`.
     pub last_applied: usize,
-    /// Index of the first message of the client's new subscription. The catch-up's `to` is the
-    /// parent of that message, or its target when it is a revert.
+    /// The first message of the client's new subscription. The catch-up's `to` is its parent, or
+    /// its target when it is a revert.
     pub first_live: usize,
 }
 
@@ -56,8 +57,9 @@ pub enum FallbackReason {
 ///   the highest watermarks the blocks carried. Nothing is evicted before the first commit.
 /// - A revert purges the blocks above its target and leaves the watermarks alone.
 /// - A restart clears the window.
-/// - Every revert is journaled with the blocks it orphaned, until its target falls below the
-///   window's oldest block or the window is cleared.
+/// - Every revert is journaled with the hashes of the blocks it orphaned. An entry is kept while
+///   its target is no lower than the parent of the window's oldest block, by number (`target + 1 >=
+///   oldest`), so a revert to that parent still anchors a path. A clear drops every entry.
 ///
 /// `from` is the block of `gap.last_applied`; `to` is the parent of `gap.first_live`, or its
 /// target when it is a revert. The rules, in order:
@@ -121,11 +123,11 @@ pub(super) struct JournalEntry {
 /// The server's delta window for one extractor, with its revert journal.
 #[derive(Debug)]
 pub(super) struct Window {
-    depth: u64,
+    pub(super) depth: u64,
     /// Contiguous canonical blocks, oldest first.
     pub(super) blocks: Vec<Arc<BlockAggregatedChanges>>,
-    finalized: Option<u64>,
-    committed: Option<u64>,
+    pub(super) finalized: Option<u64>,
+    pub(super) committed: Option<u64>,
     /// Reverts applied, oldest first.
     pub(super) journal: Vec<JournalEntry>,
 }
@@ -202,7 +204,7 @@ impl Window {
     }
 
     /// Evicts every block at or below `min(finalized, committed, tip - depth)`, then forgets the
-    /// reverts whose target left the window.
+    /// reverts whose target is below the parent of the oldest block left.
     fn evict(&mut self) {
         let (Some(tip), Some(finalized), Some(committed)) =
             (self.blocks.last(), self.finalized, self.committed)
@@ -223,7 +225,7 @@ impl Window {
         if let Some(oldest) = self.blocks.first() {
             let oldest = oldest.block.number;
             self.journal
-                .retain(|entry| entry.revert.block.number >= oldest);
+                .retain(|entry| entry.revert.block.number + 1 >= oldest);
         }
     }
 
@@ -482,14 +484,16 @@ mod test {
     }
 
     #[rstest]
-    #[case::target_still_held(1, None)]
-    #[case::target_evicted(2, Some(FallbackReason::UnknownHash))]
-    fn spec_forgets_a_revert_once_its_target_leaves_the_window(
+    #[case::target_held(1, None)]
+    #[case::target_is_the_parent_of_the_oldest_block(2, None)]
+    #[case::target_below_the_parent_of_the_oldest_block(3, Some(FallbackReason::UnknownHash))]
+    fn spec_forgets_a_revert_once_its_target_cannot_anchor_a_path(
         #[case] committed: u64,
         #[case] expected: Option<FallbackReason>,
     ) {
         // The client has 4. The chain reverts to 2 and grows 3'..=7' on branch 1, whose
-        // watermarks evict every block up to `committed`.
+        // watermarks evict every block up to `committed`. Whether the window still holds block 2
+        // or block 2 is the parent of its oldest block, the path is the same.
         let old_branch: Vec<_> = (1..=4)
             .map(|n| full_block(n, 0, 0))
             .collect();

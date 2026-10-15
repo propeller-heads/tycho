@@ -247,12 +247,20 @@ impl DeltaStateModel {
             entrypoint_contracts: connected_contracts,
         } = connected;
 
-        same("extractor", extractor, canonical_extractor)?;
-        same("head", head, canonical_head)?;
-        same("components", components, canonical_components)?;
-        same("component_attributes", component_attributes, canonical_attributes)?;
-        same("component_balances", component_balances, canonical_component_balances)?;
-        same("account_storage", account_storage, canonical_storage)?;
+        same_value("extractor", extractor, canonical_extractor)?;
+        same_value("head", head, canonical_head)?;
+        same_entries("components", components, canonical_components)?;
+        same_entries(
+            "component_attributes",
+            &flatten(component_attributes),
+            &flatten(canonical_attributes),
+        )?;
+        same_entries(
+            "component_balances",
+            &flatten(component_balances),
+            &flatten(canonical_component_balances),
+        )?;
+        same_entries("account_storage", &flatten(account_storage), &flatten(canonical_storage))?;
         bounded(
             "account_native_balances",
             keys(account_native_balances),
@@ -262,8 +270,12 @@ impl DeltaStateModel {
         bounded("account_code", keys(account_code), keys(canonical_code), keys(connected_code))?;
         covers(
             "account_token_balances",
-            &map_pairs(account_token_balances),
-            &map_pairs(canonical_token_balances),
+            &flatten(account_token_balances)
+                .into_keys()
+                .collect(),
+            &flatten(canonical_token_balances)
+                .into_keys()
+                .collect(),
         )?;
         bounded("tokens", keys(tokens), keys(canonical_tokens), keys(connected_tokens))?;
         bounded("component_tvl", keys(component_tvl), keys(canonical_tvl), keys(connected_tvl))?;
@@ -437,11 +449,31 @@ fn drop_if_empty<K: Eq + Hash, IK, IV>(map: &mut HashMap<K, HashMap<IK, IV>>, ke
     }
 }
 
-fn same<T: PartialEq>(field: &'static str, own: &T, canonical: &T) -> Result<(), StateMismatch> {
+/// Checks that two values are equal.
+fn same_value<T: PartialEq + Debug>(
+    field: &'static str,
+    own: &T,
+    canonical: &T,
+) -> Result<(), StateMismatch> {
     if own == canonical {
-        Ok(())
-    } else {
-        Err(StateMismatch::Differs { field })
+        return Ok(());
+    }
+    Err(StateMismatch::Differs { field, entry: format!("{own:?}, canonical {canonical:?}") })
+}
+
+/// Checks that two maps hold equal values under the same keys.
+fn same_entries<K: Eq + Hash + Debug, V: PartialEq>(
+    field: &'static str,
+    own: &HashMap<K, V>,
+    canonical: &HashMap<K, V>,
+) -> Result<(), StateMismatch> {
+    let differing = own
+        .keys()
+        .chain(canonical.keys())
+        .filter(|key| own.get(*key) != canonical.get(*key));
+    match smallest(differing) {
+        Some(entry) => Err(StateMismatch::Differs { field, entry }),
+        None => Ok(()),
     }
 }
 
@@ -482,16 +514,17 @@ fn keys<K: Eq + Hash, V>(map: &HashMap<K, V>) -> HashSet<&K> {
     map.keys().collect()
 }
 
-fn map_pairs<K: Eq + Hash, IK: Eq + Hash, IV>(
+/// The values of a map of maps, keyed by both keys.
+fn flatten<K: Eq + Hash, IK: Eq + Hash, IV>(
     map: &HashMap<K, HashMap<IK, IV>>,
-) -> HashSet<(&K, &IK)> {
-    let mut pairs = HashSet::new();
+) -> HashMap<(&K, &IK), &IV> {
+    let mut flat = HashMap::new();
     for (key, inner) in map {
-        for inner_key in inner.keys() {
-            pairs.insert((key, inner_key));
+        for (inner_key, value) in inner {
+            flat.insert((key, inner_key), value);
         }
     }
-    pairs
+    flat
 }
 
 fn set_pairs<K: Eq + Hash, IK: Eq + Hash>(map: &HashMap<K, HashSet<IK>>) -> HashSet<(&K, &IK)> {
@@ -511,6 +544,9 @@ pub enum StateMismatch {
     Differs {
         /// Name of the model field.
         field: &'static str,
+        /// The smallest key whose value differs, by its debug form, for the assertion message.
+        /// For `extractor` and `head`, the client's value and the canonical one.
+        entry: String,
     },
     /// A field compared by entry lacks an entry the canonical state holds.
     Missing {
@@ -740,7 +776,8 @@ mod test {
 
         let result = client.check_against(&canonical, &canonical);
 
-        assert_eq!(result, Err(StateMismatch::Differs { field: "account_storage" }));
+        let entry = format!("{:?}", (&byte_address(1), &Bytes::from(vec![1])));
+        assert_eq!(result, Err(StateMismatch::Differs { field: "account_storage", entry }));
     }
 
     #[test]
@@ -749,10 +786,10 @@ mod test {
         let canonical = DeltaStateModel::fold(blocks.iter().map(Arc::as_ref));
         let client = DeltaStateModel::fold([blocks[0].as_ref()]);
 
-        assert_eq!(
-            client.check_against(&canonical, &canonical),
-            Err(StateMismatch::Differs { field: "head" })
-        );
+        let result = client.check_against(&canonical, &canonical);
+
+        let entry = format!("{:?}, canonical {:?}", Some(&blocks[0].block), Some(&blocks[1].block));
+        assert_eq!(result, Err(StateMismatch::Differs { field: "head", entry }));
     }
 
     #[test]

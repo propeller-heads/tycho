@@ -83,9 +83,25 @@ struct Shapes {
     /// Restarts whose replay left the blocks sent before the restart.
     downtime_reorgs: usize,
     evicted_blocks: usize,
+    /// Evictions stopped by the finalized or committed height rather than by the window depth.
+    watermark_bound_evictions: usize,
 }
 
 impl Shapes {
+    fn add_eviction(&mut self, window: &Window, evicted: usize) {
+        let (Some(tip), Some(finalized), Some(committed)) =
+            (window.blocks.last(), window.finalized, window.committed)
+        else {
+            return;
+        };
+        self.evicted_blocks += evicted;
+        let by_watermark = finalized.min(committed) <
+            tip.block
+                .number
+                .saturating_sub(window.depth);
+        self.watermark_bound_evictions += usize::from(evicted > 0 && by_watermark);
+    }
+
     fn add(&mut self, history: &History) {
         let mut window = Window::new(history.config.window_depth);
         // The window's blocks when the extractor last restarted, until the replay leaves
@@ -133,7 +149,7 @@ impl Shapes {
             window.apply(event);
             if let HistoryEvent::Message(message) = event {
                 if !message.revert {
-                    self.evicted_blocks += held + 1 - window.blocks.len();
+                    self.add_eviction(&window, held + 1 - window.blocks.len());
                 }
             }
         }
@@ -196,6 +212,7 @@ fn a_client_following_the_ws_matches_the_canonical_chain_after_every_event() {
         upgraded_restarts,
         downtime_reorgs,
         evicted_blocks,
+        watermark_bound_evictions,
     } = shapes;
     for (shape, count) in [
         ("reverts", reverts),
@@ -205,6 +222,7 @@ fn a_client_following_the_ws_matches_the_canonical_chain_after_every_event() {
         ("upgraded restarts", upgraded_restarts),
         ("reorgs during downtime", downtime_reorgs),
         ("evictions", evicted_blocks),
+        ("evictions bound by the finalized or committed height", watermark_bound_evictions),
     ] {
         assert!(count > 0, "no {shape} in {SEEDS} histories");
     }
@@ -280,10 +298,32 @@ struct Outcomes {
     /// Catch-ups after a restart from the last committed block, the parent of the window's
     /// oldest block.
     from_the_last_committed_block: usize,
+    /// Reverts on a path that re-create a component the client saw deleted.
+    recreating_a_deleted_component: usize,
+    /// Reverts on a path that remove a component the client saw created.
+    removing_a_created_component: usize,
     fallbacks: HashMap<FallbackReason, usize>,
 }
 
 impl Outcomes {
+    /// Records which components `message`, a step of a path, re-creates or removes from the
+    /// client's state before it.
+    fn add_step(&mut self, client: &DeltaStateModel, message: &BlockAggregatedChanges) {
+        if !message.revert {
+            return;
+        }
+        let recreates = message
+            .new_protocol_components
+            .keys()
+            .any(|id| !client.components.contains_key(id));
+        let removes = message
+            .deleted_protocol_components
+            .keys()
+            .any(|id| client.components.contains_key(id));
+        self.recreating_a_deleted_component += usize::from(recreates);
+        self.removing_a_created_component += usize::from(removes);
+    }
+
     fn add_possible(&mut self, history: &History, gap: Gap, path: &[Arc<BlockAggregatedChanges>]) {
         let reverts = path
             .iter()
@@ -332,6 +372,7 @@ fn a_possible_catch_up_ends_in_the_canonical_state() {
             // next restart ends the new subscription.
             let mut client = follower[gap.last_applied].clone();
             for message in &path {
+                outcomes.add_step(&client, message);
                 client.apply(message);
             }
             let mut last_live = gap.first_live;
@@ -359,6 +400,8 @@ fn a_possible_catch_up_ends_in_the_canonical_state() {
     assert!(outcomes.through_nested_reverts > 0, "{outcomes:?}");
     assert!(outcomes.across_a_restart > 0, "{outcomes:?}");
     assert!(outcomes.from_the_last_committed_block > 0, "{outcomes:?}");
+    assert!(outcomes.recreating_a_deleted_component > 0, "{outcomes:?}");
+    assert!(outcomes.removing_a_created_component > 0, "{outcomes:?}");
     // `ToNotInWindow` needs a window behind the WebSocket, which a history cannot express.
     for reason in [
         FallbackReason::FingerprintChanged,
@@ -475,4 +518,34 @@ fn without_nested_reverts_no_revert_orphans_an_earlier_target() {
 
     assert!(shapes.reverts > 0, "{shapes:?}");
     assert_eq!(shapes.nested_reverts, 0, "{shapes:?}");
+}
+
+#[test]
+fn the_window_holds_a_revert_to_the_finalized_block_at_the_deepest_finality() {
+    // Finality one block short of the window depth, commits at finality and frequent deep
+    // reverts: the window must still hold every revert target, or applying the revert panics.
+    let config = HistoryConfig {
+        length: 400,
+        window_depth: 9,
+        finality_depth: 8,
+        max_revert_depth: 8,
+        max_commit_lag: 0,
+        revert_probability: 0.6,
+        restart_probability: 0.0,
+        ..Default::default()
+    };
+    let mut reverts_to_the_finalized_block = 0;
+    for seed in 0..16 {
+        let history = generate_history(&config, seed);
+        let mut window = Window::new(config.window_depth);
+        for event in &history.events {
+            if let HistoryEvent::Message(message) = event {
+                let to_finalized = window.finalized == Some(message.block.number);
+                reverts_to_the_finalized_block += usize::from(message.revert && to_finalized);
+            }
+            window.apply(event);
+        }
+    }
+
+    assert!(reverts_to_the_finalized_block > 0);
 }

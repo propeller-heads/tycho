@@ -35,18 +35,20 @@ pub struct HistoryConfig {
     /// Number of events to generate: messages and restarts.
     pub length: usize,
     /// Retention depth `W` of the server's delta window (`--delta-window-depth`), in blocks.
-    /// Decides which blocks a catch-up can still reach. At least 1.
+    /// Decides which blocks a catch-up can still reach.
     pub window_depth: u64,
-    /// Blocks between the tip and the finalized block. Reverts never reach below finality.
+    /// Blocks between the tip and the finalized block. Reverts never reach below finality. Below
+    /// `window_depth`: a revert may target the finalized block, which the window then still holds,
+    /// since it evicts only blocks at least `window_depth` below the tip.
     pub finality_depth: u64,
-    /// Most blocks the committed height trails the finalized one by. The committed height is
-    /// `None` until the first commit after every extractor start, and on every revert message.
+    /// Most blocks the committed height trails the finalized one by. Commits come in batches, so
+    /// the lag varies up to this bound. The committed height is `None` until the first commit
+    /// after every extractor start, and on every revert message.
     pub max_commit_lag: u64,
     /// Chance that the next event is a revert instead of a new block.
     pub revert_probability: f64,
     /// Deepest revert, in blocks below the tip. Reverts never reach below the finalized block or
-    /// the first block of the extractor's current run either. Below `window_depth`, so the
-    /// server's window always holds the revert target.
+    /// the first block of the extractor's current run either.
     pub max_revert_depth: u64,
     /// Whether a revert may orphan the target of an earlier revert, so that a catch-up path can
     /// go through several reverts.
@@ -75,7 +77,7 @@ impl Default for HistoryConfig {
             length: 200,
             window_depth: 16,
             finality_depth: 8,
-            max_commit_lag: 4,
+            max_commit_lag: 10,
             revert_probability: 0.1,
             max_revert_depth: 6,
             nested_reverts: true,
@@ -179,16 +181,28 @@ impl History {
 ///
 /// # Panics
 ///
-/// When `window_depth` is 0, `max_revert_depth` is not below `window_depth`, or a probability
-/// lies outside `[0, 1]`.
+/// When `finality_depth` is not below `window_depth`, a probability lies outside `[0, 1]`, or
+/// `restart_probability` and `revert_probability` add up to more than 1.
 pub fn generate_history(config: &HistoryConfig, seed: u64) -> History {
-    assert!(config.window_depth >= 1, "window_depth must be at least 1");
     assert!(
-        config.max_revert_depth < config.window_depth,
-        "max_revert_depth ({}) must be below window_depth ({}), or the window may not hold a \
-         revert target",
-        config.max_revert_depth,
+        config.finality_depth < config.window_depth,
+        "finality_depth ({}) must be below window_depth ({}), or the window may evict the target \
+         of a revert to the finalized block",
+        config.finality_depth,
         config.window_depth
+    );
+    for (name, probability) in [
+        ("revert_probability", config.revert_probability),
+        ("restart_probability", config.restart_probability),
+        ("fingerprint_change_probability", config.fingerprint_change_probability),
+        ("downtime_reorg_probability", config.downtime_reorg_probability),
+    ] {
+        assert!((0.0..=1.0).contains(&probability), "{name} ({probability}) must lie in [0, 1]");
+    }
+    assert!(
+        config.restart_probability + config.revert_probability <= 1.0,
+        "restart_probability and revert_probability are chances of one event and add up to more \
+         than 1"
     );
     let mut generator = Generator::new(config, seed);
     while generator.events.len() < config.length {
@@ -222,8 +236,8 @@ const CHANGE_ACCOUNT: f64 = 0.3;
 const UPDATE_DCI: f64 = 0.35;
 /// Chance that a DCI update links its entry point to a component, beside tracing it.
 const LINK_ENTRYPOINT: f64 = 0.7;
-/// Chance that the first commit of an extractor run waits for another block.
-const DELAY_FIRST_COMMIT: f64 = 0.5;
+/// Chance that a message reports a new commit when the lag does not force one.
+const COMMIT: f64 = 0.3;
 
 /// Address kinds, the first bytes of an address, which keep the address families apart.
 const ACCOUNT: u8 = 0xac;
@@ -475,8 +489,10 @@ impl<'a> Generator<'a> {
         message
     }
 
-    /// The committed height a message for block `number` carries: within `max_commit_lag` of
-    /// finality, never above the block, and `None` until the run's first commit.
+    /// The committed height a message for block `number` carries: `None` until the run's first
+    /// commit, then the height of the last commit. A commit jumps to a finalized block of the run
+    /// that is not above `number`. One is forced when the committed height would otherwise trail
+    /// finality by more than `max_commit_lag`.
     fn draw_committed(&mut self, number: u64) -> Option<u64> {
         let highest = self.finalized.min(number);
         if highest < self.run_start {
@@ -485,11 +501,12 @@ impl<'a> Generator<'a> {
         let lag_floor = self
             .finalized
             .saturating_sub(self.config.max_commit_lag);
-        if self.committed.is_none() &&
-            lag_floor < self.run_start &&
-            self.rng.gen_bool(DELAY_FIRST_COMMIT)
-        {
-            return None;
+        let forced = match self.committed {
+            Some(committed) => committed < lag_floor,
+            None => lag_floor >= self.run_start,
+        };
+        if !forced && !self.rng.gen_bool(COMMIT) {
+            return self.committed;
         }
         let lowest = self
             .committed
@@ -1091,6 +1108,14 @@ fn revert_message(target: &ChainBlock, reverted: &[ChainBlock]) -> BlockAggregat
 mod test {
     use super::*;
     use crate::testing::delta_history::fixtures::*;
+
+    #[test]
+    #[should_panic(expected = "finality_depth (8) must be below window_depth (8)")]
+    fn a_window_no_deeper_than_finality_is_rejected() {
+        let config = HistoryConfig { window_depth: 8, finality_depth: 8, ..Default::default() };
+
+        generate_history(&config, 0);
+    }
 
     #[test]
     fn generation_is_deterministic_for_a_seed() {
