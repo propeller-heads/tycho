@@ -2791,6 +2791,150 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_extractor_behind_the_chain_head_writes_at_backfill_priority() {
+        let now: NaiveDateTime = "2026-10-05T12:00:00".parse().unwrap();
+        let block_at = |ts: NaiveDateTime| Block { ts, ..Default::default() };
+        let priority_at = |ts| write_priority(&block_at(ts), now);
+
+        assert_eq!(priority_at(now - Duration::days(3)), WritePriority::Backfill);
+        assert_eq!(
+            priority_at(now - BACKFILL_BLOCK_AGE - Duration::seconds(1)),
+            WritePriority::Backfill
+        );
+        assert_eq!(priority_at(now - BACKFILL_BLOCK_AGE), WritePriority::Head);
+        assert_eq!(priority_at(now - Duration::seconds(2)), WritePriority::Head);
+        assert_eq!(priority_at(now + Duration::seconds(2)), WritePriority::Head, "clock skew");
+    }
+
+    /// An empty block `number`, received `age` ago, whose finalized height trails it by one.
+    fn trailing_block_aged(number: u64, age: Duration) -> BlockChanges {
+        let mut msg = trailing_block(number);
+        msg.block.ts = chrono::Utc::now().naive_utc() - age;
+        msg
+    }
+
+    /// The number and the priority of every block a gateway was asked to commit.
+    type CommittedPriorities = Arc<std::sync::Mutex<Vec<(u64, WritePriority)>>>;
+
+    /// A gateway that records the number and the priority of every block it is asked to commit.
+    /// Its cursor is missing at startup and points at block `takeover_height` when read again.
+    fn priority_gateway(takeover_height: u64) -> (MockExtractorGateway, CommittedPriorities) {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        gw.expect_get_cursor()
+            .returning(move || match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(StorageError::NotFound("ExtractionState".into(), EXTRACTOR_NAME.into())),
+                _ => Ok((b"cursor".to_vec(), crate::testing::block(takeover_height).hash)),
+            });
+        gw.expect_get_block()
+            .returning(move |_| Ok(crate::testing::block(takeover_height)));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_cache_tokens()
+            .returning(|_| ());
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _, priority| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push((changes.block.number, priority));
+                Ok(())
+            });
+        (gw, committed)
+    }
+
+    #[tokio::test]
+    async fn test_extractor_at_the_chain_head_commits_old_finalized_blocks_at_head_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let extractor = create_extractor(gw).await;
+        let finality_lag = Duration::minutes(18);
+
+        for (number, age) in [(1, finality_lag), (2, finality_lag), (3, Duration::seconds(5))] {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, age),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![(1, WritePriority::Head)]);
+    }
+
+    #[tokio::test]
+    async fn test_syncing_extractor_commits_at_backfill_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let extractor = create_extractor(gw).await;
+        let age = Duration::days(3);
+
+        for number in 1..=3 {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, age),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![(1, WritePriority::Backfill)]);
+    }
+
+    #[tokio::test]
+    async fn test_promoted_follower_at_the_chain_head_takes_over_at_head_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        for number in 1..=4 {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, Duration::minutes(18)),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+
+        channels.promote();
+        extractor
+            .process_full_block_message(
+                trailing_block_aged(5, Duration::seconds(5)),
+                "cursor@5".into(),
+                4,
+            )
+            .await
+            .unwrap();
+        wait_for_commits(&extractor).await;
+
+        let committed = committed.lock().unwrap().clone();
+        assert_eq!(
+            committed
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(
+            committed
+                .iter()
+                .all(|(_, priority)| *priority == WritePriority::Head),
+            "unexpected priorities: {committed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_follower_retains_drained_blocks_until_the_leader_commits_them() {
         let mut gw = MockExtractorGateway::new();
