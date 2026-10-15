@@ -320,12 +320,36 @@ pub(crate) struct DBCacheWriteExecutor {
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
     max_retries: u64,
-    /// Writer epoch claimed at construction; every write transaction is fenced on it.
-    epoch: i64,
 }
 
 impl DBCacheWriteExecutor {
+    /// Creates the executor and claims the database writer epoch for this process.
     pub(crate) async fn new(
+        name: String,
+        chain: Chain,
+        pool: Pool<AsyncPgConnection>,
+        state_gateway: PostgresGateway,
+        msg_receiver: mpsc::Receiver<DBCacheMessage>,
+    ) -> Self {
+        let executor = Self::new_unclaimed(name, chain, pool, state_gateway, msg_receiver).await;
+        let mut conn = executor
+            .pool
+            .get()
+            .await
+            .expect("pool should be connected");
+        let epoch = executor
+            .state_gateway
+            .claimed_epoch
+            .claim(&mut conn)
+            .await
+            .expect("Claiming the database writer epoch should succeed");
+        info!(epoch, "Claimed database writer epoch");
+        executor
+    }
+
+    /// Creates the executor without claiming the writer epoch. Every write fails until the
+    /// process claims one through [`CachedGateway::claim_writer`].
+    pub(crate) async fn new_unclaimed(
         name: String,
         chain: Chain,
         pool: Pool<AsyncPgConnection>,
@@ -344,21 +368,7 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        let epoch = writer_epoch::claim(&mut conn)
-            .await
-            .expect("Claiming the database writer epoch should succeed");
-        info!(epoch, "Claimed database writer epoch");
-
-        Self {
-            name,
-            chain,
-            pool,
-            state_gateway,
-            persisted_block,
-            msg_receiver,
-            max_retries: 3,
-            epoch,
-        }
+        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -384,6 +394,17 @@ impl DBCacheWriteExecutor {
             tracing::Span::current().record("extractor_id", extractor_id);
         }
 
+        let Some(epoch) = self.state_gateway.claimed_epoch.get() else {
+            error!("DBTransactionRejected: this process has not claimed the writer epoch");
+            let _ = new_db_tx
+                .tx
+                .send(Err(StorageError::Unexpected(
+                    "Write rejected: this process has not claimed the database writer epoch"
+                        .to_string(),
+                )));
+            return;
+        };
+
         let mut conn = self
             .pool
             .get()
@@ -401,7 +422,7 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
-                        writer_epoch::ensure_current(conn, self.epoch).await?;
+                        writer_epoch::ensure_current(conn, epoch).await?;
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
@@ -658,6 +679,49 @@ impl CachedGateway {
                 tx.add_operation(op)?;
                 Ok(())
             }
+        }
+    }
+
+    /// Claims a new database writer epoch for this process and returns it.
+    ///
+    /// From then on this process's writes go through, and every write of a process that claimed
+    /// before fails with [`StorageError::Fenced`].
+    pub async fn claim_writer(&self) -> Result<i64, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+        self.state_gateway
+            .claimed_epoch
+            .claim(&mut conn)
+            .await
+    }
+
+    /// Returns the number of the newest block each extractor of `chain` has committed to the
+    /// database, keyed by extractor name.
+    pub async fn get_committed_heights(
+        &self,
+        chain: &Chain,
+    ) -> Result<HashMap<String, u64>, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+        self.state_gateway
+            .get_committed_heights(chain, &mut conn)
+            .await
+    }
+
+    /// Adds `tokens` to the in-memory token cache without writing them to the database.
+    ///
+    /// Tokens already in the cache keep their cached values. Does nothing when the token cache is
+    /// disabled. Lets a process that does not write serve tokens it extracted before the database
+    /// writer stores them.
+    pub fn cache_tokens(&self, tokens: &[Token]) {
+        if let Some(token_cache) = &self.state_gateway.token_cache {
+            token_cache.add_tokens(tokens);
         }
     }
 
@@ -1491,7 +1555,10 @@ mod test_serial_db {
             rx,
         )
         .await;
-        let epoch = write_executor.epoch;
+        let epoch = gateway
+            .claimed_epoch
+            .get()
+            .expect("executor should have claimed");
         (gateway, tx, epoch, write_executor.run())
     }
 

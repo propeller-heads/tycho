@@ -4,7 +4,13 @@
 //! writer claims a new epoch, and every write transaction checks that the stored epoch is still
 //! the claimed one. A process that lost the writer role then fails its writes instead of
 //! interleaving them with the new writer's.
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -12,6 +18,30 @@ use tracing::warn;
 use tycho_common::storage::StorageError;
 
 use super::{schema::writer_epoch, PostgresError};
+
+/// The writer epoch this process holds, shared by the write executor and the gateways feeding it.
+///
+/// The table starts at epoch 0 and every claim increments it, so a claimed epoch is positive and
+/// 0 stands for "not claimed yet".
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClaimedEpoch(Arc<AtomicI64>);
+
+impl ClaimedEpoch {
+    /// Returns the claimed epoch, or `None` while this process has not claimed one.
+    pub(crate) fn get(&self) -> Option<i64> {
+        match AtomicI64::load(&self.0, Ordering::Acquire) {
+            0 => None,
+            epoch => Some(epoch),
+        }
+    }
+
+    /// Claims a new epoch in the database and makes it the one writes are fenced on.
+    pub(crate) async fn claim(&self, conn: &mut AsyncPgConnection) -> Result<i64, StorageError> {
+        let epoch = claim(conn).await?;
+        self.0.store(epoch, Ordering::Release);
+        Ok(epoch)
+    }
+}
 
 /// How often a claim that waits for the epoch row logs a warning.
 const CLAIM_WAIT_WARNING_INTERVAL: Duration = Duration::from_secs(10);

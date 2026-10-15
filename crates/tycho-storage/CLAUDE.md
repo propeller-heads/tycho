@@ -16,7 +16,8 @@ postgres/
 ├── token_cache.rs      — in-memory token store answering get_tokens without SQL (opt-in)
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
-├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
+├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed heights per extractor
+├── leader_lock.rs      — LeaderLock: session advisory lock electing the single database writer
 ├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── writer_epoch.rs     — single-writer fencing: claim / check the `writer_epoch` row
@@ -44,6 +45,15 @@ All public DB operations go through one of two gateway structs:
   A claim waits for every open write transaction (it logs a warning every 10s). So that a
   vanished writer cannot block it for long, every pool session sets server-side TCP keepalives
   (`SESSION_KEEPALIVES`): Postgres drops a dead peer's session, and its lock, after about 25s.
+  With `GatewayBuilder::defer_writer_claim` the executor starts unclaimed and rejects every
+  write until `CachedGateway::claim_writer`. The claimed epoch lives on `PostgresGateway`
+  (`ClaimedEpoch`), so the executor and every `CachedGateway` clone share it.
+- **Leader election**: `LeaderLock` holds a session advisory lock on a dedicated, non-pooled
+  connection with the same server-side TCP keepalives, so Postgres frees the lock about 25s after a
+  leader's host disappears. The lock elects the writer; the epoch fences it.
+- **Non-writer support**: `CachedGateway::get_committed_heights` returns the block number each
+  extractor's `extraction_state` points to (the newest block committed for it), and
+  `cache_tokens` adds tokens to the token cache without writing them.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
