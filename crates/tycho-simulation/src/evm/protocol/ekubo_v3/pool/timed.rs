@@ -94,6 +94,8 @@ pub fn finish_transition(
                                 new_deltas[idx] = delta;
                             }
                         }
+                        // A deletion of a rate delta the pool never held: nothing to remove.
+                        Err(_) if delta.rate_delta0.is_zero() && delta.rate_delta1.is_zero() => {}
                         Err(idx) => {
                             new_deltas.insert(idx, delta);
                         }
