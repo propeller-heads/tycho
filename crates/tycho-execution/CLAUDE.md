@@ -176,7 +176,7 @@ Each concrete router has its own executor, and each executor holds one router ad
 | `MetricFallbackRouter` | `MetricFallbackExecutor` | Simulated swap through `simulatePrimary` | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
 | `BebopFallbackRouter` | `BebopFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
 | `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
-| `NativeFallbackRouter` | `NativeFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][nativeDataLength: 4][nativeData][fallback]` |
+| `NativeFallbackRouter` | `NativeFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][nativeDataLength: 4][nativeData][fallback]` |
 | `LiquoriceFallbackRouter` | `LiquoriceFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][calldataLength: 4][settlement calldata][fallback]` |
 
 A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
@@ -204,8 +204,8 @@ output to the receiver. The rest of `amountIn` goes back to the caller, as for B
 in `FallbackSwap`.
 
 `NativeFallbackRouter` runs a signed Native RFQ-T quote. `nativeData` is `[signedAmountIn: 32][tradeRFQT calldata]`,
-the fields `NativeExecutor` takes after its target, and the quote MUST name the fallback router as recipient. `swap`
-checks the target against the immutable `nativeRouterV6`, the `tradeRFQT` selector, non-zero amounts and zero
+the fields `NativeExecutor` takes after its target, and the quote MUST name the fallback router as recipient. The
+router calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selector, non-zero amounts and zero
 `actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when it
 differs from the signed amount it writes it as `actualSellerAmount`, and Native scales the signed minimum output to
 it. Native reverts an input too far from the signed amount, and the fallback then fills the leg. The router approves

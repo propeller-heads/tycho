@@ -14,7 +14,6 @@ error NativeFallbackRouter__AddressZero();
 error NativeFallbackRouter__InvalidAmountIn();
 error NativeFallbackRouter__InvalidDataLength(uint256 length);
 error NativeFallbackRouter__InvalidSelector(bytes4 selector);
-error NativeFallbackRouter__InvalidTarget(address target);
 error NativeFallbackRouter__UnexpectedOverride();
 
 /// @title NativeFallbackRouter
@@ -59,12 +58,11 @@ contract NativeFallbackRouter is TychoFallbackRouter {
     /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     function swap(
         Swap calldata swap_,
-        address target,
         bytes calldata nativeData,
         bytes calldata fallbackSwap
     ) external {
-        _validate(swap_.amountIn, target, nativeData);
-        _swap(swap_, target, nativeData, fallbackSwap);
+        _validate(swap_.amountIn, nativeData);
+        _swap(swap_, nativeRouterV6, nativeData, fallbackSwap);
     }
 
     function _runsPrimaryFirst() internal pure override returns (bool) {
@@ -73,7 +71,7 @@ contract NativeFallbackRouter is TychoFallbackRouter {
 
     function _swapPrimary(
         Swap calldata swap_,
-        address target,
+        address, /* nativeRouterV6 */
         bytes calldata nativeData
     ) internal override {
         bytes memory payload = nativeData[_CALLDATA_START:];
@@ -86,10 +84,10 @@ contract NativeFallbackRouter is TychoFallbackRouter {
         IERC20 tokenOut = IERC20(swap_.tokenOut);
         uint256 balanceBefore = tokenOut.balanceOf(address(this));
 
-        tokenIn.forceApprove(target, swap_.amountIn);
+        tokenIn.forceApprove(nativeRouterV6, swap_.amountIn);
         // slither-disable-next-line unused-return
-        target.functionCall(payload);
-        tokenIn.forceApprove(target, 0);
+        nativeRouterV6.functionCall(payload);
+        tokenIn.forceApprove(nativeRouterV6, 0);
 
         tokenOut.safeTransfer(
             swap_.receiver, tokenOut.balanceOf(address(this)) - balanceBefore
@@ -97,16 +95,12 @@ contract NativeFallbackRouter is TychoFallbackRouter {
     }
 
     /// @dev Rejects data the primary must never run, rather than falling back on it.
-    function _validate(
-        uint256 amountIn,
-        address target,
-        bytes calldata nativeData
-    ) internal view {
+    function _validate(uint256 amountIn, bytes calldata nativeData)
+        internal
+        pure
+    {
         if (nativeData.length < _MIN_DATA_LENGTH) {
             revert NativeFallbackRouter__InvalidDataLength(nativeData.length);
-        }
-        if (target != nativeRouterV6) {
-            revert NativeFallbackRouter__InvalidTarget(target);
         }
         bytes4 selector =
             bytes4(nativeData[_CALLDATA_START:_CALLDATA_START + 4]);

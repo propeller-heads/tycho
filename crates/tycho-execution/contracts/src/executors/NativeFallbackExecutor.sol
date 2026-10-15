@@ -11,7 +11,7 @@ import {NativeFallbackRouter} from "../fallback/NativeFallbackRouter.sol";
 /// @title NativeFallbackExecutor
 /// @notice Runs one swap through `NativeFallbackRouter`.
 contract NativeFallbackExecutor is FallbackExecutor {
-    uint256 private constant _NATIVE_DATA_START = 64;
+    uint256 private constant _NATIVE_DATA_START = 44;
 
     constructor(address fallbackRouter_) FallbackExecutor(fallbackRouter_) {}
 
@@ -30,7 +30,6 @@ contract NativeFallbackExecutor is FallbackExecutor {
         NativeFallbackRouter(fallbackRouter)
             .swap(
                 swap_,
-                address(bytes20(data[40:60])),
                 data[_NATIVE_DATA_START:fallbackOffset],
                 data[fallbackOffset:]
             );
@@ -46,7 +45,7 @@ contract NativeFallbackExecutor is FallbackExecutor {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }
         fallbackOffset =
-            _NATIVE_DATA_START + uint32(bytes4(data[60:_NATIVE_DATA_START]));
+            _NATIVE_DATA_START + uint32(bytes4(data[40:_NATIVE_DATA_START]));
         if (data.length <= fallbackOffset) {
             revert FallbackExecutor__InvalidDataLength(data.length);
         }

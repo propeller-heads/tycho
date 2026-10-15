@@ -20,7 +20,6 @@ import {
     NativeFallbackRouter__InvalidAmountIn,
     NativeFallbackRouter__InvalidDataLength,
     NativeFallbackRouter__InvalidSelector,
-    NativeFallbackRouter__InvalidTarget,
     NativeFallbackRouter__UnexpectedOverride
 } from "../../src/fallback/NativeFallbackRouter.sol";
 
@@ -120,20 +119,6 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
-    function testRejectsUnknownTarget() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                NativeFallbackRouter__InvalidTarget.selector, address(0xdead)
-            )
-        );
-        router.swap(
-            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, SIGNED_USDC_IN, BOB),
-            address(0xdead),
-            _nativeData(),
-            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
-        );
-    }
-
     /// Native's V4 tradeRFQT selector.
     function testRejectsOtherSelector() public {
         bytes memory nativeData = _nativeData();
@@ -224,11 +209,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     function testExecutorRejectsDataWithoutFallback() public {
         bytes memory nativeData = _nativeData();
         bytes memory data = abi.encodePacked(
-            USDC_ADDR,
-            WETH_ADDR,
-            NATIVE_ROUTER_V6_ETHEREUM,
-            uint32(nativeData.length),
-            nativeData
+            USDC_ADDR, WETH_ADDR, uint32(nativeData.length), nativeData
         );
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -239,11 +220,10 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     function testExecutorRejectsMissingLengthPrefix() public {
-        bytes memory data =
-            abi.encodePacked(USDC_ADDR, WETH_ADDR, NATIVE_ROUTER_V6_ETHEREUM);
+        bytes memory data = abi.encodePacked(USDC_ADDR, WETH_ADDR);
         vm.expectRevert(
             abi.encodeWithSelector(
-                FallbackExecutor__InvalidDataLength.selector, 60
+                FallbackExecutor__InvalidDataLength.selector, 40
             )
         );
         executor.getTransferData(data);
@@ -252,7 +232,6 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     function _swap(uint256 amountIn, bytes memory nativeData) internal {
         router.swap(
             FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, amountIn, BOB),
-            NATIVE_ROUTER_V6_ETHEREUM,
             nativeData,
             FallbackSwaps.uniswapV3(USDC_WETH_USV3)
         );
@@ -287,7 +266,6 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         return abi.encodePacked(
             USDC_ADDR,
             WETH_ADDR,
-            NATIVE_ROUTER_V6_ETHEREUM,
             uint32(nativeData.length),
             nativeData,
             FallbackSwaps.uniswapV3(USDC_WETH_USV3)

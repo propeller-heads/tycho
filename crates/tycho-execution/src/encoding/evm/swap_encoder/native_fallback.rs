@@ -12,9 +12,13 @@ use crate::encoding::{
 /// Protocol config key of the chain's `NativeFallbackRouter` address.
 const FALLBACK_ROUTER_CONFIG_KEY: &str = "fallback_router";
 
-/// `[tokenIn: 20][tokenOut: 20][target: 20]`, the part of the Native swap data before the
-/// executor's length prefix.
-const NATIVE_HEAD_LENGTH: usize = 60;
+/// `[tokenIn: 20][tokenOut: 20]`, the part of the Native swap data before the executor's length
+/// prefix.
+const NATIVE_HEAD_LENGTH: usize = 40;
+
+/// `[target: 20]`, which the Native swap data carries between the tokens and the signed amount.
+/// `NativeFallbackRouter` calls its immutable `nativeRouterV6` instead.
+const NATIVE_TARGET_LENGTH: usize = 20;
 
 /// Encodes a Native swap for `NativeFallbackRouter`. The quote is requested with that router as
 /// recipient.
@@ -82,7 +86,8 @@ impl SwapEncoder for NativeFallbackSwapEncoder {
         let native = self
             .native
             .encode_swap(swap, &self.quote_context(encoding_context))?;
-        let (head, native_data) = native.split_at(NATIVE_HEAD_LENGTH);
+        let (head, rest) = native.split_at(NATIVE_HEAD_LENGTH);
+        let native_data = &rest[NATIVE_TARGET_LENGTH..];
         let native_data_length = u32::try_from(native_data.len()).map_err(|_| {
             EncodingError::FatalError(format!(
                 "Native swap data of {} bytes does not fit the uint32 length prefix",
@@ -197,10 +202,7 @@ mod tests {
         let native_data = format!("{:064x}{TRADE_RFQT_CALLDATA}", 1_000_000);
         assert_eq!(
             hex_swap,
-            format!(
-                "{USDC}{WETH}{ROUTER_V6}{:08x}{native_data}01{USDC_WETH_USV3}",
-                native_data.len() / 2
-            )
+            format!("{USDC}{WETH}{:08x}{native_data}01{USDC_WETH_USV3}", native_data.len() / 2)
         );
         write_calldata_to_file("test_encode_native_fallback_for_solidity", &hex_swap);
     }
