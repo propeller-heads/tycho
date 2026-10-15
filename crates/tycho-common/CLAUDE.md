@@ -32,7 +32,7 @@ Shared domain types, storage/extraction traits, and simulation abstractions used
 - **`errors`** — `SimulationError` (Fatal / InvalidInput / Recoverable) and `TransitionError`
 
 ### Test Helpers (`testing/`, `test-utils` feature)
-- **`delta_history`** — Delta catch-up oracle: `DeltaStateModel` (client state folded from WebSocket messages, `check_against` the canonical chain), `generate_history` (random extractor histories with reverts and restarts, reverts built like the indexer's), `catch_up_spec` (what the server's delta window must answer for a gap), `through_the_wire`
+- **`delta_history`** — Delta catch-up oracle: `DeltaStateModel` (client state folded from WebSocket messages, `check_against` the canonical chain), `generate_history` (random extractor histories with reverts and restarts, reverts built like the indexer's), `catch_up_spec` (what the server's delta window must answer for a gap), `follower_states` (the state of a client following the WebSocket after each event), `sample_gaps` (the gaps worth checking in a history), `through_the_wire`
 
 ## Client Sync
 

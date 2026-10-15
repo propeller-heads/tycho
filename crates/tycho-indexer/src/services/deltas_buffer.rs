@@ -15,7 +15,7 @@ use tycho_common::{
         blockchain::BlockAggregatedChanges,
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
-        MergeError,
+        BlockHash, MergeError,
     },
     storage::StorageError,
     Bytes,
@@ -26,7 +26,7 @@ use crate::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{DeltaWindow, FoldSink},
+    services::state::window::{CatchUpPath, DeltaWindow, FoldSink},
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -98,6 +98,28 @@ pub trait PendingDeltasBuffer {
         f: &dyn Fn(&BlockAggregatedChanges) -> bool,
         protocol_system: &str,
     ) -> Result<Option<BlockAggregatedChanges>>;
+
+    /// The messages that take a client of `protocol_system` from block `from` to block `to`,
+    /// oldest first, or why its window cannot serve them; see [`DeltaWindow::catch_up_path`].
+    /// `from_number` is the number of `from`.
+    ///
+    /// # Errors
+    ///
+    /// `UnknownExtractor` when no window serves `protocol_system`, `LockError` when its lock is
+    /// poisoned.
+    // An `expect`, unlike an `allow`, fails the build once the endpoint calls this, so it cannot
+    // outlive the gap between the two changes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the delta catch-up endpoint will call it; tests do already")
+    )]
+    fn catch_up_path(
+        &self,
+        protocol_system: &str,
+        from: &BlockHash,
+        from_number: u64,
+        to: &BlockHash,
+    ) -> Result<CatchUpPath>;
 }
 
 impl PendingDeltas {
@@ -556,6 +578,25 @@ impl PendingDeltasBuffer for PendingDeltas {
         }
 
         Ok(None)
+    }
+
+    /// Holds the extractor's window lock only while the path is resolved, which copies `Arc`s;
+    /// callers build their responses after the lock is released.
+    fn catch_up_path(
+        &self,
+        protocol_system: &str,
+        from: &BlockHash,
+        from_number: u64,
+        to: &BlockHash,
+    ) -> Result<CatchUpPath> {
+        let window = self
+            .windows
+            .get(protocol_system)
+            .ok_or_else(|| PendingDeltasError::UnknownExtractor(protocol_system.to_string()))?;
+        let guard = window.lock().map_err(|e| {
+            PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
+        })?;
+        Ok(guard.catch_up_path(from, from_number, to))
     }
 }
 
@@ -1524,5 +1565,512 @@ mod test {
             .unwrap();
 
         assert_eq!(res, expected_res);
+    }
+
+    #[tokio::test]
+    async fn run_keeps_partial_reverts_out_of_the_window() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        for n in 1..=4 {
+            tx.send(DeltaCommand::Block(native_msg(n, None, n)))
+                .await
+                .unwrap();
+        }
+        // A revert the extractor marks partial. It targets 3, so had the window applied it, block 4
+        // would be gone.
+        let partial_revert =
+            BlockAggregatedChanges { partial_block_index: Some(0), ..(*native_revert(3)).clone() };
+        tx.send(DeltaCommand::Block(Arc::new(partial_revert)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        pump.await.unwrap().unwrap();
+        assert!(has_block(&buffer, 4));
+    }
+
+    #[test]
+    fn catch_up_path_of_an_unknown_extractor_is_an_error() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+
+        let res = buffer.catch_up_path("unknown", &block(1).hash, 1, &block(2).hash);
+
+        assert_eq!(res, Err(PendingDeltasError::UnknownExtractor("unknown".to_string())));
+    }
+
+    /// Checks the windows' catch-up paths over random extractor histories: against
+    /// `catch_up_spec`, the reference model of what a window must answer, and, for a window a few
+    /// events ahead of or behind the client, against the canonical chain.
+    mod catch_up_properties {
+        use std::{collections::BTreeMap, ops::Range};
+
+        use rand::{rngs::StdRng, SeedableRng};
+        use tycho_common::testing::delta_history::{
+            catch_up_spec, follower_states, generate_history, sample_gaps, CatchUpSpec,
+            DeltaStateModel, FallbackReason, Gap, History, HistoryConfig, HistoryEvent,
+            RestartKind, EXTRACTOR,
+        };
+
+        use super::*;
+        use crate::services::state::window::CatchUpUnavailable;
+
+        /// Histories per configuration the spec property runs over.
+        const SEEDS: u64 = 128;
+        /// Histories per configuration the out-of-step property runs over. It folds client states,
+        /// which costs more than comparing paths.
+        const OUT_OF_STEP_SEEDS: u64 = 64;
+        /// Random gaps drawn per history, besides the gaps around restarts.
+        const RANDOM_GAPS: usize = 40;
+        /// Events the window may be ahead of or behind the client's first live message when the
+        /// endpoint asks it.
+        const MAX_SKEW: usize = 4;
+
+        fn configs() -> [HistoryConfig; 2] {
+            [
+                HistoryConfig::default(),
+                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
+                // bound and clients fall below the floor.
+                HistoryConfig {
+                    window_depth: 4,
+                    finality_depth: 3,
+                    max_revert_depth: 3,
+                    max_commit_lag: 2,
+                    ..Default::default()
+                },
+            ]
+        }
+
+        /// Feeds `history` to a window the way the pump does, with a fold batch of 1. Calls
+        /// `query(index, buffer)` with the window as it stands before each event, and once more
+        /// after the last one, with `index` the number of events.
+        fn replay(history: &History, mut query: impl FnMut(usize, &PendingDeltas)) {
+            let windows = new_windows(
+                [EXTRACTOR],
+                WindowConfig { depth: history.config.window_depth, min_fold_batch: 1 },
+            );
+            let buffer = PendingDeltas::from_windows(windows, Arc::new(DiscardSink));
+            for (index, event) in history.events.iter().enumerate() {
+                query(index, &buffer);
+                match event {
+                    HistoryEvent::Message(message) => buffer.insert(message).unwrap(),
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                        buffer
+                            .fold_committed_and_clear(EXTRACTOR)
+                            .unwrap();
+                    }
+                }
+            }
+            query(history.events.len(), &buffer);
+        }
+
+        /// The window's answer for a client that missed `gap`: from the block of its last
+        /// message to the parent of its first live message, or to that message's target when it
+        /// is a revert.
+        fn catch_up(buffer: &PendingDeltas, history: &History, gap: Gap) -> CatchUpPath {
+            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) =
+                (&history.events[gap.last_applied], &history.events[gap.first_live])
+            else {
+                panic!("{gap:?} does not start and end at a message");
+            };
+            let to = if live.revert { &live.block.hash } else { &live.block.parent_hash };
+            buffer
+                .catch_up_path(EXTRACTOR, &last.block.hash, last.block.number, to)
+                .unwrap()
+        }
+
+        /// The window answer the spec requires, or `None` when the spec falls back on a
+        /// fingerprint change: the window cannot see fingerprints, so the endpoint compares them
+        /// before it asks the window.
+        fn required_answer(spec: CatchUpSpec) -> Option<CatchUpPath> {
+            let reason = match spec {
+                CatchUpSpec::Possible(path) => return Some(Ok(path)),
+                CatchUpSpec::Fallback(reason) => reason,
+            };
+            let unavailable = match reason {
+                FallbackReason::FingerprintChanged => return None,
+                FallbackReason::EmptyWindow => CatchUpUnavailable::EmptyWindow,
+                FallbackReason::BelowFloor => CatchUpUnavailable::BelowFloor,
+                FallbackReason::UnknownHash => CatchUpUnavailable::UnknownHash,
+                FallbackReason::ToNotInWindow => CatchUpUnavailable::ToNotInWindow,
+                FallbackReason::ToNotAhead => CatchUpUnavailable::ToNotAhead,
+            };
+            Some(Err(unavailable))
+        }
+
+        /// `(number, revert)` of every message on a path, to keep failure messages short.
+        fn summary(
+            answer: &CatchUpPath,
+        ) -> std::result::Result<Vec<(u64, bool)>, CatchUpUnavailable> {
+            answer
+                .as_ref()
+                .map_err(|reason| *reason)
+                .map(|path| {
+                    path.iter()
+                        .map(|message| (message.block.number, message.revert))
+                        .collect()
+                })
+        }
+
+        /// How often each answer shape occurs.
+        #[derive(Debug, Default)]
+        struct Outcomes {
+            /// Gaps the spec answers with `FingerprintChanged`, not compared.
+            fingerprint_changed: usize,
+            empty: usize,
+            canonical_blocks_only: usize,
+            through_a_revert: usize,
+            through_nested_reverts: usize,
+            /// Paths that start at the parent of the window's oldest block, which the window no
+            /// longer holds.
+            from_the_parent_of_the_oldest_block: usize,
+            /// Paths over a gap with an extractor restart in it.
+            across_a_restart: usize,
+            /// Paths through a revert whose target is the parent of the window's oldest block,
+            /// the lowest target the journal keeps.
+            through_a_revert_to_the_parent_of_the_oldest_block: usize,
+            unavailable: HashMap<CatchUpUnavailable, usize>,
+        }
+
+        impl Outcomes {
+            fn add(
+                &mut self,
+                history: &History,
+                gap: Gap,
+                oldest_parent: Option<&BlockHash>,
+                answer: &CatchUpPath,
+            ) {
+                let path = match answer {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        *self
+                            .unavailable
+                            .entry(*reason)
+                            .or_default() += 1;
+                        return;
+                    }
+                };
+                let HistoryEvent::Message(last) = &history.events[gap.last_applied] else {
+                    panic!("{gap:?} does not start at a message");
+                };
+                let mut reverts = Vec::new();
+                for message in path {
+                    if message.revert {
+                        reverts.push(&message.block.hash);
+                    }
+                }
+                let mut restarted = false;
+                for event in &history.events[gap.last_applied + 1..gap.first_live] {
+                    match event {
+                        HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                            restarted = true;
+                        }
+                        HistoryEvent::Message(_) => {}
+                    }
+                }
+                self.empty += usize::from(path.is_empty());
+                self.canonical_blocks_only += usize::from(!path.is_empty() && reverts.is_empty());
+                self.through_a_revert += usize::from(!reverts.is_empty());
+                self.through_nested_reverts += usize::from(reverts.len() >= 2);
+                self.from_the_parent_of_the_oldest_block +=
+                    usize::from(reverts.is_empty() && oldest_parent == Some(&last.block.hash));
+                self.across_a_restart += usize::from(restarted);
+                self.through_a_revert_to_the_parent_of_the_oldest_block += usize::from(
+                    reverts.last().copied() == oldest_parent && oldest_parent.is_some(),
+                );
+            }
+        }
+
+        #[test]
+        fn catch_up_paths_match_the_spec() {
+            let mut rng = StdRng::seed_from_u64(0);
+            let mut outcomes = Outcomes::default();
+            for config in &configs() {
+                for seed in 0..SEEDS {
+                    let history = generate_history(config, seed);
+                    let mut by_first_live: BTreeMap<usize, Vec<Gap>> = BTreeMap::new();
+                    for gap in sample_gaps(&history, RANDOM_GAPS, &mut rng) {
+                        by_first_live
+                            .entry(gap.first_live)
+                            .or_default()
+                            .push(gap);
+                    }
+
+                    // The window as it stands when the client's first live message arrives.
+                    replay(&history, |index, buffer| {
+                        for &gap in by_first_live
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(required) = required_answer(catch_up_spec(&history, gap))
+                            else {
+                                outcomes.fingerprint_changed += 1;
+                                continue;
+                            };
+
+                            let answer = catch_up(buffer, &history, gap);
+
+                            assert!(
+                                answer == required,
+                                "seed {seed}, {config:?}, {gap:?}: the window answers {:?}, \
+                                 the spec {:?}",
+                                summary(&answer),
+                                summary(&required)
+                            );
+                            let oldest_parent = buffer.windows[EXTRACTOR]
+                                .lock()
+                                .unwrap()
+                                .floor()
+                                .map(|oldest| oldest.parent_hash);
+                            outcomes.add(&history, gap, oldest_parent.as_ref(), &answer);
+                        }
+                    });
+                }
+            }
+
+            let Outcomes {
+                fingerprint_changed,
+                empty,
+                canonical_blocks_only,
+                through_a_revert,
+                through_nested_reverts,
+                from_the_parent_of_the_oldest_block,
+                across_a_restart,
+                through_a_revert_to_the_parent_of_the_oldest_block,
+                unavailable,
+            } = &outcomes;
+            for (shape, count) in [
+                ("fingerprint changes", fingerprint_changed),
+                ("empty paths", empty),
+                ("paths of canonical blocks only", canonical_blocks_only),
+                ("paths through a revert", through_a_revert),
+                ("paths through nested reverts", through_nested_reverts),
+                ("paths from the parent of the oldest block", from_the_parent_of_the_oldest_block),
+                ("paths across a restart", across_a_restart),
+                (
+                    "paths through a revert to the parent of the oldest block",
+                    through_a_revert_to_the_parent_of_the_oldest_block,
+                ),
+            ] {
+                assert!(*count > 0, "no {shape} in {outcomes:?}");
+            }
+            // `ToNotInWindow` needs a window behind the WebSocket, which a history cannot express.
+            for reason in [
+                CatchUpUnavailable::EmptyWindow,
+                CatchUpUnavailable::BelowFloor,
+                CatchUpUnavailable::UnknownHash,
+                CatchUpUnavailable::ToNotAhead,
+            ] {
+                assert!(unavailable.contains_key(&reason), "no {reason:?} in {outcomes:?}");
+            }
+        }
+
+        /// Whether an upgraded extractor restarted among `events[range]`.
+        fn upgraded_restart_in(history: &History, range: Range<usize>) -> bool {
+            history.events[range]
+                .iter()
+                .any(|event| match event {
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Upgraded,
+                    } => true,
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Unchanged,
+                    } |
+                    HistoryEvent::Message(_) => false,
+                })
+        }
+
+        /// The messages of the subscription that starts at `first_live`, with their event
+        /// indices, until a restart ends it.
+        fn live_messages(
+            history: &History,
+            first_live: usize,
+        ) -> Vec<(usize, &Arc<BlockAggregatedChanges>)> {
+            let mut live = Vec::new();
+            for (index, event) in history
+                .events
+                .iter()
+                .enumerate()
+                .skip(first_live)
+            {
+                match event {
+                    HistoryEvent::Message(message) => live.push((index, message)),
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => break,
+                }
+            }
+            live
+        }
+
+        /// Applies `path`, then `live`, to `client` and checks it against the canonical chain
+        /// right after the first live message and after the last one.
+        fn check_resume(
+            history: &History,
+            mut client: DeltaStateModel,
+            path: &[Arc<BlockAggregatedChanges>],
+            live: &[(usize, &Arc<BlockAggregatedChanges>)],
+            context: impl Fn() -> String,
+        ) {
+            for message in path {
+                client.apply(message);
+            }
+            for (position, &(index, message)) in live.iter().enumerate() {
+                client.apply(message);
+                if position == 0 || position == live.len() - 1 {
+                    assert_eq!(
+                        client.check_against(
+                            &history.canonical_states[index],
+                            &history.connected_states[index]
+                        ),
+                        Ok(()),
+                        "{}, after event {index}",
+                        context()
+                    );
+                }
+            }
+        }
+
+        fn same_messages(
+            left: &[Arc<BlockAggregatedChanges>],
+            right: &[Arc<BlockAggregatedChanges>],
+        ) -> bool {
+            left.len() == right.len() &&
+                left.iter()
+                    .zip(right)
+                    .all(|(left, right)| Arc::ptr_eq(left, right))
+        }
+
+        /// How often the out-of-step property sees each case.
+        #[derive(Debug, Default)]
+        struct Skews {
+            /// Queries skipped because an upgraded extractor restarted between the client and the
+            /// window: a process keeps one fingerprint, so the endpoint never mixes the two.
+            upgraded: usize,
+            unavailable: usize,
+            /// Paths from a window ahead of the client's first live message.
+            ahead: usize,
+            /// Paths from a window behind it.
+            behind: usize,
+            /// Distinct paths per gap, each folded and checked once.
+            checked: usize,
+            /// Checked paths that differ from the one the window answers in step, or that it
+            /// answers only out of step.
+            unlike_in_step: usize,
+            /// Checked paths holding a revert the client also receives live.
+            duplicate_reverts: usize,
+        }
+
+        /// The endpoint asks a window that may be a few events ahead of or behind the client's
+        /// first live message. Any path such a window answers must bring the client to the
+        /// canonical state, right after its first live message and at the last message of its
+        /// subscription, which a restart ends.
+        #[test]
+        fn catch_up_paths_from_a_window_out_of_step_end_in_the_canonical_state() {
+            let mut rng = StdRng::seed_from_u64(1);
+            let mut skews = Skews::default();
+            for config in &configs() {
+                for seed in 0..OUT_OF_STEP_SEEDS {
+                    let history = generate_history(config, seed);
+                    let gaps = sample_gaps(&history, RANDOM_GAPS, &mut rng);
+                    let mut queries: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                    for (position, gap) in gaps.iter().enumerate() {
+                        let earliest = gap.first_live.saturating_sub(MAX_SKEW);
+                        let latest = (gap.first_live + MAX_SKEW).min(history.events.len());
+                        for at in earliest..=latest {
+                            let spanned = at.min(gap.last_applied)..at.max(gap.first_live);
+                            if upgraded_restart_in(&history, spanned) {
+                                skews.upgraded += 1;
+                                continue;
+                            }
+                            queries
+                                .entry(at)
+                                .or_default()
+                                .push(position);
+                        }
+                    }
+                    // Per gap, the paths the window answers and where it stood.
+                    let mut answers: Vec<Vec<(usize, Vec<Arc<BlockAggregatedChanges>>)>> =
+                        vec![Vec::new(); gaps.len()];
+                    replay(&history, |at, buffer| {
+                        for &position in queries.get(&at).into_iter().flatten() {
+                            match catch_up(buffer, &history, gaps[position]) {
+                                Ok(path) => answers[position].push((at, path)),
+                                Err(_) => skews.unavailable += 1,
+                            }
+                        }
+                    });
+
+                    let follower = follower_states(&history);
+                    for (gap, answers) in gaps.iter().zip(&answers) {
+                        let live = live_messages(&history, gap.first_live);
+                        let in_step = answers
+                            .iter()
+                            .find(|(at, _)| *at == gap.first_live)
+                            .map(|(_, path)| path);
+                        let mut checked: Vec<&[Arc<BlockAggregatedChanges>]> = Vec::new();
+                        for (at, path) in answers {
+                            skews.ahead += usize::from(*at > gap.first_live);
+                            skews.behind += usize::from(*at < gap.first_live);
+                            if checked
+                                .iter()
+                                .any(|seen| same_messages(seen, path))
+                            {
+                                continue;
+                            }
+                            checked.push(path);
+                            skews.checked += 1;
+                            skews.unlike_in_step += usize::from(
+                                in_step.is_none_or(|in_step| !same_messages(in_step, path)),
+                            );
+                            skews.duplicate_reverts += usize::from(path.iter().any(|message| {
+                                message.revert &&
+                                    live.iter()
+                                        .any(|(_, live)| Arc::ptr_eq(live, message))
+                            }));
+
+                            check_resume(
+                                &history,
+                                follower[gap.last_applied].clone(),
+                                path,
+                                &live,
+                                || {
+                                    format!(
+                                        "seed {seed}, {config:?}, {gap:?}, window before event \
+                                         {at}, path {:?}",
+                                        summary(&Ok(path.clone()))
+                                    )
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            let Skews {
+                upgraded,
+                unavailable,
+                ahead,
+                behind,
+                checked,
+                unlike_in_step,
+                duplicate_reverts,
+            } = &skews;
+            for (case, count) in [
+                ("skipped upgrades", upgraded),
+                ("unavailable paths", unavailable),
+                ("paths from a window ahead", ahead),
+                ("paths from a window behind", behind),
+                ("checked paths", checked),
+                ("paths unlike the in-step one", unlike_in_step),
+                ("paths with a revert the client also receives live", duplicate_reverts),
+            ] {
+                assert!(*count > 0, "no {case} in {skews:?}");
+            }
+        }
     }
 }

@@ -46,7 +46,8 @@ services/
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
-    window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
+    window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction; catch_up_path
+    revert_journal.rs       RevertJournal — the revert messages a DeltaWindow applied, with the hashes they orphaned
     cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
@@ -141,6 +142,14 @@ extend the window's chain is an error that ends the pump and the process: only t
 replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
 blocks into the sink and clears it; the restarted extractor replays everything above its
 database cursor.
+
+Each window journals the revert messages it applies, with the hashes of the blocks they
+orphaned (`services/state/revert_journal.rs`). An entry stays while its target is no lower than
+the parent of the window's oldest block, and a clear drops them all. `DeltaWindow::catch_up_path`
+uses both to list the messages that take a client from its last block to a block the window holds:
+the reverts that orphaned the client's block, then the canonical blocks. It follows
+`catch_up_spec` in `tycho-common`'s `testing::delta_history`, checked by a property test in
+`services/deltas_buffer.rs`.
 
 ## Persistence
 
