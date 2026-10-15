@@ -715,7 +715,12 @@ impl ProtocolSim for UniswapV4State {
         let swap_params = SwapParams {
             zero_for_one,
             amount_specified: amount_to_swap,
-            sqrt_price_limit: self.sqrt_price,
+            // Hooks see the limit the router sends, and some price their fee from it.
+            sqrt_price_limit: if zero_for_one {
+                MIN_SQRT_RATIO + U256::from(1u64)
+            } else {
+                MAX_SQRT_RATIO - U256::from(1u64)
+            },
         };
 
         // Check if hook is set and has before_swap permissions
@@ -1479,6 +1484,7 @@ mod tests {
         address: Address,
         pending_overrides: Option<Arc<PendingOverrides>>,
         seen: Arc<std::sync::Mutex<SeenCalls>>,
+        limits: Arc<std::sync::Mutex<Vec<U256>>>,
     }
 
     impl ConfigurableFeeHook {
@@ -1490,6 +1496,7 @@ mod tests {
                 address: Address::from_slice(&address),
                 pending_overrides: None,
                 seen: Arc::default(),
+                limits: Arc::default(),
             }
         }
 
@@ -1511,10 +1518,14 @@ mod tests {
 
         fn before_swap(
             &self,
-            _params: BeforeSwapParameters,
+            params: BeforeSwapParameters,
             _overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
             _transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
         ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            self.limits
+                .lock()
+                .unwrap()
+                .push(params.swap_params.sqrt_price_limit);
             self.seen.lock().unwrap().push((
                 "before",
                 self.pending_overrides
@@ -1663,6 +1674,23 @@ mod tests {
             calls,
             vec![("before", false), ("after", false), ("before", true), ("after", true)],
             "the confirmed quote runs both calls without overrides, the pending one with them"
+        );
+    }
+
+    #[test]
+    fn test_hooks_see_the_price_limit_the_router_sends() {
+        let hook = ConfigurableFeeHook::new();
+        let pool = hooked_pool(&hook);
+        let amount_in = BigUint::from(1_000_000u64);
+
+        pool.get_amount_out(amount_in.clone(), &token_x(), &token_y())
+            .unwrap();
+        pool.get_amount_out(amount_in, &token_y(), &token_x())
+            .unwrap();
+
+        assert_eq!(
+            *hook.limits.lock().unwrap(),
+            vec![MIN_SQRT_RATIO + U256::from(1u64), MAX_SQRT_RATIO - U256::from(1u64)]
         );
     }
 
