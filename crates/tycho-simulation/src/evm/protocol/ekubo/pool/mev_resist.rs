@@ -223,7 +223,7 @@ impl EkuboPool for MevResistPool {
             );
         }
 
-        if new_initialized_ticks {
+        if new_initialized_ticks || active_tick_update.is_some() {
             self.imp = impl_from_state(
                 *self.key(),
                 self.base_pool_state,

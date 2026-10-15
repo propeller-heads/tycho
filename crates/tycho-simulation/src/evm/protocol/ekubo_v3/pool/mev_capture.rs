@@ -134,7 +134,7 @@ impl EkuboPool for MevCapturePool {
         updated_attributes: HashMap<String, Bytes>,
         deleted_attributes: HashSet<String>,
     ) -> Result<(), TransitionError> {
-        let ticks = concentrated::finish_transition(
+        let new_ticks = concentrated::finish_transition(
             &mut self.swap_state.active_tick,
             &mut self.swap_state.sdk_state,
             self.imp.concentrated_pool().ticks(),
@@ -142,15 +142,27 @@ impl EkuboPool for MevCapturePool {
             &deleted_attributes,
         )?;
 
+        let tick_moved = self
+            .swap_state
+            .active_tick
+            .is_some_and(|tick| tick != self.swap_state.last_tick);
         if let Some(active_tick) = self.swap_state.active_tick {
             self.swap_state.last_tick = active_tick;
         }
 
-        if let Some(new_ticks) = ticks {
+        // The SDK derives the MEV fee from the tick stored in `imp`, so a tick move needs a
+        // rebuild.
+        if new_ticks.is_some() || tick_moved {
+            let ticks = new_ticks.unwrap_or_else(|| {
+                self.imp
+                    .concentrated_pool()
+                    .ticks()
+                    .to_vec()
+            });
             self.imp = impl_from_state(
                 self.imp.key(),
                 self.swap_state.sdk_state,
-                new_ticks,
+                ticks,
                 self.swap_state.last_tick,
             )
             .map_err(|err| {
