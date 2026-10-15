@@ -74,6 +74,11 @@ pub enum StorageError {
     WriteCacheGoneAway(),
     #[error("Invalid block range encountered")]
     InvalidBlockRange(),
+    #[error(
+        "Write rejected: this process claimed writer epoch {claimed} but the database is at \
+         epoch {current}, so another process took over writing"
+    )]
+    Fenced { claimed: i64, current: i64 },
 }
 
 /// Storage methods for chain specific objects.
