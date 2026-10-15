@@ -214,11 +214,11 @@ input Native did not pull goes back to the caller.
 
 `LiquoriceFallbackRouter` runs a signed Liquorice quote through the immutable `liquoriceSettlement`. It takes the
 settlement calldata alone: Liquorice quotes do not partially fill, so the router carries none of `LiquoriceExecutor`'s
-partial-fill fields. The quote MUST name the fallback router as trader and receiver, and Liquorice MUST allow the
-router as a solver. `swap` checks the `settle`/`settleSingle` selector before anything runs. The router approves the
+partial-fill fields. The quote MUST name the fallback router as trader and receiver, and Liquorice MUST allow the router
+as a solver. `swap` checks the `settle`/`settleSingle` selector before anything runs. The router approves the
 `liquoriceBalanceManager` for `amountIn`, calls the settlement, revokes the approval and forwards the output. The
-settlement pulls the signed amount, so the rest of `amountIn` goes back to the caller, as for Bebop, and an
-`amountIn` below it makes the pull revert and the fallback fill the whole leg.
+settlement pulls the signed amount, so the rest of `amountIn` goes back to the caller, as for Bebop. An `amountIn` below
+the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
