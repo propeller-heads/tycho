@@ -2643,6 +2643,442 @@ mod test {
         create_extractor_with_batch_size(gw, 1).await
     }
 
+    /// Writer status channels a test drives: the role and the leader's committed heights.
+    struct WriterChannels {
+        role: tokio::sync::watch::Sender<Role>,
+        heights: tokio::sync::watch::Sender<HashMap<String, u64>>,
+    }
+
+    impl WriterChannels {
+        fn follower() -> (Self, WriterStatus) {
+            let (role, role_rx) = tokio::sync::watch::channel(Role::Follower);
+            let (heights, heights_rx) = tokio::sync::watch::channel(HashMap::new());
+            (Self { role, heights }, WriterStatus::new(role_rx, heights_rx))
+        }
+
+        fn leader_committed(&self, height: u64) {
+            self.heights
+                .send(HashMap::from([(EXTRACTOR_NAME.to_string(), height)]))
+                .unwrap();
+        }
+
+        fn promote(&self) {
+            self.role.send(Role::Leader).unwrap();
+        }
+    }
+
+    /// An empty block `number` whose finalized height trails it by one block.
+    fn trailing_block(number: u64) -> BlockChanges {
+        BlockChanges::new(
+            EXTRACTOR_NAME.to_string(),
+            Chain::Ethereum,
+            crate::testing::block(number),
+            number - 1,
+            false,
+            vec![],
+            vec![],
+        )
+    }
+
+    async fn process_trailing_blocks(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        numbers: std::ops::RangeInclusive<u64>,
+    ) -> Option<ExtractorMsg> {
+        let mut last = None;
+        for number in numbers {
+            let msg = trailing_block(number);
+            last = extractor
+                .process_full_block_message(msg, format!("cursor@{number}"), number - 1)
+                .await
+                .expect("block should process");
+        }
+        last
+    }
+
+    async fn committing_numbers(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+    ) -> Vec<u64> {
+        extractor
+            .reorg_buffer
+            .lock()
+            .await
+            .committing_blocks()
+            .iter()
+            .map(|block| block.block_update().block.number)
+            .collect()
+    }
+
+    /// A gateway whose cursor is missing at startup and points at block `takeover_height` when
+    /// read again, and that records the number of every block it is asked to commit.
+    fn takeover_gateway(
+        takeover_height: u64,
+    ) -> (MockExtractorGateway, Arc<std::sync::Mutex<Vec<u64>>>) {
+        takeover_gateway_at(crate::testing::block(takeover_height))
+    }
+
+    /// Like [`takeover_gateway`], with the cursor pointing at `floor`.
+    fn takeover_gateway_at(
+        floor: Block,
+    ) -> (MockExtractorGateway, Arc<std::sync::Mutex<Vec<u64>>>) {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        let floor_hash = floor.hash.clone();
+        gw.expect_get_cursor()
+            .returning(move || match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(StorageError::NotFound("ExtractionState".into(), EXTRACTOR_NAME.into())),
+                _ => Ok((b"cursor".to_vec(), floor_hash.clone())),
+            });
+        gw.expect_get_block()
+            .returning(move |_| Ok(floor.clone()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        (gw, committed)
+    }
+
+    async fn wait_for_commits(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+    ) {
+        let handle = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take();
+        if let Some(handle) = handle {
+            handle
+                .await
+                .expect("commit task should not panic")
+                .expect("commit should succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_follower_retains_drained_blocks_until_the_leader_commits_them() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        gw.expect_cache_tokens().never();
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+
+        let msg = process_trailing_blocks(&extractor, 1..=4)
+            .await
+            .unwrap();
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2]);
+        assert_eq!(msg.db_committed_block_height, None);
+
+        channels.leader_committed(1);
+        let msg = process_trailing_blocks(&extractor, 5..=5)
+            .await
+            .unwrap();
+
+        assert_eq!(committing_numbers(&extractor).await, vec![2, 3]);
+        assert_eq!(msg.db_committed_block_height, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_follower_caches_tokens_once_the_leader_commits_their_block() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        let cached = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cached_clone = cached.clone();
+        gw.expect_cache_tokens()
+            .returning(move |tokens| {
+                cached_clone
+                    .lock()
+                    .unwrap()
+                    .extend(tokens.iter().map(|t| t.symbol.clone()))
+            });
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        let mut first = trailing_block(1);
+        let usdc = Bytes::from_str("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        first
+            .new_tokens
+            .insert(usdc.clone(), Token::new(&usdc, "USDC", 6, 0, &[], Chain::Ethereum, 100));
+
+        extractor
+            .process_full_block_message(first, "cursor@1".into(), 0)
+            .await
+            .unwrap();
+        process_trailing_blocks(&extractor, 2..=3).await;
+        assert!(cached.lock().unwrap().is_empty(), "tokens must wait for the leader's commit");
+
+        channels.leader_committed(1);
+        process_trailing_blocks(&extractor, 4..=4).await;
+
+        assert_eq!(*cached.lock().unwrap(), vec!["USDC".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_promoted_follower_commits_only_blocks_above_the_former_leaders_height() {
+        let (gw, committed) = takeover_gateway(2);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2, 3]);
+        assert!(committed.lock().unwrap().is_empty());
+
+        channels.promote();
+        process_trailing_blocks(&extractor, 6..=6).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![3, 4]);
+    }
+
+    fn following_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        gw.expect_cache_tokens()
+            .returning(|_| ());
+        gw
+    }
+
+    async fn has_capacity_within(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        timeout: std::time::Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, extractor.wait_for_capacity())
+            .await
+            .is_ok()
+    }
+
+    /// Processes empty blocks `numbers`, each `interval` of chain time after the previous one,
+    /// with finality trailing by one block. Retains every block below the last two.
+    async fn process_blocks_every(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        numbers: std::ops::RangeInclusive<u64>,
+        interval: Duration,
+    ) {
+        let start = crate::testing::block(1).ts;
+        for number in numbers {
+            let mut msg = trailing_block(number);
+            msg.block.ts = start + interval * (number - 1) as i32;
+            extractor
+                .process_full_block_message(msg, format!("cursor@{number}"), number - 1)
+                .await
+                .expect("block should process");
+        }
+    }
+
+    async fn following_extractor() -> (
+        WriterChannels,
+        ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>,
+    ) {
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(following_gateway())
+            .await
+            .with_writer_status(writer);
+        (channels, extractor)
+    }
+
+    const SHORT_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+    /// Longer than two capacity polls.
+    const LONG_WAIT: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+    #[tokio::test]
+    async fn test_follower_without_retained_blocks_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=2, Duration::hours(1)).await;
+        assert!(committing_numbers(&extractor)
+            .await
+            .is_empty());
+
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_retaining_many_blocks_of_a_short_span_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+
+        process_blocks_every(&extractor, 1..=2_002, Duration::milliseconds(100)).await;
+
+        assert_eq!(
+            committing_numbers(&extractor)
+                .await
+                .len(),
+            2_000
+        );
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_retaining_just_below_the_span_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+
+        process_blocks_every(&extractor, 1..=4, FOLLOWER_RETENTION_SPAN - Duration::seconds(1))
+            .await;
+
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2]);
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_at_the_retention_span_waits_for_the_leader() {
+        let (channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=6, FOLLOWER_RETENTION_SPAN / 3).await;
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2, 3, 4]);
+
+        assert!(
+            !has_capacity_within(&extractor, LONG_WAIT).await,
+            "retained blocks spanning exactly the limit must pause the follower"
+        );
+
+        channels.leader_committed(1);
+        assert!(
+            has_capacity_within(&extractor, LONG_WAIT).await,
+            "the leader's commit must release the follower"
+        );
+        assert_eq!(committing_numbers(&extractor).await, vec![2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_follower_at_the_retention_span_continues_once_promoted() {
+        let (channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=4, FOLLOWER_RETENTION_SPAN).await;
+        assert!(!has_capacity_within(&extractor, SHORT_WAIT).await);
+
+        channels.promote();
+
+        assert!(has_capacity_within(&extractor, LONG_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_leader_never_waits_for_capacity() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        let extractor = create_extractor(gw).await;
+
+        assert!(has_capacity_within(&extractor, std::time::Duration::from_millis(50)).await);
+    }
+
+    #[tokio::test]
+    async fn test_takeover_fails_when_retained_blocks_do_not_continue_the_database() {
+        let (gw, committed) = takeover_gateway(1);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+        // Lose block 2: the database ends at block 1 and the retained blocks start at 3.
+        extractor
+            .reorg_buffer
+            .lock()
+            .await
+            .release_committed(2);
+
+        channels.promote();
+        let result = extractor
+            .process_full_block_message(trailing_block(6), "cursor@6".into(), 5)
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtractionError::ReorgBufferError(ref msg)) if msg.contains("start at 3")),
+            "unexpected takeover result: {result:?}"
+        );
+        assert!(committed.lock().unwrap().is_empty(), "nothing may be written over a gap");
+    }
+
+    #[tokio::test]
+    async fn test_takeover_fails_when_retained_blocks_fork_from_the_database() {
+        let mut floor = crate::testing::block(2);
+        floor.hash = Bytes::from(0xdead_u64).lpad(32, 0);
+        let (gw, committed) = takeover_gateway_at(floor);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+
+        channels.promote();
+        let result = extractor
+            .process_full_block_message(trailing_block(6), "cursor@6".into(), 5)
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtractionError::ReorgBufferError(ref msg)) if msg.contains("Cannot take over") && msg.contains("parent hash")),
+            "unexpected takeover result: {result:?}"
+        );
+        assert!(committed.lock().unwrap().is_empty(), "nothing may be written onto another fork");
+    }
+
+    #[tokio::test]
+    async fn test_promoted_lagging_follower_drops_blocks_the_former_leader_committed() {
+        let (gw, committed) = takeover_gateway(5);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=3).await;
+
+        channels.promote();
+        let msg = process_trailing_blocks(&extractor, 4..=4)
+            .await
+            .unwrap();
+        assert_eq!(
+            msg.db_committed_block_height,
+            Some(3),
+            "the reported commit never exceeds the message's finality"
+        );
+        process_trailing_blocks(&extractor, 5..=8).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![6]);
+        assert_eq!(committing_numbers(&extractor).await, vec![6]);
+    }
+
     #[tokio::test]
     async fn test_get_cursor() {
         let mut gw = MockExtractorGateway::new();
@@ -3539,6 +3975,23 @@ mod test {
         bsd.partial_index = Some(partial_index);
         bsd.is_partial = true;
         bsd
+    }
+
+    #[tokio::test]
+    async fn test_follower_partial_block_reports_the_leaders_committed_height() {
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(following_gateway())
+            .await
+            .with_writer_status(writer);
+        channels.leader_committed(3);
+
+        let msg = extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(5, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.db_committed_block_height, Some(3));
     }
 
     /// Helper: build a full `BlockScopedData` with complete block data from
