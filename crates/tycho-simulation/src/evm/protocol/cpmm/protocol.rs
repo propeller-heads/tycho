@@ -22,6 +22,9 @@ use crate::{
     protocol::errors::InvalidSnapshotError,
 };
 
+/// Largest reserve a Uniswap V2 style pair can store; `_update` reverts above it.
+pub const UINT112_MAX: U256 = U256::from_limbs([u64::MAX, (1 << 48) - 1, 0, 0]);
+
 pub fn cpmm_try_from_with_header(
     snapshot: ComponentWithState,
 ) -> Result<(U256, U256), InvalidSnapshotError> {
@@ -94,12 +97,16 @@ pub fn cpmm_get_amount_out(
 /// This asymmetry (full `x` added to reserves, but `y` based on fee-adjusted input) causes
 /// the actual price impact to be slightly less than 90%. For typical fees (0.25%-0.3%), the
 /// actual price impact is approximately 89.9% instead of exactly 90%.
+///
+/// `max_reserve` caps the input so the input reserve stays storable, for pairs that keep reserves
+/// in a narrower type such as `uint112`.
 pub fn cpmm_get_limits(
     sell_token: Bytes,
     buy_token: Bytes,
     reserve0: U256,
     reserve1: U256,
     fee_bps: u32,
+    max_reserve: Option<U256>,
 ) -> Result<(BigUint, BigUint), SimulationError> {
     if reserve0 == U256::from(0u64) || reserve1 == U256::from(0u64) {
         return Ok((BigUint::zero(), BigUint::zero()));
@@ -112,6 +119,10 @@ pub fn cpmm_get_limits(
     // Soft limit for amount in is the amount to get approximately 90% price impact.
     // Solving the fee-less equations yields: x = (√10 - 1) × reserve_in ≈ 2.162 × reserve_in
     let amount_in = mul_div(reserve_in, U256::from(2162u128), U256::from(1e3))?;
+    let amount_in = match max_reserve {
+        Some(max_reserve) => amount_in.min(max_reserve.saturating_sub(reserve_in)),
+        None => amount_in,
+    };
 
     // Calculate amount_out using the actual swap formula that accounts for fees
     // amount_in_with_fee = amount_in * (10000 - fee_bps) / 10000

@@ -194,6 +194,7 @@ impl ProtocolSim for AerodromeV1State {
                 self.reserve0,
                 self.reserve1,
                 self.resolved_fee_bps(),
+                None,
             )
         }
     }

@@ -20,7 +20,7 @@ use tycho_common::{
 use crate::evm::protocol::{
     cpmm::protocol::{
         cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits, cpmm_spot_price,
-        cpmm_swap_to_price, ProtocolFee,
+        cpmm_swap_to_price, ProtocolFee, UINT112_MAX,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint},
@@ -94,7 +94,14 @@ impl ProtocolSim for PancakeswapV2State {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        cpmm_get_limits(sell_token, buy_token, self.reserve0, self.reserve1, PANCAKESWAP_V2_FEE)
+        cpmm_get_limits(
+            sell_token,
+            buy_token,
+            self.reserve0,
+            self.reserve1,
+            PANCAKESWAP_V2_FEE,
+            Some(UINT112_MAX),
+        )
     }
 
     fn delta_transition(

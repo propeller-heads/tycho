@@ -113,6 +113,7 @@ impl RingSwapV2State {
             self.reserve0,
             self.reserve1,
             RING_SWAP_V2_FEE_BPS,
+            None,
         )?;
         let zero_to_one = sell_token < buy_token;
         let (reserve_in, reserve_out) = if zero_to_one {

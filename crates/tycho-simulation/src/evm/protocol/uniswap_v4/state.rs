@@ -997,7 +997,12 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
-        Ok((u256_to_biguint(total_amount_in), u256_to_biguint(total_amount_out)))
+        // The PoolManager casts both swap amounts to int128 and reverts above it.
+        let int128_max = U256::from(i128::MAX as u128);
+        Ok((
+            u256_to_biguint(total_amount_in.min(int128_max)),
+            u256_to_biguint(total_amount_out.min(int128_max)),
+        ))
     }
 
     fn delta_transition(
@@ -2796,6 +2801,31 @@ mod tests {
         // Should return some conservative limits
         assert!(limit_in > BigUint::zero());
         assert!(limit_out > BigUint::zero());
+    }
+
+    #[test]
+    fn test_get_limits_stay_within_int128() {
+        let liquidity = u128::MAX / 4;
+        let pool = UniswapV4State::new(
+            liquidity,
+            U256::from(1u8) << 96,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
+            0,
+            60,
+            vec![
+                TickInfo::new(-887220, liquidity as i128).unwrap(),
+                TickInfo::new(887220, -(liquidity as i128)).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let (limit_in, limit_out) = pool
+            .get_limits(usdc().address, weth().address)
+            .unwrap();
+
+        let int128_max = BigUint::from(i128::MAX as u128);
+        assert_eq!(limit_in, int128_max);
+        assert!(limit_out <= int128_max);
     }
 
     // Tests based on Uniswap V4's ProtocolFeeLibrary.t.sol
