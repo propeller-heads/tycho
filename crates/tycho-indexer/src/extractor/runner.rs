@@ -209,12 +209,18 @@ impl ExtractorRunner {
                 );
 
                 let should_continue = async {
+                    let extractor = &self.extractor;
+                    let substreams = &mut self.substreams;
+                    let next_block = async {
+                        extractor.wait_for_capacity().await;
+                        substreams.next().await
+                    };
                     tokio::select! {
                         _ = &mut self.stop_rx => {
                             warn!("Stop signal received; exiting!");
                             return Ok(false);
                         }
-                        val = self.substreams.next().instrument(info_span!("substreams_waiting")) => {
+                        val = next_block.instrument(info_span!("substreams_waiting")) => {
                             match val {
                                 None => {
                                     error!("stream ended");
