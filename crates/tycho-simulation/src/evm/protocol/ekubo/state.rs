@@ -247,6 +247,32 @@ mod tests {
         assert_eq!(state, case.state_after_transition);
     }
 
+    /// A deletion of a key the pool never held: a block that creates and deletes the key, or a
+    /// revert of a key created and deleted inside the reverted range.
+    #[rstest]
+    #[case::base_tick(base(), "ticks/-100")]
+    #[case::mev_resist_tick(mev_resist(), "ticks/-100")]
+    #[case::twamm_order(twamm(), "orders/token0/600")]
+    fn test_delta_transition_deleting_an_absent_key_leaves_the_state_unchanged(
+        #[case] case: TestCase,
+        #[case] key: &str,
+    ) {
+        let mut state = case.state_after_transition.clone();
+
+        state
+            .delta_transition(
+                ProtocolStateDelta {
+                    deleted_attributes: HashSet::from([key.to_string()]),
+                    ..Default::default()
+                },
+                &HashMap::default(),
+                &Balances::default(),
+            )
+            .expect("executing transition");
+
+        assert_eq!(state, case.state_after_transition);
+    }
+
     #[apply(all_cases)]
     fn test_get_amount_out(case: TestCase) {
         let (token0, token1) = (case.token0(), case.token1());
