@@ -56,7 +56,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// The signed price needs no comparison, so the fallback pool is never quoted.
-    function testNativeFills() public {
+    function testInputAtSignedAmount() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
 
         vm.expectCall(
@@ -94,7 +94,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// Native rejects an input 10% above the signed amount, so the fallback fills the whole leg.
-    function testInputAboveDeviationLimitFallsBack() public {
+    function testInputAboveDeviationLimit() public {
         uint256 amountIn = SIGNED_USDC_IN * 11 / 10;
         deal(USDC_ADDR, address(router), amountIn);
         uint256 fallbackOut = _quoteFallback(amountIn);
@@ -107,7 +107,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// An expired quote reverts in the Native router, so the fallback fills the whole leg.
-    function testExpiredQuoteFallsBack() public {
+    function testExpiredQuote() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
         vm.warp(QUOTE_DEADLINE + 1);
         uint256 fallbackOut = _quoteFallback(SIGNED_USDC_IN);
@@ -120,7 +120,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// Native's V4 tradeRFQT selector.
-    function testRejectsOtherSelector() public {
+    function testV4TradeRfqtSelector() public {
         bytes memory nativeData = _nativeData();
         bytes4 v4TradeRfqt = 0x0947c2d9;
         _writeBytes4(nativeData, 32, v4TradeRfqt);
@@ -132,24 +132,24 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _swap(SIGNED_USDC_IN, nativeData);
     }
 
-    function testRejectsPresetSellerAmount() public {
+    function testPresetSellerAmount() public {
         bytes memory nativeData = _nativeData();
         _writeWord(nativeData, 32 + ACTUAL_SELLER_AMOUNT_OFFSET, 1);
         vm.expectRevert(NativeFallbackRouter__UnexpectedOverride.selector);
         _swap(SIGNED_USDC_IN, nativeData);
     }
 
-    function testRejectsZeroSignedAmount() public {
+    function testZeroSignedAmount() public {
         vm.expectRevert(NativeFallbackRouter__InvalidAmountIn.selector);
         _swap(SIGNED_USDC_IN, abi.encodePacked(uint256(0), TRADE_RFQT_CALLDATA));
     }
 
-    function testRejectsZeroAmountIn() public {
+    function testZeroAmountIn() public {
         vm.expectRevert(NativeFallbackRouter__InvalidAmountIn.selector);
         _swap(0, _nativeData());
     }
 
-    function testRejectsShortNativeData() public {
+    function testShortNativeData() public {
         bytes memory noOverrides = abi.encodePacked(
             SIGNED_USDC_IN, bytes4(0x7083527c), bytes32(uint256(0x60))
         );
@@ -162,7 +162,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _swap(SIGNED_USDC_IN, noOverrides);
     }
 
-    function testConstructorRejectsZeroAddress() public {
+    function testConstructorZeroAddress() public {
         vm.expectRevert(NativeFallbackRouter__AddressZero.selector);
         new NativeFallbackRouter(
             IPoolManager(POOL_MANAGER),
@@ -206,7 +206,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// The length prefix says the Native data runs to the end, leaving no fallback.
-    function testExecutorRejectsDataWithoutFallback() public {
+    function testExecutorDataWithoutFallback() public {
         bytes memory nativeData = _nativeData();
         bytes memory data = abi.encodePacked(
             USDC_ADDR, WETH_ADDR, uint32(nativeData.length), nativeData
@@ -219,7 +219,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         executor.getTransferData(data);
     }
 
-    function testExecutorRejectsMissingLengthPrefix() public {
+    function testExecutorMissingLengthPrefix() public {
         bytes memory data = abi.encodePacked(USDC_ADDR, WETH_ADDR);
         vm.expectRevert(
             abi.encodeWithSelector(
