@@ -4242,3 +4242,55 @@ plans:
         }
     }
 }
+
+#[cfg(test)]
+mod health_tests {
+    use std::collections::HashMap;
+
+    use actix_web::{test, App};
+    use tokio::{sync::watch, time::Instant};
+
+    use super::*;
+    use crate::extractor::writer_status::Role;
+
+    fn writer_status(role: Role, last_confirmed_ago: std::time::Duration) -> WriterStatus {
+        let confirmed_at = Instant::now()
+            .checked_sub(last_confirmed_ago)
+            .expect("the clock should be past the duration");
+        let (_, role) = watch::channel(role);
+        let (_, heights) = watch::channel(HashMap::new());
+        let (_, confirmed_at) = watch::channel(confirmed_at);
+        WriterStatus::new(role, heights).with_lead_confirmations(confirmed_at)
+    }
+
+    async fn health_status(writer_status: Option<WriterStatus>) -> StatusCode {
+        let mut app = App::new();
+        if let Some(writer_status) = writer_status {
+            app = app.app_data(web::Data::new(writer_status));
+        }
+        let app = test::init_service(app.route("/health", web::get().to(health))).await;
+        let req = test::TestRequest::get()
+            .uri("/health")
+            .to_request();
+        test::call_service(&app, req)
+            .await
+            .status()
+    }
+
+    #[actix_web::test]
+    async fn test_health_fails_when_the_leader_stopped_confirming_its_lock() {
+        let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(stale)).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[actix_web::test]
+    async fn test_health_passes_for_a_confirming_leader_a_follower_and_no_status() {
+        let confirming = writer_status(Role::Leader, std::time::Duration::from_secs(1));
+        let follower = writer_status(Role::Follower, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(confirming)).await, StatusCode::OK);
+        assert_eq!(health_status(Some(follower)).await, StatusCode::OK);
+        assert_eq!(health_status(None).await, StatusCode::OK);
+    }
+}

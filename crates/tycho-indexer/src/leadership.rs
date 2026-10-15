@@ -170,3 +170,158 @@ async fn hold_lead(
         return Err(failure);
     }
 }
+
+#[cfg(test)]
+mod test_serial_db {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use tycho_common::{
+        models::ExtractionState,
+        storage::{ChainGateway, ExtractionStateGateway, StorageError},
+    };
+    use tycho_storage::postgres::{builder::GatewayBuilder, testing::run_against_db};
+
+    use super::*;
+    use crate::testing::block;
+
+    fn database_url() -> String {
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+    }
+
+    async fn writer_gateway() -> (CachedGateway, JoinHandle<()>) {
+        GatewayBuilder::new(&database_url())
+            .set_chains(&[Chain::Ethereum])
+            .defer_writer_claim()
+            .build()
+            .await
+            .expect("gateway should build")
+    }
+
+    /// Commits block `number` and an extraction state named `extractor` pointing at it.
+    async fn commit_block(
+        gateway: &CachedGateway,
+        extractor: &str,
+        number: u64,
+    ) -> Result<(), StorageError> {
+        let block = block(number);
+        gateway
+            .start_transaction(&block, Some(extractor))
+            .await;
+        gateway
+            .upsert_block(std::slice::from_ref(&block))
+            .await?;
+        gateway
+            .save_state(&ExtractionState::new(
+                extractor.to_string(),
+                Chain::Ethereum,
+                None,
+                b"cursor",
+                block.hash.clone(),
+            ))
+            .await?;
+        gateway.commit_transaction(0).await
+    }
+
+    async fn wait_until(condition: impl Fn() -> bool) -> bool {
+        for _ in 0..100 {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn test_follower_takes_over_when_the_leader_session_ends() {
+        run_against_db(|_| async move {
+            let (leader_gw, _leader_executor) = writer_gateway().await;
+            let (leader_status, leader_task) =
+                elect(&database_url(), leader_gw.clone(), Chain::Ethereum, || async {})
+                    .await
+                    .expect("first process should be elected");
+            assert_eq!(leader_status.role(), Role::Leader);
+            tokio::time::sleep(POLL_INTERVAL * 3).await;
+            let since_confirmed = leader_status
+                .time_since_lead_confirmed()
+                .expect("a leader tracks its lock confirmations");
+            assert!(
+                since_confirmed < POLL_INTERVAL * 2,
+                "the leader must keep confirming its lock, last confirmed {since_confirmed:?} ago"
+            );
+            commit_block(&leader_gw, "uniswap_v2", 1)
+                .await
+                .expect("the leader should write");
+
+            let (follower_gw, _follower_executor) = writer_gateway().await;
+            let promoted = Arc::new(AtomicBool::new(false));
+            let promoted_flag = promoted.clone();
+            let (follower_status, _follower_task) =
+                elect(&database_url(), follower_gw.clone(), Chain::Ethereum, move || async move {
+                    promoted_flag.store(true, Ordering::SeqCst);
+                })
+                .await
+                .expect("second process should start");
+            assert_eq!(follower_status.role(), Role::Follower);
+            assert_eq!(follower_status.time_since_lead_confirmed(), None);
+            assert_eq!(follower_status.committed_height("uniswap_v2"), Some(1));
+
+            commit_block(&leader_gw, "uniswap_v2", 2)
+                .await
+                .expect("the leader keeps writing");
+            assert!(
+                wait_until(|| follower_status.committed_height("uniswap_v2") == Some(2)).await,
+                "the follower must see the leader's new commit"
+            );
+            assert!(!promoted.load(Ordering::SeqCst));
+
+            leader_task.abort();
+            assert!(
+                wait_until(|| follower_status.role() == Role::Leader).await,
+                "the follower must take over once the leader's session ends"
+            );
+
+            assert!(promoted.load(Ordering::SeqCst), "promotion must run before the role flips");
+            commit_block(&follower_gw, "uniswap_v2", 3)
+                .await
+                .expect("the new leader should write");
+            let stale = commit_block(&leader_gw, "uniswap_v2", 4).await;
+            assert!(
+                matches!(stale, Err(StorageError::Fenced { .. })),
+                "the former leader must be fenced, got {stale:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_promotion_that_does_not_finish_gives_up_the_lead() {
+        run_against_db(|_| async move {
+            let (leader_gw, _leader_executor) = writer_gateway().await;
+            let (_, leader_task) = elect(&database_url(), leader_gw, Chain::Ethereum, || async {})
+                .await
+                .expect("first process should be elected");
+
+            let (follower_gw, _follower_executor) = writer_gateway().await;
+            let (follower_status, follower_task) =
+                elect(&database_url(), follower_gw, Chain::Ethereum, std::future::pending::<()>)
+                    .await
+                    .expect("second process should start");
+            leader_task.abort();
+
+            let ended = tokio::time::timeout(POLL_INTERVAL * 3 + PROMOTION_TIMEOUT, follower_task)
+                .await
+                .expect("the election task must end when the promotion does not finish")
+                .expect("the election task should not panic");
+            assert!(
+                matches!(&ended, Err(ExtractionError::Unknown(msg)) if msg.contains("Promotion")),
+                "the election task must fail on the promotion timeout, got {ended:?}"
+            );
+            assert_eq!(follower_status.role(), Role::Follower, "a stuck promotion never leads");
+        })
+        .await;
+    }
+}

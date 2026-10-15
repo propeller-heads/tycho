@@ -72,3 +72,41 @@ impl WriterStatus {
             .copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(role: Role, confirmed_at: Instant) -> WriterStatus {
+        let (_, role) = watch::channel(role);
+        let (_, heights) = watch::channel(HashMap::new());
+        let (_, confirmed_at) = watch::channel(confirmed_at);
+        WriterStatus::new(role, heights).with_lead_confirmations(confirmed_at)
+    }
+
+    fn ago(duration: Duration) -> Instant {
+        Instant::now()
+            .checked_sub(duration)
+            .expect("the clock should be past the duration")
+    }
+
+    #[test]
+    fn test_leader_reports_time_since_its_last_lock_confirmation() {
+        let leader = status(Role::Leader, ago(Duration::from_secs(40)));
+
+        let since_confirmed = leader
+            .time_since_lead_confirmed()
+            .expect("a leader that tracks confirmations reports one");
+
+        assert!(since_confirmed >= Duration::from_secs(40));
+        assert!(since_confirmed < Duration::from_secs(41));
+    }
+
+    #[test]
+    fn test_follower_and_untracked_leader_report_no_lock_confirmation() {
+        let follower = status(Role::Follower, ago(Duration::from_secs(40)));
+
+        assert_eq!(follower.time_since_lead_confirmed(), None);
+        assert_eq!(WriterStatus::leader().time_since_lead_confirmed(), None);
+    }
+}
