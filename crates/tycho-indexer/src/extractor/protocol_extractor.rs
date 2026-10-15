@@ -940,16 +940,16 @@ where
     }
 }
 
-/// Revert class of one (component, attribute) pair, decided by its event history inside
-/// the reverted range. The first event picks the variant: a creation means the attr did
-/// not exist before the range (`CreatedInRange`), anything else means it did
-/// (`ExistedBefore`).
+/// Revert class of one (component, attribute) pair, decided by the first event on it inside
+/// the reverted range: a creation means the attr did not exist before the range
+/// (`CreatedInRange`), anything else means it did (`ExistedBefore`).
 enum AttrRevert {
     /// A prior value exists: restore it from the buffer, then the DB.
     ExistedBefore,
-    /// No prior value: revert as a deletion when still alive at the end of the range,
-    /// otherwise revert to nothing.
-    CreatedInRange { alive: bool },
+    /// No prior value: revert as a deletion, also when the range deleted it again. A client
+    /// that applied the whole range no longer holds it, so the deletion changes nothing there,
+    /// but a client that applied the creation and missed the deletion still does.
+    CreatedInRange,
 }
 
 /// One event on a (component, attribute) pair, in chronological order.
@@ -964,16 +964,10 @@ fn classify<'a>(
     key: (&'a String, &'a String),
     event: AttrEvent,
 ) {
-    map.entry(key)
-        .and_modify(|class| {
-            if let AttrRevert::CreatedInRange { alive } = class {
-                *alive = !matches!(event, AttrEvent::Deleted);
-            }
-        })
-        .or_insert(match event {
-            AttrEvent::Created => AttrRevert::CreatedInRange { alive: true },
-            AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
-        });
+    map.entry(key).or_insert(match event {
+        AttrEvent::Created => AttrRevert::CreatedInRange,
+        AttrEvent::Updated | AttrEvent::Deleted => AttrRevert::ExistedBefore,
+    });
 }
 
 #[async_trait]
@@ -1674,10 +1668,10 @@ where
                 });
         }
 
-        // Revert the attributes born inside the range that survived it by emitting
-        // deletions — they have no prior state to restore.
+        // Revert the attributes born inside the range by emitting deletions — they have no
+        // prior state to restore.
         for (&(c_id, attr), class) in reverted_attrs.iter() {
-            if !matches!(class, AttrRevert::CreatedInRange { alive: true }) {
+            if !matches!(class, AttrRevert::CreatedInRange) {
                 continue;
             }
             state_deltas
@@ -3822,6 +3816,32 @@ mod test {
 
     /// Gateway mock for revert tests that reach the previous-value lookups.
     fn revert_test_gateway() -> MockExtractorGateway {
+        let mut gw = revert_test_gateway_without_state_lookups();
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw
+    }
+
+    /// Like `revert_test_gateway`, but fails the test when the revert looks up prior attribute
+    /// values of `component` in the DB. An attribute created inside the reverted range has no
+    /// prior value, so the revert must delete it without a lookup.
+    fn revert_test_gateway_without_state_lookup_of(
+        component: &'static str,
+    ) -> MockExtractorGateway {
+        let mut gw = revert_test_gateway_without_state_lookups();
+        gw.expect_get_protocol_states()
+            .returning(move |component_ids| {
+                assert!(
+                    !component_ids.contains(&component),
+                    "the revert looked up prior attribute values of {component}"
+                );
+                Ok(Vec::new())
+            });
+        gw
+    }
+
+    /// `revert_test_gateway` without the protocol state lookup.
+    fn revert_test_gateway_without_state_lookups() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
             .times(1)
@@ -3838,8 +3858,6 @@ mod test {
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_protocol_states()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
@@ -4351,8 +4369,69 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_revert_attr_created_and_deleted_in_range() {
-        let extractor = create_extractor(revert_test_gateway()).await;
+    async fn test_revert_attr_created_and_deleted_across_blocks_deletes() {
+        let extractor =
+            create_extractor(revert_test_gateway_without_state_lookup_of("pool_x")).await;
+
+        // Block 1: empty anchor.
+        full_block(&extractor, 1, 1, vec![]).await;
+        // Block 2: create `pool_x`. Non-finalized: in the buffer, absent from the DB.
+        full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
+        // Block 3 mints a fresh tick, block 4 burns it.
+        full_block(
+            &extractor,
+            3,
+            1,
+            vec![entity_change_tx(
+                3,
+                0,
+                "pool_x",
+                "ticks/100/net-liquidity",
+                5000,
+                PbChangeType::Creation,
+            )],
+        )
+        .await;
+        full_block(
+            &extractor,
+            4,
+            1,
+            vec![entity_change_tx(
+                4,
+                0,
+                "pool_x",
+                "ticks/100/net-liquidity",
+                0,
+                PbChangeType::Deletion,
+            )],
+        )
+        .await;
+
+        let revert_msg = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A client that applied block 3 and missed block 4 still holds the tick when it
+        // applies this revert, so the revert must delete it.
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta.deleted_attributes,
+            HashSet::from(["ticks/100/net-liquidity".to_string()])
+        );
+        assert!(pool_x_delta
+            .updated_attributes
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_attr_created_and_deleted_in_partial_block_deletes() {
+        let extractor =
+            create_extractor(revert_test_gateway_without_state_lookup_of("pool_x")).await;
 
         // Block 1: empty anchor.
         full_block(&extractor, 1, 1, vec![]).await;
@@ -4361,8 +4440,7 @@ mod test {
         full_block(&extractor, 2, 1, vec![component_creation_tx(2, 0, "pool_x", &[])]).await;
 
         // Partial block 3: tx 0 mints a fresh tick (Creation), tx 1 burns it (Deletion) —
-        // the JIT-liquidity pattern from the production crashes. The attr is already absent
-        // downstream, so the range reverts to nothing for it.
+        // the JIT-liquidity pattern from the production crashes.
         partial_block(
             &extractor,
             3,
@@ -4397,17 +4475,19 @@ mod test {
             .expect("revert must produce a message");
 
         assert!(revert_msg.revert);
-        // The attr was born and died inside the range: it is already absent downstream,
-        // so the revert must not re-announce a deletion for it.
-        if let Some(pool_x_delta) = revert_msg.state_deltas.get("pool_x") {
-            assert!(
-                !pool_x_delta
-                    .deleted_attributes
-                    .contains("ticks/100/net-liquidity"),
-                "attr created and deleted in range must not revert as a deletion, got: {:?}",
-                pool_x_delta.deleted_attributes
-            );
-        }
+        // The attr was born and died inside the range. Deleting it again changes nothing for
+        // a client that applied both txs.
+        let pool_x_delta = revert_msg
+            .state_deltas
+            .get("pool_x")
+            .expect("state_deltas should contain pool_x");
+        assert_eq!(
+            pool_x_delta.deleted_attributes,
+            HashSet::from(["ticks/100/net-liquidity".to_string()])
+        );
+        assert!(pool_x_delta
+            .updated_attributes
+            .is_empty());
     }
 
     #[tokio::test]

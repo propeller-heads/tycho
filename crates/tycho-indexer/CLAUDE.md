@@ -119,8 +119,9 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    drained blocks in a committing section until `CachedGateway` reports their write
    flushed, so lookups cover every block whose write has not landed and a DB miss proves
    that no prior state exists — the revert never waits on the commit task. Attributes
-   first created inside the reverted range revert as deletions when they survive the
-   range, and revert to nothing otherwise. A delta that holds an attribute as both
+   first created inside the reverted range revert as deletions, also when the range
+   deleted them again: a client that applied the creation and missed the deletion still
+   holds them. A delta that holds an attribute as both
    created and deleted is malformed module output, so it goes through the lookup like a
    pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
    emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
