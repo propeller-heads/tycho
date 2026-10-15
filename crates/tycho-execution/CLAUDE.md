@@ -203,14 +203,14 @@ receiver. The order fills at most `originalFilledTakerAmount`; the rest of `amou
 output to the receiver. The rest of `amountIn` goes back to the caller, as for Bebop. The quote's pool is the primary
 in `FallbackSwap`.
 
-`NativeFallbackRouter` runs a signed Native RFQ-T quote. `nativeData` is `[signedAmountIn: 32][tradeRFQT calldata]`,
-the fields `NativeExecutor` takes after its target, and the quote MUST name the fallback router as recipient. The
-router calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selector, non-zero amounts and zero
-`actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when it
-differs from the signed amount it writes it as `actualSellerAmount`, and Native scales the signed minimum output to
-it. Native reverts an input too far from the signed amount, and the fallback then fills the leg. The router approves
-the Native router for `amountIn`, calls it, revokes the approval and forwards the output. Any input Native did not
-pull goes back to the caller.
+`NativeFallbackRouter` runs a signed Native RFQ-T quote. `nativeData` is `[signedAmountIn: 32][tradeRFQT calldata]`, the
+fields `NativeExecutor` takes after its target, and the quote MUST name the fallback router as recipient. The router
+calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selector, non-zero amounts and zero
+`actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when `amountIn`
+differs from the signed amount, the router writes `amountIn` as `actualSellerAmount`, and Native scales the signed
+minimum output to `amountIn`. Native reverts an input too far from the signed amount, and the fallback then fills the
+leg. The router approves the Native router for `amountIn`, calls it, revokes the approval and forwards the output. Any
+input Native did not pull goes back to the caller.
 
 `LiquoriceFallbackRouter` runs a signed Liquorice quote through the immutable `liquoriceSettlement`. It takes the
 settlement calldata alone: Liquorice quotes do not partially fill, so the router carries none of `LiquoriceExecutor`'s
