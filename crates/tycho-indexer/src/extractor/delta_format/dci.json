@@ -1,0 +1,2470 @@
+[
+  {
+    "account_balances": {
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "balance": "0x0000000000000064",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x74cea37733c92164c75b5f6b77f367feb0e5e550dfe0f5b36e7e5d260399e312",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x435513363c0f94ab543ae0d3e7405379844f73b43bd3e2e2f9976546795c9146",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x4ea69f9ae2ab25dc0c56f6039d6389f82e580f0b10b17db3844c7a20210eb6e0"
+        }
+      },
+      "0x4536972a0e12b484d40362a412fa01b799c7c37a": {
+        "address": "0x4536972a0e12b484d40362a412fa01b799c7c37a",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x734d797a82373c1c7e04d96cc28ed8ea97c63b82f259cdb6e7d3d2bf8da79901",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x49ac71b8fb219805a2a261b03860d91211c34118aaa18b72ed8972c53710b30e",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x713f0810753468a3b124d31dddfbb8932836765c6a17f919fccb97ea32b67cf5"
+        }
+      },
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000064"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0x74cea37733c92164c75b5f6b77f367feb0e5e550dfe0f5b36e7e5d260399e312": "0xbcbfa005237b9137cb520beb8ffd2f4c286976a5bcd2f757e96e47981937b266"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "number": 1,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "ts": "1970-01-01T00:00:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000007d0",
+          "balance_float": 2000.0,
+          "component_id": "vm_pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000003e8",
+          "balance_float": 1000.0,
+          "component_id": "vm_pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_a": 4000.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_a": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce01",
+                "caller": null
+              }
+            },
+            "vm_pool_a"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_a": [
+          {
+            "external_id": "ep_a",
+            "signature": "getRate()",
+            "target": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_a": {
+          "accessed_slots": {
+            "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x4536972a0e12b484d40362a412fa01b799c7c37a": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x74cea37733c92164c75b5f6b77f367feb0e5e550dfe0f5b36e7e5d260399e312"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_a": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        ],
+        "created_at": "1970-01-01T00:00:12",
+        "creation_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+        "id": "vm_pool_a",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f61"
+        },
+        "tokens": [
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_a": {
+        "component_id": "vm_pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x000000000000000000000000000000000000000000000000000000000000001e"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "balance": "0x000000000000006e",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+          "balance": "0x00000000000001f4",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      },
+      "0x4536972a0e12b484d40362a412fa01b799c7c37a": {
+        "address": "0x4536972a0e12b484d40362a412fa01b799c7c37a",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000001388",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {}
+      },
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x000000000000000000000000000000000000000000000000000000000000006e"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x74cea37733c92164c75b5f6b77f367feb0e5e550dfe0f5b36e7e5d260399e312": "0x0000000000000000000000000000000000000000000000000000000000000014"
+        }
+      },
+      "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": {
+        "address": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x00000000000000000000000000000000000000000000000000000000000001f4"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "number": 2,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "ts": "1970-01-01T00:00:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000044c",
+          "balance_float": 1100.0,
+          "component_id": "vm_pool_a",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "vm_pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000064",
+          "balance_float": 100.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        },
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000000c8",
+          "balance_float": 200.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_a": 4000.0,
+      "vm_pool_f": 450.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_untraceable": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce05",
+                "caller": "0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+              }
+            },
+            "vm_pool_f"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_f": [
+          {
+            "external_id": "ep_untraceable",
+            "signature": "getRate()",
+            "target": "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+          }
+        ]
+      },
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_f": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+        ],
+        "created_at": "1970-01-01T00:00:24",
+        "creation_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+        "id": "vm_pool_f",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f66"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      },
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          "balance": "0x00000000000000c8",
+          "modify_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": {
+        "address": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000003",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x815b5d2791ddea65f687956cceaa07904539e52c78ec87a3c7a7004e2c94c802",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x994695f42e148242b13668f5f8f48ffdbb00884fdc987cf3f827910b2506b0c8"
+        }
+      },
+      "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+        "address": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x00000000000000000000000000000000000000000000000000000000000000c8"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000003",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350": "0x2d52117403e7dcc51433f8249ced0d4a3bed46b81edea533954ac3e31a929bb1"
+        }
+      },
+      "0xfad48eee9d2776e5ff7ed1d4563cbc8ba0dca87a": {
+        "address": "0xfad48eee9d2776e5ff7ed1d4563cbc8ba0dca87a",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000003",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x8ee01db3a1a842f02dc5c6dcddb36511945d53c69842581f5ace9756c8a30fcf",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x341ffd6a27689f2cb8bafc34d1fb967a440a6bee5eaddac52aba23b2b6a612c6",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x790258155a0d0db9f9649d825292817cebf450a6886413b71c3dd9d4a984aebe"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "number": 3,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "ts": "1970-01-01T00:00:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x00000000000002bc",
+          "balance_float": 700.0,
+          "component_id": "vm_pool_b",
+          "modify_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x00000000000001f4",
+          "balance_float": 500.0,
+          "component_id": "vm_pool_b",
+          "modify_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_b": 250.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_a": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce01",
+                "caller": null
+              }
+            },
+            "vm_pool_b"
+          ]
+        ],
+        "ep_b": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce02",
+                "caller": null
+              }
+            },
+            "vm_pool_b"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_b": [
+          {
+            "external_id": "ep_a",
+            "signature": "getRate()",
+            "target": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+          },
+          {
+            "external_id": "ep_b",
+            "signature": "getRate()",
+            "target": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_b": {
+          "accessed_slots": {
+            "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350"
+            ],
+            "0xfad48eee9d2776e5ff7ed1d4563cbc8ba0dca87a": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_b": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        ],
+        "created_at": "1970-01-01T00:00:36",
+        "creation_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+        "id": "vm_pool_b",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "0xc9334f9f3ba0a8b5e2b847b572648f196eab3a75": {
+        "address": "0xc9334f9f3ba0a8b5e2b847b572648f196eab3a75",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000004",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x7b0683f96f91c0c3442dd8e22449bbe1edf1685354178d5ecaafcf97c05206f2",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x3892bc83d6c0bfb4bd9549f2c9579bd3189f5feb2ae8e2d737a02532472dc1f6",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x236580d5bd166c8048a77cb21abcd833d407597e2ea05dce782c629cc261c99e"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "number": 4,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "ts": "1970-01-01T00:00:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x000000000000076c",
+          "balance_float": 1900.0,
+          "component_id": "vm_pool_a",
+          "modify_tx": "0x2be5466b880e787e71e3ba9dc17ba5d1a912400c8404c6ed7890708fb273a9d9",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_a": 3800.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {
+        "ep_a": {
+          "accessed_slots": {
+            "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x74cea37733c92164c75b5f6b77f367feb0e5e550dfe0f5b36e7e5d260399e312"
+            ],
+            "0xc9334f9f3ba0a8b5e2b847b572648f196eab3a75": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": {
+        "address": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000005",
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+        }
+      },
+      "0x4536972a0e12b484d40362a412fa01b799c7c37a": {
+        "address": "0x4536972a0e12b484d40362a412fa01b799c7c37a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000003"
+        }
+      },
+      "0x822c25c9a00827bd6c58163bdcc95084d2723574": {
+        "address": "0x822c25c9a00827bd6c58163bdcc95084d2723574",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000005",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xdd46ff2dc8792f60916ac53f803f44e62b10867555abc577092fe10c9ca9e9e7",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x9a359cfb6e3f6a3b4a54217004c672450a8f508357432cc7cd4db653cd15849a",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x7e4c8b66112c5fe265a7b1bb1dad0fd40638ee501a5bccc94080d67222dfa6d5"
+        }
+      },
+      "0xc9334f9f3ba0a8b5e2b847b572648f196eab3a75": {
+        "address": "0xc9334f9f3ba0a8b5e2b847b572648f196eab3a75",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000004"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "number": 5,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "ts": "1970-01-01T00:01:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000208",
+          "balance_float": 520.0,
+          "component_id": "vm_pool_b",
+          "modify_tx": "0x55743ca5cf27c761a599d24a1b7dd850876715c037547d53344511275cb2f9bb",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_b": 260.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {
+        "ep_b": {
+          "accessed_slots": {
+            "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x822c25c9a00827bd6c58163bdcc95084d2723574": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_b": {
+        "component_id": "vm_pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+          "balance": "0x000000000000012c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000009"
+        }
+      },
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x911a70854aef0a3edf0597cc7ee0a9ed97b2456ce64993ded26d5a6b4741f0c3",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x448905567385496238b5683d16e8d24d12f5f9c156a29f8ba26703d86b93ffe1"
+        }
+      },
+      "0x2780486d0d6d7ecad9e774e577948dc29b588efd": {
+        "address": "0x2780486d0d6d7ecad9e774e577948dc29b588efd",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60bde2bca1b934129bd7fab2c7baace2ceeae2afeb57580775ced1d14892d117",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x12c2737443fa47f6f9f959e8a15f2b689a527e1bd36e9b84efb8a02f93ec97bd",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x52f7e35bdc880f547a6e71f63abcce38cc2003934d2e9d683d70ec44b2152fc2"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4": "0x0c579a261b29e209389edfd1141f5d3abf108ec86a9665f8b5181b23a62a2163"
+        }
+      },
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "address": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x000000000000000000000000000000000000000000000000000000000000012c"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_c": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000190",
+          "balance_float": 400.0,
+          "component_id": "vm_pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000012c",
+          "balance_float": 300.0,
+          "component_id": "vm_pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_c": 75.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_c": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce03",
+                "caller": null
+              }
+            },
+            "vm_pool_c"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_c": [
+          {
+            "external_id": "ep_c",
+            "signature": "getRate()",
+            "target": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_c": {
+          "accessed_slots": {
+            "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x2780486d0d6d7ecad9e774e577948dc29b588efd": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_c": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+        ],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+        "id": "vm_pool_c",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f63"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": {
+        "address": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000efefefefefefefefefefefefefefefefefefefef"
+        }
+      },
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      },
+      "0xdc5c6098b450686f49a4089482970411289eeb57": {
+        "address": "0xdc5c6098b450686f49a4089482970411289eeb57",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000007",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x10dc8b213074b03cc456c7d2ba3717c42e59806b771d65982d1ef53bdc2d6c7b",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x4b15262bd42877ed5885209c36d4477ba23c5ebd69dbe26202b13f0cf756ae51",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0xd077277d96afaefa6df683272020a04f532b565096b8141f6cccd482a76e375c"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_c": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000136",
+          "balance_float": 310.0,
+          "component_id": "vm_pool_c",
+          "modify_tx": "0xce3473bdc3c02a6a451733a0e673801d6d175ba22ff7af9d562348ae7eea0f0e",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      },
+      "vm_pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000065",
+          "balance_float": 101.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0xce3473bdc3c02a6a451733a0e673801d6d175ba22ff7af9d562348ae7eea0f0e",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_c": 77.5,
+      "vm_pool_f": 450.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {
+        "ep_b": {
+          "accessed_slots": {
+            "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350"
+            ],
+            "0xdc5c6098b450686f49a4089482970411289eeb57": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+          "balance": "0x",
+          "modify_tx": "0x",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      },
+      "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": {
+        "address": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+        }
+      },
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x"
+        }
+      },
+      "0x2780486d0d6d7ecad9e774e577948dc29b588efd": {
+        "address": "0x2780486d0d6d7ecad9e774e577948dc29b588efd",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4": "0x"
+        }
+      },
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "address": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x"
+        }
+      },
+      "0xdc5c6098b450686f49a4089482970411289eeb57": {
+        "address": "0xdc5c6098b450686f49a4089482970411289eeb57",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "number": 5,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "ts": "1970-01-01T00:01:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000064",
+          "balance_float": 100.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {
+      "vm_pool_c": {
+        "chain": "ethereum",
+        "change": "Deletion",
+        "contract_addresses": [
+          "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+        ],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+        "id": "vm_pool_c",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f63"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": true,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+          "balance": "0x0000000000000190",
+          "modify_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x911a70854aef0a3edf0597cc7ee0a9ed97b2456ce64993ded26d5a6b4741f0c3",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x448905567385496238b5683d16e8d24d12f5f9c156a29f8ba26703d86b93ffe1"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4": "0x0c579a261b29e209389edfd1141f5d3abf108ec86a9665f8b5181b23a62a2163"
+        }
+      },
+      "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1": {
+        "address": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000190"
+        }
+      },
+      "0xdb5d9125b56e70650e2b91740d01168584e93a9b": {
+        "address": "0xdb5d9125b56e70650e2b91740d01168584e93a9b",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xc51b8bff314048f38cff63b5e97decead090a116702d7ebe373d950209286919",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x5cd5f7c630018a44acc6a70b944fb51135a057c60eaf970bd1a46165807d2ed1",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0xc87735cd8f8d0fa54f037cbf1ba194335b1dcb3d08120a8dff514753cefdfedc"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_d": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000384",
+          "balance_float": 900.0,
+          "component_id": "vm_pool_d",
+          "modify_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000320",
+          "balance_float": 800.0,
+          "component_id": "vm_pool_d",
+          "modify_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      },
+      "vm_pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000066",
+          "balance_float": 102.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_d": 200.0,
+      "vm_pool_f": 451.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_c": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce03",
+                "caller": null
+              }
+            },
+            "vm_pool_d"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_d": [
+          {
+            "external_id": "ep_c",
+            "signature": "getRate()",
+            "target": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_c": {
+          "accessed_slots": {
+            "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x613e5598966505e3761137685dc386cb60186073ee59ac47aaa6ff185e57ecd4"
+            ],
+            "0xdb5d9125b56e70650e2b91740d01168584e93a9b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_d": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+        ],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+        "id": "vm_pool_d",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f64"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {
+      "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+          "balance": "0x000000000000003c",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000003"
+        }
+      },
+      "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1": {
+        "address": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+        "balance": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x60806040",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x000000000000000000000000000000000000000000000000000000000000003c"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_e": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000032",
+          "balance_float": 50.0,
+          "component_id": "vm_pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000003c",
+          "balance_float": 60.0,
+          "component_id": "vm_pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_e": 6e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_a": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce01",
+                "caller": null
+              }
+            },
+            "vm_pool_e"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_e": [
+          {
+            "external_id": "ep_a",
+            "signature": "getRate()",
+            "target": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+          }
+        ]
+      },
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "vm_pool_e": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [
+          "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+        ],
+        "created_at": "1970-01-01T00:01:24",
+        "creation_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+        "id": "vm_pool_e",
+        "protocol_system": "recorded_dci",
+        "protocol_type_name": "recorded_vm_pool",
+        "static_attributes": {
+          "pool_id": "0x766d5f706f6f6c5f65"
+        },
+        "tokens": [
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": {
+        "address": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        }
+      },
+      "0x9a3517f74e0ff9f1018ee4001aeffe447557192b": {
+        "address": "0x9a3517f74e0ff9f1018ee4001aeffe447557192b",
+        "balance": "0x0000000000000000000000000000000000000000000000000000000000000008",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xd472b2259576649779a1964ab023c8bc27dce17b291abd27aaa5a82e5c150787",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0xc2a32adcd53fab3dc4c80e7d4854b13c93f2442d99635f46924ee4307bcbe7f1",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x06444964f20f896d970e1d0685f0820d248be57ca5b1fce41d7e87a8cb2baf7e"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "number": 8,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "ts": "1970-01-01T00:01:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000021c",
+          "balance_float": 540.0,
+          "component_id": "vm_pool_b",
+          "modify_tx": "0x162be2cab7a4e32c2aee74c13fac0b529d90d31b4849f81f6bfa3057cb740d3b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_b": 270.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {
+        "ep_b": {
+          "accessed_slots": {
+            "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x9a3517f74e0ff9f1018ee4001aeffe447557192b": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0x323ca94920d7e77c294c659f8b56b5229981195b48b3570e31f6d421b7bb7350"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "account": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "balance": "0x0000000000000078",
+          "modify_tx": "0xbfe00618c4426776d67c6f9513abc48f5561489dfa019e171da85df963aca7bb",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000007"
+        }
+      },
+      "0x9a3517f74e0ff9f1018ee4001aeffe447557192b": {
+        "address": "0x9a3517f74e0ff9f1018ee4001aeffe447557192b",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000006"
+        }
+      },
+      "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+        "address": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000078"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "number": 9,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "ts": "1970-01-01T00:01:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x000000000000000000000000000000000000000000000000000000000000000a",
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c": {
+        "address": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000004"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "number": 10,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "ts": "1970-01-01T00:02:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000334",
+          "balance_float": 820.0,
+          "component_id": "vm_pool_d",
+          "modify_tx": "0x93d0f973cfe1470ad883799d7dfaaf2762577e017e1a575aba48e5edd6defdd0",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_d": 205.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_a": {
+        "component_id": "vm_pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x0000000000000000000000000000000000000000000000000000000000000019"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x03614a3e6f17367d5d4a3cd8f65553238b17cfaa": {
+        "address": "0x03614a3e6f17367d5d4a3cd8f65553238b17cfaa",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000b",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x4ba6833ad0d79becc618f582b8cd0f1cacae5e655b73892eb955fd97a8450c18",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x55dba3ae8aba3709543a3f56a611aa4d9642006c042046e08bfe620dc8314276",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0xb4c7433af238e81caf24e0414ccfa60769f9da1c1a57fe77b6b360c8ce4ed480"
+        }
+      },
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000008"
+        }
+      },
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000b",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x11a674c7edc24a72b31f94edf35e48ade0f5431b4f1c667ef1e92190826a1f5d",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0xdbb5294932c0166b9da0e85823c8e3a5025434250823ba5fd7fb97b7e2295138"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000b",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8": "0xdd03b1095da978bfe78693443f6051818571392ef84558c07b15ba3d64205e53"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_f": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000000d2",
+          "balance_float": 210.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_f": 471.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_d": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce04",
+                "caller": null
+              }
+            },
+            "vm_pool_a"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_a": [
+          {
+            "external_id": "ep_d",
+            "signature": "getRate()",
+            "target": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_d": {
+          "accessed_slots": {
+            "0x03614a3e6f17367d5d4a3cd8f65553238b17cfaa": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x11a674c7edc24a72b31f94edf35e48ade0f5431b4f1c667ef1e92190826a1f5d"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": true,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x000000000000000000000000f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+        }
+      },
+      "0x21e682ae221b9e54ce76cd3aa0d71a8e571740a3": {
+        "address": "0x21e682ae221b9e54ce76cd3aa0d71a8e571740a3",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xfc0e9cb9d397b3e0c7dcda5aae21f5fa4a75258a4b02e4ef709a33578f8609c7",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x87464f7179fd2835779459bd6113ce3d784f79ff0c53f9fbc4f60ff2f26d8f97",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x790d25aab1d79ed448c0a88f5bec2d45434cf6317c0cffbb4ec9add03dd81523"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000200000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {
+        "ep_d": {
+          "accessed_slots": {
+            "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x21e682ae221b9e54ce76cd3aa0d71a8e571740a3": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x03614a3e6f17367d5d4a3cd8f65553238b17cfaa": {
+        "address": "0x03614a3e6f17367d5d4a3cd8f65553238b17cfaa",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x"
+        }
+      },
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000007"
+        }
+      },
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x",
+          "0x000000000000000000000000000000000000000000000000000000000000001d": "0x"
+        }
+      },
+      "0x21e682ae221b9e54ce76cd3aa0d71a8e571740a3": {
+        "address": "0x21e682ae221b9e54ce76cd3aa0d71a8e571740a3",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8": "0x"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "number": 10,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "ts": "1970-01-01T00:02:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_f": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000000c8",
+          "balance_float": 200.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": true,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": {
+        "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000004b0",
+          "balance_float": 1200.0,
+          "component_id": "vm_pool_a",
+          "modify_tx": "0x8e6ef001b554fdb3aa8c4880eb541f5160848ec24181861377b48e1a71ca5f23",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "vm_pool_f": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000000dc",
+          "balance_float": 220.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0x8e6ef001b554fdb3aa8c4880eb541f5160848ec24181861377b48e1a71ca5f23",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_a": 3800.0,
+      "vm_pool_f": 491.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x2c2de6849873f1e730c5001ddfbfbcb3a4155732d10b711297637becc106e342",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x6696141f8d29e09e7a333a99bdce4aea1a42c6b2b0eab4d73161c0d853cc3ecc"
+        }
+      },
+      "0x33c0f660d6b12d9d86b3304be6b22ab5efcb3667": {
+        "address": "0x33c0f660d6b12d9d86b3304be6b22ab5efcb3667",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "chain": "ethereum",
+        "change": "Creation",
+        "code": "0x5cc7962a7c3cc7e0782770fdc86cb0c8fb6753c8a8a2b8a7fc256459f1b0a914",
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x062b5c7f04da30fdbaac17db6ab09c6f2231faeb5a5436c582cdeb880c109dc6",
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0xcf0bd8f6c6efe5b1f4171ec20f34beb078efa1d28ad3a25dde90901311031847"
+        }
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "balance": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "chain": "ethereum",
+        "change": "Update",
+        "code": "0x8679e8eda65bd257638cf8cf09b8238888947cc3c0bea2aa2cc3f1c4ac7a3002",
+        "slots": {
+          "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8": "0x63062bd40d93c5b92cb48290c934951d969d165f282089a43af5c9ac6cd4107b"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {
+        "ep_d": [
+          [
+            {
+              "RPCTracer": {
+                "calldata": "0x679aefce04",
+                "caller": null
+              }
+            },
+            "vm_pool_b"
+          ]
+        ]
+      },
+      "new_entrypoints": {
+        "vm_pool_b": [
+          {
+            "external_id": "ep_d",
+            "signature": "getRate()",
+            "target": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+          }
+        ]
+      },
+      "trace_results": {
+        "ep_d": {
+          "accessed_slots": {
+            "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000000000000000000000000000000000000000001d"
+            ],
+            "0x33c0f660d6b12d9d86b3304be6b22ab5efcb3667": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": [
+              "0xd34e996ba6f185447d798724a315dbf6f96f198183ba593ee362856ba50713c8"
+            ]
+          },
+          "retriggers": [
+            [
+              "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+              {
+                "key": "0x000000000000000000000000000000000000000000000000000000000000001d",
+                "offset": 12
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_f": {
+        "component_id": "vm_pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x000000000000000000000000000000000000000000000000000000000000000b",
+          "paused": "0x02"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {
+      "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d": {
+        "address": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "balance": null,
+        "chain": "ethereum",
+        "change": "Update",
+        "code": null,
+        "slots": {
+          "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000003"
+        }
+      }
+    },
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "number": 13,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "ts": "1970-01-01T00:02:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000067",
+          "balance_float": 103.0,
+          "component_id": "vm_pool_f",
+          "modify_tx": "0xdf0788e38ac1eb43e442de508f41c6b5aa1fdd55a4f49f3376db7352d6ea772c",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_f": 491.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000e",
+      "number": 14,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "ts": "1970-01-01T00:02:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "vm_pool_e": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x0000000000000046",
+          "balance_float": 70.0,
+          "component_id": "vm_pool_e",
+          "modify_tx": "0xbc92b4f00c50ef03b51a68e3edf4d7ac28400153ef33883367372d116d7a84f2",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "vm_pool_e": 7e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_dci",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "vm_pool_b": {
+        "component_id": "vm_pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x0000000000000000000000000000000000000000000000000000000000000006"
+        }
+      }
+    }
+  }
+]

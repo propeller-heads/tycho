@@ -48,6 +48,8 @@ pub mod token_analysis_cron;
 mod u256_num;
 
 #[cfg(test)]
+mod delta_format_tests;
+#[cfg(test)]
 mod protobuf_conversion_tests;
 #[cfg(test)]
 mod recorded_extractors;

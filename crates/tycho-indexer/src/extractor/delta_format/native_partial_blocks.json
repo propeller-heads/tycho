@@ -1,0 +1,3094 @@
+[
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "number": 1,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "ts": "1970-01-01T00:00:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000007d0",
+          "balance_float": 2000.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000003e8",
+          "balance_float": 1000.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 4000.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_a": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:00:12",
+        "creation_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+        "id": "pool_a",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f61"
+        },
+        "tokens": [
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x000000000000000000000000000000000000000000000000000000000000001e",
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000c8"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "number": 1,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "ts": "1970-01-01T00:00:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000007d0",
+          "balance_float": 2000.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000003e8",
+          "balance_float": 1000.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 4000.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_a": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:00:12",
+        "creation_tx": "0xcfa35e2921c9f000623187e323e5d528a05b83783c71ac60bb9f358b3766f67c",
+        "id": "pool_a",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f61"
+        },
+        "tokens": [
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee": "0x000000000000000000000000000000000000000000000000000000000000001e",
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000c8"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000ffffffffffffffff00000000000000000000000000000002",
+      "number": 2,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "ts": "1970-01-01T00:00:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x000000000000076c",
+          "balance_float": 1900.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000044c",
+          "balance_float": 1100.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3800.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000006e",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000be"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "number": 2,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "ts": "1970-01-01T00:00:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x00000000000002bc",
+          "balance_float": 700.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x00000000000001f4",
+          "balance_float": 500.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 250.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_b": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:00:24",
+        "creation_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+        "id": "pool_b",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x00000000000000000000000000000000000000000000000000000000000001f4",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000002bc"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "number": 2,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "ts": "1970-01-01T00:00:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x000000000000076c",
+          "balance_float": 1900.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000044c",
+          "balance_float": 1100.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x3f14858b73a12abbfd70190bb4624ab2bd39cdd1e90afb29b06c9cec9ab3a83e",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x00000000000002bc",
+          "balance_float": 700.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x00000000000001f4",
+          "balance_float": 500.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3800.0,
+      "pool_b": 250.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_b": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:00:24",
+        "creation_tx": "0x44663b06e0b3bf0f0cdc6e9c06362d2f72f8f5295e218096f2b79aece1547a2b",
+        "id": "pool_b",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000006e",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000be"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x00000000000000000000000000000000000000000000000000000000000001f4",
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000002bc"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000ffffffffffffffff00000000000000000000000000000003",
+      "number": 3,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "ts": "1970-01-01T00:00:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000208",
+          "balance_float": 520.0,
+          "component_id": "pool_b",
+          "modify_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 260.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000208"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "number": 3,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "ts": "1970-01-01T00:00:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000004b0",
+          "balance_float": 1200.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x982587f11efa94a42ac2271fbe64db72cdfd4a9903742ade38c803a57b404811",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3800.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000078"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "number": 3,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "ts": "1970-01-01T00:00:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000004b0",
+          "balance_float": 1200.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x982587f11efa94a42ac2271fbe64db72cdfd4a9903742ade38c803a57b404811",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000208",
+          "balance_float": 520.0,
+          "component_id": "pool_b",
+          "modify_tx": "0xf8b527ed8591a7031e37015e916394ae25e24bcbdc24f7df47918ef528852da3",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3800.0,
+      "pool_b": 260.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000078"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000208"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "number": 4,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "ts": "1970-01-01T00:00:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000708",
+          "balance_float": 1800.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x2be5466b880e787e71e3ba9dc17ba5d1a912400c8404c6ed7890708fb273a9d9",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3600.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [
+          "fee"
+        ],
+        "updated_attributes": {
+          "fee_tier": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "number": 4,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "ts": "1970-01-01T00:00:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000708",
+          "balance_float": 1800.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x2be5466b880e787e71e3ba9dc17ba5d1a912400c8404c6ed7890708fb273a9d9",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3600.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [
+          "fee"
+        ],
+        "updated_attributes": {
+          "fee_tier": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "number": 5,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "ts": "1970-01-01T00:01:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000006a4",
+          "balance_float": 1700.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x55743ca5cf27c761a599d24a1b7dd850876715c037547d53344511275cb2f9bb",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      },
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x000000000000028a",
+          "balance_float": 650.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x55743ca5cf27c761a599d24a1b7dd850876715c037547d53344511275cb2f9bb",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0,
+      "pool_b": 260.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000b4"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x000000000000000000000000000000000000000000000000000000000000028a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "number": 5,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "ts": "1970-01-01T00:01:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x00000000000006a4",
+          "balance_float": 1700.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x55743ca5cf27c761a599d24a1b7dd850876715c037547d53344511275cb2f9bb",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      },
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x000000000000028a",
+          "balance_float": 650.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x55743ca5cf27c761a599d24a1b7dd850876715c037547d53344511275cb2f9bb",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0,
+      "pool_b": 260.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000b4"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x000000000000000000000000000000000000000000000000000000000000028a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000ffffffffffffffff00000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_c": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000190",
+          "balance_float": 400.0,
+          "component_id": "pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000012c",
+          "balance_float": 300.0,
+          "component_id": "pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_c": 75.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_c": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+        "id": "pool_c",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f63"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_c": {
+        "component_id": "pool_c",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000012c"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000ffffffffffffffff00000000000000010000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000003e7",
+          "balance_float": 999.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x68a228eba298d4a8edb468050a6c61fed6d56e8d8aca522e854524652411d9db",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x00000000000000000000000000000000000000000000000000000000000003e7"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_b": {
+        "chain": "ethereum",
+        "change": "Deletion",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x05e6a5a0cc63e2e3fbae0ffc814f66ace8f953467445ef09e1a7e58e828f58c7",
+        "id": "pool_b",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 2,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000003e7",
+          "balance_float": 999.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x68a228eba298d4a8edb468050a6c61fed6d56e8d8aca522e854524652411d9db",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "pool_c": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000190",
+          "balance_float": 400.0,
+          "component_id": "pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000012c",
+          "balance_float": 300.0,
+          "component_id": "pool_c",
+          "modify_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0,
+      "pool_c": 75.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_b": {
+        "chain": "ethereum",
+        "change": "Deletion",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x05e6a5a0cc63e2e3fbae0ffc814f66ace8f953467445ef09e1a7e58e828f58c7",
+        "id": "pool_b",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      },
+      "pool_c": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+        "id": "pool_c",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f63"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x00000000000000000000000000000000000000000000000000000000000003e7"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "paused": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      },
+      "pool_c": {
+        "component_id": "pool_c",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000012c"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000ffffffffffffffff00000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_c": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000136",
+          "balance_float": 310.0,
+          "component_id": "pool_c",
+          "modify_tx": "0xce3473bdc3c02a6a451733a0e673801d6d175ba22ff7af9d562348ae7eea0f0e",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_c": 77.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee_tier": "0x0000000000000000000000000000000000000000000000000000000000000007"
+        }
+      },
+      "pool_c": {
+        "component_id": "pool_c",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000136"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "number": 5,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "ts": "1970-01-01T00:01:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000004b0",
+          "balance_float": 1200.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x982587f11efa94a42ac2271fbe64db72cdfd4a9903742ade38c803a57b404811",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {
+      "pool_c": {
+        "chain": "ethereum",
+        "change": "Deletion",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x3b47c6e951fdbe2c4ea196d4497712bc3a13955c66bfd578d644fc9bfab5f606",
+        "id": "pool_c",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f63"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_b": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0x05e6a5a0cc63e2e3fbae0ffc814f66ace8f953467445ef09e1a7e58e828f58c7",
+        "id": "pool_b",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f62"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        ]
+      }
+    },
+    "new_tokens": {},
+    "revert": true,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "fee_tier": "0x0000000000000000000000000000000000000000000000000000000000000005",
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000078"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [
+          "paused"
+        ],
+        "updated_attributes": {}
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001ffffffffffffffff00000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x0000000000000514",
+          "balance_float": 1300.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000082"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000384",
+          "balance_float": 900.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000320",
+          "balance_float": 800.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_d": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+        "id": "pool_d",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f64"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000320"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "number": 6,
+      "parent_hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "ts": "1970-01-01T00:01:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x0000000000000514",
+          "balance_float": 1300.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x749635be71945e842b4fca92c1d156ef9ae12292f84d922197da6ede2f394db6",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "pool_d": {
+        "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+          "balance": "0x0000000000000384",
+          "balance_float": 900.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        },
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000320",
+          "balance_float": 800.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3400.0,
+      "pool_d": 200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_d": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:12",
+        "creation_tx": "0xc711b7961b8a8ca982efea54e9f47cce0deb20aeccd8cdbec56d04aace6994a7",
+        "id": "pool_d",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f64"
+        },
+        "tokens": [
+          "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": {
+        "address": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "chain": "ethereum",
+        "decimals": 12,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNB",
+        "tax": 25
+      },
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+        "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDT",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000082"
+        }
+      },
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000320"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001ffffffffffffffff00000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_e": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000032",
+          "balance_float": 50.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000003c",
+          "balance_float": 60.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_e": 6e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_e": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:24",
+        "creation_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+        "id": "pool_e",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f65"
+        },
+        "tokens": [
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000032"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000032a",
+          "balance_float": 810.0,
+          "component_id": "pool_d",
+          "modify_tx": "0x5f019f3d023a5b29b14c6c79303583452a2af2244780b6c70d48661fbdd97516",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 202.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000032a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "number": 7,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000006",
+      "ts": "1970-01-01T00:01:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000032a",
+          "balance_float": 810.0,
+          "component_id": "pool_d",
+          "modify_tx": "0x5f019f3d023a5b29b14c6c79303583452a2af2244780b6c70d48661fbdd97516",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      },
+      "pool_e": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000032",
+          "balance_float": 50.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000003c",
+          "balance_float": 60.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 202.5,
+      "pool_e": 6e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_e": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:01:24",
+        "creation_tx": "0x396de500721a42e70b9db8cdc1cb4099f77624d5a62ae8e3f4d128528c008b01",
+        "id": "pool_e",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f65"
+        },
+        "tokens": [
+          "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+        "address": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "chain": "ethereum",
+        "decimals": 9,
+        "gas": [
+          40000,
+          null
+        ],
+        "quality": 100,
+        "symbol": "TKNA",
+        "tax": 25
+      },
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "WETH",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000032a"
+        }
+      },
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000032"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "number": 8,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "ts": "1970-01-01T00:01:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000021c",
+          "balance_float": 540.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x162be2cab7a4e32c2aee74c13fac0b529d90d31b4849f81f6bfa3057cb740d3b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      },
+      "pool_e": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000037",
+          "balance_float": 55.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x162be2cab7a4e32c2aee74c13fac0b529d90d31b4849f81f6bfa3057cb740d3b",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 270.0,
+      "pool_e": 6e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000021c"
+        }
+      },
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000037"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "number": 8,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000007",
+      "ts": "1970-01-01T00:01:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000021c",
+          "balance_float": 540.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x162be2cab7a4e32c2aee74c13fac0b529d90d31b4849f81f6bfa3057cb740d3b",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      },
+      "pool_e": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000037",
+          "balance_float": 55.0,
+          "component_id": "pool_e",
+          "modify_tx": "0x162be2cab7a4e32c2aee74c13fac0b529d90d31b4849f81f6bfa3057cb740d3b",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 270.0,
+      "pool_e": 6e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000021c"
+        }
+      },
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000037"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "number": 9,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "ts": "1970-01-01T00:01:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000640",
+          "balance_float": 1600.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xbfe00618c4426776d67c6f9513abc48f5561489dfa019e171da85df963aca7bb",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000aa"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "number": 9,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000008",
+      "ts": "1970-01-01T00:01:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000640",
+          "balance_float": 1600.0,
+          "component_id": "pool_a",
+          "modify_tx": "0xbfe00618c4426776d67c6f9513abc48f5561489dfa019e171da85df963aca7bb",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x00000000000000000000000000000000000000000000000000000000000000aa"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "number": 10,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "ts": "1970-01-01T00:02:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000334",
+          "balance_float": 820.0,
+          "component_id": "pool_d",
+          "modify_tx": "0x93d0f973cfe1470ad883799d7dfaaf2762577e017e1a575aba48e5edd6defdd0",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 205.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [
+          "reserve0"
+        ],
+        "updated_attributes": {}
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "number": 10,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "ts": "1970-01-01T00:02:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x0000000000000334",
+          "balance_float": 820.0,
+          "component_id": "pool_d",
+          "modify_tx": "0x93d0f973cfe1470ad883799d7dfaaf2762577e017e1a575aba48e5edd6defdd0",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 205.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_d": {
+        "component_id": "pool_d",
+        "deleted_attributes": [
+          "reserve0"
+        ],
+        "updated_attributes": {}
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001ffffffffffffffff0000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000000a",
+          "balance_float": 10.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        },
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000014",
+          "balance_float": 20.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_f": 45.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_f": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:02:12",
+        "creation_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+        "id": "pool_f",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f66"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      },
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      }
+    },
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {},
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 1,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000008c"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000000a",
+          "balance_float": 10.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        },
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "balance": "0x0000000000000014",
+          "balance_float": 20.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_f": 45.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {
+      "pool_f": {
+        "chain": "ethereum",
+        "change": "Creation",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:02:12",
+        "creation_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+        "id": "pool_f",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f66"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "new_tokens": {
+      "0x6b175474e89094c44da98b954eedeac495271d0f": {
+        "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "chain": "ethereum",
+        "decimals": 18,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "DAI",
+        "tax": 10
+      },
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "chain": "ethereum",
+        "decimals": 6,
+        "gas": [
+          10
+        ],
+        "quality": 100,
+        "symbol": "USDC",
+        "tax": 10
+      }
+    },
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000008c"
+        }
+      },
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x0000000000000001ffffffffffffffff0000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000000b",
+          "balance_float": 11.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x6ca3337c8fbe2e85be5ea669f3306914a803ad4d97e347618d1e0525ecdc44e2",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_f": 45.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000b"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_f": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x000000000000000a",
+          "balance_float": 10.0,
+          "component_id": "pool_f",
+          "modify_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": true,
+    "state_deltas": {
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000200000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000280",
+          "balance_float": 640.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x6266a18dbb27a5610ee335271ee7638066ff2dabef30371459d2f4be259a9fa6",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 270.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x0000000000000000000000000000000000000000000000000000000000000280"
+        }
+      },
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000c"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000200000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x0000000000000280",
+          "balance_float": 640.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x6266a18dbb27a5610ee335271ee7638066ff2dabef30371459d2f4be259a9fa6",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 270.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x0000000000000000000000000000000000000000000000000000000000000280"
+        }
+      },
+      "pool_f": {
+        "component_id": "pool_f",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x000000000000000000000000000000000000000000000000000000000000000c"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "number": 10,
+      "parent_hash": "0x0000000000000001000000000000000000000000000000000000000000000009",
+      "ts": "1970-01-01T00:02:00"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": {
+          "balance": "0x000000000000028a",
+          "balance_float": 650.0,
+          "component_id": "pool_b",
+          "modify_tx": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "token": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        }
+      }
+    },
+    "component_tvl": {},
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {
+      "pool_f": {
+        "chain": "ethereum",
+        "change": "Deletion",
+        "contract_addresses": [],
+        "created_at": "1970-01-01T00:02:12",
+        "creation_tx": "0x69921ea19b5d58014a62f1d8bf1659ac8e3b2632a62dacd9b757bfb2ec59c2ce",
+        "id": "pool_f",
+        "protocol_system": "recorded_native",
+        "protocol_type_name": "recorded_native_pool",
+        "static_attributes": {
+          "pool_id": "0x706f6f6c5f66"
+        },
+        "tokens": [
+          "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ]
+      }
+    },
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": true,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000082"
+        }
+      },
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve1": "0x000000000000000000000000000000000000000000000000000000000000028a"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000005dc",
+          "balance_float": 1500.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x8e6ef001b554fdb3aa8c4880eb541f5160848ec24181861377b48e1a71ca5f23",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000096"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "number": 11,
+      "parent_hash": "0x000000000000000100000000000000000000000000000000000000000000000a",
+      "ts": "1970-01-01T00:02:12"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_a": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x00000000000005dc",
+          "balance_float": 1500.0,
+          "component_id": "pool_a",
+          "modify_tx": "0x8e6ef001b554fdb3aa8c4880eb541f5160848ec24181861377b48e1a71ca5f23",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_a": 3200.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_a": {
+        "component_id": "pool_a",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000096"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_e": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000003d",
+          "balance_float": 61.0,
+          "component_id": "pool_e",
+          "modify_tx": "0xbcd0d2abbd24a3ea7f63d413f24e52c3c0384fda91f1dc288a95c4118f6bc15a",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_e": 6.1e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000038"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "number": 12,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000b",
+      "ts": "1970-01-01T00:02:24"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_e": {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": {
+          "balance": "0x000000000000003d",
+          "balance_float": 61.0,
+          "component_id": "pool_e",
+          "modify_tx": "0xbcd0d2abbd24a3ea7f63d413f24e52c3c0384fda91f1dc288a95c4118f6bc15a",
+          "token": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_e": 6.1e-17
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_e": {
+        "component_id": "pool_e",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000038"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "number": 13,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "ts": "1970-01-01T00:02:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000226",
+          "balance_float": 550.0,
+          "component_id": "pool_b",
+          "modify_tx": "0xdf0788e38ac1eb43e442de508f41c6b5aa1fdd55a4f49f3376db7352d6ea772c",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 275.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000226"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "number": 13,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000c",
+      "ts": "1970-01-01T00:02:36"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_b": {
+        "0x6b175474e89094c44da98b954eedeac495271d0f": {
+          "balance": "0x0000000000000226",
+          "balance_float": 550.0,
+          "component_id": "pool_b",
+          "modify_tx": "0xdf0788e38ac1eb43e442de508f41c6b5aa1fdd55a4f49f3376db7352d6ea772c",
+          "token": "0x6b175474e89094c44da98b954eedeac495271d0f"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_b": 275.0
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {
+      "pool_b": {
+        "component_id": "pool_b",
+        "deleted_attributes": [],
+        "updated_attributes": {
+          "reserve0": "0x0000000000000000000000000000000000000000000000000000000000000226"
+        }
+      }
+    }
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000e",
+      "number": 14,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "ts": "1970-01-01T00:02:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000033e",
+          "balance_float": 830.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xbc92b4f00c50ef03b51a68e3edf4d7ac28400153ef33883367372d116d7a84f2",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 207.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "partial_block_index": 0,
+    "revert": false,
+    "state_deltas": {}
+  },
+  {
+    "account_balances": {},
+    "account_deltas": {},
+    "block": {
+      "chain": "ethereum",
+      "hash": "0x000000000000000300000000000000000000000000000000000000000000000e",
+      "number": 14,
+      "parent_hash": "0x000000000000000300000000000000000000000000000000000000000000000d",
+      "ts": "1970-01-01T00:02:48"
+    },
+    "chain": "ethereum",
+    "component_balances": {
+      "pool_d": {
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+          "balance": "0x000000000000033e",
+          "balance_float": 830.0,
+          "component_id": "pool_d",
+          "modify_tx": "0xbc92b4f00c50ef03b51a68e3edf4d7ac28400153ef33883367372d116d7a84f2",
+          "token": "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        }
+      }
+    },
+    "component_tvl": {
+      "pool_d": 207.5
+    },
+    "db_committed_block_height": null,
+    "dci_update": {
+      "new_entrypoint_params": {},
+      "new_entrypoints": {},
+      "trace_results": {}
+    },
+    "deleted_protocol_components": {},
+    "extractor": "recorded_native",
+    "finalized_block_height": 0,
+    "new_protocol_components": {},
+    "new_tokens": {},
+    "revert": false,
+    "state_deltas": {}
+  }
+]

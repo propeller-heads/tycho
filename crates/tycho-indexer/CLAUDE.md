@@ -214,6 +214,44 @@ count moved during it.
 `entity_cache_shadow_comparisons_total{endpoint,outcome}`,
 `entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
 
+## Delta format files
+
+`extractor/delta_format/*.json` hold every message the recorded extractors emit for their
+recorded streams, revert messages included (`extractor/recorded_extractors/`: real extractors on
+Postgres, substreams streams written with the protobuf builders, RPC services mocked):
+
+- `native.json`: the native stream.
+- `native_partial_blocks.json`: the same blocks sent as partial blocks, through the runner's
+  dispatch with partial blocks enabled: a first block sent whole with its partial copy, partial
+  messages, the full-block messages merged from them, reverts that drop pending partials, and an
+  undo signal naming the block being streamed.
+- `dci.json`: the DCI stream, including an entry point the mocked tracer never traces (the
+  `paused` attribute, its retries and the retry limit).
+
+The JSON is canonical: watermarks reset, object keys and sets sorted, and block `ts` and
+component `created_at` written as their offset from the stream's base timestamp after the Unix
+epoch, so the files do not change from day to day. `.gitattributes` checks them out with LF line
+endings.
+
+`test_serial_db_emitted_deltas_match_the_committed_format` (`extractor/delta_format_tests.rs`)
+fails while the emitted messages differ from the files. A diff in them is a change to the deltas
+clients receive for the same blocks. When the change is intended, regenerate the files against a
+test database (`DATABASE_URL`) and commit them with it:
+
+```sh
+UPDATE_DELTA_FORMAT=1 cargo nextest run -p tycho-indexer --all-features --test-threads 1 \
+  -E 'test(test_serial_db_emitted_deltas_match_the_committed_format)'
+```
+
+`the_committed_format_exercises_every_field` fails while a field or enum variant of the message
+or its nested types is empty, default or absent in every committed message; exercise it in a
+recorded stream, or list it in `UNEXERCISED` with the reason.
+
+The files cannot show behaviour behind the mocked RPC services, extractor modules the recorded
+extractors do not run (the Uniswap V4 hooks DCI, the post-processors), or the revert of a block
+sealed under a hash substreams no longer names (`HeightMatch` in `handle_revert`, which a
+consistent stream never sends; covered by `test_revert_hash_miss_purges_from_target_height`).
+
 ## Connections
 
 ```
