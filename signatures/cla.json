@@ -151,6 +151,14 @@
       "created_at": "2026-10-15T10:09:02Z",
       "repoId": 677301333,
       "pullRequestNo": 1575
+    },
+    {
+      "name": "kirsanium",
+      "id": 22195697,
+      "comment_id": 6198349530,
+      "created_at": "2026-10-15T17:36:30Z",
+      "repoId": 677301333,
+      "pullRequestNo": 1608
     }
   ]
 }
