@@ -487,13 +487,15 @@ mod test {
     #[case::target_held(1, None)]
     #[case::target_is_the_parent_of_the_oldest_block(2, None)]
     #[case::target_below_the_parent_of_the_oldest_block(3, Some(FallbackReason::UnknownHash))]
-    fn spec_forgets_a_revert_once_its_target_cannot_anchor_a_path(
+    fn spec_walks_through_a_revert_only_while_its_target_anchors_a_path(
         #[case] committed: u64,
         #[case] expected: Option<FallbackReason>,
     ) {
         // The client has 4. The chain reverts to 2 and grows 3'..=7' on branch 1, whose
         // watermarks evict every block up to `committed`. Whether the window still holds block 2
-        // or block 2 is the parent of its oldest block, the path is the same.
+        // or block 2 is the parent of its oldest block, the path is the same. Below that parent,
+        // the walk gets stuck whether or not the journal still holds the revert; the pruning
+        // itself is checked by `the_journal_keeps_a_revert_while_its_target_can_anchor_a_path`.
         let old_branch: Vec<_> = (1..=4)
             .map(|n| full_block(n, 0, 0))
             .collect();
@@ -520,6 +522,44 @@ mod test {
             None => CatchUpSpec::Possible([&[revert][..], &new_branch[..4]].concat()),
         };
         assert_eq!(spec, expected);
+    }
+
+    #[test]
+    fn the_journal_keeps_a_revert_while_its_target_can_anchor_a_path() {
+        let journaled = |window: &Window| -> Vec<u64> {
+            window
+                .journal
+                .iter()
+                .map(|entry| entry.revert.block.number)
+                .collect()
+        };
+        let mut window = Window::new(2);
+        for number in 1..=4 {
+            window.apply(&HistoryEvent::Message(full_block(number, 0, 0)));
+        }
+        window.apply(&HistoryEvent::Message(revert_to(2, 0, 0)));
+        assert_eq!(journaled(&window), vec![2]);
+
+        // Blocks 3'..=5' on branch 1 carry watermarks that evict one more block each:
+        // (block, finalized and committed height, oldest block left, reverts still journaled).
+        for (number, watermark, oldest, expected) in
+            [(3, 1, 2, vec![2]), (4, 2, 3, vec![2]), (5, 3, 4, vec![])]
+        {
+            let block = Arc::new(BlockAggregatedChanges {
+                finalized_block_height: watermark,
+                db_committed_block_height: Some(watermark),
+                ..(*full_block(number, 1, if number == 3 { 0 } else { 1 })).clone()
+            });
+
+            window.apply(&HistoryEvent::Message(block));
+
+            let held = window
+                .blocks
+                .first()
+                .map(|block| block.block.number);
+            assert_eq!(held, Some(oldest), "after block {number}'");
+            assert_eq!(journaled(&window), expected, "after block {number}'");
+        }
     }
 
     #[test]
