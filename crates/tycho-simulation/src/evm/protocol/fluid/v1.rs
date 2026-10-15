@@ -3148,4 +3148,28 @@ mod test {
 
         assert!(max_amount_in < max_amount_onchain_test);
     }
+
+    #[test]
+    fn verify_token1_reserves_uses_contract_minimum_liquidity() {
+        // GHO/USDC pool 0xde632c3a, block 26198566, after selling 1e18 GHO.
+        let token0 = U256::from(9139533397056245920_u64);
+        let price = U256::from_str("999999999725139423651692544").unwrap();
+
+        assert!(verify_token1_reserves(token0, U256::from(942442127000000_u64), price));
+        assert!(verify_token1_reserves(token0, U256::from(913953339454414_u64), price));
+        assert!(!verify_token1_reserves(token0, U256::from(913953339454413_u64), price));
+    }
+
+    #[test]
+    fn verify_token0_reserves_uses_contract_minimum_liquidity() {
+        let price = constant::B_I1E27;
+        let token1 = U256::from(10).pow(U256::from(18));
+
+        assert!(verify_token0_reserves(U256::from(10).pow(U256::from(14)), token1, price));
+        assert!(!verify_token0_reserves(
+            U256::from(10).pow(U256::from(14)) - U256::ONE,
+            token1,
+            price
+        ));
+    }
 }
