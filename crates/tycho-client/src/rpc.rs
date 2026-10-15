@@ -25,18 +25,21 @@ use tokio::{
 use tracing::{debug, error, instrument, trace, warn};
 use tycho_common::{
     dto::{
-        ComponentTvlRequestBody, ComponentTvlRequestResponse, PaginationLimits, PaginationParams,
+        ComponentTvlRequestBody, ComponentTvlRequestResponse, DeltaCatchUpRequestBody,
+        DeltaCatchUpRequestResponse, DeltaCatchUpUnavailable, PaginationLimits, PaginationParams,
         ProtocolComponentRequestResponse, ProtocolComponentsRequestBody, ProtocolStateRequestBody,
         ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
         StateRequestBody, StateRequestResponse, TokensRequestBody, TokensRequestResponse,
         TracedEntryPointRequestBody, TracedEntryPointRequestResponse, VersionParam,
     },
     models::{
-        blockchain::{EntryPointWithTracingParams, TracedEntryPoints, TracingResult},
+        blockchain::{
+            BlockAggregatedChanges, EntryPointWithTracingParams, TracedEntryPoints, TracingResult,
+        },
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
         token::Token,
-        Chain, ComponentId,
+        BlockHash, Chain, ComponentId, ExtractorFingerprint,
     },
     Bytes,
 };
@@ -421,6 +424,62 @@ impl TracedEntryPointsParams {
         self.page_size = page_size;
         self
     }
+}
+
+/// Parameters for [`RPCClient::get_delta_catch_up`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct DeltaCatchUpParams {
+    chain: Chain,
+    protocol_system: String,
+    from_hash: BlockHash,
+    from_number: u64,
+    to_hash: BlockHash,
+    fingerprint: ExtractorFingerprint,
+    include_state: bool,
+}
+
+impl DeltaCatchUpParams {
+    /// Asks for the messages that take a client of `protocol_system` from the last block it
+    /// applied (`from_hash`, number `from_number`) to block `to_hash`, for a client that synced
+    /// under `fingerprint`. The messages carry state updates unless
+    /// [`with_include_state`](Self::with_include_state) turns them off.
+    pub fn new(
+        chain: Chain,
+        protocol_system: impl Into<String>,
+        from_hash: BlockHash,
+        from_number: u64,
+        to_hash: BlockHash,
+        fingerprint: ExtractorFingerprint,
+    ) -> Self {
+        Self {
+            chain,
+            protocol_system: protocol_system.into(),
+            from_hash,
+            from_number,
+            to_hash,
+            fingerprint,
+            include_state: true,
+        }
+    }
+
+    /// Sets whether the messages carry state updates, like the subscription option of the same
+    /// name.
+    pub fn with_include_state(mut self, include_state: bool) -> Self {
+        self.include_state = include_state;
+        self
+    }
+}
+
+/// Answer of [`RPCClient::get_delta_catch_up`].
+#[derive(Clone, PartialEq, Debug)]
+pub enum DeltaCatchUp {
+    /// The missed messages, oldest first, as the WebSocket sent them: revert messages and full
+    /// blocks. The last one may be a revert to the requested block.
+    Available(Vec<BlockAggregatedChanges>),
+    /// The server cannot serve the messages; resync from a snapshot.
+    Unavailable(DeltaCatchUpUnavailable),
+    /// The server predates delta catch-up; resync from a snapshot.
+    Unsupported,
 }
 
 /// Parameters for [`RPCClient::get_protocol_components_paginated`].
@@ -1236,6 +1295,17 @@ pub trait RPCClient: Send + Sync {
         chunk_size: Option<usize>,
         concurrency: usize,
     ) -> Result<Snapshot, RPCError>;
+
+    /// Retrieves the messages a WebSocket subscriber missed between two blocks, as the WebSocket
+    /// sent them, or why the server cannot serve them.
+    ///
+    /// The default answers [`DeltaCatchUp::Unsupported`], so callers resync from a snapshot.
+    async fn get_delta_catch_up(
+        &self,
+        _params: DeltaCatchUpParams,
+    ) -> Result<DeltaCatchUp, RPCError> {
+        Ok(DeltaCatchUp::Unsupported)
+    }
 }
 
 /// Configuration options for HttpRPCClient
@@ -1995,6 +2065,64 @@ impl RPCClient for HttpRPCClient {
         };
 
         Ok(Snapshot { states, vm_storage })
+    }
+
+    /// Answers [`DeltaCatchUp::Unsupported`] when the server answers 404: it predates the
+    /// endpoint.
+    #[instrument(skip(self))]
+    async fn get_delta_catch_up(
+        &self,
+        params: DeltaCatchUpParams,
+    ) -> Result<DeltaCatchUp, RPCError> {
+        let request = DeltaCatchUpRequestBody {
+            chain: params.chain.into(),
+            protocol_system: params.protocol_system,
+            from_block_hash: params.from_hash,
+            from_block_number: params.from_number,
+            to_block_hash: params.to_hash,
+            fingerprint: params.fingerprint.into(),
+            include_state: params.include_state,
+        };
+
+        let uri = format!(
+            "{}/{TYCHO_SERVER_VERSION}/delta_catch_up",
+            self.url
+                .to_string()
+                .trim_end_matches('/')
+        );
+        debug!(%uri, "Sending delta_catch_up request to Tycho server");
+        trace!(?request, "Sending request to Tycho server");
+
+        let response = self
+            .make_post_request(&request, &uri)
+            .await?;
+        trace!(?response, "Received response from Tycho server");
+        if response.status() == StatusCode::NOT_FOUND {
+            debug!("Tycho server has no delta_catch_up endpoint");
+            return Ok(DeltaCatchUp::Unsupported);
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| RPCError::ParseResponse(e.to_string()))?;
+        let dto_response = serde_json::from_str::<DeltaCatchUpRequestResponse>(&body)
+            .map_err(|err| RPCError::from_parse_error(err, &body))?;
+        match dto_response {
+            DeltaCatchUpRequestResponse::Available { messages } => {
+                trace!(n_messages = messages.len(), "Received delta catch-up messages");
+                Ok(DeltaCatchUp::Available(
+                    messages
+                        .into_iter()
+                        .map(BlockAggregatedChanges::from)
+                        .collect(),
+                ))
+            }
+            DeltaCatchUpRequestResponse::Unavailable { reason } => {
+                debug!(?reason, "Delta catch-up unavailable");
+                Ok(DeltaCatchUp::Unavailable(reason))
+            }
+        }
     }
 }
 
@@ -3749,5 +3877,137 @@ mod tests {
         for (i, token) in tokens.iter().enumerate() {
             assert_eq!(token.symbol, format!("TOKEN_{i}"), "Token at index {i} has wrong symbol");
         }
+    }
+
+    fn delta_catch_up_params() -> DeltaCatchUpParams {
+        DeltaCatchUpParams::new(
+            Chain::Ethereum,
+            "uniswap_v2",
+            Bytes::from(vec![4u8; 32]),
+            4,
+            Bytes::from(vec![6u8; 32]),
+            ExtractorFingerprint(Bytes::from("0xabcdef")),
+        )
+    }
+
+    /// Serves `body` with `status` to one catch-up request.
+    async fn delta_catch_up_server(
+        status: usize,
+        body: &str,
+    ) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/delta_catch_up")
+            .with_status(status)
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        (server, mock)
+    }
+
+    #[tokio::test]
+    async fn test_get_delta_catch_up_from_a_server_without_the_endpoint_is_unsupported() {
+        let (server, mock) = delta_catch_up_server(404, "").await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+
+        let response = client
+            .get_delta_catch_up(delta_catch_up_params())
+            .await
+            .expect("a missing endpoint is an answer, not an error");
+
+        mock.assert();
+        assert_eq!(response, DeltaCatchUp::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_get_delta_catch_up_converts_the_messages_to_models() {
+        let revert = tycho_common::dto::BlockAggregatedChanges {
+            extractor: "uniswap_v2".to_string(),
+            revert: true,
+            state_updates: HashMap::from([(
+                "c1".to_string(),
+                tycho_common::dto::ProtocolStateDelta {
+                    component_id: "c1".to_string(),
+                    updated_attributes: HashMap::from([("x".to_string(), Bytes::from("0x02"))]),
+                    deleted_attributes: HashSet::new(),
+                },
+            )]),
+            ..Default::default()
+        };
+        let block = tycho_common::dto::BlockAggregatedChanges {
+            extractor: "uniswap_v2".to_string(),
+            ..Default::default()
+        };
+        let messages = vec![revert, block];
+        let body = serde_json::json!({"status": "available", "messages": messages}).to_string();
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/delta_catch_up")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "chain": "ethereum",
+                "protocol_system": "uniswap_v2",
+                "from_block_hash": format!("0x{}", "04".repeat(32)),
+                "from_block_number": 4,
+                "to_block_hash": format!("0x{}", "06".repeat(32)),
+                "fingerprint": "0xabcdef",
+                "include_state": false,
+            })))
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+
+        let response = client
+            .get_delta_catch_up(delta_catch_up_params().with_include_state(false))
+            .await
+            .expect("get delta catch-up");
+
+        mock.assert();
+        let expected = messages
+            .into_iter()
+            .map(BlockAggregatedChanges::from)
+            .collect();
+        assert_eq!(response, DeltaCatchUp::Available(expected));
+    }
+
+    #[rstest]
+    #[case::known_reason("to_not_ahead", DeltaCatchUpUnavailable::ToNotAhead)]
+    #[case::reason_added_after_this_client("window_too_busy", DeltaCatchUpUnavailable::Unknown)]
+    #[tokio::test]
+    async fn test_get_delta_catch_up_reports_why_it_is_unavailable(
+        #[case] sent: &str,
+        #[case] expected: DeltaCatchUpUnavailable,
+    ) {
+        let body = serde_json::json!({"status": "unavailable", "reason": sent}).to_string();
+        let (server, mock) = delta_catch_up_server(200, &body).await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+
+        let response = client
+            .get_delta_catch_up(delta_catch_up_params())
+            .await
+            .expect("get delta catch-up");
+
+        mock.assert();
+        assert_eq!(response, DeltaCatchUp::Unavailable(expected));
+    }
+
+    #[tokio::test]
+    async fn test_get_delta_catch_up_of_an_unknown_extractor_is_an_error() {
+        let (server, mock) =
+            delta_catch_up_server(400, "Unknown extractor: ethereum:uniswap_v2").await;
+        let client = HttpRPCClient::new(server.url().as_str(), HttpRPCClientOptions::default())
+            .expect("create client");
+
+        let response = client
+            .get_delta_catch_up(delta_catch_up_params())
+            .await;
+
+        mock.assert();
+        assert!(matches!(response, Err(RPCError::UnknownExtractor(_))), "{response:?}");
     }
 }

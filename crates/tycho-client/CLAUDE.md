@@ -5,7 +5,9 @@ Consumer library implementing the snapshot + deltas pattern for real-time protoc
 ## Module Map
 
 ```
-rpc.rs              HTTP snapshot client — fetches protocol state at a block height
+rpc.rs              HTTP snapshot client — fetches protocol state at a block height;
+                    get_delta_catch_up fetches the messages a resubscribing client missed
+                    (Unsupported on a 404 from servers without the endpoint)
 deltas.rs           WebSocket client — streams real-time state deltas
 stream.rs           Builder entry point — wires RPC + WS clients into a TychoStream.
                     build() eagerly loads and validates the chain registry before any network I/O
