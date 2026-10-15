@@ -41,7 +41,7 @@ for any protocol indexed by Tycho.
   `with_fallback_router()` on the Bebop, Hashflow, Liquorice, Metric and Native builders labels
   components `fallback:rfq:bebop` / `fallback:rfq:hashflow` / `fallback:rfq:liquorice` /
   `fallback:rfq:metric` / `fallback:rfq:native`, so they execute through those venues' fallback
-  routers. Off by default: those routers are not deployed yet.
+  routers. Off by default. The Native and Liquorice routers are not deployed yet.
   Hashflow, Liquorice, Bebop and Native stream in one of two `rfq::models::ComponentLayout`s,
   set on the client builder. `PerPair` (default) streams one component per token pair, decoded
   by the per-pair state (`state.rs`, `decoder.rs`). `AllPairs` streams one component for all

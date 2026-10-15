@@ -490,7 +490,7 @@ same `FallbackSwapData` `user_data`:
   also reads `router_v6` there. Each inserts a length prefix before the venue data and appends the fallback; the
   Liquorice one drops the partial-fill fields and keeps the settlement calldata.
 
-None of these routers is deployed, so no chain lists these entries yet. The gas estimator charges a
+The Native and Liquorice routers are not deployed, so no chain lists their entries yet. The gas estimator charges a
 Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop, Hashflow, Native or Liquorice leg the
 router's approval and output forward.
 
