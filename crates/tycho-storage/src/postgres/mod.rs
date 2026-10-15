@@ -133,8 +133,8 @@ use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
@@ -158,6 +158,7 @@ mod schema;
 mod snapshot;
 pub mod token_cache;
 mod versioning;
+mod writer_epoch;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
@@ -649,10 +650,32 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 
 /// Creates a connection pool without running migrations.
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    let mut manager_config = ManagerConfig::default();
+    manager_config.custom_setup =
+        Box::new(|url| Box::pin(establish_with_keepalives(url.to_string())));
+    let config =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, manager_config);
     Pool::builder(config)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
+/// Server-side TCP keepalive settings of every database session.
+///
+/// A write transaction holds a share lock on the writer epoch row until it ends. If the writer's
+/// host disappears with a transaction open, Postgres keeps that session and its lock until it
+/// notices that the peer is gone, and no new writer can claim the epoch until then. With the
+/// operating system defaults that can take hours. With these settings Postgres drops the session
+/// about 25 seconds after the peer stops answering.
+pub(crate) const SESSION_KEEPALIVES: &str =
+    "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3;";
+
+async fn establish_with_keepalives(url: String) -> ConnectionResult<AsyncPgConnection> {
+    let mut conn = AsyncPgConnection::establish(&url).await?;
+    conn.batch_execute(SESSION_KEEPALIVES)
+        .await
+        .map_err(ConnectionError::CouldntSetupConfiguration)?;
+    Ok(conn)
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.

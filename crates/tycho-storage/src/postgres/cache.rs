@@ -46,7 +46,7 @@ use tycho_common::{
 use super::{
     is_transaction_conflict,
     snapshot::{bound_snapshot_reads, snapshot_transaction},
-    PostgresError, PostgresGateway,
+    writer_epoch, PostgresError, PostgresGateway,
 };
 
 /// Represents different types of database write operations.
@@ -320,6 +320,8 @@ pub(crate) struct DBCacheWriteExecutor {
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
     max_retries: u64,
+    /// Writer epoch claimed at construction; every write transaction is fenced on it.
+    epoch: i64,
 }
 
 impl DBCacheWriteExecutor {
@@ -342,7 +344,21 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
+        let epoch = writer_epoch::claim(&mut conn)
+            .await
+            .expect("Claiming the database writer epoch should succeed");
+        info!(epoch, "Claimed database writer epoch");
+
+        Self {
+            name,
+            chain,
+            pool,
+            state_gateway,
+            persisted_block,
+            msg_receiver,
+            max_retries: 3,
+            epoch,
+        }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -385,6 +401,7 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        writer_epoch::ensure_current(conn, self.epoch).await?;
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {

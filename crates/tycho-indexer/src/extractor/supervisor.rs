@@ -6,7 +6,7 @@ use tokio::sync::{
 };
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, warn};
-use tycho_common::models::ExtractorIdentity;
+use tycho_common::{models::ExtractorIdentity, storage::StorageError};
 
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
@@ -40,6 +40,17 @@ fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
     );
     restarts.increment(0);
     restarts
+}
+
+/// Returns the error to end supervision with when `err` must not lead to a restart.
+///
+/// A fenced writer means another process took over writing to the database. A rebuilt extractor
+/// would be fenced again on its first commit, so restarting cannot help.
+fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
+    let ExtractionError::Storage(StorageError::Fenced { claimed, current }) = err else {
+        return None;
+    };
+    Some(ExtractionError::Storage(StorageError::Fenced { claimed: *claimed, current: *current }))
 }
 
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
@@ -195,6 +206,9 @@ impl ExtractorSupervisor {
                         "reason" => err.variant_name()
                     )
                     .increment(1);
+                    if let Some(fatal) = unrecoverable(err) {
+                        return Err(fatal);
+                    }
                 }
                 Err(ref join_err) => {
                     error!(
