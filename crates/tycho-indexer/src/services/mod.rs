@@ -306,6 +306,12 @@ where
         if !self.disabled_rpc_caches.is_empty() {
             info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
         }
+        // Fixed per process: an extractor's fingerprint never changes while the process runs.
+        let extractor_fingerprints = self
+            .extractor_handles
+            .iter()
+            .map(|(id, sender)| (id.clone(), sender.fingerprint()))
+            .collect();
         let rpc_data = web::Data::new(
             rpc::RpcHandler::new(
                 self.db_gateway,
@@ -316,7 +322,8 @@ where
                 self.protocol_systems,
             )
             .with_disabled_caches(&self.disabled_rpc_caches)
-            .with_state_service(state_service),
+            .with_state_service(state_service)
+            .with_extractor_fingerprints(extractor_fingerprints),
         );
 
         let server = HttpServer::new(move || {
@@ -380,6 +387,10 @@ where
                 .service(
                     web::resource(format!("/{}/component_tvl", self.prefix))
                         .route(web::post().to(rpc::component_tvl::<G, EVMEntrypointService>)),
+                )
+                .service(
+                    web::resource(format!("/{}/delta_catch_up", self.prefix))
+                        .route(web::post().to(rpc::delta_catch_up::<G, EVMEntrypointService>)),
                 )
                 .service(
                     SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
