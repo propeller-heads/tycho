@@ -209,7 +209,8 @@ router calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selec
 `actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when it
 differs from the signed amount it writes it as `actualSellerAmount`, and Native scales the signed minimum output to
 it. Native reverts an input too far from the signed amount, and the fallback then fills the leg. The router approves
-the Native router for `amountIn`, calls it, revokes the approval and forwards the output.
+the Native router for `amountIn`, calls it, revokes the approval and forwards the output. Any input Native did not
+pull goes back to the caller.
 
 `LiquoriceFallbackRouter` runs a signed Liquorice quote through the immutable `liquoriceSettlement`. It takes the
 settlement calldata alone: Liquorice quotes do not partially fill, so the router carries none of `LiquoriceExecutor`'s

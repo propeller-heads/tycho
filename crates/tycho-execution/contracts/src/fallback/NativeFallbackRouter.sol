@@ -63,6 +63,13 @@ contract NativeFallbackRouter is TychoFallbackRouter {
     ) external {
         _validate(swap_.amountIn, nativeData);
         _swap(swap_, nativeRouterV6, nativeData, fallbackSwap);
+
+        // Native is approved for all of `amountIn`; send back any input it did not pull.
+        IERC20 tokenIn = IERC20(swap_.tokenIn);
+        uint256 remainder = tokenIn.balanceOf(address(this));
+        if (remainder > 0) {
+            tokenIn.safeTransfer(msg.sender, remainder);
+        }
     }
 
     function _runsPrimaryFirst() internal pure override returns (bool) {
