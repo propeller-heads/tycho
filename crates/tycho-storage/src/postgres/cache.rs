@@ -1464,6 +1464,107 @@ mod test_serial_db {
         .await;
     }
 
+    async fn setup_write_executor(
+        connection_pool: &Pool<AsyncPgConnection>,
+    ) -> (PostgresGateway, mpsc::Sender<DBCacheMessage>, i64, JoinHandle<()>) {
+        let mut connection = connection_pool
+            .get()
+            .await
+            .expect("Failed to get a connection from the pool");
+        let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+        db_fixtures::insert_token(
+            &mut connection,
+            chain_id,
+            "0000000000000000000000000000000000000000",
+            "ETH",
+            18,
+            Some(100),
+        )
+        .await;
+        let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+        let (tx, rx) = mpsc::channel(10);
+        let write_executor = DBCacheWriteExecutor::new(
+            "ethereum".to_owned(),
+            Chain::Ethereum,
+            connection_pool.clone(),
+            gateway.clone(),
+            rx,
+        )
+        .await;
+        let epoch = write_executor.epoch;
+        (gateway, tx, epoch, write_executor.run())
+    }
+
+    #[tokio::test]
+    async fn test_write_is_fenced_after_another_writer_claims() {
+        run_against_db(|connection_pool| async move {
+            let (gateway, tx, epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let newer_epoch = writer_epoch::claim(&mut connection)
+                .await
+                .expect("second writer should claim");
+
+            let block = get_sample_block(1);
+            let res =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            handle.abort();
+
+            assert_eq!(res, Err(StorageError::Fenced { claimed: epoch, current: newer_epoch }));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await;
+            assert!(stored.is_err(), "a fenced write must not reach the database");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_waiting_on_a_concurrent_claim_is_fenced() {
+        run_against_db(|connection_pool| async move {
+            let (gateway, tx, epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut claimer = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            sql_query("BEGIN")
+                .execute(&mut claimer)
+                .await
+                .unwrap();
+            let newer_epoch = writer_epoch::claim(&mut claimer)
+                .await
+                .expect("second writer should claim");
+
+            let block = get_sample_block(1);
+            let response =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block])])
+                    .await;
+            // Give the write time to block on the epoch row held by the uncommitted claim.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sql_query("COMMIT")
+                .execute(&mut claimer)
+                .await
+                .unwrap();
+
+            let res = response
+                .await
+                .expect("executor should answer");
+            handle.abort();
+
+            assert_eq!(res, Err(StorageError::Fenced { claimed: epoch, current: newer_epoch }));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut claimer)
+                .await;
+            assert!(stored.is_err(), "a fenced write must not reach the database");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_write_retries_serialization_failure() {
         run_against_db(|connection_pool| async move {

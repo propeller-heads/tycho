@@ -65,3 +65,41 @@ pub(crate) async fn ensure_current(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test_serial_db {
+    use diesel_async::{AsyncConnection, SimpleAsyncConnection};
+
+    use super::*;
+
+    async fn open_session() -> AsyncPgConnection {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        AsyncPgConnection::establish(&url)
+            .await
+            .expect("session should connect")
+    }
+
+    #[tokio::test]
+    async fn test_claim_waits_until_open_write_transactions_end() {
+        let mut writer = open_session().await;
+        writer
+            .batch_execute("BEGIN; SELECT epoch FROM writer_epoch FOR SHARE;")
+            .await
+            .unwrap();
+        let mut claimer = open_session().await;
+        let claim = tokio::spawn(async move { claim(&mut claimer).await });
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!claim.is_finished(), "the claim must wait for the open write transaction");
+
+        writer
+            .batch_execute("COMMIT")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), claim)
+            .await
+            .expect("the claim should finish once the transaction ends")
+            .unwrap()
+            .expect("the claim should succeed");
+    }
+}

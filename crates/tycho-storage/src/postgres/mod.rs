@@ -1573,6 +1573,38 @@ mod tests_transaction_conflict {
 }
 
 #[cfg(test)]
+mod test_serial_db_pool {
+    use diesel::{sql_types::Text, QueryableByName};
+
+    use super::*;
+
+    #[derive(QueryableByName)]
+    struct Setting {
+        #[diesel(sql_type = Text)]
+        value: String,
+    }
+
+    #[tokio::test]
+    async fn test_pool_sessions_set_server_side_keepalives() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect(&db_url).await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+
+        let mut settings = Vec::new();
+        for name in ["tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"] {
+            let setting: Setting =
+                diesel::sql_query(format!("SELECT current_setting('{name}') AS value"))
+                    .get_result(&mut conn)
+                    .await
+                    .unwrap();
+            settings.push(setting.value);
+        }
+
+        assert_eq!(settings, ["10", "5", "3"]);
+    }
+}
+
+#[cfg(test)]
 mod tests_migration_lock {
     use std::{sync::mpsc, thread, time::Duration};
 
