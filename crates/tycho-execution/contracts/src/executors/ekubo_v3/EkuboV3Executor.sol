@@ -66,7 +66,7 @@ contract EkuboV3Executor is IExecutor, ICallback {
     uint256 private constant _POOL_DATA_OFFSET = 56;
     uint256 internal constant _HOP_BYTE_LEN = 52;
 
-    uint256 private constant _SKIP_AHEAD = 0;
+    uint256 private constant _SKIP_AHEAD = 0x7fffffff;
 
     // A signed hop appends meta(32) | minBalanceUpdate(32) | sigLen(2) | sig.
     // These name the fixed-width parts of that tail; the signature length is

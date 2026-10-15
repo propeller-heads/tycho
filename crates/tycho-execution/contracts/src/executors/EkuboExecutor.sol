@@ -37,7 +37,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
     bytes4 private constant _LOCKED_SELECTOR = 0xb45a3c0e; // locked(uint256)
     bytes4 private constant _PAY_CALLBACK_SELECTOR = 0x599d0714; // payCallback(uint256,address)
 
-    uint256 private constant _SKIP_AHEAD = 0;
+    uint256 private constant _SKIP_AHEAD = 0x7fffffff;
 
     using SafeERC20 for IERC20;
 
