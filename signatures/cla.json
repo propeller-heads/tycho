@@ -143,6 +143,14 @@
       "created_at": "2026-10-09T09:57:47Z",
       "repoId": 677301333,
       "pullRequestNo": 1449
+    },
+    {
+      "name": "fichiokaku",
+      "id": 129840383,
+      "comment_id": 6189615967,
+      "created_at": "2026-10-15T10:09:02Z",
+      "repoId": 677301333,
+      "pullRequestNo": 1575
     }
   ]
 }
