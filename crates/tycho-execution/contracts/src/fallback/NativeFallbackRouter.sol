@@ -118,7 +118,8 @@ contract NativeFallbackRouter is TychoFallbackRouter {
         if (selector != _TRADE_RFQT_SELECTOR) {
             revert NativeFallbackRouter__InvalidSelector(selector);
         }
-        // A zero `actualSellerAmount` means "the signed amount" to Native.
+        // A zero `amountIn` written as `actualSellerAmount` would make Native trade the signed
+        // amount.
         if (amountIn == 0 || _signedAmountIn(nativeData) == 0) {
             revert NativeFallbackRouter__InvalidAmountIn();
         }
