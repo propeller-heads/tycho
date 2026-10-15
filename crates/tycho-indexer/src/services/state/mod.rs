@@ -1,8 +1,9 @@
 //! In-memory serving of state requests.
 //!
-//! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
-//! and the service that answers state requests from both ([`service`]). Locking is described in
-//! the [`cache`] module doc; the read order in the [`service`] module doc.
+//! This module holds the block window ([`window`]) with the reverts it applied
+//! ([`revert_journal`]), the entity cache ([`cache`]) it folds into, and the service that answers
+//! state requests from both ([`service`]). Locking is described in the [`cache`] module doc; the
+//! read order in the [`service`] module doc.
 //!
 //! # How a state request is served
 //!
@@ -17,6 +18,7 @@
 //! read never misses them.
 
 pub(crate) mod cache;
+pub(crate) mod revert_journal;
 pub(crate) mod service;
 pub(crate) mod shadow;
 pub(crate) mod window;

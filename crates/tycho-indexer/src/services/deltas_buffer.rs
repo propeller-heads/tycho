@@ -15,7 +15,7 @@ use tycho_common::{
         blockchain::BlockAggregatedChanges,
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
-        MergeError,
+        BlockHash, MergeError,
     },
     storage::StorageError,
     Bytes,
@@ -26,7 +26,7 @@ use crate::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{DeltaWindow, FoldSink},
+    services::state::window::{CatchUpPath, DeltaWindow, FoldSink},
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -98,6 +98,28 @@ pub trait PendingDeltasBuffer {
         f: &dyn Fn(&BlockAggregatedChanges) -> bool,
         protocol_system: &str,
     ) -> Result<Option<BlockAggregatedChanges>>;
+
+    /// The messages that take a client of `protocol_system` from block `from` to block `to`,
+    /// oldest first, or why its window cannot serve them; see [`DeltaWindow::catch_up_path`].
+    /// `from_number` is the number of `from`.
+    ///
+    /// # Errors
+    ///
+    /// `UnknownExtractor` when no window serves `protocol_system`, `LockError` when its lock is
+    /// poisoned.
+    // An `expect`, unlike an `allow`, fails the build once the endpoint calls this, so it cannot
+    // outlive the gap between the two changes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the delta catch-up endpoint will call it; tests do already")
+    )]
+    fn catch_up_path(
+        &self,
+        protocol_system: &str,
+        from: &BlockHash,
+        from_number: u64,
+        to: &BlockHash,
+    ) -> Result<CatchUpPath>;
 }
 
 impl PendingDeltas {
@@ -556,6 +578,25 @@ impl PendingDeltasBuffer for PendingDeltas {
         }
 
         Ok(None)
+    }
+
+    /// Holds the extractor's window lock only while the path is resolved, which copies `Arc`s;
+    /// callers build their responses after the lock is released.
+    fn catch_up_path(
+        &self,
+        protocol_system: &str,
+        from: &BlockHash,
+        from_number: u64,
+        to: &BlockHash,
+    ) -> Result<CatchUpPath> {
+        let window = self
+            .windows
+            .get(protocol_system)
+            .ok_or_else(|| PendingDeltasError::UnknownExtractor(protocol_system.to_string()))?;
+        let guard = window.lock().map_err(|e| {
+            PendingDeltasError::LockError(protocol_system.to_string(), e.to_string())
+        })?;
+        Ok(guard.catch_up_path(from, from_number, to))
     }
 }
 
@@ -1524,5 +1565,344 @@ mod test {
             .unwrap();
 
         assert_eq!(res, expected_res);
+    }
+
+    #[tokio::test]
+    async fn run_keeps_partial_reverts_out_of_the_window() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.clone().run(vec![rx], start_tx));
+
+        for n in 1..=4 {
+            tx.send(DeltaCommand::Block(native_msg(n, None, n)))
+                .await
+                .unwrap();
+        }
+        // A revert the extractor marks partial. It targets 3 so that applying it would show: the
+        // window would drop block 4 and journal the revert.
+        let partial_revert =
+            BlockAggregatedChanges { partial_block_index: Some(0), ..(*native_revert(3)).clone() };
+        tx.send(DeltaCommand::Block(Arc::new(partial_revert)))
+            .await
+            .unwrap();
+        drop(tx);
+
+        pump.await.unwrap().unwrap();
+        assert!(has_block(&buffer, 4));
+        assert_eq!(
+            buffer
+                .catch_up_path("native:extractor", &block(4).hash, 4, &block(4).hash)
+                .unwrap(),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn catch_up_path_of_an_unknown_extractor_is_an_error() {
+        let buffer = PendingDeltas::new(["native:extractor"]);
+
+        let res = buffer.catch_up_path("unknown", &block(1).hash, 1, &block(2).hash);
+
+        assert_eq!(res, Err(PendingDeltasError::UnknownExtractor("unknown".to_string())));
+    }
+
+    /// Checks the windows' catch-up paths against `catch_up_spec`, the reference model of what a
+    /// window must answer, over random extractor histories.
+    mod catch_up_spec_property {
+        use std::collections::BTreeMap;
+
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use tycho_common::testing::delta_history::{
+            catch_up_spec, generate_history, CatchUpSpec, FallbackReason, Gap, History,
+            HistoryConfig, HistoryEvent, EXTRACTOR,
+        };
+
+        use super::*;
+        use crate::services::state::window::CatchUpUnavailable;
+
+        /// Histories per configuration.
+        const SEEDS: u64 = 128;
+        /// Random gaps drawn per history, besides the gaps around restarts.
+        const RANDOM_GAPS: usize = 40;
+        /// Messages after a restart that start a subscription in a gap around the restart.
+        const FIRST_LIVES_AFTER_A_RESTART: usize = 3;
+
+        /// Gaps of every shape the spec tells apart: random ones up to three window depths long,
+        /// and ones around every restart, from the client's last block and from the last
+        /// committed one.
+        fn gaps(history: &History, rng: &mut StdRng) -> Vec<Gap> {
+            let mut messages = Vec::new();
+            for (index, event) in history.events.iter().enumerate() {
+                match event {
+                    HistoryEvent::Message(_) => messages.push(index),
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {}
+                }
+            }
+            let reach = 3 * history.config.window_depth as usize;
+            let mut gaps = Vec::new();
+            for _ in 0..RANDOM_GAPS {
+                let start = rng.gen_range(0..messages.len() - 1);
+                let end = (start + rng.gen_range(1..=reach)).min(messages.len() - 1);
+                gaps.push(Gap { last_applied: messages[start], first_live: messages[end] });
+            }
+            for (restart, event) in history.events.iter().enumerate() {
+                let HistoryEvent::ExtractorRestarted { last_committed, kind: _ } = event else {
+                    continue;
+                };
+                let split = messages.partition_point(|&index| index < restart);
+                let (before, after) = messages.split_at(split);
+                let at_last_committed = before
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&index| {
+                        matches!(
+                            &history.events[index],
+                            HistoryEvent::Message(message) if &message.block == last_committed
+                        )
+                    });
+                for &first_live in after
+                    .iter()
+                    .take(FIRST_LIVES_AFTER_A_RESTART)
+                {
+                    for last_applied in before
+                        .last()
+                        .copied()
+                        .into_iter()
+                        .chain(at_last_committed)
+                    {
+                        gaps.push(Gap { last_applied, first_live });
+                    }
+                }
+            }
+            gaps
+        }
+
+        /// The window answer the spec requires, or `None` when the spec falls back on a
+        /// fingerprint change: the window cannot see fingerprints, so the endpoint compares them
+        /// before it asks the window.
+        fn required_answer(spec: CatchUpSpec) -> Option<CatchUpPath> {
+            let reason = match spec {
+                CatchUpSpec::Possible(path) => return Some(Ok(path)),
+                CatchUpSpec::Fallback(reason) => reason,
+            };
+            let unavailable = match reason {
+                FallbackReason::FingerprintChanged => return None,
+                FallbackReason::EmptyWindow => CatchUpUnavailable::EmptyWindow,
+                FallbackReason::BelowFloor => CatchUpUnavailable::BelowFloor,
+                FallbackReason::UnknownHash => CatchUpUnavailable::UnknownHash,
+                FallbackReason::ToNotInWindow => CatchUpUnavailable::ToNotInWindow,
+                FallbackReason::ToNotAhead => CatchUpUnavailable::ToNotAhead,
+            };
+            Some(Err(unavailable))
+        }
+
+        /// `(number, revert)` of every message on a path, to keep failure messages short.
+        fn summary(
+            answer: &CatchUpPath,
+        ) -> std::result::Result<Vec<(u64, bool)>, CatchUpUnavailable> {
+            answer
+                .as_ref()
+                .map_err(|reason| *reason)
+                .map(|path| {
+                    path.iter()
+                        .map(|message| (message.block.number, message.revert))
+                        .collect()
+                })
+        }
+
+        /// How often each answer shape occurs.
+        #[derive(Debug, Default)]
+        struct Outcomes {
+            /// Gaps the spec answers with `FingerprintChanged`, not compared.
+            fingerprint_changed: usize,
+            empty: usize,
+            canonical_blocks_only: usize,
+            through_a_revert: usize,
+            through_nested_reverts: usize,
+            /// Paths that start at the parent of the window's oldest block, which the window no
+            /// longer holds.
+            from_the_parent_of_the_oldest_block: usize,
+            /// Paths over a gap with an extractor restart in it.
+            across_a_restart: usize,
+            /// Paths through a revert whose target is the parent of the window's oldest block,
+            /// the lowest target the journal keeps.
+            through_a_revert_to_the_parent_of_the_oldest_block: usize,
+            unavailable: HashMap<CatchUpUnavailable, usize>,
+        }
+
+        impl Outcomes {
+            fn add(
+                &mut self,
+                history: &History,
+                gap: Gap,
+                oldest_parent: Option<&BlockHash>,
+                answer: &CatchUpPath,
+            ) {
+                let path = match answer {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        *self
+                            .unavailable
+                            .entry(*reason)
+                            .or_default() += 1;
+                        return;
+                    }
+                };
+                let HistoryEvent::Message(last) = &history.events[gap.last_applied] else {
+                    panic!("{gap:?} does not start at a message");
+                };
+                let mut reverts = Vec::new();
+                for message in path {
+                    if message.revert {
+                        reverts.push(&message.block.hash);
+                    }
+                }
+                let mut restarted = false;
+                for event in &history.events[gap.last_applied + 1..gap.first_live] {
+                    match event {
+                        HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                            restarted = true;
+                        }
+                        HistoryEvent::Message(_) => {}
+                    }
+                }
+                self.empty += usize::from(path.is_empty());
+                self.canonical_blocks_only += usize::from(!path.is_empty() && reverts.is_empty());
+                self.through_a_revert += usize::from(!reverts.is_empty());
+                self.through_nested_reverts += usize::from(reverts.len() >= 2);
+                self.from_the_parent_of_the_oldest_block +=
+                    usize::from(reverts.is_empty() && oldest_parent == Some(&last.block.hash));
+                self.across_a_restart += usize::from(restarted);
+                self.through_a_revert_to_the_parent_of_the_oldest_block += usize::from(
+                    reverts.last().copied() == oldest_parent && oldest_parent.is_some(),
+                );
+            }
+        }
+
+        #[test]
+        fn catch_up_paths_match_the_spec() {
+            let configs = [
+                HistoryConfig::default(),
+                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
+                // bound and clients fall below the floor.
+                HistoryConfig {
+                    window_depth: 4,
+                    finality_depth: 3,
+                    max_revert_depth: 3,
+                    max_commit_lag: 2,
+                    ..Default::default()
+                },
+            ];
+            let mut rng = StdRng::seed_from_u64(0);
+            let mut outcomes = Outcomes::default();
+            for config in &configs {
+                for seed in 0..SEEDS {
+                    let history = generate_history(config, seed);
+                    let mut by_first_live: BTreeMap<usize, Vec<Gap>> = BTreeMap::new();
+                    for gap in gaps(&history, &mut rng) {
+                        by_first_live
+                            .entry(gap.first_live)
+                            .or_default()
+                            .push(gap);
+                    }
+                    let windows = new_windows(
+                        [EXTRACTOR],
+                        WindowConfig { depth: config.window_depth, min_fold_batch: 1 },
+                    );
+                    let buffer =
+                        PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
+
+                    for (index, event) in history.events.iter().enumerate() {
+                        // The window as it stands when the client's first live message arrives.
+                        for &gap in by_first_live
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                        {
+                            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) =
+                                (&history.events[gap.last_applied], event)
+                            else {
+                                panic!("{gap:?} does not start and end at a message");
+                            };
+                            let Some(required) = required_answer(catch_up_spec(&history, gap))
+                            else {
+                                outcomes.fingerprint_changed += 1;
+                                continue;
+                            };
+                            let to = if live.revert {
+                                &live.block.hash
+                            } else {
+                                &live.block.parent_hash
+                            };
+
+                            let answer = buffer
+                                .catch_up_path(EXTRACTOR, &last.block.hash, last.block.number, to)
+                                .unwrap();
+
+                            assert!(
+                                answer == required,
+                                "seed {seed}, {config:?}, {gap:?}: the window answers {:?}, \
+                                 the spec {:?}",
+                                summary(&answer),
+                                summary(&required)
+                            );
+                            let oldest_parent = windows[EXTRACTOR]
+                                .lock()
+                                .unwrap()
+                                .floor()
+                                .map(|oldest| oldest.parent_hash);
+                            outcomes.add(&history, gap, oldest_parent.as_ref(), &answer);
+                        }
+                        match event {
+                            HistoryEvent::Message(message) => buffer.insert(message).unwrap(),
+                            HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                                buffer
+                                    .fold_committed_and_clear(EXTRACTOR)
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let Outcomes {
+                fingerprint_changed,
+                empty,
+                canonical_blocks_only,
+                through_a_revert,
+                through_nested_reverts,
+                from_the_parent_of_the_oldest_block,
+                across_a_restart,
+                through_a_revert_to_the_parent_of_the_oldest_block,
+                unavailable,
+            } = &outcomes;
+            for (shape, count) in [
+                ("fingerprint changes", fingerprint_changed),
+                ("empty paths", empty),
+                ("paths of canonical blocks only", canonical_blocks_only),
+                ("paths through a revert", through_a_revert),
+                ("paths through nested reverts", through_nested_reverts),
+                ("paths from the parent of the oldest block", from_the_parent_of_the_oldest_block),
+                ("paths across a restart", across_a_restart),
+                (
+                    "paths through a revert to the parent of the oldest block",
+                    through_a_revert_to_the_parent_of_the_oldest_block,
+                ),
+            ] {
+                assert!(*count > 0, "no {shape} in {outcomes:?}");
+            }
+            // `ToNotInWindow` needs a window behind the WebSocket, which a history cannot express.
+            for reason in [
+                CatchUpUnavailable::EmptyWindow,
+                CatchUpUnavailable::BelowFloor,
+                CatchUpUnavailable::UnknownHash,
+                CatchUpUnavailable::ToNotAhead,
+            ] {
+                assert!(unavailable.contains_key(&reason), "no {reason:?} in {outcomes:?}");
+            }
+        }
     }
 }
