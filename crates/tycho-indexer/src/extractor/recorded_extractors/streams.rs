@@ -15,11 +15,11 @@ use tycho_storage::postgres::db_fixtures::yesterday_midnight;
 
 use super::{
     rpc::{address_word, balance_slot, delegate, implementation_slot, slot},
-    Recorded, RecordedStream,
+    Delivery, Recorded, RecordedStream,
 };
 use crate::{
     pb::sf::substreams::{
-        rpc::v2::BlockUndoSignal,
+        rpc::v2::{BlockScopedData, BlockUndoSignal},
         v1::{BlockRef, Clock},
     },
     testing::fixtures::pb_block_scoped_data,
@@ -125,12 +125,17 @@ const ROUTER: [u8; 20] = [0x7e; 20];
 /// The native stream: components created and deleted, attributes created, updated and deleted,
 /// component balances of priced and unpriced tokens. A two-block branch is orphaned before the
 /// halfway point, and nested undo signals orphan another branch after it.
-pub(super) fn native() -> RecordedStream {
+///
+/// Sent as partial blocks, block 1 arrives whole, as blocks behind the chain head do, and the
+/// undo signals interrupt the last block of each orphaned branch, so one revert drops sealed
+/// blocks and pending partials, and one drops pending partials only. One more undo signal names
+/// block 3 while it streams: nothing sealed is invalid, so the extractor keeps its partials.
+pub(super) fn native(delivery: Delivery) -> RecordedStream {
     use ChangeType::{Creation, Deletion, Update};
 
-    let mut stream = StreamWriter::new();
+    let mut stream = StreamWriter::delivering(delivery);
     // 1
-    stream.block(vec![Tx::new()
+    stream.whole_block(vec![Tx::new()
         .create(native_pool("pool_a", [&WETH, &USDC]))
         .attributes(
             "pool_a",
@@ -151,7 +156,7 @@ pub(super) fn native() -> RecordedStream {
             .balance("pool_b", &TKNA, 700),
     ]);
     // 3
-    stream.block(vec![
+    stream.block_undone_to_itself(vec![
         Tx::new()
             .attributes("pool_b", &[("reserve0", 520, Update)])
             .balance("pool_b", &DAI, 520),
@@ -185,7 +190,7 @@ pub(super) fn native() -> RecordedStream {
             .delete(native_pool("pool_b", [&DAI, &TKNA]))
             .attributes("pool_b", &[("paused", 1, Creation)]),
     ]);
-    stream.block(vec![Tx::new()
+    stream.interrupted_block(vec![Tx::new()
         .attributes("pool_c", &[("reserve0", 310, Update)])
         .attributes("pool_a", &[("fee_tier", 7, Update)])
         .balance("pool_c", &USDT, 310)]);
@@ -235,7 +240,7 @@ pub(super) fn native() -> RecordedStream {
             .balance("pool_f", &USDC, 20),
         Tx::new().attributes("pool_a", &[("reserve0", 140, Update)]),
     ]);
-    stream.block(vec![Tx::new()
+    stream.interrupted_block(vec![Tx::new()
         .attributes("pool_f", &[("reserve0", 11, Update)])
         .balance("pool_f", &DAI, 11)]);
     stream.undo_to(11);
@@ -407,14 +412,38 @@ pub(super) fn dci() -> RecordedStream {
     stream.finish()
 }
 
+/// How a block is sent in a stream of partial blocks. In a stream of full blocks, every block is
+/// one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One partial per transaction, the last one flagged.
+    Partials,
+    /// One partial per transaction, with an undo signal naming the block itself after the first.
+    PartialsUndoneToItself,
+    /// One partial per transaction, none flagged: an undo signal orphans the block next.
+    Interrupted,
+    /// One message, as substreams sends blocks behind the chain head.
+    Whole,
+}
+
+/// Whether every message of a block was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockEnd {
+    Sealed,
+    /// The next message is an undo signal that orphans the block before its last partial. Only
+    /// blocks sent as partial blocks can end this way; full blocks are always sealed.
+    Interrupted,
+}
+
 /// Writes a stream block by block. Blocks written after an undo signal are on a new branch:
 /// their hashes differ from the blocks they replace.
 pub(super) struct StreamWriter {
+    delivery: Delivery,
     /// Timestamp of block 0. The test database only has partitions for recent days.
     base_ts: NaiveDateTime,
     /// The current chain, oldest first.
     chain: Vec<ChainBlock>,
-    /// Number of undo signals so far.
+    /// Number of undo signals that orphaned blocks so far.
     branch: u64,
     final_height: u64,
     messages: Vec<Recorded>,
@@ -423,12 +452,21 @@ pub(super) struct StreamWriter {
 struct ChainBlock {
     number: u64,
     hash: BlockHash,
+    /// Cursor of the block's last message.
     cursor: String,
+    end: BlockEnd,
 }
 
 impl StreamWriter {
+    /// A writer that sends every block as one message.
     pub(super) fn new() -> Self {
+        Self::delivering(Delivery::FullBlocks)
+    }
+
+    /// A writer that sends blocks the way `delivery` says.
+    pub(super) fn delivering(delivery: Delivery) -> Self {
         Self {
+            delivery,
             base_ts: yesterday_midnight(),
             chain: Vec::new(),
             branch: 0,
@@ -440,6 +478,40 @@ impl StreamWriter {
     /// Appends the next block of the current chain, with `txs` in order. The first block is
     /// final: an extractor with the dynamic contract indexer needs its first block to be.
     pub(super) fn block(&mut self, txs: Vec<Tx>) {
+        self.append(txs, Shape::Partials);
+    }
+
+    /// Appends the next block like [`Self::block`], sent as one message even in a stream of
+    /// partial blocks, as substreams sends blocks behind the chain head.
+    pub(super) fn whole_block(&mut self, txs: Vec<Tx>) {
+        self.append(txs, Shape::Whole);
+    }
+
+    /// Appends the next block like [`Self::block`]. Sent as partial blocks, an undo signal naming
+    /// the block itself follows its first partial, and its remaining partials follow the undo:
+    /// substreams rewinds to the block it is streaming, which the extractor has not sealed.
+    pub(super) fn block_undone_to_itself(&mut self, txs: Vec<Tx>) {
+        self.append(txs, Shape::PartialsUndoneToItself);
+    }
+
+    /// Appends the next block like [`Self::block`], for an undo signal to orphan next. Sent as
+    /// partial blocks, the block's last partial never arrives.
+    pub(super) fn interrupted_block(&mut self, txs: Vec<Tx>) {
+        self.append(txs, Shape::Interrupted);
+    }
+
+    /// # Panics
+    /// If the current chain ends in an interrupted block, or a block sent as partial blocks has
+    /// too few transactions for its shape.
+    fn append(&mut self, txs: Vec<Tx>, shape: Shape) {
+        if let Some(tip) = self.chain.last() {
+            assert_eq!(
+                tip.end,
+                BlockEnd::Sealed,
+                "block {} was interrupted: only an undo signal can follow it",
+                tip.number
+            );
+        }
         let number = self
             .chain
             .last()
@@ -457,8 +529,7 @@ impl StreamWriter {
                 .max(number.saturating_sub(FINALITY_LAG))
         };
 
-        let mut changes = Vec::new();
-        let mut storage_changes = Vec::new();
+        let mut parts = Vec::with_capacity(txs.len());
         for (index, tx) in txs.into_iter().enumerate() {
             let index = index as u64;
             let transaction = pb::Transaction {
@@ -467,49 +538,129 @@ impl StreamWriter {
                 to: ROUTER.to_vec(),
                 index,
             };
+            let mut part = BlockPart::default();
             if !tx.storage.is_empty() {
-                storage_changes.push(pb::TransactionStorageChanges {
-                    tx: Some(transaction.clone()),
-                    storage_changes: tx.storage,
-                });
+                part.storage_changes
+                    .push(pb::TransactionStorageChanges {
+                        tx: Some(transaction.clone()),
+                        storage_changes: tx.storage,
+                    });
             }
             if tx.changes != pb::TransactionChanges::default() {
-                changes.push(pb::TransactionChanges { tx: Some(transaction), ..tx.changes });
+                part.changes
+                    .push(pb::TransactionChanges { tx: Some(transaction), ..tx.changes });
             }
+            parts.push(part);
         }
 
-        let ts = self.base_ts.and_utc().timestamp() as u64 + number * BLOCK_TIME;
-        let cursor = format!("cursor@{number}:{}", self.branch);
+        let block = pb::Block {
+            hash: hash.to_vec(),
+            parent_hash: parent_hash.to_vec(),
+            number,
+            ts: self.base_ts.and_utc().timestamp() as u64 + number * BLOCK_TIME,
+        };
+        let shape = match self.delivery {
+            Delivery::FullBlocks => Shape::Whole,
+            Delivery::PartialBlocks => shape,
+        };
+        let cursor = match shape {
+            Shape::Whole => {
+                let cursor = format!("cursor@{number}:{}", self.branch);
+                let whole = parts
+                    .into_iter()
+                    .fold(BlockPart::default(), BlockPart::extend);
+                let data = self.block_scoped_data(block, whole, &cursor);
+                self.messages
+                    .push(Recorded::Block(Box::new(data)));
+                cursor
+            }
+            Shape::Partials | Shape::PartialsUndoneToItself | Shape::Interrupted => {
+                self.send_partials(block, parts, shape)
+            }
+        };
+        let end = match shape {
+            Shape::Interrupted => BlockEnd::Interrupted,
+            Shape::Partials | Shape::PartialsUndoneToItself | Shape::Whole => BlockEnd::Sealed,
+        };
+        self.chain
+            .push(ChainBlock { number, hash, cursor, end });
+    }
+
+    /// Sends `block` as one partial per part, shaped by `shape`, and returns the last partial's
+    /// cursor. Every partial but a sealed block's last one carries a temporary hash that reads
+    /// like the block's, with ones in the second word and the partial's index in the third.
+    ///
+    /// # Panics
+    /// If there are too few parts for `shape`, or `shape` is [`Shape::Whole`].
+    fn send_partials(&mut self, block: pb::Block, parts: Vec<BlockPart>, shape: Shape) -> String {
+        let number = block.number;
+        let (needed, sealed) = match shape {
+            Shape::Partials => (1, true),
+            Shape::PartialsUndoneToItself => (2, true),
+            Shape::Interrupted => (1, false),
+            Shape::Whole => panic!("block {number} is sent whole, not as partials"),
+        };
+        assert!(parts.len() >= needed, "block {number} needs {needed} transactions as {shape:?}");
+        let last = parts.len() - 1;
+        let mut cursor = String::new();
+        for (index, part) in parts.into_iter().enumerate() {
+            let flagged = sealed && index == last;
+            let hash = if flagged {
+                block.hash.clone()
+            } else {
+                let words = [self.branch, u64::MAX, index as u64, number].map(u64::to_be_bytes);
+                words.concat()
+            };
+            cursor = format!("cursor@{number}:{}:{index}", self.branch);
+            let mut data =
+                self.block_scoped_data(pb::Block { hash, ..block.clone() }, part, &cursor);
+            data.is_partial = true;
+            data.partial_index = Some(index as u32);
+            data.is_last_partial = Some(flagged);
+            self.messages
+                .push(Recorded::Block(Box::new(data)));
+            if index == 0 && shape == Shape::PartialsUndoneToItself {
+                let id = Bytes::from(block.hash.clone()).to_string();
+                self.messages
+                    .push(Recorded::Undo(BlockUndoSignal {
+                        last_valid_block: Some(BlockRef { id, number }),
+                        last_valid_cursor: cursor.clone(),
+                    }));
+            }
+        }
+        cursor
+    }
+
+    /// One message of the stream: `part` of `block`, with the current final height.
+    fn block_scoped_data(
+        &self,
+        block: pb::Block,
+        part: BlockPart,
+        cursor: &str,
+    ) -> BlockScopedData {
+        let clock = Clock {
+            id: Bytes::from(block.hash.clone()).to_string(),
+            number: block.number,
+            timestamp: Some(prost_types::Timestamp { seconds: block.ts as i64, nanos: 0 }),
+        };
         let mut data = pb_block_scoped_data(
             pb::BlockChanges {
-                block: Some(pb::Block {
-                    hash: hash.to_vec(),
-                    parent_hash: parent_hash.to_vec(),
-                    number,
-                    ts,
-                }),
-                changes,
-                storage_changes,
+                block: Some(block),
+                changes: part.changes,
+                storage_changes: part.storage_changes,
             },
-            Some(&cursor),
+            Some(cursor),
             Some(self.final_height),
         );
-        data.clock = Some(Clock {
-            id: hash.to_string(),
-            number,
-            timestamp: Some(prost_types::Timestamp { seconds: ts as i64, nanos: 0 }),
-        });
-        self.messages
-            .push(Recorded::Block(Box::new(data)));
-        self.chain
-            .push(ChainBlock { number, hash, cursor });
+        data.clock = Some(clock);
+        data
     }
 
     /// Returns to block `number` of the current chain, orphaning the blocks above it.
     ///
     /// # Panics
-    /// If `number` is below the finalized height, which substreams never reverts, or is not on
-    /// the current chain.
+    /// If `number` is below the finalized height, which substreams never reverts, or is not a
+    /// sealed block of the current chain.
     pub(super) fn undo_to(&mut self, number: u64) {
         assert!(
             number >= self.final_height,
@@ -526,8 +677,8 @@ impl StreamWriter {
         let target = self
             .chain
             .last()
-            .filter(|tip| tip.number == number)
-            .unwrap_or_else(|| panic!("block {number} is not on the current chain"));
+            .filter(|tip| tip.number == number && tip.end == BlockEnd::Sealed)
+            .unwrap_or_else(|| panic!("block {number} is not a sealed block of the current chain"));
         self.messages
             .push(Recorded::Undo(BlockUndoSignal {
                 last_valid_block: Some(BlockRef { id: target.hash.to_string(), number }),
@@ -549,7 +700,23 @@ impl StreamWriter {
     }
 
     pub(super) fn finish(self) -> RecordedStream {
-        RecordedStream { base_ts: self.base_ts, messages: self.messages }
+        RecordedStream { delivery: self.delivery, base_ts: self.base_ts, messages: self.messages }
+    }
+}
+
+/// The changes of some of a block's transactions, in order.
+#[derive(Default)]
+struct BlockPart {
+    changes: Vec<pb::TransactionChanges>,
+    storage_changes: Vec<pb::TransactionStorageChanges>,
+}
+
+impl BlockPart {
+    fn extend(mut self, later: BlockPart) -> BlockPart {
+        self.changes.extend(later.changes);
+        self.storage_changes
+            .extend(later.storage_changes);
+        self
     }
 }
 

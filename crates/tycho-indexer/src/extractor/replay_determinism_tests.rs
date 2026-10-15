@@ -29,11 +29,13 @@ async fn test_serial_db_replayed_blocks_emit_the_original_messages(
 ) {
     run_against_db(move |pool| async move {
         let database = seed_database(&pool).await;
-        let stream = recorded_stream(kind).messages;
-        let (before_restart, _) = stream.split_at(stream.len() / 2);
+        let stream = recorded_stream(kind);
+        let (before_restart, _) = stream
+            .messages
+            .split_at(stream.messages.len() / 2);
 
         let first_run = build_extractor(&database, kind).await;
-        let originals = feed(&first_run, before_restart).await;
+        let originals = feed(&first_run, before_restart, stream.delivery).await;
         drop(first_run);
         let tip = canonical_blocks(before_restart)
             .last()
@@ -50,7 +52,7 @@ async fn test_serial_db_replayed_blocks_emit_the_original_messages(
             .number;
         assert!(last_committed < tip, "the first run must leave blocks uncommitted");
         let replay = replay_after_restart(before_restart, last_committed, downtime);
-        let replayed = feed(&after_restart, &replay).await;
+        let replayed = feed(&after_restart, &replay, stream.delivery).await;
 
         assert!(!replay.is_empty(), "the restarted extractor must replay blocks");
         assert_eq!(replayed.len(), replay.len(), "every replayed block must emit a message");
