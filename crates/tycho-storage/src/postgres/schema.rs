@@ -379,6 +379,13 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    writer_epoch (id) {
+        id -> Bool,
+        epoch -> Int8,
+    }
+}
+
 diesel::joinable!(account -> chain (chain_id));
 diesel::joinable!(account_balance -> account (account_id));
 diesel::joinable!(account_balance -> token (token_id));
@@ -440,4 +447,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     token_price,
     transaction,
     transaction_cleanup_progress,
+    writer_epoch,
 );

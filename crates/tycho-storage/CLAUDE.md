@@ -20,6 +20,7 @@ postgres/
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
 ├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
+├── writer_epoch.rs     — single-writer fencing: increment / verify the `writer_epoch` row
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
 └── schema.rs           — auto-generated Diesel table! macros
 ```
@@ -35,6 +36,15 @@ All public DB operations go through one of two gateway structs:
   when enabled) and `get_delta` (small LRU). The executor runs a batch up to
   three times when Postgres reports a transaction conflict (deadlock or serialization
   failure); each attempt re-runs from scratch with a fresh snapshot.
+- **Writer fencing**: `DBCacheWriteExecutor::new` claims a new epoch in the one-row
+  `writer_epoch` table, and every executor transaction first reads that row `FOR SHARE`. When
+  another process has claimed since, the transaction fails with `StorageError::Fenced` and
+  writes nothing. A claim that commits while a write waits on the row makes the write fail with
+  a serialization error; the retry then sees the new epoch. Writes that bypass the executor
+  (migrations, `ensure_*` at startup, `add_protocol_types`, `update_tokens`) are not fenced.
+  A claim waits for every open write transaction (it logs a warning every 10s). So that a
+  vanished writer cannot block it for long, every pool session sets server-side TCP keepalives
+  (`SESSION_KEEPALIVES`): Postgres drops a dead peer's session, and its lock, after about 25s.
 - **`DirectGateway`** (testing / low-throughput): same trait surface, no buffering.
 
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
