@@ -35,6 +35,7 @@ use crate::{
 };
 
 pub mod chain_state;
+mod delta_format;
 mod dynamic_contract_indexer;
 pub mod factory;
 pub mod models;

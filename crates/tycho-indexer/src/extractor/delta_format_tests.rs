@@ -40,27 +40,23 @@ use tycho_common::models::{
 };
 use tycho_storage::postgres::testing::run_against_db;
 
-use crate::extractor::recorded_extractors::{
-    build_extractor, deltas_only, feed, recorded_partial_block_stream, recorded_stream,
-    seed_database, ExtractorKind, RecordedStream,
+use crate::extractor::{
+    delta_format::FormatStream,
+    recorded_extractors::{
+        build_extractor, deltas_only, feed, recorded_partial_block_stream, recorded_stream,
+        seed_database, ExtractorKind, RecordedStream,
+    },
 };
 
 /// Set to `1` to rewrite the format files from what the extractors emit instead of comparing.
 const UPDATE_ENV: &str = "UPDATE_DELTA_FORMAT";
 
-/// A recorded stream with a committed format file.
-#[derive(Debug, Clone, Copy)]
-enum FormatStream {
-    Native,
-    /// The native stream's blocks sent as partial blocks, so the merge of partials into
-    /// full-block messages and the reverts of pending partials are in the format.
-    NativePartialBlocks,
-    Dci,
+/// The directory holding the format files.
+fn format_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/extractor/delta_format")
 }
 
 impl FormatStream {
-    const ALL: [Self; 3] = [Self::Native, Self::NativePartialBlocks, Self::Dci];
-
     fn extractor(self) -> ExtractorKind {
         match self {
             Self::Native | Self::NativePartialBlocks => ExtractorKind::Native,
@@ -77,33 +73,22 @@ impl FormatStream {
     }
 
     fn path(self) -> PathBuf {
-        let file = match self {
-            Self::Native => "native.json",
-            Self::NativePartialBlocks => "native_partial_blocks.json",
-            Self::Dci => "dci.json",
-        };
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/extractor/delta_format")
-            .join(file)
+        format_dir().join(self.file_name())
+    }
+
+    /// The committed file: the bytes the binary was built with, which the fingerprint covers.
+    ///
+    /// # Panics
+    /// If the file is not UTF-8.
+    fn committed(self) -> &'static str {
+        std::str::from_utf8(self.committed_bytes())
+            .unwrap_or_else(|err| panic!("{} is not UTF-8: {err}", self.path().display()))
     }
 
     /// # Panics
-    /// If the file cannot be read.
-    fn committed(self) -> String {
-        let path = self.path();
-        fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "cannot read {}: {err}. Generate it by running \
-                 test_serial_db_emitted_deltas_match_the_committed_format with {UPDATE_ENV}=1.",
-                path.display()
-            )
-        })
-    }
-
-    /// # Panics
-    /// If the file cannot be read or does not hold messages.
+    /// If the file does not hold messages.
     fn committed_messages(self) -> Vec<BlockAggregatedChanges> {
-        serde_json::from_str(&self.committed())
+        serde_json::from_str(self.committed())
             .unwrap_or_else(|err| panic!("{} does not hold messages: {err}", self.path().display()))
     }
 }
@@ -303,8 +288,9 @@ async fn test_serial_db_emitted_deltas_match_the_committed_format(#[case] stream
                 .unwrap_or_else(|err| panic!("cannot write {}: {err}", path.display()));
             return;
         }
-        let committed = stream.committed();
-        if let Some(difference) = first_difference(&committed, &actual, "the emitted messages") {
+        if let Some(difference) =
+            first_difference(stream.committed(), &actual, "the emitted messages")
+        {
             panic!(
                 "The messages emitted for the {stream:?} stream differ from {}. If the change is \
                  intended, rerun this test with {UPDATE_ENV}=1, review the diff and commit the \
@@ -324,14 +310,39 @@ async fn test_serial_db_emitted_deltas_match_the_committed_format(#[case] stream
 #[case::native_partial_blocks(FormatStream::NativePartialBlocks)]
 #[case::dci(FormatStream::Dci)]
 fn the_committed_format_files_are_canonical(#[case] stream: FormatStream) {
-    let committed = stream.committed();
-
     // The files' timestamps already count from the Unix epoch.
     let rewritten = canonical_json(&stream.committed_messages(), DateTime::UNIX_EPOCH.naive_utc());
 
-    if let Some(difference) = first_difference(&committed, &rewritten, "the file written again") {
+    if let Some(difference) =
+        first_difference(stream.committed(), &rewritten, "the file written again")
+    {
         panic!("{} is not canonical.\n{difference}", stream.path().display());
     }
+}
+
+/// The fingerprint covers the files of `FormatStream::ALL` only, so a format file outside it
+/// would not change fingerprints when it changes.
+#[test]
+fn every_format_file_belongs_to_a_stream() {
+    let dir = format_dir();
+    let mut files = BTreeSet::new();
+    for entry in
+        fs::read_dir(&dir).unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()))
+    {
+        let entry = entry.unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
+        files.insert(
+            entry
+                .file_name()
+                .into_string()
+                .unwrap_or_else(|name| panic!("{name:?} in {} is not UTF-8", dir.display())),
+        );
+    }
+    let streams: BTreeSet<String> = FormatStream::ALL
+        .iter()
+        .map(|stream| stream.file_name().to_string())
+        .collect();
+
+    assert_eq!(files, streams, "add every format file's stream to FormatStream::ALL");
 }
 
 /// The reason for every field no recorded message exercises.

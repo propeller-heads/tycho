@@ -79,6 +79,12 @@ static DCI_BLACKLIST: LazyLock<Vec<Address>> = LazyLock::new(|| {
     vec![] // Default to no blacklist
 });
 
+/// The addresses `DCI_BLACKLIST_ADDRESSES` lists, read once per process. The DCI indexes them only
+/// through the slots traces access, never in full.
+pub(crate) fn dci_blacklist() -> &'static [Address] {
+    &DCI_BLACKLIST
+}
+
 #[async_trait]
 impl<AE, T, G> ExtractorExtension for DynamicContractIndexer<AE, T, G>
 where

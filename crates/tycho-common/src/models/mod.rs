@@ -674,6 +674,17 @@ impl From<dto::ExtractorIdentity> for ExtractorIdentity {
     }
 }
 
+/// Identifies the deltas an extractor emits. Equal fingerprints mean two runs of an extractor use
+/// the same code, substreams package and config, so they emit the same messages for the same
+/// blocks as far as those decide them, and a client may resume one run's stream with the other
+/// run's deltas. The database contents at startup and the RPC node's answers can still differ
+/// between the runs. Different fingerprints give no such guarantee: the client must resync from a
+/// snapshot.
+///
+/// The bytes are opaque: compare fingerprints for equality only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractorFingerprint(pub Bytes);
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct ExtractionState {
     pub name: String,

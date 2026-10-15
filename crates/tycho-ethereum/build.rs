@@ -1,8 +1,8 @@
 //! Computes the digest behind `SERVICES_SOURCE_DIGEST`: the sources of the RPC services the
 //! indexer's extractors call, the RPC client they call through, the ERC-20 bindings they use and
 //! the crate root, whose `BytesCodec` they all use. The indexer's recorded-extractor tests mock
-//! these, so its delta format files cannot show a change to them; the digest is for the indexer's
-//! extractor fingerprints instead.
+//! these, so its delta format files cannot show a change to them; the indexer folds this digest
+//! into every extractor fingerprint instead.
 //!
 //! `build/source_digest.rs` says what the digest ignores. It reads only this crate's own files,
 //! so it works from the published package too.

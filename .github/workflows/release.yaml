@@ -133,6 +133,8 @@ jobs:
 
       # Wave 4: indexer (depends on storage, common, client, ethereum)
       # TODO: Re-enable this when we can release tycho-storage to crates.io
+      # tycho-indexer's build.rs includes ../tycho-ethereum/build/source_digest.rs by path: vendor
+      # or publish that file before re-enabling, or the packaged crate will not build.
       # - name: Publish tycho-indexer
       #   run: >
       #     cargo publish -p tycho-indexer --locked

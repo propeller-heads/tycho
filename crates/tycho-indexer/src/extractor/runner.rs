@@ -15,7 +15,7 @@ use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument
 use tycho_common::{
     models::{
         blockchain::{Block, BlockAggregatedChanges},
-        ExtractorIdentity,
+        ExtractorFingerprint, ExtractorIdentity,
     },
     traits::AccountExtractor,
 };
@@ -99,17 +99,28 @@ pub enum ControlMessage {
 #[async_trait]
 pub trait MessageSender: Send + Sync {
     async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+
+    /// The fingerprint of the deltas this sender emits, fixed for the sender's lifetime. `None`
+    /// when the sender has none, so subscribers cannot tell whether two runs emit the same deltas.
+    fn fingerprint(&self) -> Option<ExtractorFingerprint> {
+        None
+    }
 }
 
 #[derive(Clone)]
 pub struct ExtractorHandle {
     id: ExtractorIdentity,
     control_tx: Sender<ControlMessage>,
+    fingerprint: ExtractorFingerprint,
 }
 
 impl ExtractorHandle {
-    pub fn new(id: ExtractorIdentity, control_tx: Sender<ControlMessage>) -> Self {
-        Self { id, control_tx }
+    pub fn new(
+        id: ExtractorIdentity,
+        control_tx: Sender<ControlMessage>,
+        fingerprint: ExtractorFingerprint,
+    ) -> Self {
+        Self { id, control_tx, fingerprint }
     }
 
     pub fn get_id(&self) -> ExtractorIdentity {
@@ -147,6 +158,10 @@ impl MessageSender for ExtractorHandle {
             // TODO: use a better error type that lets us return this as an error.
             Err(_) => panic!("Subscription timed out!"),
         }
+    }
+
+    fn fingerprint(&self) -> Option<ExtractorFingerprint> {
+        Some(self.fingerprint.clone())
     }
 }
 

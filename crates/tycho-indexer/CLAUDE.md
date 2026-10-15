@@ -15,7 +15,8 @@ extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
   supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
-  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
+  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types; extractor fingerprint
+  delta_format.rs           FormatStream (the committed delta format files, built in) and delta_format_digest
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
@@ -244,6 +245,11 @@ UPDATE_DELTA_FORMAT=1 cargo nextest run -p tycho-indexer --all-features --test-t
   -E 'test(test_serial_db_emitted_deltas_match_the_committed_format)'
 ```
 
+The binary embeds the files (`FormatStream` in `extractor/delta_format.rs`), and the tests compare
+against the embedded bytes. A new stream needs a `FormatStream` variant and its file, created
+empty before the first `UPDATE_DELTA_FORMAT=1` run; `every_format_file_belongs_to_a_stream` fails
+while a file in the folder belongs to no stream in `FormatStream::ALL`.
+
 `the_committed_format_exercises_every_field` fails while a field or enum variant of the message
 or its nested types is empty, default or absent in every committed message; exercise it in a
 recorded stream, or list it in `UNEXERCISED` with the reason.
@@ -252,6 +258,61 @@ The files cannot show behaviour behind the mocked RPC services, extractor module
 extractors do not run (the Uniswap V4 hooks DCI, the post-processors), or the revert of a block
 sealed under a hash substreams no longer names (`HeightMatch` in `handle_revert`, which a
 consistent stream never sends; covered by `test_revert_hash_miss_purges_from_target_height`).
+
+## Extractor fingerprint
+
+`ExtractorFactory::create` reads the extractor's substreams package once, downloading it from S3
+when it is missing, and computes the extractor's `ExtractorFingerprint` from it
+(`extractor_fingerprint` in `factory.rs`): Keccak-256 over length-prefixed fields holding
+
+- `delta_format_digest()` (`extractor/delta_format.rs`): the committed delta format files,
+  `tycho_ethereum::SERVICES_SOURCE_DIGEST` (the RPC services the recorded extractors mock), and
+  `UNRECORDED_MODULES_SOURCE_DIGEST`, which `build.rs` computes (with tycho-ethereum's
+  `build/source_digest.rs`) from every file under
+  `extractor/dynamic_contract_indexer/hooks/` and `extractor/post_processors/` (modules the
+  recorded extractors do not run) and from the code only they use, `extractor/u256_num.rs` and
+  `extractor/dynamic_contract_indexer/mod.rs`;
+- the package's bytes, not its path;
+- the config fields that shape deltas: `name`, `chain`, `start_block`, `module_name`,
+  `initialized_accounts`, `initialized_accounts_block`, `dci_plugin` (the pool manager as parsed
+  address bytes; a value that is not hex fails startup) and `post_processor`. The function
+  destructures `ExtractorConfig` without `..` and binds every other field to `_` with the reason,
+  so a new field fails to compile until it is classified;
+- the inputs outside the config that shape deltas (`FingerprintInputs`, also destructured without
+  `..`): the token pre-processor's settlement contract (`--settlement-contract`, which sets new
+  tokens' quality, tax and gas), the chain's native token address (built in, or `native` in
+  `chains.yaml` for a custom chain; the hooks DCI's state overrides and the storage's account
+  balances read it), and, for extractors with a DCI plugin, the DCI blacklist
+  (`DCI_BLACKLIST_ADDRESSES`, as a set: it decides full versus traced-slot indexing).
+
+Equal fingerprints mean two runs use the same code, package and config, so they emit the same
+deltas for the same blocks as far as those decide them. What the runs read at startup or from
+the network can still differ: the database contents (token metadata already stored, the DCI's
+snapshot of ERC-20 addresses, and its trace retry counts, which are not persisted) and the RPC
+node's answers. The fingerprint changes with the package, those config fields and inputs, the
+format files or those sources; a plain restart of the same build with the same package and config
+keeps it. The factory keeps the decoded
+package, and every run it builds, in-process restarts included, streams that package, so an
+extractor's fingerprint is fixed for the process's lifetime. `ExtractorSupervisor::handle` puts
+it on the `ExtractorHandle` (`MessageSender::fingerprint`).
+
+Not in the fingerprint:
+
+- The `TRACE_*` variables: they pick the tracing node and its retry policy, not what is traced
+  (see `create_rpc_dci`).
+- The code of `main.rs`'s `initialize_accounts`: its config fields are hashed, its code is not.
+- The rest of a custom chain's config (`chains.yaml`): besides the native token, the indexer only
+  reads its block time, which estimates the chain tip for sync-progress metrics.
+- The delivery path after the extractor, which neither the format files nor the source digests
+  cover: the model-to-DTO conversion (`dto::BlockAggregatedChanges::from`), `drop_state` for
+  `include_state: false` subscriptions, and `ws.rs`'s filter of partial and full-block messages.
+
+The source digests ignore what cannot change behaviour: in `.rs` files they hash the `syn` token
+stream without comments, doc comments (`///`, `//!`, `#[doc]`), formatting, `#[cfg(test)]` items
+and `#[test]`-style functions (see tycho-ethereum's `CLAUDE.md`). Any other edit to a hashed
+source changes the fingerprint, so clients resync after the next deploy even when the deltas did
+not change; so does a `syn`, `quote` or `proc-macro2` upgrade that changes the token stream's
+string form, once.
 
 ## Connections
 
