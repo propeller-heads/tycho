@@ -16,10 +16,9 @@ use tycho_common::{
 
 use crate::extractor::{
     dynamic_contract_indexer::{
-        cache::HooksDCICache,
         dci::DynamicContractIndexer,
         hooks::{
-            component_metadata::ComponentTracingMetadata,
+            cache::HooksDCICache, component_metadata::ComponentTracingMetadata,
             hook_orchestrator::HookOrchestratorRegistry,
             hook_permissions_detector::HookPermissionsDetector,
             metadata_orchestrator::BlockMetadataOrchestrator,

@@ -294,8 +294,6 @@ impl ExtractorFactory {
                 Some(DCIPlugin::Standard(rpc_dci))
             }
             Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
-                // random address to deploy our mini router to
-                let router_address = Address::from("0x2e234DAe75C793f67A35089C9d99245E1C58470b");
                 let pool_manager = Address::from(pool_manager_address.as_str());
 
                 let base_dci = Self::create_rpc_dci(
@@ -306,16 +304,14 @@ impl ExtractorFactory {
                 )
                 .await?;
 
+                // The builder's defaults (in the hooks module) set the rest of the wiring.
                 let mut hooks_dci = UniswapV4HookDCIBuilder::new(
                     base_dci,
                     &self.rpc_client,
-                    router_address,
                     pool_manager,
                     fresh_gw.clone(),
                     self.config.chain,
                 )
-                .pause_after_retries(3)
-                .max_retries(5)
                 .build()?;
 
                 hooks_dci.initialize().await?;

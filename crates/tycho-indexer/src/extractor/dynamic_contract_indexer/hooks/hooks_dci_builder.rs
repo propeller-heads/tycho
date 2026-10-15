@@ -35,6 +35,17 @@ use crate::extractor::{
     ExtractionError,
 };
 
+// The defaults below shape the deltas the hooks DCI emits. They live in this module, not in the
+// extractor factory, so the hooks source digest in every extractor fingerprint covers them.
+
+/// Where traced swaps place the mini router, through a state override. Any address without a
+/// contract works, but it appears in the traced calls and their pruned addresses.
+const MINI_ROUTER_ADDRESS: &str = "0x2e234DAe75C793f67A35089C9d99245E1C58470b";
+/// Failed attempts after which the hooks DCI pauses a component's tracing.
+const PAUSE_AFTER_RETRIES: u32 = 3;
+/// Failed attempts after which the hooks DCI stops retrying a component's tracing.
+const MAX_RETRIES: u32 = 5;
+
 /// Builder for creating a fully configured UniswapV4HookDCI
 pub(crate) struct UniswapV4HookDCIBuilder<AE, T, G>
 where
@@ -65,7 +76,6 @@ where
     pub(crate) fn new(
         inner_dci: DynamicContractIndexer<AE, T, G>,
         rpc: &EthereumRpcClient,
-        router_address: Address,
         pool_manager: Address,
         db_gateway: G,
         chain: Chain,
@@ -73,12 +83,12 @@ where
         Self {
             inner_dci,
             rpc: rpc.clone(),
-            router_address,
+            router_address: Address::from(MINI_ROUTER_ADDRESS),
             pool_manager,
             db_gateway,
             chain,
-            pause_after_retries: 3,
-            max_retries: 5,
+            pause_after_retries: PAUSE_AFTER_RETRIES,
+            max_retries: MAX_RETRIES,
             rpc_batch_size: 50,
         }
     }
@@ -249,7 +259,6 @@ mod tests {
         let rpc_url = "http://localhost:8545".to_string();
 
         // Create test addresses
-        let router_address = Address::from("0x1234567890123456789012345678901234567890");
         let pool_manager = Address::from("0x0987654321098765432109876543210987654321");
 
         // Create mock RPC client (we can't actually create a real one without infrastructure)
@@ -262,7 +271,6 @@ mod tests {
         let builder = UniswapV4HookDCIBuilder::new(
             inner_dci,
             &rpc,
-            router_address.clone(),
             pool_manager.clone(),
             db_gateway,
             Chain::Ethereum,
@@ -279,7 +287,7 @@ mod tests {
         assert_eq!(builder.max_retries, 10);
         assert_eq!(builder.rpc_batch_size, 100);
         assert_eq!(builder.chain, Chain::Ethereum);
-        assert_eq!(builder.router_address, router_address);
+        assert_eq!(builder.router_address, Address::from(MINI_ROUTER_ADDRESS));
         assert_eq!(builder.pool_manager, pool_manager);
         assert_eq!(builder.rpc.get_url(), rpc_url);
 

@@ -27,6 +27,7 @@ extractor/
     cache.rs                DCI component/contract cache
     hooks/                  UniswapV4-style hooks DCI variant
       hook_dci.rs           HooksDCI — hooks-specific ExtractorExtension
+      cache.rs              HooksDCICache — per-component processing state, layered by block
       hooks_dci_builder.rs  Builder for HooksDCI
       hook_orchestrator.rs  Orchestrates hook detection + metadata
       hook_permissions_detector.rs  Detects hook permission flags
