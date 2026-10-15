@@ -24,6 +24,7 @@ mod maverick_v2;
 mod metric;
 mod metric_fallback;
 mod native;
+mod native_fallback;
 mod native_wrap;
 mod pancakeswap_infinity;
 mod propamm;

@@ -87,10 +87,18 @@ pub struct NativeClient {
     quote_timeout: Duration,
     #[serde(default)]
     component_layout: ComponentLayout,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    NativeClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl NativeClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:native";
+    /// Components executed through Tycho's `NativeFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:native";
     pub const DEFAULT_ENDPOINT: &'static str = "https://v2.api.native.org/swap-api-v2/v1";
 
     // Native API error codes:
@@ -150,7 +158,13 @@ impl NativeClient {
             poll_time,
             quote_timeout,
             component_layout: ComponentLayout::PerPair,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
+    }
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
     }
 
     pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
@@ -210,7 +224,7 @@ impl NativeClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "native_relay_pool".to_string(),
             chain: self.chain,
             tokens,
@@ -343,7 +357,7 @@ impl NativeClient {
             }
         }
         let component = component::all_pairs_component(
-            Self::PROTOCOL_SYSTEM,
+            &self.protocol_system,
             "native_relay_pool",
             self.chain,
             &swap_directions,

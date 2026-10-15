@@ -18,6 +18,7 @@ pub struct NativeClientBuilder {
     poll_time: Duration,
     quote_timeout: Duration,
     component_layout: ComponentLayout,
+    via_fallback_router: bool,
 }
 
 impl NativeClientBuilder {
@@ -31,6 +32,7 @@ impl NativeClientBuilder {
             poll_time: Duration::from_secs(5),
             quote_timeout: Duration::from_secs(5),
             component_layout: ComponentLayout::PerPair,
+            via_fallback_router: false,
         }
     }
 
@@ -71,13 +73,19 @@ impl NativeClientBuilder {
         self
     }
 
+    /// Executes the swaps through Tycho's `NativeFallbackRouter`. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<NativeClient, RFQError> {
         let quote_tokens = match self.quote_tokens {
             Some(tokens) => tokens,
             None => default_quote_tokens_for_chain(&self.chain)?,
         };
 
-        NativeClient::new(
+        let client = NativeClient::new(
             self.chain,
             self.api_key,
             self.tokens,
@@ -85,7 +93,8 @@ impl NativeClientBuilder {
             quote_tokens,
             self.poll_time,
             self.quote_timeout,
-        )
-        .map(|client| client.with_component_layout(self.component_layout))
+        )?
+        .with_component_layout(self.component_layout);
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

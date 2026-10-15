@@ -99,6 +99,10 @@
       "contract": "HashflowFallbackExecutor",
       "args": ["0x29D7A3cd3485710585d4f3bee5E43fE28633915F"]
     },
+    "fallback:rfq:native": {
+      "contract": "NativeFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

@@ -168,6 +168,9 @@ pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
 /// Hashflow components executed through `HashflowFallbackRouter`.
 pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
 
+/// Native components executed through `NativeFallbackRouter`.
+pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
+
 #[cfg(test)]
 mod tests {
     use super::*;
