@@ -68,3 +68,41 @@ pub(crate) async fn lock_epoch_row_and_verify(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test_serial_db {
+    use diesel_async::{AsyncConnection, SimpleAsyncConnection};
+
+    use super::*;
+
+    async fn open_session() -> AsyncPgConnection {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        AsyncPgConnection::establish(&url)
+            .await
+            .expect("session should connect")
+    }
+
+    #[tokio::test]
+    async fn test_increment_waits_until_open_write_transactions_end() {
+        let mut writer = open_session().await;
+        writer
+            .batch_execute("BEGIN; SELECT epoch FROM writer_epoch FOR SHARE;")
+            .await
+            .unwrap();
+        let mut claimer = open_session().await;
+        let increment = tokio::spawn(async move { increment_writer_epoch(&mut claimer).await });
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!increment.is_finished(), "the increment must wait for the open write transaction");
+
+        writer
+            .batch_execute("COMMIT")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), increment)
+            .await
+            .expect("the increment should finish once the transaction ends")
+            .unwrap()
+            .expect("the increment should succeed");
+    }
+}
