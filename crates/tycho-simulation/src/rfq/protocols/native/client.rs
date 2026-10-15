@@ -1242,6 +1242,64 @@ mod tests {
     }
 
     #[test]
+    fn test_fallback_router_labels_components() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        let labels = |client: NativeClient| {
+            let books = client.group_orderbook(vec![NativeOrderbookEntry {
+                base_address: weth.clone(),
+                quote_address: usdt.clone(),
+                minimum_in_base: 0.0,
+                side: NativeOrderbookSide::Bid,
+                levels: vec![NativePriceLevel { quantity: 1.0, price: 3000.0 }],
+            }]);
+            let (component_id, book) = books
+                .iter()
+                .next()
+                .expect("one grouped book");
+            let per_pair = client
+                .create_component_with_state(
+                    component_id.clone(),
+                    vec![weth.clone(), usdt.clone()],
+                    book.clone(),
+                    0.0,
+                )
+                .component
+                .protocol_system;
+            let all_pairs = client
+                .all_pairs_component(&books)
+                .unwrap()
+                .expect("the book clears the zero threshold")
+                .component
+                .protocol_system;
+            (per_pair, all_pairs)
+        };
+        let builder = || {
+            NativeClientBuilder::new(Chain::Ethereum, String::new())
+                .tokens(HashSet::from([weth.clone(), usdt.clone()]))
+                .quote_tokens(HashSet::from([usdt.clone()]))
+                .tvl_threshold(0.0)
+        };
+        let rfq = NativeClient::PROTOCOL_SYSTEM.to_string();
+        let fallback = NativeClient::FALLBACK_PROTOCOL_SYSTEM.to_string();
+
+        assert_eq!(labels(builder().build().unwrap()), (rfq.clone(), rfq));
+        assert_eq!(
+            labels(
+                builder()
+                    .with_fallback_router()
+                    .build()
+                    .unwrap()
+            ),
+            (fallback.clone(), fallback)
+        );
+        assert_eq!(
+            NativeClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::NATIVE_FALLBACK_PROTOCOL_SYSTEM
+        );
+    }
+
+    #[test]
     fn creates_all_pairs_component_from_relay_orderbook() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();

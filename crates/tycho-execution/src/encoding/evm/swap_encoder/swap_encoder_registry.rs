@@ -372,6 +372,12 @@ mod tests {
         assert!(registry
             .get_encoder(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
+        assert!(registry
+            .get_encoder(NATIVE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(registry
+            .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
     }
 
     #[test]

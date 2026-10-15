@@ -274,6 +274,7 @@ fn estimate_transfer_overhead(
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
     use super::*;
@@ -429,9 +430,12 @@ mod tests {
         assert_eq!(gas, BigUint::from(325_000u64));
     }
 
-    #[test]
-    fn test_single_hashflow_fallback_router() {
-        let solution = make_solution(vec![make_swap(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]);
+    #[rstest]
+    #[case::hashflow(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::native(NATIVE_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::liquorice(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)]
+    fn test_single_signed_quote_fallback_router(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // The same charges as the Bebop fallback router.

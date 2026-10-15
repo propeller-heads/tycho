@@ -731,9 +731,12 @@ mod tests {
         models::PriceLevel,
         protocols::{
             component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
-            liquorice::models::{
-                LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
-                LiquoriceTokenPairPrice, LiquoriceTx,
+            liquorice::{
+                client_builder::LiquoriceClientBuilder,
+                models::{
+                    LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
+                    LiquoriceTokenPairPrice, LiquoriceTx,
+                },
             },
             maker_price_levels::MakerPriceLevels,
             test_utils::{mock_quote_server, quote_params, LIQUORICE_QUOTE_RESPONSE},
@@ -994,6 +997,54 @@ mod tests {
                 .collect(),
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let prices_by_mm =
+            HashMap::from([("test_mm".to_string(), vec![levels(&weth, &usdc, &[(1.0, 3000.0)])])]);
+        let labels = |client: LiquoriceClient| {
+            let per_pair = client
+                .create_component_with_state(
+                    String::from("liquorice"),
+                    vec![weth.clone(), usdc.clone()],
+                    &HashMap::new(),
+                    0.0,
+                )
+                .component
+                .protocol_system;
+            let all_pairs = client
+                .all_pairs_component(&prices_by_mm)
+                .unwrap()
+                .expect("the price levels clear the zero threshold")
+                .component
+                .protocol_system;
+            (per_pair, all_pairs)
+        };
+        let builder = || {
+            LiquoriceClientBuilder::new(Chain::Ethereum, String::new(), String::new())
+                .tokens(HashSet::from([weth.clone(), usdc.clone()]))
+                .tvl_threshold(0.0)
+        };
+        let rfq = LiquoriceClient::PROTOCOL_SYSTEM.to_string();
+        let fallback = LiquoriceClient::FALLBACK_PROTOCOL_SYSTEM.to_string();
+
+        assert_eq!(labels(builder().build().unwrap()), (rfq.clone(), rfq));
+        assert_eq!(
+            labels(
+                builder()
+                    .with_fallback_router()
+                    .build()
+                    .unwrap()
+            ),
+            (fallback.clone(), fallback)
+        );
+        assert_eq!(
+            LiquoriceClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::LIQUORICE_FALLBACK_PROTOCOL_SYSTEM
+        );
     }
 
     #[test]

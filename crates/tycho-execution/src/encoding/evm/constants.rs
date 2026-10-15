@@ -187,6 +187,8 @@ mod tests {
         assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus
