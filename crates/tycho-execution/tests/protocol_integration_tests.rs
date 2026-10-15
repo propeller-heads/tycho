@@ -1857,6 +1857,66 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
 }
 
 #[test]
+fn test_single_encoding_strategy_biconomy_weth_usdc() {
+    // WETH -> (Biconomy PropAMM venue, push-payment IPropAMM) -> USDC
+    let token_in = weth();
+    let token_out = usdc();
+
+    // The mock venue address used by the BiconomyRouterTest Foundry test.
+    let venue = "2222222222222222222222222222222222222222";
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: format!("0x{venue}"),
+            protocol_system: String::from("biconomy"),
+            static_attributes: HashMap::from([(
+                "pamm_address".to_string(),
+                Bytes::from_str(venue).unwrap(),
+            )]),
+            ..Default::default()
+        },
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("1_000000000000000000").unwrap(),
+        // The mock venue pays a fixed 2000 USDC per WETH.
+        BigUint::from(1_000_000_000_u64),
+        BigUint::from(1_000_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_biconomy_weth_usdc",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
 fn test_single_encoding_strategy_fallback_usdc_weth() {
     let token_in = usdc();
     let token_out = weth();
