@@ -118,7 +118,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
-    /// Native's V4 tradeRFQT selector.
+    /// Uses Native's V4 tradeRFQT selector in place of the V6 one.
     function testV4TradeRfqtSelector() public {
         bytes memory nativeData = _nativeData();
         bytes4 v4TradeRfqt = 0x0947c2d9;
