@@ -810,6 +810,9 @@ pub mod testing {
 
     async fn teardown(conn: &mut AsyncPgConnection) {
         let tables = vec![
+            // Tracing results reference their detection block without a cascade, so entry points
+            // go first: deleting them cascades to their params, results and component links.
+            "entry_point",
             // put block early so most FKs cascade, it would
             // be better to find the correct order tough.
             "transaction_cleanup_progress",
