@@ -22,6 +22,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed heights as watch receivers
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -157,6 +158,33 @@ they are provably behind the finality horizon.
 Drained blocks stay in the buffer's committing section (shared with the commit task via
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
+
+### Leader and follower extractors
+
+Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
+set by `ExtractorFactory::with_writer_status`; without it the extractor is the only writer):
+
+- **Committing** (leader): the path above.
+- **Following**: drained blocks go into the committing section but are never written. They are
+  released once the leader's committed height for this extractor (`WriterStatus::committed_height`)
+  passes them, and the released blocks' `new_tokens` go into the token cache
+  (`ExtractorGateway::cache_tokens`), the same point at which the leader's write-through caches them.
+  Outgoing messages carry the leader's committed height as `db_committed_block_height`.
+  A following extractor keeps committing blocks that span less than `FOLLOWER_RETENTION_SPAN`
+  (1 hour of chain time, newest minus oldest committing block timestamp; chain time and not a
+  block count, as block times range from 100 ms to minutes; more than the finality delay of every
+  chain, so a follower at the head does not pause). At the limit,
+  `Extractor::wait_for_capacity` (awaited by the runner before it pulls the next block, in the
+  same `select!` as the stop signal) pauses it until the leader's commits release blocks or it
+  becomes leader; it logs `FollowerPaused` and `FollowerResumed` with the span and block count.
+  It never drops retained blocks: revert lookups rely on them until the database covers them.
+- **Takeover**: on the first full block after the role turns `Leader`, the extractor reads its
+  `extraction_state` block (the former leader's last commit, `floor`), releases retained blocks at or
+  below it, commits the rest, and from then on drops every drained block at or below `floor`. A
+  follower that was behind the former leader therefore never writes a block twice. Messages report
+  `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
+  and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
+  extractor from its cursor.
 
 ## Why extractor messages must be broadcast to the RPC service
 
