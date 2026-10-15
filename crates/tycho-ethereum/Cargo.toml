@@ -38,6 +38,9 @@ alloy = { workspace = true, default-features = false, features = [
     "providers",
 ] }
 
+[build-dependencies]
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 mockito.workspace = true

@@ -29,7 +29,22 @@ services/
        └─ allowance_slot_detector.rs  Locates allowance mapping slot
 
 test_fixtures.rs        Shared RPC/account fixtures, also consumed by tycho-test
+lib.rs                  BytesCodec; SERVICES_SOURCE_DIGEST (see below)
+build.rs                Computes SERVICES_SOURCE_DIGEST
 ```
+
+## `SERVICES_SOURCE_DIGEST`
+
+`build.rs` hashes (Keccak-256) the crate-relative path and contents of every file under
+`src/services/`, `src/rpc/`, `src/erc20.rs` and `src/lib.rs` (`BytesCodec`, used by every hashed
+service), in sorted path order, with CRLF normalized to LF in UTF-8 files and hidden files and
+editor backups (`.*`, `*~`) skipped, and `lib.rs` exposes the hex digest as
+`SERVICES_SOURCE_DIGEST`. Any edit to those files changes it, tests and comments included. The
+digest is for the indexer's extractor fingerprints: its recorded-extractor tests mock these
+services, so its delta format files cannot show a change to them.
+
+The script reads only this crate's files, so it also runs from the published package. When the
+services come to depend on a file outside those paths, add it to `HASHED_PATHS` in `build.rs`.
 
 ## Module Dependencies
 

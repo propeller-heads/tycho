@@ -14,6 +14,14 @@ use alloy::primitives::{Address, B256, U256};
 pub(crate) use rpc::errors::*;
 use tycho_common::Bytes;
 
+/// Hex-encoded Keccak-256 digest of this crate's `services`, `rpc` and `erc20` sources and of this
+/// file, computed at build time from every file's path and contents (line endings normalized to
+/// LF).
+///
+/// Two builds with the same digest compiled the same sources for these modules. Any edit to them,
+/// tests and comments included, changes it.
+pub const SERVICES_SOURCE_DIGEST: &str = env!("TYCHO_ETHEREUM_SERVICES_SOURCE_DIGEST");
+
 /// A trait for converting types to and from `Bytes`.
 ///
 /// This trait provides methods to convert a type into a `Bytes` object,
