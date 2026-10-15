@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quote_is_requested_for_the_fallback_router() {
+    fn test_quote_context() {
         let quote_context = encoder().quote_context(&context());
 
         assert_eq!(
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_requires_the_fallback_router_config() {
+    fn test_new_without_fallback_router_config() {
         let err = NativeFallbackSwapEncoder::new(
             Bytes::default(),
             Chain::Ethereum,
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_requires_the_native_router_config() {
+    fn test_new_without_router_v6_config() {
         let err = NativeFallbackSwapEncoder::new(
             Bytes::default(),
             Chain::Ethereum,
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_fallback_the_chain_does_not_run() {
+    fn test_fallback_the_chain_does_not_run() {
         let swap = usdc_weth_swap(&format!(
             r#"{{"fallback_protocol":"aerodrome_v1","pool":"0x{USDC_WETH_USV3}"}}"#
         ));
