@@ -66,8 +66,10 @@ use tycho_indexer::{
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
         token_analysis_cron::analyze_tokens,
+        writer_status::{Role, WriterStatus},
         ExtractionError,
     },
+    leadership,
     services::{
         EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
     },
@@ -598,14 +600,23 @@ async fn create_indexing_tasks(
         .set_component_index(global_args.component_index)
         .build_with_rpc_gateway()
         .await?;
-    let epoch = cached_gw
-        .increment_writer_epoch()
-        .await?;
-    info!(epoch, "Became the database writer");
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
     let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
+
+    let accounts_to_initialize: Vec<(Vec<Address>, u64)> = extractors_config
+        .extractors
+        .values()
+        .map(|config| (config.initialized_accounts.clone(), config.initialized_accounts_block))
+        .collect();
+    let (writer_status, election_task) =
+        leadership::elect(&global_args.database_url, cached_gw.clone(), chain).await?;
+    // A process promoted later does not run this: the accounts are a testing aid to start
+    // indexing from a later block, and the first leader has written them already.
+    if writer_status.role() == Role::Leader {
+        initialize_all_accounts(accounts_to_initialize, &rpc_client, chain, &cached_gw).await;
+    }
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -619,6 +630,7 @@ async fn create_indexing_tasks(
         &rpc_client,
         extraction_runtime,
         substreams_args.enable_partial_blocks,
+        &writer_status,
     )
     .await
     .map_err(|e| ExtractionError::Setup(format!("Failed to create extractors: {e}")))?;
@@ -668,6 +680,7 @@ async fn create_indexing_tasks(
                 .0
                 .clone(),
         )
+        .writer_status(writer_status.clone())
         .run()?;
     info!(server_url, "Http and Ws server started");
 
@@ -687,7 +700,27 @@ async fn create_indexing_tasks(
         .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
-    Ok((supervisor_tasks, vec![server_task, shutdown_task]))
+    let election_task = tokio::spawn(async move {
+        election_task
+            .await
+            .unwrap_or_else(|err| {
+                Err(ExtractionError::Unknown(format!("Leader election task panicked: {err}")))
+            })
+    });
+
+    Ok((supervisor_tasks, vec![server_task, shutdown_task, election_task]))
+}
+
+/// Writes the configured initial state of accounts. Only the database writer may call this.
+async fn initialize_all_accounts(
+    accounts: Vec<(Vec<Address>, u64)>,
+    rpc_client: &EthereumRpcClient,
+    chain: Chain,
+    cached_gw: &CachedGateway,
+) {
+    for (addresses, block) in accounts {
+        initialize_accounts(addresses, block, rpc_client, chain, cached_gw).await;
+    }
 }
 
 #[expect(
@@ -706,6 +739,7 @@ async fn build_all_extractors(
     rpc_client: &EthereumRpcClient,
     runtime: Option<&tokio::runtime::Handle>,
     partial_blocks: bool,
+    writer_status: &WriterStatus,
 ) -> Result<
     (
         Vec<ExtractorSupervisor>,
@@ -734,17 +768,6 @@ async fn build_all_extractors(
     protocol_cache.populate().await?;
 
     for extractor_config in config.extractors.values() {
-        initialize_accounts(
-            extractor_config
-                .initialized_accounts
-                .clone(),
-            extractor_config.initialized_accounts_block,
-            rpc_client,
-            chain,
-            cached_gw,
-        )
-        .await;
-
         #[expect(
             clippy::disallowed_methods,
             reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
@@ -767,7 +790,8 @@ async fn build_all_extractors(
             Some(runtime_handle),
             protocol_cache.clone(),
         )
-        .await?;
+        .await?
+        .with_writer_status(writer_status.clone());
 
         // Create dedicated PendingDeltas channel for this extractor
         let (pd_tx, pd_rx) = tokio::sync::mpsc::channel(PENDING_DELTAS_CHANNEL_SIZE);
