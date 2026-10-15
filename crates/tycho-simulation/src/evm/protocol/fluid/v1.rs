@@ -48,7 +48,7 @@ mod constant {
     use alloy::{hex, primitives::U256};
 
     pub const MAX_PRICE_DIFF: U256 = U256::from_limbs([5, 0, 0, 0]); // 5
-    pub const MIN_SWAP_LIQUIDITY: U256 = U256::from_limbs([8500, 0, 0, 0]); // 8500
+    pub const MIN_SWAP_LIQUIDITY: U256 = U256::from_limbs([10000, 0, 0, 0]); // 1e4
     pub const SIX_DECIMALS: U256 = U256::from_limbs([1000000, 0, 0, 0]); // 1e6
     pub const TWO_DECIMALS: U256 = U256::from_limbs([100, 0, 0, 0]); // 1e2
     pub const B_I1E18: U256 = U256::from_limbs([0x0DE0B6B3A7640000, 0, 0, 0]); // 1e18
