@@ -10,7 +10,8 @@ use crate::encoding::{
             HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
             METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
             PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS,
+            UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -131,10 +132,7 @@ impl SwapEncoderRegistry {
         }
         if protocol_system.starts_with(FALLBACK_PREFIX) &&
             protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != BEBOP_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != HASHFLOW_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != NATIVE_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != LIQUORICE_FALLBACK_PROTOCOL_SYSTEM
+            !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
         {
             return self.encoders.get(FALLBACK_KEY);
         }

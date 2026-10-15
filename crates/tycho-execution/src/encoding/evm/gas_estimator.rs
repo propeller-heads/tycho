@@ -2,9 +2,8 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-        LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-        NATIVE_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
     },
     group_swaps::group_swaps,
 };
@@ -254,11 +253,7 @@ fn estimate_transfer_overhead(
     }
 
     // The signed-quote routers approve the venue themselves and forward the output.
-    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM ||
-        protocol_system == HASHFLOW_FALLBACK_PROTOCOL_SYSTEM ||
-        protocol_system == NATIVE_FALLBACK_PROTOCOL_SYSTEM ||
-        protocol_system == LIQUORICE_FALLBACK_PROTOCOL_SYSTEM
-    {
+    if SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
         overhead += transfer_token_gas(token_out);
     }
@@ -278,7 +273,13 @@ mod tests {
     use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
     use super::*;
-    use crate::encoding::models::{default_token, Solution, Strategy, Swap, UserTransferType};
+    use crate::encoding::{
+        evm::constants::{
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+        },
+        models::{default_token, Solution, Strategy, Swap, UserTransferType},
+    };
 
     fn lido_swap(token_in: Bytes, token_out: Bytes) -> Swap {
         Swap::new(
