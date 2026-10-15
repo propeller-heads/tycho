@@ -32,8 +32,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     address constant TRADER = 0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f;
     address constant AUTH_MANAGER = 0x000438801500c89E225E8D6CB69D9c14dD05e000;
     address constant MAKER = 0x06465bcEEaef280Bb7340A58D75dfc5E1F687058;
-    /// The quote's expiry.
-    uint256 constant EXPIRY = 0x69850367;
+    uint256 constant QUOTE_EXPIRY = 0x69850367;
     uint256 constant SIGNED_USDC_IN = 3000e6;
     uint256 constant SIGNED_WETH_OUT = 1 ether;
     bytes constant SETTLE_SINGLE_CALLDATA =
@@ -123,7 +122,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     /// An expired quote reverts in the settlement, so the fallback fills the whole leg.
     function testExpiredQuote() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
-        vm.warp(EXPIRY + 1);
+        vm.warp(QUOTE_EXPIRY + 1);
         uint256 fallbackOut = _quoteFallback(SIGNED_USDC_IN);
 
         _expectFallbackSwap(SIGNED_USDC_IN);
