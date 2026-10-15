@@ -9,6 +9,8 @@ import {
     ILocker
 } from "@ekubo-v3/interfaces/IFlashAccountant.sol";
 import {Constants} from "../Constants.sol";
+import {CoreLib} from "@ekubo-v3/libraries/CoreLib.sol";
+import {FlashAccountantLib} from "@ekubo-v3/libraries/FlashAccountantLib.sol";
 import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {LibCall} from "@solady/utils/LibCall.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -25,6 +27,9 @@ import {
 import {
     SignedExclusiveSwapLib
 } from "@ekubo-v3/libraries/SignedExclusiveSwapLib.sol";
+using CoreLib for ICore;
+using FlashAccountantLib for ICore;
+
 // Imported so Forge compiles the artifact for deployCodeTo.
 import {
     SignedExclusiveSwap
@@ -119,6 +124,11 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
     bytes32 constant ORACLE_CONFIG =
         0x517E506700271AEa091b02f42756F5E174Af5230000000000000000000000000;
 
+    // ETH/WBTC concentrated pool, 0.1% fee, tick spacing 1000.
+    PoolConfig constant WBTC_ETH_CONFIG = PoolConfig.wrap(
+        0x0000000000000000000000000000000000000000004189374bc6a7f0800003e8
+    );
+
     constructor() {
         vm.makePersistent(address(executor));
         vm.makePersistent(address(liquidityHelper));
@@ -195,6 +205,39 @@ contract EkuboV3ExecutorTest is Constants, TestUtils {
         );
 
         assertEq(CORE_ADDRESS.balance, ethBalanceBeforeCore - amountOut);
+    }
+
+    // The pool has empty bitmap words in range. Without skipAhead, Core ends
+    // the swap step at each of them and rounds the input up again.
+    function testSwapSkipsEmptyBitmapWords() public setUpFork(26198000) {
+        SkipAheadSwapper swapper = new SkipAheadSwapper();
+        PoolKey memory poolKey = PoolKey({
+            token0: address(0), token1: WBTC_ADDR, config: WBTC_ETH_CONFIG
+        });
+        bytes memory data = abi.encodePacked(
+            WBTC_ADDR, // tokenIn
+            ETH_ADDRESS, // tokenOut
+            PoolConfig.unwrap(WBTC_ETH_CONFIG) // poolConfig
+        );
+        uint256[3] memory amounts = [uint256(2e6), 3e6, 4e6];
+
+        for (uint256 i = 0; i < amounts.length; i++) {
+            uint256 amountIn = amounts[i];
+            uint256 snapshot = vm.snapshotState();
+
+            deal(WBTC_ADDR, address(swapper), amountIn);
+            uint256 expectedOut =
+                swapper.swap(poolKey, uint128(amountIn), 0x7fffffff);
+            vm.revertToState(snapshot);
+            snapshot = vm.snapshotState();
+
+            deal(WBTC_ADDR, address(executor), amountIn);
+            uint256 ethBefore = address(executor).balance;
+            executor.swap(amountIn, data, address(executor));
+            uint256 amountOut = address(executor).balance - ethBefore;
+            assertEq(amountOut, expectedOut, "output below skipAhead swap");
+            vm.revertToState(snapshot);
+        }
     }
 
     function testMevCapture() public setUpFork(24198199) {
@@ -493,6 +536,62 @@ contract LiquidityHelper {
             )
         );
     }
+}
+
+// Swaps token1 for token0 through Core with a given skipAhead.
+contract SkipAheadSwapper {
+    function swap(PoolKey memory poolKey, uint128 amountIn, uint256 skipAhead)
+        external
+        returns (uint256 amountOut)
+    {
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.startPayments.selector, poolKey.token1
+            )
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodePacked(
+                IFlashAccountant.lock.selector,
+                abi.encode(poolKey, amountIn, skipAhead)
+            )
+        );
+        amountOut = address(this).balance;
+    }
+
+    function locked_6416899205(
+        uint256 /* id */
+    )
+        external
+    {
+        (PoolKey memory poolKey, uint128 amountIn, uint256 skipAhead) =
+            abi.decode(msg.data[36:], (PoolKey, uint128, uint256));
+
+        SwapParameters params = createSwapParameters({
+            _sqrtRatioLimit: MAX_SQRT_RATIO,
+            _amount: int128(amountIn),
+            _isToken1: true,
+            _skipAhead: skipAhead
+        });
+        (PoolBalanceUpdate bu,) = CORE.swap(0, poolKey, params);
+
+        SafeTransferLib.safeTransfer(
+            poolKey.token1, CORE_ADDRESS, uint128(bu.delta1())
+        );
+        // slither-disable-next-line unused-return
+        LibCall.callContract(
+            CORE_ADDRESS,
+            abi.encodeWithSelector(
+                IFlashAccountant.completePayments.selector, poolKey.token1
+            )
+        );
+        CORE.withdraw(poolKey.token0, address(this), uint128(-bu.delta0()));
+    }
+
+    receive() external payable {}
 }
 
 contract EkuboV3RobinhoodExecutorTest is Constants, TestUtils {
