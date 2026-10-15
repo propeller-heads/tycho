@@ -31,19 +31,20 @@ services/
 test_fixtures.rs        Shared RPC/account fixtures, also consumed by tycho-test
 lib.rs                  BytesCodec; SERVICES_SOURCE_DIGEST (see below)
 build.rs                Computes SERVICES_SOURCE_DIGEST
-build/source_digest.rs  Computes the source digest for build.rs; tested in this crate
+build/source_digest.rs  Source digest, also used by tycho-indexer's build.rs; tested in this crate
 ```
 
 ## `SERVICES_SOURCE_DIGEST`
 
 `build.rs` digests (Keccak-256) every file under `src/services/`, `src/rpc/`, `src/erc20.rs` and
 `src/lib.rs` (`BytesCodec`, used by every hashed service), and `lib.rs` exposes the hex digest as
-`SERVICES_SOURCE_DIGEST`. The digest is for the indexer's extractor fingerprints: its
+`SERVICES_SOURCE_DIGEST`. The indexer folds it into every extractor fingerprint: its
 recorded-extractor tests mock these services, so its delta format files cannot show a change to
-them.
+them (see `crates/tycho-indexer/CLAUDE.md`, "Extractor fingerprint").
 
-`build/source_digest.rs` computes it. It hashes each file's crate-relative path and contents, in
-sorted path order, skipping hidden files and editor backups (`.*`, `*~`):
+`build/source_digest.rs` computes it, and tycho-indexer's `build.rs` includes the same file by
+path for its own digest. It hashes each file's crate-relative path and contents, in sorted path
+order, skipping hidden files and editor backups (`.*`, `*~`):
 
 - a `.rs` file is parsed with `syn`, and the digest hashes its token stream's string form without
   `#[cfg(test)]` items (in modules, impl and trait blocks and function bodies), functions with a

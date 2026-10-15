@@ -1,3 +1,4 @@
+mod cache;
 mod component_metadata;
 mod entrypoint_generator;
 pub(crate) mod hook_dci;

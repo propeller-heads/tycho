@@ -40,27 +40,23 @@ use tycho_common::models::{
 };
 use tycho_storage::postgres::testing::run_against_db;
 
-use crate::extractor::recorded_extractors::{
-    build_extractor, deltas_only, feed, recorded_partial_block_stream, recorded_stream,
-    seed_database, ExtractorKind, RecordedStream,
+use crate::extractor::{
+    delta_format::FormatStream,
+    recorded_extractors::{
+        build_extractor, deltas_only, feed, recorded_partial_block_stream, recorded_stream,
+        seed_database, ExtractorKind, RecordedStream,
+    },
 };
 
 /// Set to `1` to rewrite the format files from what the extractors emit instead of comparing.
 const UPDATE_ENV: &str = "UPDATE_DELTA_FORMAT";
 
-/// A recorded stream with a committed format file.
-#[derive(Debug, Clone, Copy)]
-enum FormatStream {
-    Native,
-    /// The native stream's blocks sent as partial blocks, so the merge of partials into
-    /// full-block messages and the reverts of pending partials are in the format.
-    NativePartialBlocks,
-    Dci,
+/// The directory holding the format files.
+fn format_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/extractor/delta_format")
 }
 
 impl FormatStream {
-    const ALL: [Self; 3] = [Self::Native, Self::NativePartialBlocks, Self::Dci];
-
     fn extractor(self) -> ExtractorKind {
         match self {
             Self::Native | Self::NativePartialBlocks => ExtractorKind::Native,
@@ -77,33 +73,22 @@ impl FormatStream {
     }
 
     fn path(self) -> PathBuf {
-        let file = match self {
-            Self::Native => "native.json",
-            Self::NativePartialBlocks => "native_partial_blocks.json",
-            Self::Dci => "dci.json",
-        };
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/extractor/delta_format")
-            .join(file)
+        format_dir().join(self.file_name())
+    }
+
+    /// The committed file: the bytes the binary was built with, which the fingerprint covers.
+    ///
+    /// # Panics
+    /// If the file is not UTF-8.
+    fn committed(self) -> &'static str {
+        std::str::from_utf8(self.committed_bytes())
+            .unwrap_or_else(|err| panic!("{} is not UTF-8: {err}", self.path().display()))
     }
 
     /// # Panics
-    /// If the file cannot be read.
-    fn committed(self) -> String {
-        let path = self.path();
-        fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "cannot read {}: {err}. Generate it by running \
-                 test_serial_db_emitted_deltas_match_the_committed_format with {UPDATE_ENV}=1.",
-                path.display()
-            )
-        })
-    }
-
-    /// # Panics
-    /// If the file cannot be read or does not hold messages.
+    /// If the file does not hold messages.
     fn committed_messages(self) -> Vec<BlockAggregatedChanges> {
-        serde_json::from_str(&self.committed())
+        serde_json::from_str(self.committed())
             .unwrap_or_else(|err| panic!("{} does not hold messages: {err}", self.path().display()))
     }
 }
@@ -303,8 +288,9 @@ async fn test_serial_db_emitted_deltas_match_the_committed_format(#[case] stream
                 .unwrap_or_else(|err| panic!("cannot write {}: {err}", path.display()));
             return;
         }
-        let committed = stream.committed();
-        if let Some(difference) = first_difference(&committed, &actual, "the emitted messages") {
+        if let Some(difference) =
+            first_difference(stream.committed(), &actual, "the emitted messages")
+        {
             panic!(
                 "The messages emitted for the {stream:?} stream differ from {}. If the change is \
                  intended, rerun this test with {UPDATE_ENV}=1, review the diff and commit the \
@@ -324,14 +310,142 @@ async fn test_serial_db_emitted_deltas_match_the_committed_format(#[case] stream
 #[case::native_partial_blocks(FormatStream::NativePartialBlocks)]
 #[case::dci(FormatStream::Dci)]
 fn the_committed_format_files_are_canonical(#[case] stream: FormatStream) {
-    let committed = stream.committed();
-
     // The files' timestamps already count from the Unix epoch.
     let rewritten = canonical_json(&stream.committed_messages(), DateTime::UNIX_EPOCH.naive_utc());
 
-    if let Some(difference) = first_difference(&committed, &rewritten, "the file written again") {
+    if let Some(difference) =
+        first_difference(stream.committed(), &rewritten, "the file written again")
+    {
         panic!("{} is not canonical.\n{difference}", stream.path().display());
     }
+}
+
+/// The fingerprint covers the files of `FormatStream::ALL` only, so a format file outside it
+/// would not change fingerprints when it changes.
+#[test]
+fn every_format_file_belongs_to_a_stream() {
+    let dir = format_dir();
+    let mut files = BTreeSet::new();
+    for entry in
+        fs::read_dir(&dir).unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()))
+    {
+        let entry = entry.unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
+        files.insert(
+            entry
+                .file_name()
+                .into_string()
+                .unwrap_or_else(|name| panic!("{name:?} in {} is not UTF-8", dir.display())),
+        );
+    }
+    let streams: BTreeSet<String> = FormatStream::ALL
+        .iter()
+        .map(|stream| stream.file_name().to_string())
+        .collect();
+
+    assert_eq!(files, streams, "add every format file's stream to FormatStream::ALL");
+}
+
+/// Delivering the native stream as partial blocks yields the full-block messages of full delivery:
+/// every full-block message of the partial-block file, reverts included, equals the native file's
+/// message for the same block, in the same order. The native messages the partial-block file skips
+/// are blocks a later revert orphans, which partial delivery dropped while they were still
+/// partial, and reverts whose orphaned blocks were all skipped. This is why the extractor
+/// fingerprint leaves out the `partial_blocks` flag.
+#[test]
+fn partial_delivery_emits_the_full_block_messages_of_full_delivery() {
+    let full = FormatStream::Native.committed_messages();
+    let partial = FormatStream::NativePartialBlocks.committed_messages();
+    let full_blocks: Vec<&BlockAggregatedChanges> = partial
+        .iter()
+        .filter(|message| message.partial_block_index.is_none())
+        .collect();
+    assert!(!full_blocks.is_empty(), "the partial-block file holds no full-block message");
+
+    let mut delivered = BTreeSet::new();
+    let mut next = 0;
+    for message in full_blocks {
+        let Some(offset) = full[next..]
+            .iter()
+            .position(|candidate| {
+                candidate.block.hash == message.block.hash && candidate.revert == message.revert
+            })
+        else {
+            panic!(
+                "the native file holds no message for {} after its message {next}",
+                describe_message(message)
+            );
+        };
+        next += offset;
+        assert_eq!(
+            &full[next],
+            message,
+            "the messages for {} differ between the two files",
+            describe_message(message)
+        );
+        delivered.insert(next);
+        next += 1;
+    }
+
+    let orphaned = orphaned_blocks(&full);
+    for (index, message) in full.iter().enumerate() {
+        if delivered.contains(&index) {
+            continue;
+        }
+        if message.revert {
+            let undelivered = orphaned[&index]
+                .iter()
+                .all(|block| !delivered.contains(block));
+            assert!(
+                undelivered,
+                "the partial-block file skips native message {index}, a {}, but holds a block it \
+                 orphans",
+                describe_message(message)
+            );
+        } else {
+            assert!(
+                orphaned
+                    .values()
+                    .flatten()
+                    .any(|block| *block == index),
+                "the partial-block file skips native message {index}, a {}, which no revert \
+                 orphans",
+                describe_message(message)
+            );
+        }
+    }
+}
+
+/// For each revert message in `messages`, by index, the indices of the block messages it orphans:
+/// the blocks on the chain above its target when it arrives.
+///
+/// # Panics
+/// If a revert's target is not on the chain.
+fn orphaned_blocks(messages: &[BlockAggregatedChanges]) -> HashMap<usize, Vec<usize>> {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut orphaned = HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if !message.revert {
+            chain.push(index);
+            continue;
+        }
+        let Some(target) = chain
+            .iter()
+            .rposition(|block| messages[*block].block.hash == message.block.hash)
+        else {
+            panic!(
+                "message {index}, a {}, targets no block on the chain",
+                describe_message(message)
+            );
+        };
+        orphaned.insert(index, chain.split_off(target + 1));
+    }
+    orphaned
+}
+
+/// `revert to block 5` or `block 5`.
+fn describe_message(message: &BlockAggregatedChanges) -> String {
+    let kind = if message.revert { "revert to block" } else { "block" };
+    format!("{kind} {}", message.block.number)
 }
 
 /// The reason for every field no recorded message exercises.

@@ -1,6 +1,11 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+    str::FromStr,
+    sync::Arc,
+};
 
-use anyhow::{format_err, Context};
+use anyhow::Context;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
 use prost::Message;
@@ -11,7 +16,10 @@ use tokio::{
 };
 use tracing::info;
 use tycho_common::{
-    models::{Address, Chain, ExtractorIdentity, FinancialType, ImplementationType, ProtocolType},
+    models::{
+        Address, Chain, ExtractorFingerprint, ExtractorIdentity, FinancialType, ImplementationType,
+        ProtocolType,
+    },
     Bytes,
 };
 use tycho_ethereum::{
@@ -26,8 +34,10 @@ use tycho_storage::postgres::cache::CachedGateway;
 use crate::{
     extractor::{
         chain_state::ChainState,
+        delta_format::{delta_format_digest, FieldHasher},
         dynamic_contract_indexer::{
-            dci::DynamicContractIndexer, hooks::hooks_dci_builder::UniswapV4HookDCIBuilder,
+            dci::{dci_blacklist, DynamicContractIndexer},
+            hooks::hooks_dci_builder::UniswapV4HookDCIBuilder,
         },
         post_processors::POST_PROCESSOR_REGISTRY,
         protocol_cache::ProtocolMemoryCache,
@@ -160,10 +170,11 @@ where
 /// - `cached_gw`: each `build_runner` call creates a fresh instance via `new_instance()` (fresh
 ///   `open_tx` and LRU cache; shared write channel to `DBCacheWriteExecutor`).
 /// - `token_pre_processor`, `rpc_client`: stateless RPC wrappers.
+/// - `spkg` and `fingerprint`: the substreams package is read once at construction, and every run
+///   streams that package, so the fingerprint computed from it holds for every run in this process.
 pub struct ExtractorFactory {
     pub(super) config: ExtractorConfig,
     endpoint_url: String,
-    s3_bucket: Option<String>,
     token: String,
     chain: Chain,
     cached_gw: CachedGateway,
@@ -174,10 +185,13 @@ pub struct ExtractorFactory {
     runtime_handle: Option<Handle>,
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,
+    spkg: Package,
+    fingerprint: ExtractorFingerprint,
 }
 
 impl ExtractorFactory {
-    /// Creates the factory, making one RPC call to fetch the current block number.
+    /// Creates the factory, making one RPC call to fetch the current block number, and reads the
+    /// substreams package, downloading it from `s3_bucket` first when it is missing.
     ///
     /// The `protocol_cache` holds the whole chain's token and component universe, so callers
     /// must pass one shared, already populated instance to every factory on the chain instead
@@ -208,10 +222,34 @@ impl ExtractorFactory {
             chain.block_time_secs() as i64,
         );
 
+        let spkg_bytes = read_spkg(&config.spkg, s3_bucket.as_deref()).await?;
+        let native_token = config
+            .chain
+            .try_native_token()
+            .map_err(|err| ExtractionError::Setup(format!("No native token for the chain: {err}")))?
+            .address;
+        let settlement_contract = Address::from(
+            token_pre_processor
+                .settlement_contract()
+                .as_slice(),
+        );
+        let fingerprint = extractor_fingerprint(
+            &config,
+            &FingerprintInputs {
+                spkg: &spkg_bytes,
+                dci_blacklist: dci_blacklist(),
+                settlement_contract: &settlement_contract,
+                native_token: &native_token,
+            },
+        )?;
+        let spkg = Package::decode(spkg_bytes.as_slice()).map_err(|err| {
+            ExtractionError::Setup(format!("Failed to decode the package {}: {err}", config.spkg))
+        })?;
+        info!(extractor = %config.name, fingerprint = %fingerprint.0, "Extractor fingerprint");
+
         Ok(Self {
             config,
             endpoint_url,
-            s3_bucket,
             token,
             chain,
             cached_gw,
@@ -222,14 +260,23 @@ impl ExtractorFactory {
             runtime_handle,
             protocol_cache,
             chain_state,
+            spkg,
+            fingerprint,
         })
+    }
+
+    /// The fingerprint of the deltas this extractor emits, the same for every run this factory
+    /// builds.
+    pub fn fingerprint(&self) -> &ExtractorFingerprint {
+        &self.fingerprint
     }
 
     /// Builds a fresh, ready-to-run [`ExtractorRunner`].
     ///
     /// Creates a fresh gateway instance, constructs the DCI plugin if configured, and establishes
     /// the Substreams stream from the last committed block (or the config start block on first
-    /// run). The protocol cache and chain state are reused from factory construction.
+    /// run). The protocol cache, chain state and substreams package are reused from factory
+    /// construction.
     pub async fn build_runner(
         &self,
         subscriptions: Arc<Mutex<SubscriptionsMap>>,
@@ -294,8 +341,6 @@ impl ExtractorFactory {
                 Some(DCIPlugin::Standard(rpc_dci))
             }
             Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
-                // random address to deploy our mini router to
-                let router_address = Address::from("0x2e234DAe75C793f67A35089C9d99245E1C58470b");
                 let pool_manager = Address::from(pool_manager_address.as_str());
 
                 let base_dci = Self::create_rpc_dci(
@@ -306,16 +351,14 @@ impl ExtractorFactory {
                 )
                 .await?;
 
+                // The builder's defaults (in the hooks module) set the rest of the wiring.
                 let mut hooks_dci = UniswapV4HookDCIBuilder::new(
                     base_dci,
                     &self.rpc_client,
-                    router_address,
                     pool_manager,
                     fresh_gw.clone(),
                     self.config.chain,
                 )
-                .pause_after_retries(3)
-                .max_retries(5)
                 .build()?;
 
                 hooks_dci.initialize().await?;
@@ -340,16 +383,6 @@ impl ExtractorFactory {
             )
             .await?,
         );
-
-        // Ensure the spkg file is present (download from S3 if needed).
-        ensure_spkg(&self.config.spkg, self.s3_bucket.as_deref()).await?;
-
-        let content = std::fs::read(&self.config.spkg)
-            .with_context(|| format_err!("read package from file '{}'", self.config.spkg))
-            .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
-        let spkg = Package::decode(content.as_ref())
-            .context("decode spkg")
-            .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
 
         let endpoint = Arc::new(
             SubstreamsEndpoint::new(&self.endpoint_url, Some(self.token.clone()))
@@ -378,7 +411,7 @@ impl ExtractorFactory {
         let stream = SubstreamsStream::new(
             endpoint,
             None, // No cursor on fresh start.
-            Some(spkg),
+            Some(self.spkg.clone()),
             self.config.module_name.clone(),
             start_block,
             self.config.stop_block.unwrap_or(0) as u64,
@@ -413,6 +446,11 @@ impl ExtractorFactory {
     > {
         let account_extractor = EVMAccountExtractor::new(rpc_client, chain);
 
+        // The `TRACE_*` variables pick the node that traces, how many times a transient RPC error
+        // (rate limit, unavailable node) is retried, and the delay between attempts. None of them
+        // changes the traced calls, or which slots, contracts and entry points get traced, so the
+        // extractor fingerprint leaves them out. Whether a trace still fails after the retries
+        // depends on the node's availability, which no fingerprint can cover.
         let tracer_rpc_client = if let Ok(tracer_rpc_url) = std::env::var("TRACE_RPC_URL") {
             EthereumRpcClient::new(&tracer_rpc_url).map_err(|err| {
                 ExtractionError::Setup(format!(
@@ -447,6 +485,122 @@ impl ExtractorFactory {
 
         Ok(rpc_dci)
     }
+}
+
+/// What shapes an extractor's deltas besides its config, read once at startup.
+struct FingerprintInputs<'a> {
+    /// The substreams package's bytes.
+    spkg: &'a [u8],
+    /// The addresses the DCI indexes only through traced slots (`DCI_BLACKLIST_ADDRESSES`).
+    dci_blacklist: &'a [Address],
+    /// The contract token analysis simulates transfers through (`--settlement-contract`).
+    settlement_contract: &'a Address,
+    /// The chain's native token address.
+    native_token: &'a Address,
+}
+
+/// The fingerprint of the deltas an extractor emits: a digest of [`delta_format_digest`], the
+/// configuration fields and the inputs that shape the deltas.
+///
+/// Leaves out the fields that cannot change the deltas emitted for a block, the package's path
+/// among them: moving the package keeps the fingerprint.
+///
+/// # Errors
+///
+/// `ExtractionError::Setup` when the Uniswap V4 hooks DCI's pool manager address is not hex.
+fn extractor_fingerprint(
+    config: &ExtractorConfig,
+    inputs: &FingerprintInputs,
+) -> Result<ExtractorFingerprint, ExtractionError> {
+    let ExtractorConfig {
+        name,
+        chain,
+        // Only stored with the protocol types; extraction never reads it.
+        implementation_type: _,
+        // Blocks per database transaction: moves only `db_committed_block_height`, not deltas.
+        sync_batch_size: _,
+        start_block,
+        // Ends the stream; the blocks before it emit the same deltas.
+        stop_block: _,
+        // A block holding an unlisted type fails; a block that decodes emits the same deltas.
+        protocol_types: _,
+        // A path: the package's bytes are hashed instead.
+        spkg: _,
+        module_name,
+        initialized_accounts,
+        initialized_accounts_block,
+        dci_plugin,
+        post_processor,
+        // The supervisor's restart limit.
+        max_restarts: _,
+    } = config;
+    let FingerprintInputs { spkg, dci_blacklist, settlement_contract, native_token } = inputs;
+
+    let mut hasher = FieldHasher::new();
+    hasher.field(&delta_format_digest());
+    hasher.field(spkg);
+    hasher.field(module_name.as_bytes());
+    // Both appear in every message the extractor emits.
+    hasher.field(name.as_bytes());
+    hasher.field(chain.to_string().as_bytes());
+    // Picks the first block of an empty database: after a rebuild, it decides the history that
+    // reverts, TVL and new-token detection read.
+    hasher.field(&start_block.to_be_bytes());
+    hasher.count(initialized_accounts.len());
+    for account in initialized_accounts {
+        hasher.field(account);
+    }
+    hasher.field(&initialized_accounts_block.to_be_bytes());
+    // Every extractor analyses the tokens it reports as new.
+    hasher.field(settlement_contract);
+    // The hooks DCI's state overrides read it, and so does the storage for every extractor's
+    // account balances. For a custom chain it comes from `chains.yaml`.
+    hasher.field(native_token);
+    match dci_plugin {
+        None => hasher.field(b"no dci"),
+        Some(DCIType::RPC) => {
+            hasher.field(b"rpc dci");
+            hash_dci_blacklist(&mut hasher, dci_blacklist);
+        }
+        Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
+            let pool_manager = Address::from_str(pool_manager_address).map_err(|err| {
+                ExtractionError::Setup(format!(
+                    "Invalid pool_manager_address {pool_manager_address}: {err}"
+                ))
+            })?;
+            hasher.field(b"uniswap v4 hooks dci");
+            hasher.field(&pool_manager);
+            hash_dci_blacklist(&mut hasher, dci_blacklist);
+        }
+    }
+    match post_processor {
+        None => hasher.field(b"no post-processor"),
+        Some(post_processor) => {
+            hasher.field(b"post-processor");
+            hasher.field(post_processor.as_bytes());
+        }
+    }
+    Ok(ExtractorFingerprint(Bytes::from(hasher.finish())))
+}
+
+/// Hashes the blacklist as a set: its order and duplicates do not change what the DCI does.
+fn hash_dci_blacklist(hasher: &mut FieldHasher, blacklist: &[Address]) {
+    let blacklist: BTreeSet<&Address> = blacklist.iter().collect();
+    hasher.count(blacklist.len());
+    for address in blacklist {
+        hasher.field(address);
+    }
+}
+
+/// Reads the substreams package at `spkg_path`, downloading it from `s3_bucket` first when it is
+/// missing.
+async fn read_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<Vec<u8>, ExtractionError> {
+    ensure_spkg(spkg_path, s3_bucket).await?;
+    tokio::fs::read(spkg_path)
+        .await
+        .map_err(|err| {
+            ExtractionError::Setup(format!("Failed to read the package {spkg_path}: {err}"))
+        })
 }
 
 async fn ensure_spkg(spkg_path: &str, s3_bucket: Option<&str>) -> Result<(), ExtractionError> {
@@ -506,7 +660,180 @@ async fn download_file_from_s3(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    /// Owned [`FingerprintInputs`], so each test case can change any of them.
+    #[derive(Clone)]
+    struct Inputs {
+        spkg: Vec<u8>,
+        dci_blacklist: Vec<Address>,
+        settlement_contract: Address,
+        native_token: Address,
+    }
+
+    fn inputs() -> Inputs {
+        Inputs {
+            spkg: b"substreams package".to_vec(),
+            dci_blacklist: vec![Bytes::from("0xaa"), Bytes::from("0xbb")],
+            settlement_contract: Bytes::from("0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"),
+            native_token: Bytes::from("0x0000000000000000000000000000000000000000"),
+        }
+    }
+
+    /// A config whose optional fields are all set, so each test case can change any of them.
+    fn config() -> ExtractorConfig {
+        ExtractorConfig {
+            name: "uniswap_v4".to_string(),
+            chain: Chain::Ethereum,
+            implementation_type: ImplementationType::Custom,
+            sync_batch_size: 1000,
+            start_block: 21688329,
+            stop_block: Some(23000000),
+            protocol_types: vec![ProtocolTypeConfig::new(
+                "uniswap_v4_pool".to_string(),
+                FinancialType::Swap,
+            )],
+            spkg: "substreams/ethereum-uniswap-v4-v0.2.1.spkg".to_string(),
+            module_name: "map_protocol_changes".to_string(),
+            initialized_accounts: vec![Bytes::from("0x01"), Bytes::from("0x02")],
+            initialized_accounts_block: 21688000,
+            dci_plugin: Some(DCIType::UniswapV4Hooks {
+                pool_manager_address: "0x000000000004444c5dc75cB358380D2e3dE08A90".to_string(),
+            }),
+            post_processor: Some("add_default_attributes_uniswapv4".to_string()),
+            max_restarts: Some(3),
+        }
+    }
+
+    fn fingerprint(config: &ExtractorConfig, inputs: &Inputs) -> ExtractorFingerprint {
+        let Inputs { spkg, dci_blacklist, settlement_contract, native_token } = inputs;
+        extractor_fingerprint(
+            config,
+            &FingerprintInputs { spkg, dci_blacklist, settlement_contract, native_token },
+        )
+        .expect("the config is valid")
+    }
+
+    #[rstest]
+    #[case::name(|c: &mut ExtractorConfig| c.name = "uniswap_v4_hooks".to_string())]
+    #[case::chain(|c: &mut ExtractorConfig| c.chain = Chain::Base)]
+    #[case::start_block(|c: &mut ExtractorConfig| c.start_block += 1)]
+    #[case::module_name(|c: &mut ExtractorConfig| c.module_name = "map_other".to_string())]
+    #[case::account_added(|c: &mut ExtractorConfig| c.initialized_accounts.push(Bytes::from("0x03")))]
+    #[case::accounts_regrouped(|c: &mut ExtractorConfig| {
+        c.initialized_accounts = vec![Bytes::from("0x0102")];
+    })]
+    #[case::accounts_block(|c: &mut ExtractorConfig| c.initialized_accounts_block += 1)]
+    #[case::no_dci(|c: &mut ExtractorConfig| c.dci_plugin = None)]
+    #[case::rpc_dci(|c: &mut ExtractorConfig| c.dci_plugin = Some(DCIType::RPC))]
+    #[case::pool_manager(|c: &mut ExtractorConfig| {
+        c.dci_plugin = Some(DCIType::UniswapV4Hooks { pool_manager_address: "0x01".to_string() });
+    })]
+    #[case::no_post_processor(|c: &mut ExtractorConfig| c.post_processor = None)]
+    #[case::other_post_processor(|c: &mut ExtractorConfig| {
+        c.post_processor = Some("add_default_attributes".to_string());
+    })]
+    fn the_fingerprint_changes_with_each_field_that_shapes_deltas(
+        #[case] change: fn(&mut ExtractorConfig),
+    ) {
+        let mut changed = config();
+        change(&mut changed);
+
+        assert_ne!(fingerprint(&changed, &inputs()), fingerprint(&config(), &inputs()));
+    }
+
+    #[rstest]
+    #[case::spkg_path(|c: &mut ExtractorConfig| c.spkg = "elsewhere/package.spkg".to_string())]
+    #[case::implementation_type(|c: &mut ExtractorConfig| {
+        c.implementation_type = ImplementationType::Vm;
+    })]
+    #[case::sync_batch_size(|c: &mut ExtractorConfig| c.sync_batch_size = 1)]
+    #[case::stop_block(|c: &mut ExtractorConfig| c.stop_block = None)]
+    #[case::protocol_types(|c: &mut ExtractorConfig| c.protocol_types.clear())]
+    #[case::max_restarts(|c: &mut ExtractorConfig| c.max_restarts = None)]
+    #[case::pool_manager_in_lowercase(|c: &mut ExtractorConfig| {
+        c.dci_plugin = Some(DCIType::UniswapV4Hooks {
+            pool_manager_address: "0x000000000004444c5dc75cb358380d2e3de08a90".to_string(),
+        });
+    })]
+    fn the_fingerprint_ignores_fields_that_do_not_shape_deltas(
+        #[case] change: fn(&mut ExtractorConfig),
+    ) {
+        let mut changed = config();
+        change(&mut changed);
+
+        assert_eq!(fingerprint(&changed, &inputs()), fingerprint(&config(), &inputs()));
+    }
+
+    #[rstest]
+    #[case::package_bytes(|i: &mut Inputs| i.spkg = b"substreams package v2".to_vec())]
+    #[case::blacklisted_address_added(|i: &mut Inputs| i.dci_blacklist.push(Bytes::from("0xcc")))]
+    #[case::blacklist_emptied(|i: &mut Inputs| i.dci_blacklist.clear())]
+    #[case::settlement_contract(|i: &mut Inputs| i.settlement_contract = Bytes::from("0x01"))]
+    #[case::native_token(|i: &mut Inputs| i.native_token = Bytes::from("0xeeee"))]
+    fn the_fingerprint_changes_with_each_input_that_shapes_deltas(#[case] change: fn(&mut Inputs)) {
+        let mut changed = inputs();
+        change(&mut changed);
+
+        assert_ne!(fingerprint(&config(), &changed), fingerprint(&config(), &inputs()));
+    }
+
+    #[rstest]
+    #[case::blacklist_reordered(|i: &mut Inputs| i.dci_blacklist.reverse())]
+    #[case::blacklisted_address_repeated(|i: &mut Inputs| {
+        i.dci_blacklist.push(Bytes::from("0xaa"));
+    })]
+    fn the_fingerprint_hashes_the_dci_blacklist_as_a_set(#[case] change: fn(&mut Inputs)) {
+        let mut changed = inputs();
+        change(&mut changed);
+
+        assert_eq!(fingerprint(&config(), &changed), fingerprint(&config(), &inputs()));
+    }
+
+    /// Only the DCI reads the blacklist.
+    #[rstest]
+    #[case::without_dci(None, true)]
+    #[case::with_rpc_dci(Some(DCIType::RPC), false)]
+    fn the_fingerprint_hashes_the_dci_blacklist_only_with_a_dci(
+        #[case] dci_plugin: Option<DCIType>,
+        #[case] ignores_blacklist: bool,
+    ) {
+        let config = ExtractorConfig { dci_plugin, ..config() };
+        let other_blacklist = Inputs { dci_blacklist: vec![Bytes::from("0xcc")], ..inputs() };
+
+        assert_eq!(
+            fingerprint(&config, &other_blacklist) == fingerprint(&config, &inputs()),
+            ignores_blacklist
+        );
+    }
+
+    #[test]
+    fn a_pool_manager_address_that_is_not_hex_fails_the_fingerprint() {
+        let config = ExtractorConfig {
+            dci_plugin: Some(DCIType::UniswapV4Hooks {
+                pool_manager_address: "pool manager".to_string(),
+            }),
+            ..config()
+        };
+        let Inputs { spkg, dci_blacklist, settlement_contract, native_token } = inputs();
+
+        let result = extractor_fingerprint(
+            &config,
+            &FingerprintInputs {
+                spkg: &spkg,
+                dci_blacklist: &dci_blacklist,
+                settlement_contract: &settlement_contract,
+                native_token: &native_token,
+            },
+        );
+
+        assert!(
+            matches!(&result, Err(ExtractionError::Setup(message)) if message.contains("pool manager")),
+            "{result:?}"
+        );
+    }
 
     #[test]
     fn test_extractor_config_without_dci_plugin() {

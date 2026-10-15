@@ -1,6 +1,7 @@
 //! Source digests for the extractor fingerprint, computed by build scripts: tycho-ethereum's
-//! `build.rs` uses this file for `SERVICES_SOURCE_DIGEST`. It reads only the files it is given, so
-//! it runs from the published package too.
+//! `build.rs` uses this file for `SERVICES_SOURCE_DIGEST`, and tycho-indexer's `build.rs` includes
+//! it by path for its own digest. It reads only the files it is given, so it runs from the
+//! published package too.
 //!
 //! A digest ignores edits that cannot change the code's behaviour. For each `.rs` file it hashes
 //! the token stream that `syn` parses, without items marked `#[cfg(test)]`, functions marked

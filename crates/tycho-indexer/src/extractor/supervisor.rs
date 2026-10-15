@@ -97,7 +97,11 @@ impl ExtractorSupervisor {
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
     pub fn handle(&self) -> ExtractorHandle {
-        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone())
+        ExtractorHandle::new(
+            self.id.clone(),
+            self.ctrl_tx.clone(),
+            self.factory.fingerprint().clone(),
+        )
     }
 
     /// Runs the supervision loop. Returns `Ok` when the extractor exited gracefully or was
@@ -107,8 +111,8 @@ impl ExtractorSupervisor {
     /// process, and callers are expected to treat it as fatal:
     /// - The runner could not be rebuilt after a failure. Rebuilding only touches external state,
     ///   so this means the database was unreachable while reading back the cursor, last block, or
-    ///   DCI entry points, or the spkg file on disk is missing or corrupted. An invalid
-    ///   configuration fails the first build the same way, aborting startup.
+    ///   DCI entry points. An invalid configuration fails the first build the same way, aborting
+    ///   startup.
     /// - `max_restarts` consecutive failures were exhausted.
     ///
     /// In both cases a process restart is the safest recovery: it rebuilds from a clean
