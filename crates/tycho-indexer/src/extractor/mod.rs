@@ -46,6 +46,7 @@ pub mod runner;
 pub mod supervisor;
 pub mod token_analysis_cron;
 mod u256_num;
+pub mod writer_status;
 
 #[cfg(test)]
 mod protobuf_conversion_tests;
@@ -181,6 +182,12 @@ pub trait Extractor: Send + Sync {
 
     /// Processes a progress report from the source stream.
     async fn handle_progress(&self, inp: ModulesProgress) -> Result<(), ExtractionError>;
+
+    /// Waits until the extractor can take another block from the source stream.
+    ///
+    /// Returns at once unless the extractor keeps blocks in memory for another process to
+    /// write and already holds as many as it may.
+    async fn wait_for_capacity(&self);
 }
 
 #[automock]
