@@ -250,46 +250,38 @@ impl DeltaStateModel {
         same_value("extractor", extractor, canonical_extractor)?;
         same_value("head", head, canonical_head)?;
         same_entries("components", components, canonical_components)?;
-        same_entries(
-            "component_attributes",
-            &flatten(component_attributes),
-            &flatten(canonical_attributes),
-        )?;
-        same_entries(
+        same_nested_entries("component_attributes", component_attributes, canonical_attributes)?;
+        same_nested_entries(
             "component_balances",
-            &flatten(component_balances),
-            &flatten(canonical_component_balances),
+            component_balances,
+            canonical_component_balances,
         )?;
-        same_entries("account_storage", &flatten(account_storage), &flatten(canonical_storage))?;
-        bounded(
+        same_nested_entries("account_storage", account_storage, canonical_storage)?;
+        bounded_keys(
             "account_native_balances",
-            keys(account_native_balances),
-            keys(canonical_native_balances),
-            keys(connected_native_balances),
+            account_native_balances,
+            canonical_native_balances,
+            connected_native_balances,
         )?;
-        bounded("account_code", keys(account_code), keys(canonical_code), keys(connected_code))?;
-        covers(
+        bounded_keys("account_code", account_code, canonical_code, connected_code)?;
+        covers_nested_keys(
             "account_token_balances",
-            &flatten(account_token_balances)
-                .into_keys()
-                .collect(),
-            &flatten(canonical_token_balances)
-                .into_keys()
-                .collect(),
+            account_token_balances,
+            canonical_token_balances,
         )?;
-        bounded("tokens", keys(tokens), keys(canonical_tokens), keys(connected_tokens))?;
-        bounded("component_tvl", keys(component_tvl), keys(canonical_tvl), keys(connected_tvl))?;
-        bounded(
+        bounded_keys("tokens", tokens, canonical_tokens, connected_tokens)?;
+        bounded_keys("component_tvl", component_tvl, canonical_tvl, connected_tvl)?;
+        bounded_pairs(
             "component_entrypoints",
-            set_pairs(component_entrypoints),
-            set_pairs(canonical_entrypoints),
-            set_pairs(connected_entrypoints),
+            component_entrypoints,
+            canonical_entrypoints,
+            connected_entrypoints,
         )?;
-        bounded(
+        bounded_pairs(
             "entrypoint_contracts",
-            set_pairs(entrypoint_contracts),
-            set_pairs(canonical_contracts),
-            set_pairs(connected_contracts),
+            entrypoint_contracts,
+            canonical_contracts,
+            connected_contracts,
         )
     }
 
@@ -477,41 +469,104 @@ fn same_entries<K: Eq + Hash + Debug, V: PartialEq>(
     }
 }
 
-/// Checks `canonical ⊆ own ⊆ connected`.
-fn bounded<T: Eq + Hash + Debug>(
+/// Checks that two maps of maps hold equal values under the same pair of keys. Compares the maps
+/// whole and flattens them only when they differ, to name the differing pair. The model never
+/// stores an empty inner map, so whole maps differ only when an entry does.
+fn same_nested_entries<K: Eq + Hash + Debug, IK: Eq + Hash + Debug, V: PartialEq>(
     field: &'static str,
-    own: HashSet<T>,
-    canonical: HashSet<T>,
-    connected: HashSet<T>,
+    own: &HashMap<K, HashMap<IK, V>>,
+    canonical: &HashMap<K, HashMap<IK, V>>,
 ) -> Result<(), StateMismatch> {
-    covers(field, &own, &canonical)?;
-    match smallest(own.difference(&connected)) {
+    if own == canonical {
+        return Ok(());
+    }
+    same_entries(field, &flatten(own), &flatten(canonical))
+}
+
+/// Checks `canonical ⊆ own ⊆ connected` over the keys of the maps.
+fn bounded_keys<K: Eq + Hash + Debug, V>(
+    field: &'static str,
+    own: &HashMap<K, V>,
+    canonical: &HashMap<K, V>,
+    connected: &HashMap<K, V>,
+) -> Result<(), StateMismatch> {
+    let missing = canonical
+        .keys()
+        .filter(|key| !own.contains_key(*key));
+    if let Some(entry) = smallest(missing) {
+        return Err(StateMismatch::Missing { field, entry });
+    }
+    let unexpected = own
+        .keys()
+        .filter(|key| !connected.contains_key(*key));
+    match smallest(unexpected) {
         Some(entry) => Err(StateMismatch::Unexpected { field, entry }),
         None => Ok(()),
     }
 }
 
-/// Checks `canonical ⊆ own`.
-fn covers<T: Eq + Hash + Debug>(
+/// Checks `canonical ⊆ own` over the pairs of keys of maps of maps.
+fn covers_nested_keys<K: Eq + Hash + Debug, IK: Eq + Hash + Debug, V>(
     field: &'static str,
-    own: &HashSet<T>,
-    canonical: &HashSet<T>,
+    own: &HashMap<K, HashMap<IK, V>>,
+    canonical: &HashMap<K, HashMap<IK, V>>,
 ) -> Result<(), StateMismatch> {
-    match smallest(canonical.difference(own)) {
+    let missing = canonical
+        .iter()
+        .flat_map(|(key, inner)| {
+            inner
+                .keys()
+                .map(move |inner_key| (key, inner_key))
+        })
+        .filter(|(key, inner_key)| {
+            !own.get(*key)
+                .is_some_and(|held| held.contains_key(*inner_key))
+        });
+    match smallest(missing) {
         Some(entry) => Err(StateMismatch::Missing { field, entry }),
         None => Ok(()),
     }
 }
 
+/// Checks `canonical ⊆ own ⊆ connected` over the (key, member) pairs of maps of sets.
+fn bounded_pairs<K: Eq + Hash + Debug, IK: Eq + Hash + Debug>(
+    field: &'static str,
+    own: &HashMap<K, HashSet<IK>>,
+    canonical: &HashMap<K, HashSet<IK>>,
+    connected: &HashMap<K, HashSet<IK>>,
+) -> Result<(), StateMismatch> {
+    if let Some(entry) = smallest(pairs_outside(canonical, own)) {
+        return Err(StateMismatch::Missing { field, entry });
+    }
+    match smallest(pairs_outside(own, connected)) {
+        Some(entry) => Err(StateMismatch::Unexpected { field, entry }),
+        None => Ok(()),
+    }
+}
+
+/// The (key, member) pairs of `map` that `other` lacks.
+fn pairs_outside<'a, K: Eq + Hash, IK: Eq + Hash>(
+    map: &'a HashMap<K, HashSet<IK>>,
+    other: &'a HashMap<K, HashSet<IK>>,
+) -> impl Iterator<Item = (&'a K, &'a IK)> {
+    map.iter()
+        .flat_map(|(key, members)| {
+            members
+                .iter()
+                .map(move |member| (key, member))
+        })
+        .filter(|(key, member)| {
+            !other
+                .get(*key)
+                .is_some_and(|held| held.contains(*member))
+        })
+}
+
 /// The entry with the smallest debug form, so a mismatch names the same entry on every run.
-fn smallest<'a, T: Debug + 'a>(entries: impl Iterator<Item = &'a T>) -> Option<String> {
+fn smallest<T: Debug>(entries: impl Iterator<Item = T>) -> Option<String> {
     entries
         .map(|entry| format!("{entry:?}"))
         .min()
-}
-
-fn keys<K: Eq + Hash, V>(map: &HashMap<K, V>) -> HashSet<&K> {
-    map.keys().collect()
 }
 
 /// The values of a map of maps, keyed by both keys.
@@ -525,16 +580,6 @@ fn flatten<K: Eq + Hash, IK: Eq + Hash, IV>(
         }
     }
     flat
-}
-
-fn set_pairs<K: Eq + Hash, IK: Eq + Hash>(map: &HashMap<K, HashSet<IK>>) -> HashSet<(&K, &IK)> {
-    let mut pairs = HashSet::new();
-    for (key, inner) in map {
-        for inner_key in inner {
-            pairs.insert((key, inner_key));
-        }
-    }
-    pairs
 }
 
 /// The rule a client's state breaks in [`DeltaStateModel::check_against`].
