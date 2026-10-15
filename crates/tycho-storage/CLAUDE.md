@@ -40,6 +40,9 @@ All public DB operations go through one of two gateway structs:
 `GatewayBuilder::build` requires **exactly one** chain (`ensure_chain`) — an instance is
 single-chain; it hard-fails otherwise.
 
+Every gateway build runs the embedded migrations first, under a Postgres advisory lock
+(`MIGRATION_LOCK_KEY`), so processes starting together against one database migrate one at a time.
+
 Both delegate every actual SQL call to `PostgresGateway` (unexported). Domain logic lives in
 `chain`, `contract`, `protocol`, `entry_point`, `extraction_state`, and `snapshot`—each adding
 methods to `PostgresGateway` via `impl` blocks in their own file.
