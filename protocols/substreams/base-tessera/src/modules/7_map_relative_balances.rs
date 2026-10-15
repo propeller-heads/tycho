@@ -21,6 +21,7 @@ fn balance(token: &[u8], owner: &[u8]) -> Result<BigInt> {
         .call(token.to_vec())
         .ok_or_else(|| anyhow!("balanceOf failed for {} at {}", id(token), id(owner)))
 }
+
 fn event_delta(log: &eth::v2::Log, owner: &[u8]) -> Option<BigInt> {
     if let Some(erc20::events::Transfer { from, to, value }) =
         erc20::events::Transfer::match_and_decode(log)
@@ -140,13 +141,25 @@ fn balance_deltas_from_storage(
     let mut seeded = HashSet::new();
     let mut deltas = vec![];
     for group in new_components.tx_components {
-        let tx = group.tx.expect("component transaction");
+        let tx = group
+            .tx
+            .ok_or_else(|| anyhow!("new components without a transaction"))?;
+        // Balance aggregation groups consecutive deltas by transaction, so the seed must sort
+        // inside its transaction's execution-ordinal range, never by transaction index.
+        let ord = block
+            .transaction_traces
+            .iter()
+            .find(|trace| u64::from(trace.index) == tx.index)
+            .map(|trace| trace.begin_ordinal)
+            .ok_or_else(|| {
+                anyhow!("component transaction {} is missing from the block", tx.index)
+            })?;
         for c in group.components {
             for token in c.tokens {
                 let amount = sources.balance(&token, owner)?;
                 seeded.insert((token.clone(), c.id.clone()));
                 deltas.push(BalanceDelta {
-                    ord: tx.index,
+                    ord,
                     tx: Some(tx.clone()),
                     token,
                     component_id: c.id.as_bytes().to_vec(),
@@ -339,6 +352,18 @@ mod tests {
         values
     }
 
+    /// Transaction indexes in emission order, one entry per run of consecutive deltas.
+    fn tx_runs(deltas: &[BalanceDelta]) -> Vec<u64> {
+        let mut runs = vec![];
+        for d in deltas {
+            let index = d.tx.as_ref().unwrap().index;
+            if runs.last() != Some(&index) {
+                runs.push(index);
+            }
+        }
+        runs
+    }
+
     #[test]
     fn self_transfer_nets_to_zero() {
         assert_eq!(
@@ -387,6 +412,66 @@ mod tests {
         assert_eq!(deltas_of(&deltas, "new", &BASE_TOKEN), vec![BigInt::from(7)]);
         assert_eq!(deltas_of(&deltas, "old", &USDC), vec![BigInt::from(50)]);
         assert!(deltas.iter().all(|d| d.token != UNHELD), "no pair holds this token");
+    }
+
+    #[test]
+    fn seed_stays_inside_its_transaction_ordinal_range() {
+        let sources = FakeSources {
+            holders: HashMap::from([
+                (USDC.to_vec(), vec!["old".to_string(), "new".to_string()]),
+                (BASE_TOKEN.to_vec(), vec!["old".to_string()]),
+            ]),
+            balances: HashMap::from([((USDC.to_vec(), TREASURY.to_vec()), 500)]),
+        };
+        // Transaction indexes are far below execution ordinals, so an index-based seed for
+        // tx 47 would sort between tx 3's deltas and split them.
+        let swap = eth::v2::TransactionTrace {
+            begin_ordinal: 30,
+            end_ordinal: 60,
+            ..tx(
+                3,
+                vec![
+                    transfer(&USDC, &OUTSIDER, &TREASURY, 50, 40),
+                    transfer(&BASE_TOKEN, &TREASURY, &OUTSIDER, 8, 55),
+                ],
+                vec![],
+            )
+        };
+        let creation = eth::v2::TransactionTrace {
+            begin_ordinal: 100,
+            end_ordinal: 120,
+            ..tx(47, vec![transfer(&USDC, &OUTSIDER, &TREASURY, 6, 110)], vec![])
+        };
+        let deltas = balance_deltas(
+            &config(),
+            &block(vec![swap, creation]),
+            created("new", &[&USDC], 47),
+            &TREASURY,
+            &sources,
+        )
+        .unwrap();
+
+        // Balance aggregation groups consecutive deltas by transaction.
+        assert_eq!(tx_runs(&deltas), vec![3, 47]);
+        assert_eq!(deltas_of(&deltas, "old", &USDC), vec![BigInt::from(50), BigInt::from(6)]);
+        assert_eq!(deltas_of(&deltas, "old", &BASE_TOKEN), vec![BigInt::from(-8)]);
+        assert_eq!(deltas_of(&deltas, "new", &USDC), vec![BigInt::from(500)]);
+    }
+
+    #[test]
+    fn seed_for_transaction_missing_from_block_returns_an_error() {
+        let sources = FakeSources { holders: HashMap::new(), balances: HashMap::new() };
+        let error = balance_deltas(
+            &config(),
+            &block(vec![tx(0, vec![], vec![])]),
+            created("new", &[&USDC], 5),
+            &TREASURY,
+            &sources,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("transaction 5"));
     }
 
     #[test]
