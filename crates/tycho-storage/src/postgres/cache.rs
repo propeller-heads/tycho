@@ -1438,6 +1438,44 @@ impl StateSnapshotGateway for CachedGateway {
 }
 
 #[cfg(test)]
+mod test_write_queue {
+    use super::*;
+
+    fn transaction(number: u64, priority: WritePriority) -> DBTransaction {
+        let block = models::blockchain::Block { number, ..Default::default() };
+        DBTransaction {
+            block_range: BlockRange::new(&block, &block),
+            priority,
+            size: 0,
+            operations: vec![],
+            tx: oneshot::channel().0,
+            owner: None,
+            caller_span: tracing::Span::none(),
+        }
+    }
+
+    #[test]
+    fn head_transactions_leave_before_backfill_ones_in_arrival_order() {
+        let mut queue = WriteQueue::default();
+        queue.push(transaction(1, WritePriority::Backfill));
+        queue.push(transaction(2, WritePriority::Head));
+        queue.push(transaction(3, WritePriority::Backfill));
+        queue.push(transaction(4, WritePriority::Head));
+
+        let order: Vec<u64> = std::iter::from_fn(|| queue.pop())
+            .map(|tx| tx.block_range.start.number)
+            .collect();
+
+        assert_eq!(order, vec![2, 4, 1, 3]);
+    }
+
+    #[test]
+    fn empty_queue_has_nothing_to_pop() {
+        assert!(WriteQueue::default().pop().is_none());
+    }
+}
+
+#[cfg(test)]
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
@@ -1747,6 +1785,127 @@ mod test_serial_db {
                 .await
                 .unwrap();
             assert_eq!(stored, 0, "cached tokens must not be written to the database");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_head_block_raises_an_open_backfill_transaction_to_head() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, mut rx) = mpsc::channel(10);
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway);
+            let (block_1, block_2) = (get_sample_block(1), get_sample_block(2));
+            cached_gw
+                .start_backfill_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .start_transaction(&block_2, None)
+                .await;
+            cached_gw
+                .upsert_block(&[block_1, block_2])
+                .await
+                .expect("Upsert blocks ok");
+
+            let executor = async {
+                let Some(DBCacheMessage::Write(db_tx)) = rx.recv().await else {
+                    panic!("expected a write");
+                };
+                let priority = db_tx.priority;
+                db_tx.tx.send(Ok(())).unwrap();
+                priority
+            };
+            let (committed, priority) = tokio::join!(cached_gw.commit_transaction(0), executor);
+
+            committed.expect("commit should succeed");
+            assert_eq!(priority, WritePriority::Head);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_head_write_runs_before_an_earlier_backfill_write() {
+        run_against_db(|connection_pool| async move {
+            let (_gateway, tx, _epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut holder = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            // Every write first reads the epoch row FOR SHARE, so this holds up the executor.
+            sql_query("BEGIN")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+            sql_query("SELECT epoch FROM writer_epoch FOR UPDATE")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+
+            let block_1 = get_sample_block(1);
+            let busy =
+                send_write_message(&tx, block_1.clone(), vec![WriteOp::UpsertBlock(vec![block_1])])
+                    .await;
+            // Give the executor time to start the first write and wait on the epoch row.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let block_2 = get_sample_block(2);
+            let backfill = send_prioritized_write(
+                &tx,
+                block_2.clone(),
+                vec![WriteOp::UpsertBlock(vec![block_2])],
+                WritePriority::Backfill,
+            )
+            .await;
+            let block_3 = get_sample_block(3);
+            let head = send_prioritized_write(
+                &tx,
+                block_3.clone(),
+                vec![WriteOp::UpsertBlock(vec![block_3])],
+                WritePriority::Head,
+            )
+            .await;
+            sql_query("ROLLBACK")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+            for response in [busy, backfill, head] {
+                response
+                    .await
+                    .expect("executor should answer")
+                    .expect("write should succeed");
+            }
+            handle.abort();
+
+            let written: Vec<(i64, NaiveDateTime)> = schema::block::table
+                .select((schema::block::number, schema::block::inserted_ts))
+                .filter(schema::block::number.eq_any([2_i64, 3]))
+                .load(&mut holder)
+                .await
+                .unwrap();
+            let inserted = |number| {
+                written
+                    .iter()
+                    .find(|(n, _)| *n == number)
+                    .map(|(_, ts)| *ts)
+                    .expect("block should be written")
+            };
+            assert!(
+                inserted(3) < inserted(2),
+                "the head write must run before the backfill write sent earlier"
+            );
         })
         .await;
     }
@@ -2397,10 +2556,19 @@ mod test_serial_db {
         block: models::blockchain::Block,
         operations: Vec<WriteOp>,
     ) -> oneshot::Receiver<Result<(), StorageError>> {
+        send_prioritized_write(tx, block, operations, WritePriority::Head).await
+    }
+
+    async fn send_prioritized_write(
+        tx: &mpsc::Sender<DBCacheMessage>,
+        block: models::blockchain::Block,
+        operations: Vec<WriteOp>,
+        priority: WritePriority,
+    ) -> oneshot::Receiver<Result<(), StorageError>> {
         let (os_tx, os_rx) = oneshot::channel();
         let db_transaction = DBTransaction {
             block_range: BlockRange::new(&block, &block),
-            priority: WritePriority::Head,
+            priority,
             size: operations.len(),
             operations,
             tx: os_tx,
