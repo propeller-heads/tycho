@@ -149,7 +149,12 @@ database cursor.
 ## Persistence
 
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
-block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
+block batch arrives. Each commit has a `WritePriority` (`write_priority`): `Backfill` when the
+newest block the extractor has received is older than `BACKFILL_BLOCK_AGE` (10 minutes, by block
+timestamp), else `Head`, so the executor runs the commits of extractors at the chain head first. A
+takeover commit uses the same rule. The committed blocks' own age cannot decide it, as only
+finalized blocks are committed and these are minutes old at the head; finality cannot either, as on
+many chains a block at the head is already final. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
 `valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
