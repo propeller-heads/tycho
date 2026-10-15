@@ -1550,6 +1550,48 @@ mod tests_transaction_conflict {
 }
 
 #[cfg(test)]
+mod tests_migration_lock {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    use diesel::{sql_query, sql_types::BigInt, Connection, PgConnection, RunQueryDsl};
+
+    use super::{run_migrations, MIGRATION_LOCK_KEY};
+
+    fn call_on_migration_lock(conn: &mut PgConnection, function: &str) {
+        sql_query(format!("SELECT {function}($1)"))
+            .bind::<BigInt, _>(MIGRATION_LOCK_KEY)
+            .execute(conn)
+            .unwrap_or_else(|e| panic!("{function} on the migration lock failed: {e}"));
+    }
+
+    #[test]
+    fn test_serial_db_run_migrations_waits_for_migration_lock() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let mut holder = PgConnection::establish(&db_url).expect("holder should connect");
+        call_on_migration_lock(&mut holder, "pg_advisory_lock");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let migrator = thread::spawn(move || {
+            run_migrations(&db_url);
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_millis(500))
+                .is_err(),
+            "migrations must wait while another session holds the migration lock"
+        );
+
+        call_on_migration_lock(&mut holder, "pg_advisory_unlock");
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("migrations should finish once the lock is released");
+        migrator.join().unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests_ensure_chain {
     use diesel::prelude::*;
     use diesel_async::{AsyncConnection, RunQueryDsl};
