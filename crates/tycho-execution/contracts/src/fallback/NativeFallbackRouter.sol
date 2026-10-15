@@ -123,7 +123,8 @@ contract NativeFallbackRouter is TychoFallbackRouter {
         if (amountIn == 0 || _signedAmountIn(nativeData) == 0) {
             revert NativeFallbackRouter__InvalidAmountIn();
         }
-        // The only tradeRFQT arguments the maker does not sign.
+        // The maker does not sign these two tradeRFQT arguments, so the router requires them to be
+        // zero.
         if (
             _calldataWord(nativeData, _ACTUAL_SELLER_AMOUNT_OFFSET) != 0
                 || _calldataWord(nativeData, _ACTUAL_MIN_OUTPUT_AMOUNT_OFFSET)
