@@ -173,6 +173,8 @@ impl EkuboPool for BasePool {
                             ticks[idx] = tick;
                         }
                     }
+                    // A deletion of a tick the pool never held: nothing to remove.
+                    Err(_) if tick.liquidity_delta.is_zero() => {}
                     Err(idx) => {
                         ticks.insert(idx, tick);
                     }

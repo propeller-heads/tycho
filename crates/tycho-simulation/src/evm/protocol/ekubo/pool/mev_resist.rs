@@ -200,6 +200,8 @@ impl EkuboPool for MevResistPool {
                         self.ticks[idx] = tick;
                     }
                 }
+                // A deletion of a tick the pool never held: nothing to remove.
+                Err(_) if tick.liquidity_delta.is_zero() => {}
                 Err(idx) => {
                     self.ticks.insert(idx, tick);
                 }
