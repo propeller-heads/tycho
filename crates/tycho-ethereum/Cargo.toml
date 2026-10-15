@@ -40,12 +40,22 @@ alloy = { workspace = true, default-features = false, features = [
 
 [build-dependencies]
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+# The versions already in Cargo.lock. Upgrading them can change every source digest once (see
+# build/source_digest.rs).
+syn = { version = "2.0.117", features = ["full", "visit-mut"] }
+quote = "1.0.40"
+proc-macro2 = "1.0.101"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 mockito.workspace = true
 rstest.workspace = true
 tracing-test = "0.2.5"
+# For the tests of build/source_digest.rs, which src/lib.rs compiles in test builds.
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+syn = { version = "2.0.117", features = ["full", "visit-mut"] }
+quote = "1.0.40"
+proc-macro2 = "1.0.101"
 
 [[example]]
 name = "run-analysis"

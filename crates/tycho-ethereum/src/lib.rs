@@ -10,16 +10,21 @@ pub mod services;
 #[cfg(test)]
 pub mod test_fixtures;
 
+/// The build script's source digest, compiled in test builds to run its tests.
+#[cfg(test)]
+#[path = "../build/source_digest.rs"]
+mod source_digest;
+
 use alloy::primitives::{Address, B256, U256};
 pub(crate) use rpc::errors::*;
 use tycho_common::Bytes;
 
 /// Hex-encoded Keccak-256 digest of this crate's `services`, `rpc` and `erc20` sources and of this
-/// file, computed at build time from every file's path and contents (line endings normalized to
-/// LF).
+/// file, computed at build time by `build/source_digest.rs`.
 ///
-/// Two builds with the same digest compiled the same sources for these modules. Any edit to them,
-/// tests and comments included, changes it.
+/// Two builds with the same digest compiled the same code for these modules. Edits that cannot
+/// change their behaviour keep it: comments, doc comments, formatting, and items only test builds
+/// compile (`#[cfg(test)]`, `#[test]`).
 pub const SERVICES_SOURCE_DIGEST: &str = env!("TYCHO_ETHEREUM_SERVICES_SOURCE_DIGEST");
 
 /// A trait for converting types to and from `Bytes`.
