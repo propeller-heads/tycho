@@ -252,12 +252,28 @@ impl From<crate::models::error::WebsocketError> for WebsocketError {
     }
 }
 
+/// Identifies the deltas an extractor emits, as hex: equal fingerprints mean two runs of an
+/// extractor use the same code, substreams package and config (see
+/// [`models::ExtractorFingerprint`]). The bytes are opaque.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ExtractorFingerprint(pub Bytes);
+
 /// A response sent from the server to the client
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
 #[serde(tag = "method", rename_all = "lowercase")]
 pub enum Response {
-    NewSubscription { extractor_id: ExtractorIdentity, subscription_id: Uuid },
-    SubscriptionEnded { subscription_id: Uuid },
+    NewSubscription {
+        extractor_id: ExtractorIdentity,
+        subscription_id: Uuid,
+        /// The fingerprint of the deltas the extractor emits. Absent when the server predates
+        /// fingerprints or the extractor has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<ExtractorFingerprint>,
+    },
+    SubscriptionEnded {
+        subscription_id: Uuid,
+    },
     Error(WebsocketError),
 }
 
@@ -3261,6 +3277,76 @@ mod test {
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: WebsocketError = serde_json::from_str(&json).unwrap();
         assert_eq!(error, deserialized);
+    }
+
+    fn new_subscription(fingerprint: Option<ExtractorFingerprint>) -> Response {
+        Response::NewSubscription {
+            extractor_id: ExtractorIdentity::new(Chain::Ethereum, "uniswap_v4"),
+            subscription_id: Uuid::from_str("30b740d1-cf09-4e0e-8cfe-b1434d447ece").unwrap(),
+            fingerprint,
+        }
+    }
+
+    #[test]
+    fn new_subscription_round_trips_with_its_fingerprint() {
+        let response =
+            new_subscription(Some(ExtractorFingerprint(Bytes::from("0xabcdef0123456789"))));
+
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["fingerprint"], "0xabcdef0123456789");
+        assert_eq!(serde_json::from_value::<Response>(json.clone()).unwrap(), response);
+        let WebSocketMessage::Response(received) =
+            serde_json::from_value::<WebSocketMessage>(json).unwrap()
+        else {
+            panic!("a NewSubscription is a WebSocketMessage::Response");
+        };
+        assert_eq!(received, response);
+    }
+
+    /// Servers without fingerprints send no field, and clients read that as `None`.
+    #[test]
+    fn new_subscription_without_fingerprint_omits_the_field() {
+        let sent_by_older_servers = r#"{
+            "method": "newsubscription",
+            "extractor_id": {"chain": "ethereum", "name": "uniswap_v4"},
+            "subscription_id": "30b740d1-cf09-4e0e-8cfe-b1434d447ece"
+        }"#;
+
+        assert_eq!(
+            serde_json::to_value(new_subscription(None)).unwrap(),
+            serde_json::from_str::<serde_json::Value>(sent_by_older_servers).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(sent_by_older_servers).unwrap(),
+            new_subscription(None)
+        );
+    }
+
+    /// Clients built before fingerprints ignore the field.
+    #[test]
+    fn older_clients_read_a_new_subscription_with_a_fingerprint() {
+        /// `Response` as clients built before fingerprints deserialize it.
+        #[derive(Deserialize, Debug, PartialEq)]
+        #[serde(tag = "method", rename_all = "lowercase")]
+        enum ResponseWithoutFingerprint {
+            NewSubscription { extractor_id: ExtractorIdentity, subscription_id: Uuid },
+            SubscriptionEnded { subscription_id: Uuid },
+            Error(WebsocketError),
+        }
+        let response =
+            new_subscription(Some(ExtractorFingerprint(Bytes::from("0xabcdef0123456789"))));
+
+        let received: ResponseWithoutFingerprint =
+            serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap();
+
+        assert_eq!(
+            received,
+            ResponseWithoutFingerprint::NewSubscription {
+                extractor_id: ExtractorIdentity::new(Chain::Ethereum, "uniswap_v4"),
+                subscription_id: Uuid::from_str("30b740d1-cf09-4e0e-8cfe-b1434d447ece").unwrap(),
+            }
+        );
     }
 
     #[test]

@@ -298,7 +298,9 @@ format files or those sources; a plain restart of the same build with the same p
 keeps it. The factory keeps the decoded
 package, and every run it builds, in-process restarts included, streams that package, so an
 extractor's fingerprint is fixed for the process's lifetime. `ExtractorSupervisor::handle` puts
-it on the `ExtractorHandle` (`MessageSender::fingerprint`).
+it on the `ExtractorHandle` (`MessageSender::fingerprint`), and `ws.rs` sends it with every
+`Response::NewSubscription` (`fingerprint`, hex; omitted when the sender has none, and ignored by
+clients that predate it).
 
 Not in the fingerprint:
 
