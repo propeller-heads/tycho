@@ -201,13 +201,23 @@ struct Outcomes {
     recreating_a_deleted_component: usize,
     /// Reverts on a path that remove a component the client saw created.
     removing_a_created_component: usize,
+    /// Reverts on a path that delete an attribute the client holds although the reverted range
+    /// deleted it again: the client applied the block that created it, not the one that deleted
+    /// it.
+    deleting_an_attribute_the_range_deleted: usize,
     fallbacks: HashMap<FallbackReason, usize>,
 }
 
 impl Outcomes {
     /// Records which components `message`, a step of a path, re-creates or removes from the
-    /// client's state before it.
-    fn add_step(&mut self, client: &DeltaStateModel, message: &BlockAggregatedChanges) {
+    /// client's state before it, and whether it deletes an attribute the client holds that the
+    /// reverted range deleted.
+    fn add_step(
+        &mut self,
+        history: &History,
+        client: &DeltaStateModel,
+        message: &Arc<BlockAggregatedChanges>,
+    ) {
         if !message.revert {
             return;
         }
@@ -221,6 +231,35 @@ impl Outcomes {
             .any(|id| client.components.contains_key(id));
         self.recreating_a_deleted_component += usize::from(recreates);
         self.removing_a_created_component += usize::from(removes);
+
+        let sent_at = history
+            .events
+            .iter()
+            .position(|event| match event {
+                HistoryEvent::Message(sent) => Arc::ptr_eq(sent, message),
+                HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => false,
+            })
+            .expect("a path holds messages of its history");
+        // The chain's state at the reverted tip, right before the revert.
+        let reverted_tip = &history.canonical_states[sent_at - 1];
+        let holds = |state: &DeltaStateModel, id: &String, name: &String| {
+            state
+                .component_attributes
+                .get(id)
+                .is_some_and(|attributes| attributes.contains_key(name))
+        };
+        let deletes_an_attribute_the_range_deleted =
+            message
+                .state_deltas
+                .iter()
+                .any(|(id, delta)| {
+                    delta
+                        .deleted_attributes
+                        .iter()
+                        .any(|name| holds(client, id, name) && !holds(reverted_tip, id, name))
+                });
+        self.deleting_an_attribute_the_range_deleted +=
+            usize::from(deletes_an_attribute_the_range_deleted);
     }
 
     fn add_possible(&mut self, history: &History, gap: Gap, path: &[Arc<BlockAggregatedChanges>]) {
@@ -271,7 +310,7 @@ fn a_possible_catch_up_ends_in_the_canonical_state() {
             // next restart ends the new subscription.
             let mut client = follower[gap.last_applied].clone();
             for message in &path {
-                outcomes.add_step(&client, message);
+                outcomes.add_step(&history, &client, message);
                 client.apply(message);
             }
             let mut last_live = gap.first_live;
@@ -301,6 +340,7 @@ fn a_possible_catch_up_ends_in_the_canonical_state() {
     assert!(outcomes.from_the_last_committed_block > 0, "{outcomes:?}");
     assert!(outcomes.recreating_a_deleted_component > 0, "{outcomes:?}");
     assert!(outcomes.removing_a_created_component > 0, "{outcomes:?}");
+    assert!(outcomes.deleting_an_attribute_the_range_deleted > 0, "{outcomes:?}");
     // `ToNotInWindow` needs a window behind the WebSocket, which a history cannot express.
     for reason in [
         FallbackReason::FingerprintChanged,
