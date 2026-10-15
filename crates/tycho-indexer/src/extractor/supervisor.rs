@@ -364,6 +364,20 @@ mod tests {
     }
 
     #[test]
+    fn fenced_writer_is_unrecoverable() {
+        let fenced = ExtractionError::Storage(StorageError::Fenced { claimed: 3, current: 4 });
+
+        assert_eq!(unrecoverable(&fenced), Some(fenced));
+    }
+
+    #[test]
+    fn other_storage_errors_are_restarted() {
+        let err = ExtractionError::Storage(StorageError::Unexpected("connection reset".into()));
+
+        assert_eq!(unrecoverable(&err), None);
+    }
+
+    #[test]
     fn restart_counter_exists_at_zero_and_counts_restarts() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
