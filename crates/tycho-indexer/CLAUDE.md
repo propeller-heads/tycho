@@ -9,6 +9,7 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task
 testing.rs                  Test utilities
 
 extractor/
@@ -157,6 +158,28 @@ Drained blocks stay in the buffer's committing section (shared with the commit t
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
 
+### Leader election
+
+Several `index` processes can run against one database. All of them extract and serve WS/RPC;
+only the leader commits. `leadership::elect` (called in `main.rs` before the extractors are built,
+with a gateway built with `defer_writer_claim`) tries the `LeaderLock` once:
+
+- **Lock taken**: claims the writer epoch, runs `initialize_accounts`, role `Leader` from the start.
+  This is the single-replica path and behaves as before.
+- **Lock held elsewhere**: role `Follower`. A background task polls
+  `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
+  On success it claims the epoch (fencing the former leader), runs `initialize_accounts`, and only
+  then switches the role to `Leader`, so no extractor commits before the fence. The lock checks
+  start at the claim; a promotion that takes longer than `PROMOTION_TIMEOUT` (5 minutes) ends the
+  task with an error, so a hung promotion cannot leave the database without a writer.
+- **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
+  it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
+  follower. `tycho_leader` (gauge, 0/1) shows the role.
+- **Health**: each successful lock check is published in the `WriterStatus`
+  (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
+  confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
+  the lock. A frozen process does not answer the probe at all, which has the same effect.
+
 ### Leader and follower extractors
 
 Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
@@ -269,7 +292,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check |
+| `/health` | GET — health check; 503 when the leader stopped confirming its lock |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at

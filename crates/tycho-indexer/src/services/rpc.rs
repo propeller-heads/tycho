@@ -26,7 +26,10 @@ use tycho_common::{
 };
 
 use crate::{
-    extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+    extractor::{
+        reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+        writer_status::WriterStatus,
+    },
     services::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
@@ -1638,21 +1641,37 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
     }
 }
 
+/// How long a leader may go without confirming its leader lock before it reports unhealthy.
+///
+/// A leader confirms its lock every second. A leader that stops confirming but keeps the lock
+/// blocks every other process from taking over, so it must be restarted.
+const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Health check endpoint
 ///
-/// This endpoint is used to check the health of the service.
+/// This endpoint is used to check the health of the service. It fails with 503 while this
+/// process is the database writer but has not confirmed its leader lock for 30 seconds.
 #[utoipa::path(
     get,
     path = "/v1/health",
     responses(
         (status = 200, description = "OK", body=Health),
+        (status = 503, description = "The database writer stopped confirming its lock", body=Health),
     ),
     security(
          ("apiKey" = [])
     )
 )]
-pub async fn health() -> Result<HttpResponse, RpcError> {
-    Ok(HttpResponse::Ok().json(dto::Health::Ready))
+pub async fn health(writer_status: Option<web::Data<WriterStatus>>) -> HttpResponse {
+    let since_confirmed = writer_status.and_then(|status| status.time_since_lead_confirmed());
+    match since_confirmed {
+        Some(elapsed) if elapsed > LEAD_CONFIRMATION_LIMIT => HttpResponse::ServiceUnavailable()
+            .json(dto::Health::NotReady(format!(
+                "Leader has not confirmed its leader lock for {}s",
+                elapsed.as_secs()
+            ))),
+        _ => HttpResponse::Ok().json(dto::Health::Ready),
+    }
 }
 
 #[cfg(test)]
