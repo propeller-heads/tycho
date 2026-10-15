@@ -204,7 +204,7 @@ output to the receiver. The rest of `amountIn` goes back to the caller, as for B
 in `FallbackSwap`.
 
 `NativeFallbackRouter` runs a signed Native RFQ-T quote. `nativeData` is `[signedAmountIn: 32][tradeRFQT calldata]`, the
-fields `NativeExecutor` takes after its target, and the quote MUST name the fallback router as recipient. The router
+same fields `NativeExecutor` takes after its target. The quote MUST name the fallback router as recipient. The router
 calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selector, non-zero amounts and zero
 `actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when `amountIn`
 differs from the signed amount, the router writes `amountIn` as `actualSellerAmount`, and Native scales the signed
