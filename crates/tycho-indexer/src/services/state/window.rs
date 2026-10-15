@@ -394,8 +394,9 @@ impl DeltaWindow {
         if let Some(height) = folded_upto {
             self.buffer
                 .drain_blocks_until(height + 1)?;
-            // Buffered blocks are contiguous, so the oldest one left is the next after `height`.
-            self.journal.prune(height + 1);
+            if let Some(oldest) = self.buffer.oldest() {
+                self.journal.prune(oldest.block.number);
+            }
         }
         outcome
     }
@@ -1606,6 +1607,44 @@ mod test {
                 block_step(2, fork_hash(2, 2)),
                 block_step(3, fork_hash(2, 3)),
             ]
+        );
+    }
+
+    #[test]
+    fn catch_up_from_a_block_orphaned_twice_goes_through_the_newest_revert() {
+        // The chain leaves 3, 4 for 3', returns to 3, 4 with the same hashes and grows 5, then
+        // leaves them again for 2''. The two reverts to 2 restore different states, so each
+        // carries a marker.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        let first_revert_to_2 = Arc::new(testing::with_state_delta(revert_msg(2), "c1", 4));
+        w.insert(&first_revert_to_2).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+        let second_revert_to_2 = Arc::new(testing::with_state_delta(revert_msg(2), "c1", 3));
+        w.insert(&second_revert_to_2).unwrap();
+        let readopted: Vec<_> = (3..=5)
+            .map(|n| Arc::new(msg(n, 0, None)))
+            .collect();
+        for block in &readopted {
+            w.insert(block).unwrap();
+        }
+
+        assert_eq!(w.catch_up_path(&hash(4), 4, &hash(5)), Ok(vec![readopted[2].clone()]));
+        assert_eq!(
+            w.catch_up_path(&fork_hash(1, 3), 3, &hash(5)),
+            Ok([vec![second_revert_to_2], readopted].concat())
+        );
+
+        let revert_to_1 = Arc::new(revert_msg(1));
+        w.insert(&revert_to_1).unwrap();
+        let two_on_fork_2 = Arc::new(fork_msg(2, 2, hash(1)));
+        w.insert(&two_on_fork_2).unwrap();
+
+        // Block 4 was orphaned by the first revert to 2 and by the revert to 1. Going through
+        // the older one would also end right, in one more step: [revert to 2, revert to 1, 2''].
+        assert_eq!(
+            w.catch_up_path(&hash(4), 4, &fork_hash(2, 2)),
+            Ok(vec![revert_to_1, two_on_fork_2])
         );
     }
 
