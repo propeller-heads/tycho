@@ -30,6 +30,10 @@ pub(super) enum FormatStream {
     Native,
     /// The native stream's blocks sent as partial blocks, so the merge of partials into
     /// full-block messages and the reverts of pending partials are in the format.
+    ///
+    /// Its full-block messages equal the native stream's for the same blocks (a test checks it),
+    /// so the extractor fingerprint leaves out the `partial_blocks` flag. Partial-block
+    /// subscribers always resync from a snapshot.
     NativePartialBlocks,
     Dci,
 }

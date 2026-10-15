@@ -345,6 +345,109 @@ fn every_format_file_belongs_to_a_stream() {
     assert_eq!(files, streams, "add every format file's stream to FormatStream::ALL");
 }
 
+/// Delivering the native stream as partial blocks yields the full-block messages of full delivery:
+/// every full-block message of the partial-block file, reverts included, equals the native file's
+/// message for the same block, in the same order. The native messages the partial-block file skips
+/// are blocks a later revert orphans, which partial delivery dropped while they were still
+/// partial, and reverts whose orphaned blocks were all skipped. This is why the extractor
+/// fingerprint leaves out the `partial_blocks` flag.
+#[test]
+fn partial_delivery_emits_the_full_block_messages_of_full_delivery() {
+    let full = FormatStream::Native.committed_messages();
+    let partial = FormatStream::NativePartialBlocks.committed_messages();
+    let full_blocks: Vec<&BlockAggregatedChanges> = partial
+        .iter()
+        .filter(|message| message.partial_block_index.is_none())
+        .collect();
+    assert!(!full_blocks.is_empty(), "the partial-block file holds no full-block message");
+
+    let mut delivered = BTreeSet::new();
+    let mut next = 0;
+    for message in full_blocks {
+        let Some(offset) = full[next..]
+            .iter()
+            .position(|candidate| {
+                candidate.block.hash == message.block.hash && candidate.revert == message.revert
+            })
+        else {
+            panic!(
+                "the native file holds no message for {} after its message {next}",
+                describe_message(message)
+            );
+        };
+        next += offset;
+        assert_eq!(
+            &full[next],
+            message,
+            "the messages for {} differ between the two files",
+            describe_message(message)
+        );
+        delivered.insert(next);
+        next += 1;
+    }
+
+    let orphaned = orphaned_blocks(&full);
+    for (index, message) in full.iter().enumerate() {
+        if delivered.contains(&index) {
+            continue;
+        }
+        if message.revert {
+            let undelivered = orphaned[&index]
+                .iter()
+                .all(|block| !delivered.contains(block));
+            assert!(
+                undelivered,
+                "the partial-block file skips native message {index}, a {}, but holds a block it \
+                 orphans",
+                describe_message(message)
+            );
+        } else {
+            assert!(
+                orphaned
+                    .values()
+                    .flatten()
+                    .any(|block| *block == index),
+                "the partial-block file skips native message {index}, a {}, which no revert \
+                 orphans",
+                describe_message(message)
+            );
+        }
+    }
+}
+
+/// For each revert message in `messages`, by index, the indices of the block messages it orphans:
+/// the blocks on the chain above its target when it arrives.
+///
+/// # Panics
+/// If a revert's target is not on the chain.
+fn orphaned_blocks(messages: &[BlockAggregatedChanges]) -> HashMap<usize, Vec<usize>> {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut orphaned = HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if !message.revert {
+            chain.push(index);
+            continue;
+        }
+        let Some(target) = chain
+            .iter()
+            .rposition(|block| messages[*block].block.hash == message.block.hash)
+        else {
+            panic!(
+                "message {index}, a {}, targets no block on the chain",
+                describe_message(message)
+            );
+        };
+        orphaned.insert(index, chain.split_off(target + 1));
+    }
+    orphaned
+}
+
+/// `revert to block 5` or `block 5`.
+fn describe_message(message: &BlockAggregatedChanges) -> String {
+    let kind = if message.revert { "revert to block" } else { "block" };
+    format!("{kind} {}", message.block.number)
+}
+
 /// The reason for every field no recorded message exercises.
 const UNEXERCISED: [(&str, &str); 15] = [
     (

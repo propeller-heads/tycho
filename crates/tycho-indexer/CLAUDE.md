@@ -226,7 +226,11 @@ Postgres, substreams streams written with the protobuf builders, RPC services mo
 - `native_partial_blocks.json`: the same blocks sent as partial blocks, through the runner's
   dispatch with partial blocks enabled: a first block sent whole with its partial copy, partial
   messages, the full-block messages merged from them, reverts that drop pending partials, and an
-  undo signal naming the block being streamed.
+  undo signal naming the block being streamed. Its full-block messages, reverts included, equal
+  `native.json`'s for the same blocks, in the same order, and the `native.json` messages it skips
+  are blocks a later revert orphans and reverts whose orphaned blocks were all skipped
+  (`partial_delivery_emits_the_full_block_messages_of_full_delivery`). This is why the
+  `partial_blocks` flag is not in the extractor fingerprint.
 - `dci.json`: the DCI stream, including an entry point the mocked tracer never traces (the
   `paused` attribute, its retries and the retry limit).
 
@@ -298,6 +302,8 @@ it on the `ExtractorHandle` (`MessageSender::fingerprint`).
 
 Not in the fingerprint:
 
+- The `partial_blocks` flag: partial delivery yields the same full-block messages (see "Delta
+  format files"), and partial-block subscribers always resync from a snapshot.
 - The `TRACE_*` variables: they pick the tracing node and its retry policy, not what is traced
   (see `create_rpc_dci`).
 - The code of `main.rs`'s `initialize_accounts`: its config fields are hashed, its code is not.
