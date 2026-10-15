@@ -3816,6 +3816,32 @@ mod test {
 
     /// Gateway mock for revert tests that reach the previous-value lookups.
     fn revert_test_gateway() -> MockExtractorGateway {
+        let mut gw = revert_test_gateway_without_state_lookups();
+        gw.expect_get_protocol_states()
+            .returning(|_| Ok(Vec::new()));
+        gw
+    }
+
+    /// Like `revert_test_gateway`, but fails the test when the revert looks up prior attribute
+    /// values of `component` in the DB. An attribute created inside the reverted range has no
+    /// prior value, so the revert must delete it without a lookup.
+    fn revert_test_gateway_without_state_lookup_of(
+        component: &'static str,
+    ) -> MockExtractorGateway {
+        let mut gw = revert_test_gateway_without_state_lookups();
+        gw.expect_get_protocol_states()
+            .returning(move |component_ids| {
+                assert!(
+                    !component_ids.contains(&component),
+                    "the revert looked up prior attribute values of {component}"
+                );
+                Ok(Vec::new())
+            });
+        gw
+    }
+
+    /// `revert_test_gateway` without the protocol state lookup.
+    fn revert_test_gateway_without_state_lookups() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
             .times(1)
@@ -3832,8 +3858,6 @@ mod test {
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
-            .returning(|_| Ok(Vec::new()));
-        gw.expect_get_protocol_states()
             .returning(|_| Ok(Vec::new()));
         gw.expect_get_protocol_components()
             .returning(|_| Ok(Vec::new()));
@@ -4346,7 +4370,8 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_attr_created_and_deleted_across_blocks_deletes() {
-        let extractor = create_extractor(revert_test_gateway()).await;
+        let extractor =
+            create_extractor(revert_test_gateway_without_state_lookup_of("pool_x")).await;
 
         // Block 1: empty anchor.
         full_block(&extractor, 1, 1, vec![]).await;
@@ -4405,7 +4430,8 @@ mod test {
 
     #[tokio::test]
     async fn test_revert_attr_created_and_deleted_in_partial_block_deletes() {
-        let extractor = create_extractor(revert_test_gateway()).await;
+        let extractor =
+            create_extractor(revert_test_gateway_without_state_lookup_of("pool_x")).await;
 
         // Block 1: empty anchor.
         full_block(&extractor, 1, 1, vec![]).await;
