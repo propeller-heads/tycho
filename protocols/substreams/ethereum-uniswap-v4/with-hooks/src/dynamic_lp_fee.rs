@@ -1,25 +1,108 @@
 //! The LP fee a dynamic-fee pool stores in `slot0`. `updateDynamicLPFee` writes it without
 //! emitting an event, so it is read off the PoolManager's storage writes instead.
 
+use substreams::scalar::BigInt;
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::prelude::*;
 
-use crate::storage::Word;
+use crate::storage::{mapping_slot, pad32, read_uint, tx_storage_writes, Word};
 
-/// Adds an `lp_fee` attribute update for every tracked pool whose `slot0.lpFee` a transaction of
-/// `block` changed. `pool_for_slot` maps a hex-encoded `slot0` storage slot to the id of the
-/// dynamic-fee pool that owns it.
-pub fn add_lp_fee_changes(
-    _pool_manager: &[u8],
-    _block: &eth::Block,
-    _pool_for_slot: impl Fn(&str) -> Option<String>,
-    _changes: &mut Vec<TransactionChanges>,
-) {
+/// Base slot of `mapping(PoolId => Pool.State) _pools` in the PoolManager. `slot0` is the first
+/// word of each entry.
+const POOLS_SLOT: u64 = 6;
+
+// `slot0` packs sqrtPriceX96 (160 bits), tick (24), protocolFee (24) and lpFee (24) from the low
+// end, which puts lpFee at bits 208..232.
+const LP_FEE_OFFSET: usize = 26;
+const LP_FEE_WIDTH: usize = 3;
+
+/// The `key_lp_fee` value that flags a pool as dynamic-fee.
+const DYNAMIC_FEE_FLAG: u64 = 0x800000;
+
+/// Returns the key a dynamic-fee pool is tracked under, given its 32-byte pool id, or `None` when
+/// `key_lp_fee` marks the pool as static-fee or `pool_id` is not a word.
+pub fn tracking_key(pool_id: &[u8], key_lp_fee: &[u8]) -> Option<String> {
+    let fee = read_uint(&pad32(key_lp_fee)?, 0, 8)?;
+    if fee != DYNAMIC_FEE_FLAG {
+        return None
+    }
+    Some(lp_fee_slot_key(&mapping_slot(&pad32(pool_id)?, POOLS_SLOT)))
 }
 
-/// The key under which the pool with `pool_id` is tracked.
-pub fn lp_fee_slot_key(_pool_id: &Word) -> String {
-    String::new()
+/// Parses the PoolManager address a module receives as its parameter, with or without `0x`.
+pub fn lp_fee_pool_manager(param: &str) -> anyhow::Result<[u8; 20]> {
+    let bytes = hex::decode(param.trim_start_matches("0x"))
+        .map_err(|e| anyhow::anyhow!("PoolManager `{param}` is not hex: {e}"))?;
+    <[u8; 20]>::try_from(bytes.as_slice())
+        .map_err(|_| anyhow::anyhow!("PoolManager `{param}` is not exactly 20 bytes"))
+}
+
+/// The tracking key of a `slot0` storage slot.
+pub fn lp_fee_slot_key(slot: &Word) -> String {
+    hex::encode(slot)
+}
+
+/// Adds an `lp_fee` attribute update for every tracked pool whose `slot0.lpFee` a transaction of
+/// `block` changed. `pool_for_slot` maps the tracking key of a `slot0` slot to the id of the
+/// dynamic-fee pool that owns it. A fee set for the first time is a `Creation`, any later one an
+/// `Update`.
+pub fn add_lp_fee_changes(
+    pool_manager: &[u8],
+    block: &eth::Block,
+    pool_for_slot: impl Fn(&str) -> Option<String>,
+    changes: &mut Vec<TransactionChanges>,
+) {
+    for trace in &block.transaction_traces {
+        let mut fee_changes: Vec<(String, u64, u64)> = Vec::new();
+        for (slot, old_word, new_word) in tx_storage_writes(trace, pool_manager).iter() {
+            let Some(pool_id) = pool_for_slot(&lp_fee_slot_key(slot)) else { continue };
+            let (Some(old_fee), Some(new_fee)) = (
+                read_uint(old_word, LP_FEE_OFFSET, LP_FEE_WIDTH),
+                read_uint(new_word, LP_FEE_OFFSET, LP_FEE_WIDTH),
+            ) else {
+                continue
+            };
+            if old_fee != new_fee {
+                fee_changes.push((pool_id, old_fee, new_fee));
+            }
+        }
+        if fee_changes.is_empty() {
+            continue
+        }
+        fee_changes.sort_unstable();
+
+        let tx: Transaction = trace.into();
+        let position = match changes.iter().position(|c| {
+            c.tx.as_ref()
+                .is_some_and(|t| t.index == tx.index)
+        }) {
+            Some(position) => position,
+            None => {
+                changes.push(TransactionChanges { tx: Some(tx), ..Default::default() });
+                changes.len() - 1
+            }
+        };
+        let tx_changes = &mut changes[position];
+
+        for (pool_id, old_fee, new_fee) in fee_changes {
+            let attribute = Attribute {
+                name: "lp_fee".to_string(),
+                value: BigInt::from(new_fee).to_signed_bytes_be(),
+                change: if old_fee == 0 { ChangeType::Creation } else { ChangeType::Update }.into(),
+            };
+            match tx_changes
+                .entity_changes
+                .iter_mut()
+                .find(|e| e.component_id == pool_id)
+            {
+                Some(entity) => entity.attributes.push(attribute),
+                None => tx_changes
+                    .entity_changes
+                    .push(EntityChanges { component_id: pool_id, attributes: vec![attribute] }),
+            }
+        }
+    }
+    changes.sort_unstable_by_key(|c| c.tx.as_ref().map(|t| t.index));
 }
 
 #[cfg(test)]
@@ -229,5 +312,15 @@ mod tests {
             lp_fee_updates(&changes),
             vec![(format!("0x{DYNAMIC_POOL}"), fee_bytes(20_000), i32::from(ChangeType::Creation))]
         );
+    }
+
+    #[test]
+    fn only_a_dynamic_key_fee_is_tracked() {
+        let pool_id = pool_word(DYNAMIC_POOL);
+        let expected = lp_fee_slot_key(&slot0_key(DYNAMIC_POOL));
+
+        assert_eq!(tracking_key(&pool_id, &[0x00, 0x80, 0x00, 0x00]), Some(expected));
+        assert_eq!(tracking_key(&pool_id, &[0x0b, 0xb8]), None);
+        assert_eq!(tracking_key(&pool_id, &[]), None);
     }
 }

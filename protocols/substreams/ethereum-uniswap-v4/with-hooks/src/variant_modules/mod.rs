@@ -1,6 +1,9 @@
 #[path = "1_map_pool_created.rs"]
 pub mod map_pool_created;
 
+#[path = "2_store_dynamic_fee_pools.rs"]
+pub mod store_dynamic_fee_pools;
+
 #[path = "2_store_euler_hooks.rs"]
 pub mod store_euler_hooks;
 

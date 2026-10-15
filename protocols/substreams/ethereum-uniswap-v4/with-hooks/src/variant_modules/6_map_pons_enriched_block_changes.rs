@@ -12,23 +12,29 @@ use ethereum_uniswap_v4_shared::{
     utils::protocol_changes::collect_transaction_changes,
 };
 use serde::Deserialize;
-use substreams::pb::substreams::StoreDeltas;
+use substreams::{
+    pb::substreams::StoreDeltas,
+    store::{StoreGet, StoreGetString},
+};
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::prelude::*;
 
 use crate::{
+    dynamic_lp_fee::{add_lp_fee_changes, lp_fee_pool_manager},
     pons::{pons_static_attributes, PONS_HOOK_IDENTIFIER},
     storage::{pad32, tx_storage_writes, Word},
 };
 
-/// Query-string parameters of [`map_pons_enriched_block_changes`]. `pons_hooks` is the only
-/// parameter: a non-empty, comma-separated list of 20-byte hexadecimal addresses, with the `0x`
+/// Query-string parameters of [`map_pons_enriched_block_changes`]. `pons_hooks` is a
+/// non-empty, comma-separated list of 20-byte hexadecimal addresses, with the `0x`
 /// prefix optional and the digits read case-insensitively, e.g.
 /// `pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,0x...`. A single hook is a one-element
-/// list.
+/// list. `pool_manager` is the PoolManager address.
 #[derive(Debug, Deserialize)]
 pub struct Params {
     pub pons_hooks: Option<String>,
+    /// The PoolManager address whose storage writes carry the dynamic LP fees.
+    pub pool_manager: Option<String>,
 }
 
 impl Params {
@@ -94,8 +100,16 @@ pub fn map_pons_enriched_block_changes(
     ticks_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
+    dynamic_fee_pools: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
-    let pons_hooks = Params::parse_from_query(&params)?.pons_hook_addresses()?;
+    let params = Params::parse_from_query(&params)?;
+    let pons_hooks = params.pons_hook_addresses()?;
+    let pool_manager = lp_fee_pool_manager(
+        params
+            .pool_manager
+            .as_deref()
+            .ok_or_else(|| anyhow!("missing `pool_manager` parameter"))?,
+    )?;
 
     let mut changes = collect_transaction_changes(
         created_pools,
@@ -108,6 +122,7 @@ pub fn map_pons_enriched_block_changes(
         pool_liquidity_store_deltas,
     );
     enrich_pons_creations(&pons_hooks, &block, &mut changes);
+    add_lp_fee_changes(&pool_manager, &block, |key| dynamic_fee_pools.get_last(key), &mut changes);
 
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }

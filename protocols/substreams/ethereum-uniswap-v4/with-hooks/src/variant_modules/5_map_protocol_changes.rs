@@ -2,12 +2,18 @@ use ethereum_uniswap_v4_shared::{
     pb::uniswap::v4::{Events, LiquidityChanges, TickDeltas},
     utils::protocol_changes::collect_transaction_changes,
 };
-use substreams::pb::substreams::StoreDeltas;
+use substreams::{
+    pb::substreams::StoreDeltas,
+    store::{StoreGet, StoreGetString},
+};
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::{block_storage::get_block_storage_changes, prelude::*};
 
+use crate::dynamic_lp_fee::{add_lp_fee_changes, lp_fee_pool_manager};
+
 #[substreams::handlers::map]
 pub fn map_protocol_changes(
+    pool_manager: String,
     block: eth::Block,
     created_pools: BlockEntityChanges,
     events: Events,
@@ -17,9 +23,10 @@ pub fn map_protocol_changes(
     ticks_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
+    dynamic_fee_pools: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     // Use the shared helper function to collect transaction changes
-    let changes = collect_transaction_changes(
+    let mut changes = collect_transaction_changes(
         created_pools,
         events,
         balances_map_deltas,
@@ -28,6 +35,13 @@ pub fn map_protocol_changes(
         ticks_store_deltas,
         pool_liquidity_changes,
         pool_liquidity_store_deltas,
+    );
+
+    add_lp_fee_changes(
+        &lp_fee_pool_manager(&pool_manager)?,
+        &block,
+        |key| dynamic_fee_pools.get_last(key),
+        &mut changes,
     );
 
     // Add DCI-specific storage changes (required by DCI)

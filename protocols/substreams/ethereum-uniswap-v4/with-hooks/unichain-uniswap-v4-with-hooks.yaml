@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "unichain_uniswap_v4_with_hooks"
-  version: v0.8.1
+  version: v0.9.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/with-hooks"
 
 protobuf:
@@ -135,10 +135,19 @@ modules:
       - store: store_euler_hooks
         mode: get
 
+  - name: store_dynamic_fee_pools
+    kind: store
+    initialBlock: 0
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
   - name: map_protocol_changes
     kind: map
     initialBlock: 0
     inputs:
+      - params: string
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created
       - map: map_events
@@ -151,6 +160,8 @@ modules:
       - map: map_liquidity_changes
       - store: store_liquidity
         mode: deltas
+      - store: store_dynamic_fee_pools
+        mode: get
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
@@ -169,6 +180,7 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
+  map_protocol_changes: "1F98400000000000000000000000000000000004"
   map_pools_created: "1F98400000000000000000000000000000000004"
   store_euler_hooks: "0x45b146BC07c9985589B52df651310e75C6BE066A"
   map_euler_enriched_protocol_changes: "0x45b146BC07c9985589B52df651310e75C6BE066A"
