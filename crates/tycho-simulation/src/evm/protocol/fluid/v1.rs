@@ -2877,7 +2877,7 @@ mod test {
             U256::from(reserve_y_outside + I256::from(debt_reserves.token1_real_reserves));
 
         // Swap amount where revert should hit
-        let swap_amount = U256::from(14_766u64) * U256::from(10u64).pow(U256::from(12));
+        let swap_amount = U256::from(14_799u64) * U256::from(10u64).pow(U256::from(12));
 
         let price = get_approx_center_price_out(
             swap_amount,
@@ -2897,7 +2897,7 @@ mod test {
             price,
             sync_time,
         );
-        assert!(result.is_err(), "FAIL: reserves ratio verification revert NOT hit for col reserves when swap amount 14_766");
+        assert!(result.is_err(), "FAIL: reserves ratio verification revert NOT hit for col reserves when swap amount 14_799");
 
         let price = get_approx_center_price_out(
             swap_amount,
@@ -2917,7 +2917,7 @@ mod test {
             price,
             sync_time,
         );
-        assert!(result.is_err(), "FAIL: reserves ratio verification revert NOT hit for debt reserves when swap amount 14_766");
+        assert!(result.is_err(), "FAIL: reserves ratio verification revert NOT hit for debt reserves when swap amount 14_799");
 
         // Refresh reserves
         col_reserves = new_verify_ratio_col_reserves_swap_out();
@@ -2946,7 +2946,7 @@ mod test {
             U256::from(reserve_y_outside + I256::from(debt_reserves.token1_real_reserves));
 
         // Swap amount where revert should NOT hit
-        let swap_amount = U256::from(14_762u64) * U256::from(10u64).pow(U256::from(12));
+        let swap_amount = U256::from(14_795u64) * U256::from(10u64).pow(U256::from(12));
 
         let price = get_approx_center_price_out(
             swap_amount,
@@ -2968,7 +2968,7 @@ mod test {
         );
         assert!(
             result.is_ok(),
-            "FAIL: reserves ratio verification revert hit for col reserves when swap amount 14_762"
+            "FAIL: reserves ratio verification revert hit for col reserves when swap amount 14_795"
         );
 
         let price = get_approx_center_price_out(
@@ -2989,7 +2989,7 @@ mod test {
             price,
             sync_time,
         );
-        assert!(result.is_ok(), "FAIL: reserves ratio verification revert hit for debt reserves when swap amount 14_762");
+        assert!(result.is_ok(), "FAIL: reserves ratio verification revert hit for debt reserves when swap amount 14_795");
     }
 
     // Use this command to retrieve state for fluid pools:
