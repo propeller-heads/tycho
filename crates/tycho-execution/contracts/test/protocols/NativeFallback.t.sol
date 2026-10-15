@@ -7,6 +7,7 @@ import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {FallbackRouterAssertions, FallbackSwaps} from "./Fallback.t.sol";
+import {BebopToken, MockBebopTarget} from "./BebopFallback.t.sol";
 import {
     FallbackExecutor__InvalidDataLength
 } from "../../src/executors/FallbackExecutor.sol";
@@ -287,5 +288,55 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         for (uint256 i = 0; i < 4; i++) {
             data[offset + i] = value[i];
         }
+    }
+}
+
+/// @notice `NativeFallbackRouter` against a mock Native router. The fallback is never quoted or
+/// run, so no fork is needed.
+contract NativeFallbackRouterMockTest is FallbackRouterAssertions {
+    uint256 constant AMOUNT_IN = 1000;
+
+    BebopToken tokenIn;
+    BebopToken tokenOut;
+    MockBebopTarget nativeRouterV6;
+    NativeFallbackRouter router;
+
+    function setUp() public {
+        tokenIn = new BebopToken();
+        tokenOut = new BebopToken();
+        nativeRouterV6 = new MockBebopTarget(tokenIn, tokenOut);
+        router = new NativeFallbackRouter(
+            IPoolManager(address(0)),
+            address(0),
+            IUniswapV3StaticQuoter(address(0)),
+            address(nativeRouterV6)
+        );
+        tokenIn.mint(address(router), AMOUNT_IN);
+    }
+
+    /// Native keeps no allowance, and the caller gets the unpulled input back.
+    function testNativePullsLessThanAmountIn() public {
+        nativeRouterV6.setPullAmount(AMOUNT_IN / 2);
+
+        router.swap(
+            FallbackSwaps.swap(
+                address(tokenIn), address(tokenOut), AMOUNT_IN, BOB
+            ),
+            abi.encodePacked(
+                AMOUNT_IN,
+                bytes4(0x7083527c),
+                bytes32(uint256(0x60)),
+                bytes32(0),
+                bytes32(0)
+            ),
+            FallbackSwaps.uniswapV2(address(0xdead), 30)
+        );
+
+        assertEq(tokenOut.balanceOf(BOB), nativeRouterV6.AMOUNT_OUT());
+        assertEq(tokenIn.allowance(address(router), address(nativeRouterV6)), 0);
+        assertEq(tokenIn.balanceOf(address(this)), AMOUNT_IN / 2);
+        _assertRouterDrained(
+            address(router), address(tokenIn), address(tokenOut)
+        );
     }
 }
