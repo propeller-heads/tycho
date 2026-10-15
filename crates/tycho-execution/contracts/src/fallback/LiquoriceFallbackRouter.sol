@@ -71,7 +71,8 @@ contract LiquoriceFallbackRouter is TychoFallbackRouter {
         }
         _swap(swap_, liquoriceSettlement, settlementCalldata, fallbackSwap);
 
-        // A fallback swaps all of `amountIn`, so only a quote below it leaves a remainder.
+        // A fallback swaps all of `amountIn`, so only a quote signed for less than `amountIn`
+        // leaves a remainder.
         IERC20 tokenIn = IERC20(swap_.tokenIn);
         uint256 remainder = tokenIn.balanceOf(address(this));
         if (remainder > 0) {
