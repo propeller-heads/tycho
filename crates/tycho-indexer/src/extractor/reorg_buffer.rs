@@ -188,16 +188,44 @@ where
         Ok(drained)
     }
 
-    /// Drops every retained block at or below `flushed_block_height`: their writes
-    /// reached the store, so the database covers them from here on.
-    pub fn release_committed(&mut self, flushed_block_height: u64) {
-        while self
+    /// Drops every retained block at or below `flushed_block_height` and returns them, oldest
+    /// first: their writes reached the store, so the database covers them from here on.
+    pub fn release_committed(&mut self, flushed_block_height: u64) -> Vec<Arc<B>> {
+        let mut released = Vec::new();
+        while let Some(block) = self
             .committing_blocks
-            .front()
-            .is_some_and(|b| b.block().number <= flushed_block_height)
+            .pop_front_if(|b| b.block().number <= flushed_block_height)
         {
-            self.committing_blocks.pop_front();
+            released.push(block);
         }
+        released
+    }
+
+    /// Returns the number of retained committing blocks.
+    pub fn committing_len(&self) -> usize {
+        self.committing_blocks.len()
+    }
+
+    /// Returns the chain time the retained committing blocks cover: the newest one's timestamp
+    /// minus the oldest one's, or `None` without retained blocks. Blocks outside the committing
+    /// section do not count.
+    pub fn committing_span(&self) -> Option<chrono::Duration> {
+        let oldest = self.committing_blocks.front()?;
+        let newest = self.committing_blocks.back()?;
+        Some(
+            newest
+                .block()
+                .ts
+                .signed_duration_since(oldest.block().ts),
+        )
+    }
+
+    /// Returns the retained committing blocks, oldest first.
+    pub fn committing_blocks(&self) -> Vec<Arc<B>> {
+        self.committing_blocks
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Iterates the buffered history newest to oldest: buffered blocks first, then

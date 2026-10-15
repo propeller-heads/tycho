@@ -43,6 +43,7 @@ use crate::{
         models::BlockChanges,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
         reorg_buffer::{PurgeOutcome, ReorgBuffer},
+        writer_status::{Role, WriterStatus},
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::{
@@ -61,6 +62,46 @@ pub struct Inner {
 }
 
 type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
+
+/// A block drained from the reorg buffer, shared with the commit task.
+type DrainedBlock = Arc<BlockUpdateWithCursor<BlockChanges>>;
+
+/// Most chain time the drained blocks of a following extractor may cover while they wait for the
+/// leader to commit them. At this span it stops taking blocks until the leader's commits release
+/// some, so its memory stays bounded when the leader does not commit for this extractor, e.g.
+/// while it runs an older configuration. Chain time and not a block count, so the limit means the
+/// same on chains with very different block times.
+const FOLLOWER_RETENTION_SPAN: Duration = Duration::minutes(30);
+
+/// How often a following extractor at its retention limit checks whether it can continue.
+const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How an extractor handles the finalized blocks it drains from its reorg buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitMode {
+    /// Commits drained blocks to the database. Blocks at or below `floor` were committed by a
+    /// former leader before this process took over, so they are dropped instead.
+    Committing { floor: Option<u64> },
+    /// Retains drained blocks until the leader's commits cover them.
+    Following,
+}
+
+/// The drained blocks a following extractor retains for the leader to commit.
+#[derive(Clone, Copy, Debug)]
+struct Retention {
+    /// Chain time the retained blocks cover, `None` without retained blocks.
+    span: Option<Duration>,
+    blocks: usize,
+}
+
+impl Retention {
+    /// Returns whether the extractor may retain another block: not once the retained blocks
+    /// span [`FOLLOWER_RETENTION_SPAN`] or more.
+    fn has_capacity(&self) -> bool {
+        self.span
+            .is_none_or(|span| span < FOLLOWER_RETENTION_SPAN)
+    }
+}
 
 #[derive(Default)]
 struct GatewayInner<G> {
@@ -92,6 +133,8 @@ pub struct ProtocolExtractor<G, T, E> {
     reorg_buffer: Mutex<ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>>,
     partial_block_buffer: Mutex<PartialBlockBuffer>,
     dci_plugin: Option<Arc<Mutex<E>>>,
+    writer: WriterStatus,
+    commit_mode: Mutex<CommitMode>,
 }
 
 impl<G, T, E> ProtocolExtractor<G, T, E>
@@ -157,6 +200,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    writer: WriterStatus::leader(),
+                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
                 }
             }
             Ok((cursor, block_hash)) => {
@@ -202,6 +247,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    writer: WriterStatus::leader(),
+                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
                 }
             }
             Err(err) => return Err(ExtractionError::Setup(err.to_string())),
@@ -209,6 +256,18 @@ where
 
         res.ensure_protocol_types().await?;
         Ok(res)
+    }
+
+    /// Makes the extractor commit or follow according to `writer`. Without this call the
+    /// extractor commits as the only writer.
+    pub fn with_writer_status(mut self, writer: WriterStatus) -> Self {
+        let mode = match writer.role() {
+            Role::Leader => CommitMode::Committing { floor: None },
+            Role::Follower => CommitMode::Following,
+        };
+        self.commit_mode = Mutex::new(mode);
+        self.writer = writer;
+        self
     }
 
     async fn update_cursor(&self, cursor: String) {
@@ -748,52 +807,219 @@ where
         Ok(new_tokens)
     }
 
-    /// Process a full block
-    ///
-    /// This includes updating the reorg buffer, committing to the database, emitting sync updates
-    /// and metrics and aggregating the changes).
-    #[instrument(skip_all, fields(block_number = msg.block.number, final_block_height))]
-    async fn process_full_block_message(
-        &self,
-        msg: BlockChanges,
-        cursor: String,
-        final_block_height: u64,
-    ) -> Result<Option<ExtractorMsg>, ExtractionError> {
-        let is_syncing = final_block_height == msg.block.number;
-        if final_block_height > msg.block.number {
-            return Err(ExtractionError::ReorgBufferError(format!(
-                "Final block height ({}) greater than block number ({}) are unsupported by the reorg buffer",
-                final_block_height, msg.block.number
-            )));
+    /// Returns how drained blocks are handled now, taking over database commits first when
+    /// this process became the leader since the previous block.
+    async fn commit_mode(&self) -> Result<CommitMode, ExtractionError> {
+        let mut mode = self.commit_mode.lock().await;
+        if *mode == CommitMode::Following && self.writer.role() == Role::Leader {
+            *mode = CommitMode::Committing { floor: self.take_over_commits().await? };
         }
+        Ok(*mode)
+    }
 
+    /// Starts committing after this process became the leader.
+    ///
+    /// Reads the newest block the former leader committed for this extractor, drops the
+    /// retained blocks it covers and queues a commit of the remaining ones. Returns that
+    /// block's number, or `None` when no block was ever committed for this extractor.
+    async fn take_over_commits(&self) -> Result<Option<u64>, ExtractionError> {
+        let floor_block = match self.gateway.inner.get_cursor().await {
+            Ok((_, block_hash)) => Some(
+                self.gateway
+                    .inner
+                    .get_block(block_hash)
+                    .await
+                    .map_err(ExtractionError::Storage)?,
+            ),
+            Err(StorageError::NotFound(_, _)) => None,
+            Err(err) => return Err(ExtractionError::Storage(err)),
+        };
+        let floor = floor_block
+            .as_ref()
+            .map(|block| block.number);
+        let (released, retained) = {
+            let mut reorg_buffer = self.reorg_buffer.lock().await;
+            let released = floor
+                .map(|height| reorg_buffer.release_committed(height))
+                .unwrap_or_default();
+            (released, reorg_buffer.committing_blocks())
+        };
+        self.cache_committed_tokens(&released);
+        if let (Some(floor), Some(first)) = (&floor_block, retained.first()) {
+            let first = &first.block_update().block;
+            if first.number != floor.number + 1 {
+                return Err(ExtractionError::ReorgBufferError(format!(
+                    "Cannot take over commits: the database ends at block {} but the \
+                     retained blocks start at {}. Restart the extractor from its cursor.",
+                    floor.number, first.number
+                )));
+            }
+            if first.parent_hash != floor.hash {
+                return Err(ExtractionError::ReorgBufferError(format!(
+                    "Cannot take over commits: the database ends at block {} ({}) but the \
+                     retained block {} has parent hash {}. Restart the extractor from its cursor.",
+                    floor.number, floor.hash, first.number, first.parent_hash
+                )));
+            }
+        }
+        if floor.is_some() {
+            *self
+                .gateway
+                .committed_block_height
+                .lock()
+                .await = floor;
+        }
+        info!(
+            extractor_id = self.name,
+            chain = %self.chain,
+            ?floor,
+            retained = retained.len(),
+            "TakingOverDatabaseCommits"
+        );
+        self.queue_commit(retained, false)
+            .await?;
+        Ok(floor)
+    }
+
+    /// Buffers `msg` and returns the finalized blocks to commit once a batch is complete.
+    ///
+    /// Blocks at or below `floor` are dropped instead of returned: a former leader committed
+    /// them already.
+    async fn drain_for_commit(
+        &self,
+        msg: &BlockChanges,
+        cursor: &str,
+        final_block_height: u64,
+        floor: Option<u64>,
+    ) -> Result<Vec<DrainedBlock>, ExtractionError> {
         let flushed_block_height = self
             .gateway
             .inner
             .flushed_block_height()
             .await;
-        let blocks_to_commit = {
+        let mut reorg_buffer = self.reorg_buffer.lock().await;
+        if let Some(height) = flushed_block_height {
+            reorg_buffer.release_committed(height);
+        }
+        reorg_buffer
+            .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.to_string()))
+            .map_err(ExtractionError::Storage)?;
+        if reorg_buffer.count_blocks_before(final_block_height) < self.gateway.commit_batch_size {
+            return Ok(Vec::new());
+        }
+        let mut drained = reorg_buffer
+            .drain_into_committing(final_block_height)
+            .map_err(ExtractionError::Storage)?;
+        if let Some(floor) = floor {
+            reorg_buffer.release_committed(floor);
+            drained.retain(|block| block.block_update().block.number > floor);
+        }
+        Ok(drained)
+    }
+
+    /// Buffers `msg` like the leader does, but keeps drained blocks until the leader's commits
+    /// cover them, without writing anything.
+    async fn retain_until_leader_commits(
+        &self,
+        msg: &BlockChanges,
+        cursor: &str,
+        final_block_height: u64,
+    ) -> Result<(), ExtractionError> {
+        let released = {
             let mut reorg_buffer = self.reorg_buffer.lock().await;
-
-            if let Some(height) = flushed_block_height {
-                reorg_buffer.release_committed(height);
-            }
-
+            let released = self.release_leader_commits(&mut reorg_buffer);
             reorg_buffer
-                .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.clone()))
+                .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.to_string()))
                 .map_err(ExtractionError::Storage)?;
-
             if reorg_buffer.count_blocks_before(final_block_height) >=
                 self.gateway.commit_batch_size
             {
                 reorg_buffer
                     .drain_into_committing(final_block_height)
-                    .map_err(ExtractionError::Storage)?
-            } else {
-                Vec::new()
+                    .map_err(ExtractionError::Storage)?;
+            }
+            released
+        };
+        self.cache_committed_tokens(&released);
+        Ok(())
+    }
+
+    /// Returns the newest block the database holds for this extractor, as reported on outgoing
+    /// messages: the leader's committed height while following, else this process's own.
+    ///
+    /// After a takeover the former leader may have committed past the blocks this extractor
+    /// has seen, so the height never exceeds `final_block_height`.
+    async fn reported_committed_height(&self, final_block_height: u64) -> Option<u64> {
+        let committed = match *self.commit_mode.lock().await {
+            CommitMode::Following => self.writer.committed_height(&self.name),
+            CommitMode::Committing { .. } => {
+                *self
+                    .gateway
+                    .committed_block_height
+                    .lock()
+                    .await
             }
         };
+        committed.map(|height| height.min(final_block_height))
+    }
 
+    /// Drops the retained blocks the leader has committed and returns them.
+    fn release_leader_commits(
+        &self,
+        reorg_buffer: &mut ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+    ) -> Vec<DrainedBlock> {
+        self.writer
+            .committed_height(&self.name)
+            .map(|height| reorg_buffer.release_committed(height))
+            .unwrap_or_default()
+    }
+
+    /// Returns what a following extractor retains for the leader, after it released what the
+    /// leader committed, or `None` when the extractor commits itself.
+    async fn retention(&self) -> Option<Retention> {
+        if *self.commit_mode.lock().await != CommitMode::Following ||
+            self.writer.role() == Role::Leader
+        {
+            return None;
+        }
+        let (released, retention) = {
+            let mut reorg_buffer = self.reorg_buffer.lock().await;
+            let released = self.release_leader_commits(&mut reorg_buffer);
+            let retention = Retention {
+                span: reorg_buffer.committing_span(),
+                blocks: reorg_buffer.committing_len(),
+            };
+            (released, retention)
+        };
+        self.cache_committed_tokens(&released);
+        Some(retention)
+    }
+
+    /// Caches the new tokens of blocks the database now covers. The leader's writes put a
+    /// block's tokens into its token cache when it commits the block; this gives every other
+    /// process the same tokens at the same point.
+    fn cache_committed_tokens(&self, blocks: &[DrainedBlock]) {
+        let tokens: Vec<Token> = blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .block_update()
+                    .new_tokens
+                    .values()
+                    .cloned()
+            })
+            .collect();
+        if !tokens.is_empty() {
+            self.gateway.inner.cache_tokens(&tokens);
+        }
+    }
+
+    /// Commits `blocks_to_commit` in a background task, after the previous commit task ended.
+    async fn queue_commit(
+        &self,
+        blocks_to_commit: Vec<DrainedBlock>,
+        is_syncing: bool,
+    ) -> Result<(), ExtractionError> {
         if let Some(last_block) = blocks_to_commit.last() {
             let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
             let gateway = self.gateway.inner.clone();
@@ -883,6 +1109,41 @@ where
 
             trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
         };
+        Ok(())
+    }
+
+    /// Process a full block
+    ///
+    /// This includes updating the reorg buffer, committing to the database, emitting sync updates
+    /// and metrics and aggregating the changes).
+    #[instrument(skip_all, fields(block_number = msg.block.number, final_block_height))]
+    async fn process_full_block_message(
+        &self,
+        msg: BlockChanges,
+        cursor: String,
+        final_block_height: u64,
+    ) -> Result<Option<ExtractorMsg>, ExtractionError> {
+        let is_syncing = final_block_height == msg.block.number;
+        if final_block_height > msg.block.number {
+            return Err(ExtractionError::ReorgBufferError(format!(
+                "Final block height ({}) greater than block number ({}) are unsupported by the reorg buffer",
+                final_block_height, msg.block.number
+            )));
+        }
+
+        match self.commit_mode().await? {
+            CommitMode::Following => {
+                self.retain_until_leader_commits(&msg, &cursor, final_block_height)
+                    .await?;
+            }
+            CommitMode::Committing { floor } => {
+                let blocks_to_commit = self
+                    .drain_for_commit(&msg, &cursor, final_block_height, floor)
+                    .await?;
+                self.queue_commit(blocks_to_commit, is_syncing)
+                    .await?;
+            }
+        }
 
         self.update_last_processed_block(msg.block.clone())
             .await;
@@ -892,10 +1153,8 @@ where
 
         self.update_cursor(cursor).await;
 
-        let committed_block_height = *self
-            .gateway
-            .committed_block_height
-            .lock()
+        let committed_block_height = self
+            .reported_committed_height(final_block_height)
             .await;
         let mut changes = msg.into_aggregated(committed_block_height)?;
         self.handle_tvl_changes(&mut changes)
@@ -1101,10 +1360,8 @@ where
 
             self.update_cursor(inp.cursor).await;
 
-            let committed_block_height = *self
-                .gateway
-                .committed_block_height
-                .lock()
+            let committed_block_height = self
+                .reported_committed_height(inp.final_block_height)
                 .await;
             let mut changes = msg.into_aggregated(committed_block_height)?;
             self.handle_tvl_changes(&mut changes)
@@ -1775,6 +2032,37 @@ where
     async fn handle_progress(&self, _inp: ModulesProgress) -> Result<(), ExtractionError> {
         todo!()
     }
+
+    async fn wait_for_capacity(&self) {
+        let mut paused = false;
+        loop {
+            let retention = self.retention().await;
+            if retention.is_none_or(|retention| retention.has_capacity()) {
+                if paused {
+                    info!(
+                        extractor_id = self.name,
+                        chain = %self.chain,
+                        retained_span = ?retention.and_then(|retention| retention.span),
+                        retained_blocks = retention.map_or(0, |retention| retention.blocks),
+                        "FollowerResumed"
+                    );
+                }
+                return;
+            }
+            if !paused {
+                warn!(
+                    extractor_id = self.name,
+                    chain = %self.chain,
+                    retained_span = ?retention.and_then(|retention| retention.span),
+                    retained_blocks = retention.map_or(0, |retention| retention.blocks),
+                    limit = %FOLLOWER_RETENTION_SPAN,
+                    "FollowerPaused: waiting for the leader to commit retained blocks"
+                );
+                paused = true;
+            }
+            tokio::time::sleep(CAPACITY_POLL_INTERVAL).await;
+        }
+    }
 }
 pub struct ExtractorPgGateway {
     name: String,
@@ -1825,6 +2113,9 @@ pub trait ExtractorGateway: Send + Sync {
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when nothing has been flushed since startup.
     async fn flushed_block_height(&self) -> Option<u64>;
+
+    /// Makes `tokens` available to token queries of this process without persisting them.
+    fn cache_tokens(&self, tokens: &[Token]);
 
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
@@ -2182,6 +2473,10 @@ impl ExtractorGateway for ExtractorPgGateway {
     async fn flushed_block_height(&self) -> Option<u64> {
         self.state_gateway
             .flushed_block_height()
+    }
+
+    fn cache_tokens(&self, tokens: &[Token]) {
+        self.state_gateway.cache_tokens(tokens);
     }
 
     async fn get_protocol_states<'a>(
