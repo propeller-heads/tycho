@@ -27,8 +27,9 @@ use crate::encoding::{
 /// Two rules whose breach misorders the pool key, so the swap reverts `PoolNotInitialized`
 /// instead of swapping something else. Both covered by tests:
 /// - Read `hook_address`, never `hooks`: `hooks` is for the simulator, and the hookless CL package
-///   emits it as zero for every pool so `UniswapV4State` decodes them hookless. Both Infinity CL
-///   packages emit the real hook as `hook_address`.
+///   emits it as zero for every pool so `UniswapV4State` decodes them hookless. The Bin package
+///   emits no `hooks` at all. Both Infinity CL packages and the Bin package emit the real hook as
+///   `hook_address`.
 /// - `zeroForOne` compares PROTOCOL-NATIVE addresses (native ETH is `Address::ZERO`) BEFORE
 ///   `convert_to_router_token`. CANONICAL definition lives in the executor contract.
 #[derive(Clone)]
@@ -129,21 +130,23 @@ mod tests {
     /// Native ETH as the router represents it, `ETH_ADDRESS` in `NativeETH.sol`.
     const ROUTER_ETH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-    /// The live pool's static attributes (LP fee 5, tick spacing 2, no hook bitmap) plus `extra`.
-    /// Tick spacing is bits [16,40) of `parameters`, so byte 29 is its low byte.
+    /// A live pool's static attributes plus `extra`. `key_byte` is byte 29 of `parameters`, which
+    /// holds the CL pool's tick spacing and the Bin pool's bin step alike.
     //
     // protocol_system is required, not defaulted: the pool-type byte comes from it and
     // ..Default::default() leaves it empty, hitting the error arm.
-    fn swap_fixture(
+    fn swap_fixture_with_key(
         protocol_system: &str,
         token_in: &str,
         token_out: &str,
+        lp_fee: u8,
+        key_byte: u8,
         extra: &[(&str, Bytes)],
     ) -> Swap {
         let mut parameters = vec![0u8; 32];
-        parameters[29] = 2;
+        parameters[29] = key_byte;
         let mut static_attributes: HashMap<String, Bytes> = HashMap::from([
-            ("key_lp_fee".into(), Bytes::from(BigInt::from(5).to_signed_bytes_be())),
+            ("key_lp_fee".into(), Bytes::from(BigInt::from(lp_fee).to_signed_bytes_be())),
             ("parameters".into(), Bytes::from(parameters)),
         ]);
         static_attributes.extend(
@@ -165,6 +168,16 @@ mod tests {
         )
     }
 
+    /// The live CL pool: LP fee 5, tick spacing 2.
+    fn swap_fixture(
+        protocol_system: &str,
+        token_in: &str,
+        token_out: &str,
+        extra: &[(&str, Bytes)],
+    ) -> Swap {
+        swap_fixture_with_key(protocol_system, token_in, token_out, 5, 2, extra)
+    }
+
     fn encode_swap(swap: &Swap) -> Result<Vec<u8>, EncodingError> {
         // Deterministic test address, config/test_executor_addresses.json ("base").
         let encoder = PancakeswapInfinitySwapEncoder::new(
@@ -182,16 +195,18 @@ mod tests {
         encoder.encode_swap(swap, &context)
     }
 
-    /// The two pool types differ in the pool-type byte alone. The Forge tests replay the written
-    /// calldata.
+    /// The two pool types differ in the pool-type byte, and each case carries its own live
+    /// USDC/USDT pool key so the Forge tests can replay the written calldata on a fork.
     #[rstest]
-    #[case::cl("pancakeswap_infinity_cl", "00")]
-    #[case::bin("pancakeswap_infinity_bin", "01")]
+    #[case::cl("pancakeswap_infinity_cl", "00", 5, 2)]
+    #[case::bin("pancakeswap_infinity_bin", "01", 7, 10)]
     fn test_encode_pancakeswap_infinity_swap(
         #[case] protocol_system: &str,
         #[case] pool_type: &str,
+        #[case] lp_fee: u8,
+        #[case] key_byte: u8,
     ) {
-        let swap = swap_fixture(protocol_system, USDC, USDT, &[]);
+        let swap = swap_fixture_with_key(protocol_system, USDC, USDT, lp_fee, key_byte, &[]);
         let hex_swap = encode(encode_swap(&swap).unwrap());
 
         assert_eq!(
@@ -204,10 +219,9 @@ mod tests {
                 // zero for one (USDC sorts below USDT)
                 "01",
                 pool_type,
-                // fee (5)
-                "000005",
-                // parameters (tick spacing 2 in bits [16,40), hook bitmap zero)
-                "0000000000000000000000000000000000000000000000000000000000020000",
+                &format!("{lp_fee:06x}"),
+                // parameters: tick spacing or bin step at byte 29, hook bitmap zero
+                &format!("{:0>58}{key_byte:02x}0000", ""),
                 // hook address (not set, so zero)
                 "0000000000000000000000000000000000000000",
             ]
@@ -262,8 +276,8 @@ mod tests {
         assert_eq!(encode(&encoded[20..40]), router_token(token_out));
     }
 
-    /// The hook is read from `hook_address`. A `hooks` attribute is ignored: the substreams
-    /// package never emits one.
+    /// The hook is read from `hook_address`. A `hooks` attribute is ignored: the CL package emits
+    /// it as zero for `UniswapV4State`, never as the pool's hook.
     #[rstest]
     #[case::hook_address("hook_address", "7777777777777777777777777777777777777777")]
     #[case::hooks("hooks", "0000000000000000000000000000000000000000")]
