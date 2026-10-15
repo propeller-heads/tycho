@@ -77,3 +77,50 @@ impl LeaderLock {
             .map_err(|err| StorageError::Unexpected(format!("Leader lock session lost: {err}")))
     }
 }
+
+#[cfg(test)]
+mod test_serial_db {
+    use super::*;
+
+    fn database_url() -> String {
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+    }
+
+    #[tokio::test]
+    async fn test_only_one_session_holds_the_leader_lock() {
+        let mut leader = LeaderLock::connect(&database_url())
+            .await
+            .unwrap();
+        let mut follower = LeaderLock::connect(&database_url())
+            .await
+            .unwrap();
+
+        assert!(leader.try_acquire().await.unwrap());
+        assert!(leader.try_acquire().await.unwrap(), "the holder keeps the lock");
+        assert!(!follower.try_acquire().await.unwrap());
+        leader.check_alive().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_passes_on_when_the_leader_session_closes() {
+        let mut leader = LeaderLock::connect(&database_url())
+            .await
+            .unwrap();
+        let mut follower = LeaderLock::connect(&database_url())
+            .await
+            .unwrap();
+        assert!(leader.try_acquire().await.unwrap());
+
+        drop(leader);
+
+        let mut acquired = false;
+        for _ in 0..50 {
+            if follower.try_acquire().await.unwrap() {
+                acquired = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(acquired, "the lock must pass on once the leader session closes");
+    }
+}
