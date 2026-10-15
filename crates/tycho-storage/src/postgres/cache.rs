@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -147,10 +147,20 @@ impl std::fmt::Display for BlockRange {
     }
 }
 
+/// Which writes the executor runs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WritePriority {
+    /// Blocks of an extractor at the chain head. Runs before any waiting backfill.
+    Head,
+    /// Blocks of an extractor that is still syncing historical blocks.
+    Backfill,
+}
+
 /// Represents a transaction in the database, including the block information,
 /// a list of operations to be performed, and a channel to send the result.
 pub struct DBTransaction {
     block_range: BlockRange,
+    priority: WritePriority,
     size: usize,
     operations: Vec<WriteOp>,
     tx: oneshot::Sender<Result<(), StorageError>>,
@@ -312,6 +322,32 @@ pub enum DBCacheMessage {
 /// Read Operations
 /// The class does provide read operations for completeness, but it will not consider any
 /// cached changes while reading. Any reads are direct pass through to the database.
+/// Transactions waiting for the write executor. [`WritePriority::Head`] transactions leave first,
+/// each priority in arrival order.
+///
+/// Unbounded, but each gateway instance waits for the result of its transaction before it sends
+/// the next one, so the queue holds at most one transaction per instance.
+#[derive(Default)]
+struct WriteQueue {
+    head: VecDeque<DBTransaction>,
+    backfill: VecDeque<DBTransaction>,
+}
+
+impl WriteQueue {
+    fn push(&mut self, transaction: DBTransaction) {
+        match transaction.priority {
+            WritePriority::Head => self.head.push_back(transaction),
+            WritePriority::Backfill => self.backfill.push_back(transaction),
+        }
+    }
+
+    fn pop(&mut self) -> Option<DBTransaction> {
+        self.head
+            .pop_front()
+            .or_else(|| self.backfill.pop_front())
+    }
+}
+
 pub(crate) struct DBCacheWriteExecutor {
     name: String,
     chain: Chain,
@@ -375,13 +411,21 @@ impl DBCacheWriteExecutor {
     pub fn run(mut self) -> JoinHandle<()> {
         info!(name = self.name, "DBCacheWriteExecutor started!");
         tokio::spawn(async move {
-            while let Some(message) = self.msg_receiver.recv().await {
-                match message {
-                    DBCacheMessage::Write(db_tx) => {
-                        // Process the write transaction
-                        self.write(db_tx).await;
-                    }
+            let mut queue = WriteQueue::default();
+            loop {
+                // Take everything already sent, so a head transaction that arrived after a
+                // backfill one still runs first.
+                while let Ok(DBCacheMessage::Write(db_tx)) = self.msg_receiver.try_recv() {
+                    queue.push(db_tx);
                 }
+                if let Some(db_tx) = queue.pop() {
+                    self.write(db_tx).await;
+                    continue;
+                }
+                let Some(DBCacheMessage::Write(db_tx)) = self.msg_receiver.recv().await else {
+                    break;
+                };
+                queue.push(db_tx);
             }
         })
     }
@@ -470,7 +514,7 @@ impl DBCacheWriteExecutor {
         }
 
         if res.is_ok() {
-            debug!("DBTransactionCommitted");
+            debug!(priority = ?new_db_tx.priority, "DBTransactionCommitted");
         }
 
         if let Err(e) = &res {
@@ -649,15 +693,43 @@ impl Clone for CachedGateway {
 impl CachedGateway {
     // Accumulating transactions does not drop previous data nor are transactions nested.
     pub async fn start_transaction(&self, block: &models::blockchain::Block, owner: Option<&str>) {
+        self.open_transaction(block, owner, WritePriority::Head)
+            .await;
+    }
+
+    /// Like [`CachedGateway::start_transaction`], but the write runs after every waiting
+    /// [`WritePriority::Head`] write. For blocks of an extractor that is still syncing.
+    pub async fn start_backfill_transaction(
+        &self,
+        block: &models::blockchain::Block,
+        owner: Option<&str>,
+    ) {
+        self.open_transaction(block, owner, WritePriority::Backfill)
+            .await;
+    }
+
+    /// Opens a transaction with `priority`, or extends the open one to `block`. Extending with
+    /// [`WritePriority::Head`] raises the open transaction to head priority: its owner has caught
+    /// up with the chain head.
+    async fn open_transaction(
+        &self,
+        block: &models::blockchain::Block,
+        owner: Option<&str>,
+        priority: WritePriority,
+    ) {
         let mut open_tx = self.open_tx.lock().await;
 
         if let Some(tx) = open_tx.as_mut() {
             tx.0.block_range.end = block.clone();
+            if priority == WritePriority::Head {
+                tx.0.priority = WritePriority::Head;
+            }
         } else {
             let (tx, rx) = oneshot::channel();
             *open_tx = Some((
                 DBTransaction {
                     block_range: BlockRange::new(block, block),
+                    priority,
                     size: 0,
                     operations: vec![],
                     tx,
@@ -2349,6 +2421,7 @@ mod test_serial_db {
         let (os_tx, os_rx) = oneshot::channel();
         let db_transaction = DBTransaction {
             block_range: BlockRange::new(&block, &block),
+            priority: WritePriority::Head,
             size: operations.len(),
             operations,
             tx: os_tx,

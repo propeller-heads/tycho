@@ -35,7 +35,7 @@ use tycho_common::{
     Bytes,
 };
 use tycho_protobuf::{convert::TryFromMessage, pb::tycho::evm::v1 as tycho_pb};
-use tycho_storage::postgres::cache::CachedGateway;
+use tycho_storage::postgres::cache::{CachedGateway, WritePriority};
 
 use crate::{
     extractor::{
@@ -75,6 +75,26 @@ const FOLLOWER_RETENTION_SPAN: Duration = Duration::minutes(30);
 
 /// How often a following extractor at its retention limit checks whether it can continue.
 const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Age from which a block's write counts as backfill: it then runs after the writes of
+/// extractors at the chain head. Generous, so a head extractor that briefly lags keeps priority,
+/// while one syncing history from an old snapshot is far past it.
+const BACKFILL_BLOCK_AGE: Duration = Duration::minutes(10);
+
+/// Returns the priority of the writes an extractor queues while `newest_block` is the newest
+/// block it has received: [`WritePriority::Backfill`] while the extractor syncs history, else
+/// [`WritePriority::Head`].
+///
+/// Decided by how far the extractor is behind the chain head, not by the age of the blocks it
+/// writes: it writes only finalized blocks, which are minutes old even at the head on many
+/// chains. Finality cannot decide it either: on other chains a block at the head is already final.
+fn write_priority(newest_block: &Block, now: NaiveDateTime) -> WritePriority {
+    if now.signed_duration_since(newest_block.ts) > BACKFILL_BLOCK_AGE {
+        WritePriority::Backfill
+    } else {
+        WritePriority::Head
+    }
+}
 
 /// How an extractor handles the finalized blocks it drains from its reorg buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -808,11 +828,12 @@ where
     }
 
     /// Returns how drained blocks are handled now, taking over database commits first when
-    /// this process became the leader since the previous block.
-    async fn commit_mode(&self) -> Result<CommitMode, ExtractionError> {
+    /// this process became the leader since the previous block. The takeover's commit runs at
+    /// `priority`.
+    async fn commit_mode(&self, priority: WritePriority) -> Result<CommitMode, ExtractionError> {
         let mut mode = self.commit_mode.lock().await;
         if *mode == CommitMode::Following && self.writer.role() == Role::Leader {
-            *mode = CommitMode::Committing { floor: self.take_over_commits().await? };
+            *mode = CommitMode::Committing { floor: self.take_over_commits(priority).await? };
         }
         Ok(*mode)
     }
@@ -822,7 +843,10 @@ where
     /// Reads the newest block the former leader committed for this extractor, drops the
     /// retained blocks it covers and queues a commit of the remaining ones. Returns that
     /// block's number, or `None` when no block was ever committed for this extractor.
-    async fn take_over_commits(&self) -> Result<Option<u64>, ExtractionError> {
+    async fn take_over_commits(
+        &self,
+        priority: WritePriority,
+    ) -> Result<Option<u64>, ExtractionError> {
         let floor_block = match self.gateway.inner.get_cursor().await {
             Ok((_, block_hash)) => Some(
                 self.gateway
@@ -876,7 +900,7 @@ where
             retained = retained.len(),
             "TakingOverDatabaseCommits"
         );
-        self.queue_commit(retained, false)
+        self.queue_commit(retained, false, priority)
             .await?;
         Ok(floor)
     }
@@ -1014,11 +1038,13 @@ where
         }
     }
 
-    /// Commits `blocks_to_commit` in a background task, after the previous commit task ended.
+    /// Commits `blocks_to_commit` at `priority` in a background task, after the previous commit
+    /// task ended.
     async fn queue_commit(
         &self,
         blocks_to_commit: Vec<DrainedBlock>,
         is_syncing: bool,
+        priority: WritePriority,
     ) -> Result<(), ExtractionError> {
         if let Some(last_block) = blocks_to_commit.last() {
             let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
@@ -1083,7 +1109,7 @@ where
                             if is_syncing { false } else { it.peek().is_none() };
 
                         gateway
-                            .advance(block.block_update(), block.cursor(), force_db_commit)
+                            .advance(block.block_update(), block.cursor(), force_db_commit, priority)
                             .await
                             .map_err(ExtractionError::Storage)?;
                     }
@@ -1131,7 +1157,8 @@ where
             )));
         }
 
-        match self.commit_mode().await? {
+        let priority = write_priority(&msg.block, chrono::Utc::now().naive_utc());
+        match self.commit_mode(priority).await? {
             CommitMode::Following => {
                 self.retain_until_leader_commits(&msg, &cursor, final_block_height)
                     .await?;
@@ -1140,7 +1167,7 @@ where
                 let blocks_to_commit = self
                     .drain_for_commit(&msg, &cursor, final_block_height, floor)
                     .await?;
-                self.queue_commit(blocks_to_commit, is_syncing)
+                self.queue_commit(blocks_to_commit, is_syncing, priority)
                     .await?;
             }
         }
@@ -2098,7 +2125,8 @@ pub trait ExtractorGateway: Send + Sync {
     ///
     /// All writes for the block are staged within one transaction. When `force_commit` is `true`
     /// the transaction is flushed to the store immediately; otherwise it is only flushed once
-    /// enough blocks have accumulated to reach the configured batch size.
+    /// enough blocks have accumulated to reach the configured batch size. `priority` orders the
+    /// transaction against the writes of other extractors.
     ///
     /// # Errors
     /// Returns a [`StorageError`] if any staged write or the commit fails. On error the block's
@@ -2108,6 +2136,7 @@ pub trait ExtractorGateway: Send + Sync {
         changes: &BlockChanges,
         new_cursor: &str,
         force_commit: bool,
+        priority: WritePriority,
     ) -> Result<(), StorageError>;
 
     /// Returns the height of the newest block whose staged writes reached the store, or
@@ -2255,10 +2284,20 @@ impl ExtractorGateway for ExtractorPgGateway {
         changes: &BlockChanges,
         new_cursor: &str,
         force_commit: bool,
+        priority: WritePriority,
     ) -> Result<(), StorageError> {
-        self.state_gateway
-            .start_transaction(&changes.block, Some(self.name.as_str()))
-            .await;
+        match priority {
+            WritePriority::Head => {
+                self.state_gateway
+                    .start_transaction(&changes.block, Some(self.name.as_str()))
+                    .await
+            }
+            WritePriority::Backfill => {
+                self.state_gateway
+                    .start_backfill_transaction(&changes.block, Some(self.name.as_str()))
+                    .await
+            }
+        }
 
         // Insert new tokens
         if !changes.new_tokens.is_empty() {
@@ -2721,7 +2760,7 @@ mod test {
         let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let committed_clone = committed.clone();
         gw.expect_advance()
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 committed_clone
                     .lock()
                     .unwrap()
@@ -3085,7 +3124,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(1)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_block()
@@ -3145,7 +3184,7 @@ mod test {
         let call_count_clone = call_count.clone();
         gw.expect_advance()
             .times(4)
-            .returning(move |_, _, _| {
+            .returning(move |_, _, _, _| {
                 rx.recv().unwrap();
                 call_count_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -3293,7 +3332,7 @@ mod test {
         let flushed_writer = flushed.clone();
         gw.expect_advance()
             .times(2)
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 if changes.block.number <= flush_through {
                     flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
                 }
@@ -3418,7 +3457,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -3451,7 +3490,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(1)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_block()
@@ -3539,7 +3578,7 @@ mod test {
         let persisted_by_mock = Arc::clone(&persisted);
         gw.expect_advance()
             .times(2)
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 persisted_by_mock
                     .lock()
                     .unwrap()
@@ -4018,7 +4057,7 @@ mod test {
         // doesn't satisfy count_blocks_before(final_block_height) >= 1.
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
 
@@ -4134,7 +4173,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
 
         let extractor = create_extractor(gw).await;
 
@@ -4162,7 +4201,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
 
@@ -4208,7 +4247,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         // Revert lookups: contracts, protocol states, protocol components, component
         // balances, account balances.
         gw.expect_flushed_block_height()
@@ -4324,7 +4363,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -4557,7 +4596,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -5540,7 +5579,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -5585,7 +5624,7 @@ mod test {
             .times(1)
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         // The write never lands: retention must keep the drained block reachable.
         gw.expect_flushed_block_height()
             .returning(|| None);
@@ -5667,7 +5706,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         let flushed_writer = flushed.clone();
         gw.expect_advance()
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
                 Ok(())
             });
@@ -5812,7 +5851,7 @@ mod test {
                     .returning(|_| Ok(Block::default()));
                 gw.expect_advance()
                     .times(0)
-                    .returning(|_, _, _| Ok(()));
+                    .returning(|_, _, _, _| Ok(()));
                 gw.expect_flushed_block_height()
                     .returning(|| None);
                 gw.expect_get_contracts()
@@ -5931,7 +5970,7 @@ mod test {
                     .times(1)
                     .returning(|_| Ok(Block::default()));
                 gw.expect_advance()
-                    .returning(|_, _, _| Ok(()));
+                    .returning(|_, _, _, _| Ok(()));
                 // The write never lands: the creation stays reachable in the committing
                 // section.
                 gw.expect_flushed_block_height()
@@ -6509,7 +6548,7 @@ mod test_serial_db {
                 ..Default::default()
             }];
 
-            gw.advance(&msg, "cursor@500", false)
+            gw.advance(&msg, "cursor@500", false, WritePriority::Head)
                 .await
                 .expect("upsert should succeed");
 
@@ -6539,7 +6578,7 @@ mod test_serial_db {
             let msg = vm_creation_and_update();
             let exp = vm_account(0);
 
-            gw.advance(&msg, "cursor@500", true)
+            gw.advance(&msg, "cursor@500", true, WritePriority::Head)
                 .await
                 .expect("upsert should succeed");
 

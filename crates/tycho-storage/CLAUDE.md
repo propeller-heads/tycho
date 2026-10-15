@@ -36,6 +36,13 @@ All public DB operations go through one of two gateway structs:
   when enabled) and `get_delta` (small LRU). The executor runs a batch up to
   three times when Postgres reports a transaction conflict (deadlock or serialization
   failure); each attempt re-runs from scratch with a fresh snapshot.
+- **Write priority**: each transaction is `WritePriority::Head` (`start_transaction`) or
+  `Backfill` (`start_backfill_transaction`). The caller picks it; the indexer uses `Backfill` while
+  the extractor's newest received block is more than 10 minutes old. A `Head` start on an open
+  `Backfill` transaction raises it to `Head`. The executor moves everything already sent into a
+  `WriteQueue` and always runs the oldest head transaction before any backfill one, so a syncing
+  extractor's large batches delay only itself; a head write waits at most for the one
+  transaction already running. The `DBTransactionCommitted` debug event carries the `priority` it ran with.
 - **Writer fencing**: `DBCacheWriteExecutor::new` claims a new epoch in the one-row
   `writer_epoch` table, and every executor transaction first reads that row `FOR SHARE`. When
   another process has claimed since, the transaction fails with `StorageError::Fenced` and
