@@ -2,60 +2,19 @@
 
 use std::{collections::HashMap, fmt::Display, sync::Arc};
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 
 use super::{
-    catch_up_spec, generate_history, spec::Window, through_the_wire, CatchUpSpec, DeltaStateModel,
-    FallbackReason, Gap, History, HistoryConfig, HistoryEvent, RestartKind,
+    catch_up_spec, follower_states, generate_history, sample_gaps, spec::Window, through_the_wire,
+    CatchUpSpec, DeltaStateModel, FallbackReason, Gap, History, HistoryConfig, HistoryEvent,
+    RestartKind,
 };
-use crate::models::blockchain::{Block, BlockAggregatedChanges};
+use crate::models::blockchain::BlockAggregatedChanges;
 
 /// Histories each property runs over.
 const SEEDS: u64 = 128;
 /// Random gaps the catch-up property draws per history, besides the gaps around restarts.
 const RANDOM_GAPS: usize = 40;
-
-/// The state a snapshot at `at` gives: the canonical chain folded up to `at`, which is
-/// committed and so the same at any later point of the history.
-fn snapshot(history: &History, at: &Block) -> DeltaStateModel {
-    let upto: Vec<&BlockAggregatedChanges> = history
-        .canonical
-        .iter()
-        .map(Arc::as_ref)
-        .take_while(|message| message.block.number <= at.number)
-        .collect();
-    assert_eq!(
-        upto.last()
-            .map(|message| &message.block),
-        Some(at),
-        "{at:?} is not canonical"
-    );
-    DeltaStateModel::fold(upto)
-}
-
-/// `states[i]` is what a client that subscribed at the start holds right after `events[i]`.
-/// The client applies every message, and after every restart resyncs from a snapshot at the
-/// last committed block before applying the replay.
-fn follower_states(history: &History) -> Vec<DeltaStateModel> {
-    let mut client = DeltaStateModel::default();
-    let mut resync_at = None;
-    let mut states = Vec::with_capacity(history.events.len());
-    for event in &history.events {
-        match event {
-            HistoryEvent::Message(message) => {
-                if let Some(at) = resync_at.take() {
-                    client = snapshot(history, &at);
-                }
-                client.apply(message);
-            }
-            HistoryEvent::ExtractorRestarted { last_committed, kind: _ } => {
-                resync_at = Some(last_committed.clone());
-            }
-        }
-        states.push(client.clone());
-    }
-    states
-}
 
 fn assert_canonical(
     history: &History,
@@ -228,66 +187,6 @@ fn a_client_following_the_ws_matches_the_canonical_chain_after_every_event() {
     }
 }
 
-/// Gaps of every shape the spec tells apart: random ones up to three window depths long, and
-/// ones around every restart, from the client's last block and from the last committed one.
-fn gaps(history: &History, rng: &mut StdRng) -> Vec<Gap> {
-    let mut messages = Vec::new();
-    for (index, event) in history.events.iter().enumerate() {
-        if let HistoryEvent::Message(_) = event {
-            messages.push(index);
-        }
-    }
-    let reach = 3 * history.config.window_depth as usize;
-    let mut gaps = Vec::new();
-    for _ in 0..RANDOM_GAPS {
-        let start = rng.gen_range(0..messages.len() - 1);
-        let end = (start + rng.gen_range(1..=reach)).min(messages.len() - 1);
-        gaps.push(Gap { last_applied: messages[start], first_live: messages[end] });
-    }
-    for (restart, event) in history.events.iter().enumerate() {
-        let HistoryEvent::ExtractorRestarted { last_committed, kind: _ } = event else {
-            continue;
-        };
-        let before: Vec<usize> = messages
-            .iter()
-            .copied()
-            .filter(|&index| index < restart)
-            .collect();
-        let after: Vec<usize> = messages
-            .iter()
-            .copied()
-            .filter(|&index| index > restart)
-            .take(reach)
-            .collect();
-        let at_last_committed = before
-            .iter()
-            .rev()
-            .copied()
-            .find(|&index| {
-                let HistoryEvent::Message(message) = &history.events[index] else {
-                    return false;
-                };
-                &message.block == last_committed
-            });
-        let first_lives = after
-            .iter()
-            .take(3)
-            .chain(after.last())
-            .copied();
-        for first_live in first_lives {
-            for last_applied in before
-                .last()
-                .copied()
-                .into_iter()
-                .chain(at_last_committed)
-            {
-                gaps.push(Gap { last_applied, first_live });
-            }
-        }
-    }
-    gaps
-}
-
 /// How often each outcome of [`catch_up_spec`] occurs over a set of gaps.
 #[derive(Debug, Default)]
 struct Outcomes {
@@ -354,7 +253,7 @@ fn a_possible_catch_up_ends_in_the_canonical_state() {
     for seed in 0..SEEDS {
         let history = generate_history(&config, seed);
         let follower = follower_states(&history);
-        for gap in gaps(&history, &mut rng) {
+        for gap in sample_gaps(&history, RANDOM_GAPS, &mut rng) {
             let path = match catch_up_spec(&history, gap) {
                 CatchUpSpec::Possible(path) => path,
                 CatchUpSpec::Fallback(reason) => {

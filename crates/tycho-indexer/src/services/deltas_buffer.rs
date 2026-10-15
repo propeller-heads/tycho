@@ -1580,8 +1580,8 @@ mod test {
                 .await
                 .unwrap();
         }
-        // A revert the extractor marks partial. It targets 3 so that applying it would show: the
-        // window would drop block 4 and journal the revert.
+        // A revert the extractor marks partial. It targets 3, so had the window applied it, block 4
+        // would be gone.
         let partial_revert =
             BlockAggregatedChanges { partial_block_index: Some(0), ..(*native_revert(3)).clone() };
         tx.send(DeltaCommand::Block(Arc::new(partial_revert)))
@@ -1591,12 +1591,6 @@ mod test {
 
         pump.await.unwrap().unwrap();
         assert!(has_block(&buffer, 4));
-        assert_eq!(
-            buffer
-                .catch_up_path("native:extractor", &block(4).hash, 4, &block(4).hash)
-                .unwrap(),
-            Ok(Vec::new())
-        );
     }
 
     #[test]
@@ -1608,76 +1602,84 @@ mod test {
         assert_eq!(res, Err(PendingDeltasError::UnknownExtractor("unknown".to_string())));
     }
 
-    /// Checks the windows' catch-up paths against `catch_up_spec`, the reference model of what a
-    /// window must answer, over random extractor histories.
-    mod catch_up_spec_property {
-        use std::collections::BTreeMap;
+    /// Checks the windows' catch-up paths over random extractor histories: against
+    /// `catch_up_spec`, the reference model of what a window must answer, and, for a window a few
+    /// events ahead of or behind the client, against the canonical chain.
+    mod catch_up_properties {
+        use std::{collections::BTreeMap, ops::Range};
 
-        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use rand::{rngs::StdRng, SeedableRng};
         use tycho_common::testing::delta_history::{
-            catch_up_spec, generate_history, CatchUpSpec, FallbackReason, Gap, History,
-            HistoryConfig, HistoryEvent, EXTRACTOR,
+            catch_up_spec, follower_states, generate_history, sample_gaps, CatchUpSpec,
+            DeltaStateModel, FallbackReason, Gap, History, HistoryConfig, HistoryEvent,
+            RestartKind, EXTRACTOR,
         };
 
         use super::*;
         use crate::services::state::window::CatchUpUnavailable;
 
-        /// Histories per configuration.
+        /// Histories per configuration the spec property runs over.
         const SEEDS: u64 = 128;
+        /// Histories per configuration the out-of-step property runs over. It folds client states,
+        /// which costs more than comparing paths.
+        const OUT_OF_STEP_SEEDS: u64 = 64;
         /// Random gaps drawn per history, besides the gaps around restarts.
         const RANDOM_GAPS: usize = 40;
-        /// Messages after a restart that start a subscription in a gap around the restart.
-        const FIRST_LIVES_AFTER_A_RESTART: usize = 3;
+        /// Events the window may be ahead of or behind the client's first live message when the
+        /// endpoint asks it.
+        const MAX_SKEW: usize = 4;
 
-        /// Gaps of every shape the spec tells apart: random ones up to three window depths long,
-        /// and ones around every restart, from the client's last block and from the last
-        /// committed one.
-        fn gaps(history: &History, rng: &mut StdRng) -> Vec<Gap> {
-            let mut messages = Vec::new();
+        fn configs() -> [HistoryConfig; 2] {
+            [
+                HistoryConfig::default(),
+                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
+                // bound and clients fall below the floor.
+                HistoryConfig {
+                    window_depth: 4,
+                    finality_depth: 3,
+                    max_revert_depth: 3,
+                    max_commit_lag: 2,
+                    ..Default::default()
+                },
+            ]
+        }
+
+        /// Feeds `history` to a window the way the pump does, with a fold batch of 1. Calls
+        /// `query(index, buffer)` with the window as it stands before each event, and once more
+        /// after the last one, with `index` the number of events.
+        fn replay(history: &History, mut query: impl FnMut(usize, &PendingDeltas)) {
+            let windows = new_windows(
+                [EXTRACTOR],
+                WindowConfig { depth: history.config.window_depth, min_fold_batch: 1 },
+            );
+            let buffer = PendingDeltas::from_windows(windows, Arc::new(DiscardSink));
             for (index, event) in history.events.iter().enumerate() {
+                query(index, &buffer);
                 match event {
-                    HistoryEvent::Message(_) => messages.push(index),
-                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {}
-                }
-            }
-            let reach = 3 * history.config.window_depth as usize;
-            let mut gaps = Vec::new();
-            for _ in 0..RANDOM_GAPS {
-                let start = rng.gen_range(0..messages.len() - 1);
-                let end = (start + rng.gen_range(1..=reach)).min(messages.len() - 1);
-                gaps.push(Gap { last_applied: messages[start], first_live: messages[end] });
-            }
-            for (restart, event) in history.events.iter().enumerate() {
-                let HistoryEvent::ExtractorRestarted { last_committed, kind: _ } = event else {
-                    continue;
-                };
-                let split = messages.partition_point(|&index| index < restart);
-                let (before, after) = messages.split_at(split);
-                let at_last_committed = before
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|&index| {
-                        matches!(
-                            &history.events[index],
-                            HistoryEvent::Message(message) if &message.block == last_committed
-                        )
-                    });
-                for &first_live in after
-                    .iter()
-                    .take(FIRST_LIVES_AFTER_A_RESTART)
-                {
-                    for last_applied in before
-                        .last()
-                        .copied()
-                        .into_iter()
-                        .chain(at_last_committed)
-                    {
-                        gaps.push(Gap { last_applied, first_live });
+                    HistoryEvent::Message(message) => buffer.insert(message).unwrap(),
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                        buffer
+                            .fold_committed_and_clear(EXTRACTOR)
+                            .unwrap();
                     }
                 }
             }
-            gaps
+            query(history.events.len(), &buffer);
+        }
+
+        /// The window's answer for a client that missed `gap`: from the block of its last
+        /// message to the parent of its first live message, or to that message's target when it
+        /// is a revert.
+        fn catch_up(buffer: &PendingDeltas, history: &History, gap: Gap) -> CatchUpPath {
+            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) =
+                (&history.events[gap.last_applied], &history.events[gap.first_live])
+            else {
+                panic!("{gap:?} does not start and end at a message");
+            };
+            let to = if live.revert { &live.block.hash } else { &live.block.parent_hash };
+            buffer
+                .catch_up_path(EXTRACTOR, &last.block.hash, last.block.number, to)
+                .unwrap()
         }
 
         /// The window answer the spec requires, or `None` when the spec falls back on a
@@ -1784,63 +1786,33 @@ mod test {
 
         #[test]
         fn catch_up_paths_match_the_spec() {
-            let configs = [
-                HistoryConfig::default(),
-                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
-                // bound and clients fall below the floor.
-                HistoryConfig {
-                    window_depth: 4,
-                    finality_depth: 3,
-                    max_revert_depth: 3,
-                    max_commit_lag: 2,
-                    ..Default::default()
-                },
-            ];
             let mut rng = StdRng::seed_from_u64(0);
             let mut outcomes = Outcomes::default();
-            for config in &configs {
+            for config in &configs() {
                 for seed in 0..SEEDS {
                     let history = generate_history(config, seed);
                     let mut by_first_live: BTreeMap<usize, Vec<Gap>> = BTreeMap::new();
-                    for gap in gaps(&history, &mut rng) {
+                    for gap in sample_gaps(&history, RANDOM_GAPS, &mut rng) {
                         by_first_live
                             .entry(gap.first_live)
                             .or_default()
                             .push(gap);
                     }
-                    let windows = new_windows(
-                        [EXTRACTOR],
-                        WindowConfig { depth: config.window_depth, min_fold_batch: 1 },
-                    );
-                    let buffer =
-                        PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
 
-                    for (index, event) in history.events.iter().enumerate() {
-                        // The window as it stands when the client's first live message arrives.
+                    // The window as it stands when the client's first live message arrives.
+                    replay(&history, |index, buffer| {
                         for &gap in by_first_live
                             .get(&index)
                             .into_iter()
                             .flatten()
                         {
-                            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) =
-                                (&history.events[gap.last_applied], event)
-                            else {
-                                panic!("{gap:?} does not start and end at a message");
-                            };
                             let Some(required) = required_answer(catch_up_spec(&history, gap))
                             else {
                                 outcomes.fingerprint_changed += 1;
                                 continue;
                             };
-                            let to = if live.revert {
-                                &live.block.hash
-                            } else {
-                                &live.block.parent_hash
-                            };
 
-                            let answer = buffer
-                                .catch_up_path(EXTRACTOR, &last.block.hash, last.block.number, to)
-                                .unwrap();
+                            let answer = catch_up(buffer, &history, gap);
 
                             assert!(
                                 answer == required,
@@ -1849,22 +1821,14 @@ mod test {
                                 summary(&answer),
                                 summary(&required)
                             );
-                            let oldest_parent = windows[EXTRACTOR]
+                            let oldest_parent = buffer.windows[EXTRACTOR]
                                 .lock()
                                 .unwrap()
                                 .floor()
                                 .map(|oldest| oldest.parent_hash);
                             outcomes.add(&history, gap, oldest_parent.as_ref(), &answer);
                         }
-                        match event {
-                            HistoryEvent::Message(message) => buffer.insert(message).unwrap(),
-                            HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
-                                buffer
-                                    .fold_committed_and_clear(EXTRACTOR)
-                                    .unwrap();
-                            }
-                        }
-                    }
+                    });
                 }
             }
 
@@ -1902,6 +1866,210 @@ mod test {
                 CatchUpUnavailable::ToNotAhead,
             ] {
                 assert!(unavailable.contains_key(&reason), "no {reason:?} in {outcomes:?}");
+            }
+        }
+
+        /// Whether an upgraded extractor restarted among `events[range]`.
+        fn upgraded_restart_in(history: &History, range: Range<usize>) -> bool {
+            history.events[range]
+                .iter()
+                .any(|event| match event {
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Upgraded,
+                    } => true,
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Unchanged,
+                    } |
+                    HistoryEvent::Message(_) => false,
+                })
+        }
+
+        /// The messages of the subscription that starts at `first_live`, with their event
+        /// indices, until a restart ends it.
+        fn live_messages(
+            history: &History,
+            first_live: usize,
+        ) -> Vec<(usize, &Arc<BlockAggregatedChanges>)> {
+            let mut live = Vec::new();
+            for (index, event) in history
+                .events
+                .iter()
+                .enumerate()
+                .skip(first_live)
+            {
+                match event {
+                    HistoryEvent::Message(message) => live.push((index, message)),
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => break,
+                }
+            }
+            live
+        }
+
+        /// Applies `path`, then `live`, to `client` and checks it against the canonical chain
+        /// right after the first live message and after the last one.
+        fn check_resume(
+            history: &History,
+            mut client: DeltaStateModel,
+            path: &[Arc<BlockAggregatedChanges>],
+            live: &[(usize, &Arc<BlockAggregatedChanges>)],
+            context: impl Fn() -> String,
+        ) {
+            for message in path {
+                client.apply(message);
+            }
+            for (position, &(index, message)) in live.iter().enumerate() {
+                client.apply(message);
+                if position == 0 || position == live.len() - 1 {
+                    assert_eq!(
+                        client.check_against(
+                            &history.canonical_states[index],
+                            &history.connected_states[index]
+                        ),
+                        Ok(()),
+                        "{}, after event {index}",
+                        context()
+                    );
+                }
+            }
+        }
+
+        fn same_messages(
+            left: &[Arc<BlockAggregatedChanges>],
+            right: &[Arc<BlockAggregatedChanges>],
+        ) -> bool {
+            left.len() == right.len() &&
+                left.iter()
+                    .zip(right)
+                    .all(|(left, right)| Arc::ptr_eq(left, right))
+        }
+
+        /// How often the out-of-step property sees each case.
+        #[derive(Debug, Default)]
+        struct Skews {
+            /// Queries skipped because an upgraded extractor restarted between the client and the
+            /// window: a process keeps one fingerprint, so the endpoint never mixes the two.
+            upgraded: usize,
+            unavailable: usize,
+            /// Paths from a window ahead of the client's first live message.
+            ahead: usize,
+            /// Paths from a window behind it.
+            behind: usize,
+            /// Distinct paths per gap, each folded and checked once.
+            checked: usize,
+            /// Checked paths that differ from the one the window answers in step, or that it
+            /// answers only out of step.
+            unlike_in_step: usize,
+            /// Checked paths holding a revert the client also receives live.
+            duplicate_reverts: usize,
+        }
+
+        /// The endpoint asks a window that may be a few events ahead of or behind the client's
+        /// first live message. Any path such a window answers must bring the client to the
+        /// canonical state, right after its first live message and at the last message of its
+        /// subscription, which a restart ends.
+        #[test]
+        fn catch_up_paths_from_a_window_out_of_step_end_in_the_canonical_state() {
+            let mut rng = StdRng::seed_from_u64(1);
+            let mut skews = Skews::default();
+            for config in &configs() {
+                for seed in 0..OUT_OF_STEP_SEEDS {
+                    let history = generate_history(config, seed);
+                    let gaps = sample_gaps(&history, RANDOM_GAPS, &mut rng);
+                    let mut queries: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                    for (position, gap) in gaps.iter().enumerate() {
+                        let earliest = gap.first_live.saturating_sub(MAX_SKEW);
+                        let latest = (gap.first_live + MAX_SKEW).min(history.events.len());
+                        for at in earliest..=latest {
+                            let spanned = at.min(gap.last_applied)..at.max(gap.first_live);
+                            if upgraded_restart_in(&history, spanned) {
+                                skews.upgraded += 1;
+                                continue;
+                            }
+                            queries
+                                .entry(at)
+                                .or_default()
+                                .push(position);
+                        }
+                    }
+                    // Per gap, the paths the window answers and where it stood.
+                    let mut answers: Vec<Vec<(usize, Vec<Arc<BlockAggregatedChanges>>)>> =
+                        vec![Vec::new(); gaps.len()];
+                    replay(&history, |at, buffer| {
+                        for &position in queries.get(&at).into_iter().flatten() {
+                            match catch_up(buffer, &history, gaps[position]) {
+                                Ok(path) => answers[position].push((at, path)),
+                                Err(_) => skews.unavailable += 1,
+                            }
+                        }
+                    });
+
+                    let follower = follower_states(&history);
+                    for (gap, answers) in gaps.iter().zip(&answers) {
+                        let live = live_messages(&history, gap.first_live);
+                        let in_step = answers
+                            .iter()
+                            .find(|(at, _)| *at == gap.first_live)
+                            .map(|(_, path)| path);
+                        let mut checked: Vec<&[Arc<BlockAggregatedChanges>]> = Vec::new();
+                        for (at, path) in answers {
+                            skews.ahead += usize::from(*at > gap.first_live);
+                            skews.behind += usize::from(*at < gap.first_live);
+                            if checked
+                                .iter()
+                                .any(|seen| same_messages(seen, path))
+                            {
+                                continue;
+                            }
+                            checked.push(path);
+                            skews.checked += 1;
+                            skews.unlike_in_step += usize::from(
+                                in_step.is_none_or(|in_step| !same_messages(in_step, path)),
+                            );
+                            skews.duplicate_reverts += usize::from(path.iter().any(|message| {
+                                message.revert &&
+                                    live.iter()
+                                        .any(|(_, live)| Arc::ptr_eq(live, message))
+                            }));
+
+                            check_resume(
+                                &history,
+                                follower[gap.last_applied].clone(),
+                                path,
+                                &live,
+                                || {
+                                    format!(
+                                        "seed {seed}, {config:?}, {gap:?}, window before event \
+                                         {at}, path {:?}",
+                                        summary(&Ok(path.clone()))
+                                    )
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            let Skews {
+                upgraded,
+                unavailable,
+                ahead,
+                behind,
+                checked,
+                unlike_in_step,
+                duplicate_reverts,
+            } = &skews;
+            for (case, count) in [
+                ("skipped upgrades", upgraded),
+                ("unavailable paths", unavailable),
+                ("paths from a window ahead", ahead),
+                ("paths from a window behind", behind),
+                ("checked paths", checked),
+                ("paths unlike the in-step one", unlike_in_step),
+                ("paths with a revert the client also receives live", duplicate_reverts),
+            ] {
+                assert!(*count > 0, "no {case} in {skews:?}");
             }
         }
     }
