@@ -133,8 +133,8 @@ use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
@@ -159,11 +159,17 @@ mod schema;
 mod snapshot;
 pub mod token_cache;
 mod versioning;
+mod writer_epoch;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
 // +262142-12-31T23:59:59.999999999
 const MAX_TS: NaiveDateTime = NaiveDateTime::MAX;
+
+/// Server-side TCP keepalive settings of every database session: Postgres drops a session about
+/// 25 seconds (10 + 3 × 5) after its peer stops answering.
+const SESSION_KEEPALIVES: &str =
+    "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3;";
 
 lazy_static! {
     /// Simplifies querying current and historical versions by introducing a special marker version.
@@ -649,11 +655,30 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 }
 
 /// Creates a connection pool without running migrations.
+///
+/// Every session of the pool sets [`SESSION_KEEPALIVES`]. A write transaction holds a share lock
+/// on the writer epoch row until it ends. If the writer's host disappears with a transaction
+/// open, Postgres keeps that session and its lock until it notices that the peer is gone, and no
+/// new writer can increment the epoch until then. With the operating system defaults that can
+/// take hours; with these settings Postgres drops the session about 25 seconds after the peer
+/// stops answering.
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    let mut manager_config = ManagerConfig::default();
+    manager_config.custom_setup =
+        Box::new(|url| Box::pin(establish_with_keepalives(url.to_string())));
+    let config =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, manager_config);
     Pool::builder(config)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
+async fn establish_with_keepalives(url: String) -> ConnectionResult<AsyncPgConnection> {
+    let mut conn = AsyncPgConnection::establish(&url).await?;
+    conn.batch_execute(SESSION_KEEPALIVES)
+        .await
+        .map_err(ConnectionError::CouldntSetupConfiguration)?;
+    Ok(conn)
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.
