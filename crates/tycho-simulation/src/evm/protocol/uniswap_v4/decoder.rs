@@ -734,6 +734,60 @@ mod tests {
         assert!(message.contains("hooks"), "{message}");
     }
 
+    /// Quote of `token0` sold into the decoded pool, with the key fee and the stored fee given.
+    async fn quote_with_fees(key_lp_fee: u32, stored_lp_fee: Option<u32>) -> BigUint {
+        let mut snapshot = usv4_snapshot_with_hook(ZERO_HOOK);
+        snapshot
+            .component
+            .static_attributes
+            .insert("key_lp_fee".to_string(), Bytes::from(key_lp_fee.to_be_bytes().to_vec()));
+        let liquidity = 1_000_000_000_000_000_000_i128;
+        let attributes = &mut snapshot.state.attributes;
+        attributes.remove("ticks/60/net_liquidity");
+        attributes.insert(
+            "liquidity".to_string(),
+            Bytes::from(
+                (liquidity as u128)
+                    .to_be_bytes()
+                    .to_vec(),
+            ),
+        );
+        attributes.insert("tick".to_string(), Bytes::from(0_i32.to_be_bytes().to_vec()));
+        attributes.insert(
+            "ticks/-60/net_liquidity".to_string(),
+            Bytes::from(liquidity.to_be_bytes().to_vec()),
+        );
+        attributes.insert(
+            "ticks/60/net_liquidity".to_string(),
+            Bytes::from((-liquidity).to_be_bytes().to_vec()),
+        );
+        if let Some(fee) = stored_lp_fee {
+            snapshot
+                .state
+                .attributes
+                .insert("lp_fee".to_string(), Bytes::from(fee.to_be_bytes().to_vec()));
+        }
+        let pool = decode_with_chain(snapshot, Some(Chain::Ethereum))
+            .await
+            .unwrap();
+        pool.get_amount_out(BigUint::from(1_000_000_000_000_u64), &token0(), &token1())
+            .unwrap()
+            .amount
+    }
+
+    #[tokio::test]
+    async fn dynamic_pool_decodes_the_stored_lp_fee() {
+        let static_reference = quote_with_fees(20_000, None).await;
+        let fee_free = quote_with_fees(0, None).await;
+
+        let with_stored = quote_with_fees(0x800000, Some(20_000)).await;
+        let without_stored = quote_with_fees(0x800000, None).await;
+
+        assert!(static_reference < fee_free, "the fixture must make the fee visible");
+        assert_eq!(with_stored, static_reference);
+        assert_eq!(without_stored, fee_free);
+    }
+
     #[tokio::test]
     async fn test_usv4_zero_hook_pool_with_no_ticks_still_decodes() {
         // Tick leniency is keyed on the `hooks` attribute being present, not on the address being

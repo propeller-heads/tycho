@@ -3596,3 +3596,119 @@ mod step_cache_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod stored_lp_fee_tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    const STORED_LP_FEE: u32 = 20_000;
+
+    fn pool_with_lp_fee(lp_fee: u32) -> UniswapV4State {
+        let liquidity = 1_000_000_000_000_000_000u128;
+        UniswapV4State::new(
+            liquidity,
+            U256::from(1u8) << 96,
+            UniswapV4Fees::new(0, 0, lp_fee),
+            0,
+            60,
+            vec![
+                TickInfo::new(-60, liquidity as i128).unwrap(),
+                TickInfo::new(60, -(liquidity as i128)).unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn lp_fee_delta(lp_fee: u32) -> ProtocolStateDelta {
+        ProtocolStateDelta {
+            component_id: "pool".to_string(),
+            updated_attributes: HashMap::from([(
+                "lp_fee".to_string(),
+                Bytes::from(lp_fee.to_be_bytes().to_vec()),
+            )]),
+            deleted_attributes: Default::default(),
+        }
+    }
+
+    fn dynamic_pool_with_stored_fee(lp_fee: u32) -> UniswapV4State {
+        let mut pool = pool_with_lp_fee(lp_fee::DYNAMIC_FEE_FLAG);
+        pool.delta_transition(lp_fee_delta(lp_fee), &HashMap::new(), &Balances::default())
+            .unwrap();
+        pool
+    }
+
+    fn amount_in() -> I256 {
+        I256::try_from(-1_000_000_000_000i64).unwrap()
+    }
+
+    fn swap_out(pool: &UniswapV4State, lp_fee_override: Option<u32>) -> I256 {
+        pool.swap(true, amount_in(), None, lp_fee_override)
+            .unwrap()
+            .amount_calculated
+    }
+
+    #[test]
+    fn dynamic_pool_charges_the_stored_lp_fee_without_an_override() {
+        let dynamic = dynamic_pool_with_stored_fee(STORED_LP_FEE);
+        let static_fee = pool_with_lp_fee(STORED_LP_FEE);
+
+        assert_eq!(swap_out(&dynamic, None), swap_out(&static_fee, None));
+    }
+
+    #[test]
+    fn hook_override_wins_over_the_stored_lp_fee() {
+        let dynamic = dynamic_pool_with_stored_fee(STORED_LP_FEE);
+        let static_fee = pool_with_lp_fee(500);
+
+        assert_eq!(swap_out(&dynamic, Some(500)), swap_out(&static_fee, None));
+    }
+
+    #[test]
+    fn lp_fee_delta_lowers_the_next_quote() {
+        let sell = Token::new(
+            &Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
+            "X",
+            18,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        );
+        let buy = Token::new(
+            &Bytes::from_str("0x0000000000000000000000000000000000000002").unwrap(),
+            "Y",
+            18,
+            0,
+            &[Some(10_000)],
+            Default::default(),
+            100,
+        );
+        let amount = BigUint::from(1_000_000_000_000u64);
+        let mut pool = pool_with_lp_fee(lp_fee::DYNAMIC_FEE_FLAG);
+        let before = pool
+            .get_amount_out(amount.clone(), &sell, &buy)
+            .unwrap()
+            .amount;
+
+        pool.delta_transition(lp_fee_delta(STORED_LP_FEE), &HashMap::new(), &Balances::default())
+            .unwrap();
+        let after = pool
+            .get_amount_out(amount, &sell, &buy)
+            .unwrap()
+            .amount;
+
+        let ratio = after.to_f64().unwrap() / before.to_f64().unwrap();
+        assert!((ratio - 0.98).abs() < 0.001, "expected about 2% less output, got ratio {ratio}");
+    }
+
+    #[test]
+    fn lp_fee_delta_does_not_change_a_static_fee_pool() {
+        let mut pool = pool_with_lp_fee(500);
+        pool.delta_transition(lp_fee_delta(STORED_LP_FEE), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(swap_out(&pool, None), swap_out(&pool_with_lp_fee(500), None));
+    }
+}
