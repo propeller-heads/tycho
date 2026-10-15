@@ -240,3 +240,53 @@ impl EkuboPool for MevResistPool {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use evm_ekubo_sdk::{math::tick::to_sqrt_ratio, quoting::types::Config};
+
+    use super::*;
+
+    const NEW_TICK: i32 = 5_000;
+    const LIQUIDITY: u128 = 1_000_000_000_000;
+
+    fn key() -> NodeKey {
+        NodeKey {
+            token0: U256::one(),
+            token1: U256::from(2),
+            config: Config { fee: u64::MAX / 1_000, tick_spacing: 10, extension: U256::one() },
+        }
+    }
+
+    fn ticks() -> Vec<Tick> {
+        vec![
+            Tick { index: -100_000, liquidity_delta: LIQUIDITY as i128 },
+            Tick { index: 100_000, liquidity_delta: -(LIQUIDITY as i128) },
+        ]
+    }
+
+    fn pool_at(tick: i32) -> MevResistPool {
+        MevResistPool::new(key(), ticks(), to_sqrt_ratio(tick).unwrap(), LIQUIDITY, tick).unwrap()
+    }
+
+    fn quote_out(pool: &MevResistPool) -> u128 {
+        let token_amount = TokenAmount { amount: 1_000_000_000, token: pool.key().token0 };
+        pool.quote(token_amount, None)
+            .unwrap()
+            .calculated_amount
+    }
+
+    #[test]
+    fn test_tick_move_without_tick_list_change_matches_fresh_pool() {
+        let mut moved = pool_at(0);
+        moved.set_sqrt_ratio(to_sqrt_ratio(NEW_TICK).unwrap());
+        moved
+            .finish_transition(
+                HashMap::from([("tick".to_string(), NEW_TICK.to_be_bytes().into())]),
+                HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(quote_out(&moved), quote_out(&pool_at(NEW_TICK)));
+    }
+}

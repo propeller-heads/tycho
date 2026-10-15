@@ -207,3 +207,66 @@ fn gas_costs(
         EXTRA_BASE_GAS_COST +
         u64::from(state_update_count) * GAS_COST_OF_ONE_STATE_UPDATE
 }
+
+#[cfg(test)]
+mod tests {
+    use ekubo_sdk::{
+        chain::evm::{Evm, EvmMevCapturePoolConfig},
+        math::tick::to_sqrt_ratio,
+        quoting::pools::concentrated::TickSpacing,
+    };
+
+    use super::*;
+
+    const NEW_TICK: i32 = 5_000;
+
+    fn key() -> MevCapturePoolKey {
+        EvmMevCapturePoolKey {
+            token0: Address::ZERO,
+            token1: Address::repeat_byte(1),
+            config: EvmMevCapturePoolConfig {
+                fee: u64::MAX / 1_000,
+                pool_type_config: TickSpacing(10),
+                extension: Address::repeat_byte(2),
+            },
+        }
+    }
+
+    fn ticks() -> Vec<Tick> {
+        vec![
+            Tick { index: -100_000, liquidity_delta: 1_000_000_000_000 },
+            Tick { index: 100_000, liquidity_delta: -1_000_000_000_000 },
+        ]
+    }
+
+    fn state_at(tick: i32) -> EvmConcentratedPoolState {
+        EvmConcentratedPoolState {
+            sqrt_ratio: to_sqrt_ratio::<Evm>(tick).unwrap(),
+            liquidity: 1_000_000_000_000,
+            active_tick_index: Some(0),
+        }
+    }
+
+    fn quote_out(pool: &MevCapturePool) -> u128 {
+        let token_amount = EvmTokenAmount { amount: 1_000_000_000, token: pool.key().token0 };
+        pool.quote(token_amount, None)
+            .unwrap()
+            .calculated_amount
+    }
+
+    #[test]
+    fn test_tick_move_without_tick_list_change_matches_fresh_pool() {
+        let mut moved = MevCapturePool::new(key(), 0, state_at(0), ticks()).unwrap();
+        moved.set_sqrt_ratio(to_sqrt_ratio::<Evm>(NEW_TICK).unwrap());
+        moved
+            .finish_transition(
+                HashMap::from([("tick".to_string(), NEW_TICK.to_be_bytes().into())]),
+                HashSet::new(),
+            )
+            .unwrap();
+
+        let fresh = MevCapturePool::new(key(), NEW_TICK, state_at(NEW_TICK), ticks()).unwrap();
+
+        assert_eq!(quote_out(&moved), quote_out(&fresh));
+    }
+}
