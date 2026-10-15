@@ -9,6 +9,7 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task
 testing.rs                  Test utilities
 
 extractor/
@@ -159,6 +160,29 @@ Drained blocks stay in the buffer's committing section (shared with the commit t
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
 
+### Leader election
+
+Several `index` processes can run against one database. All of them extract and serve WS/RPC;
+only the leader commits. `leadership::elect` (called in `main.rs` before the extractors are built)
+tries the `LeaderLock` once:
+
+- **Lock taken**: increments the writer epoch (`CachedGateway::increment_writer_epoch`), role
+  `Leader` from the start. `main.rs` then runs `initialize_accounts`. This is the single-replica
+  path and behaves as before.
+- **Lock held elsewhere**: role `Follower`. A background task polls
+  `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
+  On success it increments the writer epoch (fencing the former leader) and only then switches
+  the role to `Leader`, so no extractor commits before the fence. A promoted process does not run
+  `initialize_accounts`: the initialized accounts are a testing aid to start indexing from a later
+  block, and the first leader wrote them.
+- **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
+  it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
+  follower. `tycho_leader` (gauge, 0/1) shows the role.
+- **Health**: each successful lock check is published in the `WriterStatus`
+  (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
+  confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
+  the lock. A frozen process does not answer the probe at all, which has the same effect.
+
 ### Leader and follower extractors
 
 Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
@@ -202,6 +226,19 @@ Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until 
 `min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
 Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
 to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+The window learns `db_committed` only from the next block message, so the database can already
+hold blocks the window still calls uncommitted. Re-applied state deltas are harmless (absolute
+values), but `get_protocol_components` then lists a new component twice, once from the database
+and once from the window, and counts it twice in `total`. On a single writer this lasts from the
+write until the next message; on a follower, which learns the leader's height from a 1 s poll, up
+to 1 s plus one block time per leader commit. Known and not yet fixed.
+A follower can also lag the leader by more than the finality delay, for example after a stream
+reconnect on a chain with a short finality delay. Its `db_committed` is capped at its own
+finalized height, so a request at its tip counts as uncommitted: the database is read at `Latest`,
+which already holds the leader's newer commits, and only the follower's window deltas are applied
+on top. The answer then mixes two versions, and the follower's next deltas can set attributes back
+to older values. Known and not yet fixed; a follow-up can carry the uncapped leader height, so that
+versions at or below it are read from the database at that exact version.
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
 Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one sample per
@@ -280,7 +317,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check |
+| `/health` | GET — health check; 503 when the leader stopped confirming its lock |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at

@@ -13,10 +13,13 @@ pub(in crate::services) fn compression_middleware() -> Compress {
 
 #[cfg(test)]
 mod tests {
-    use actix_web::{test, web, App};
+    use actix_web::{test, web, App, HttpResponse};
 
     use super::*;
-    use crate::services::rpc::health as health_endpoint;
+
+    async fn health_endpoint() -> HttpResponse {
+        HttpResponse::Ok().json(tycho_common::dto::Health::Ready)
+    }
 
     #[actix_web::test]
     async fn test_without_accept_encoding_header() {
