@@ -325,7 +325,7 @@ impl ExtractorRunner {
     /// then optionally adds a partial copy of the message (for full blocks with partials enabled)
     /// and/or the result of collect_and_process_full_block (for final partials).
     #[instrument(skip_all, fields(partial_blocks_enabled, is_partial = data.is_partial))]
-    async fn process_block_data(
+    pub(super) async fn process_block_data(
         extractor: &dyn Extractor,
         data: &BlockScopedData,
         partial_blocks_enabled: bool,

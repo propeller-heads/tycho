@@ -1,0 +1,3 @@
+# Tests compare the delta format files byte for byte, so their line endings must not depend on
+# the checkout.
+crates/tycho-indexer/src/extractor/delta_format/*.json text eol=lf

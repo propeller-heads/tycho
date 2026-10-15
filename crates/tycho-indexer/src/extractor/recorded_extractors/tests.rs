@@ -26,13 +26,18 @@ use crate::{
     testing::{aggregated_changes, with_state_delta},
 };
 
-fn decode(kind: ExtractorKind, data: &BlockScopedData) -> BlockChanges {
+/// The substreams module output `data` carries.
+fn module_output(data: &BlockScopedData) -> pb::BlockChanges {
     let output = data
         .output
         .as_ref()
         .and_then(|output| output.map_output.as_ref())
         .expect("recorded blocks carry a map output");
-    let message = pb::BlockChanges::decode(output.value.as_slice()).expect("output decodes");
+    pb::BlockChanges::decode(output.value.as_slice()).expect("output decodes")
+}
+
+fn decode(kind: ExtractorKind, data: &BlockScopedData) -> BlockChanges {
+    let message = module_output(data);
     let protocol_type = kind.protocol_type();
     BlockChanges::try_from_message((
         message,
@@ -183,6 +188,131 @@ fn recorded_streams_commit_and_revert_on_both_sides_of_the_halfway_point(
         numbers(&canonical).last() > Some(&final_height),
         "the first half must end with blocks that are not final, so they stay uncommitted"
     );
+}
+
+/// How the partial-block stream sent one block.
+struct SentBlock {
+    /// The block's messages in order: one whole message, or its partials.
+    messages: Vec<BlockScopedData>,
+    /// Whether the block's last message arrived.
+    sealed: bool,
+    /// The undo signals naming the block itself, each with the number of partials before it.
+    undos_to_itself: Vec<(usize, BlockUndoSignal)>,
+}
+
+/// Takes the messages of block `number` from the front of `stream`.
+fn take_block(number: u64, stream: &mut &[Recorded]) -> SentBlock {
+    let mut sent = SentBlock { messages: Vec::new(), sealed: false, undos_to_itself: Vec::new() };
+    loop {
+        match stream.split_first() {
+            Some((Recorded::Block(data), rest)) if block_number(data) == number => {
+                sent.messages
+                    .push(data.as_ref().clone());
+                *stream = rest;
+                if !data.is_partial || data.is_last_partial == Some(true) {
+                    sent.sealed = true;
+                    return sent;
+                }
+            }
+            Some((Recorded::Undo(undo), rest))
+                if undo
+                    .last_valid_block
+                    .as_ref()
+                    .is_some_and(|target| target.number == number) =>
+            {
+                sent.undos_to_itself
+                    .push((sent.messages.len(), undo.clone()));
+                *stream = rest;
+            }
+            _ => return sent,
+        }
+    }
+}
+
+#[test]
+fn the_partial_block_stream_sends_the_native_blocks() {
+    let full_blocks = recorded_stream(ExtractorKind::Native).messages;
+    let partial_blocks = recorded_partial_block_stream().messages;
+    let mut partials = partial_blocks.as_slice();
+    let (mut whole, mut interrupted, mut undone_to_itself) = (0, 0, 0);
+
+    for (position, message) in full_blocks.iter().enumerate() {
+        let block = match message {
+            Recorded::Block(block) => block,
+            Recorded::Undo(undo) => {
+                // The cursors differ: a partial's cursor names its index.
+                let Some((Recorded::Undo(next), rest)) = partials.split_first() else {
+                    panic!("the partial stream does not send {message}");
+                };
+                assert_eq!(next.last_valid_block, undo.last_valid_block);
+                partials = rest;
+                continue;
+            }
+        };
+        let sent = take_block(block_number(block), &mut partials);
+        if sent
+            .messages
+            .first()
+            .is_some_and(|data| !data.is_partial)
+        {
+            assert_eq!(sent.messages, vec![block.as_ref().clone()], "{message} is sent whole");
+            whole += 1;
+            continue;
+        }
+
+        let expected = module_output(block);
+        let expected_block = expected
+            .block
+            .expect("blocks carry their block");
+        let mut changes = Vec::new();
+        for (index, partial) in sent.messages.iter().enumerate() {
+            let output = module_output(partial);
+            let partial_block = output
+                .block
+                .expect("partials carry their block");
+            let last = index + 1 == sent.messages.len();
+            assert!(partial.is_partial, "{message} is sent as partials");
+            assert_eq!(partial.partial_index, Some(index as u32), "{message}");
+            assert_eq!(partial.is_last_partial, Some(last && sent.sealed), "{message}");
+            assert_eq!(partial.final_block_height, block.final_block_height, "{message}");
+            assert_eq!(
+                partial_block.hash == expected_block.hash,
+                last && sent.sealed,
+                "only the last partial of {message} carries its hash"
+            );
+            assert_eq!(
+                pb::Block { hash: expected_block.hash.clone(), ..partial_block },
+                expected_block,
+                "{message}"
+            );
+            assert_eq!(output.changes.len(), 1, "each partial of {message} sends one transaction");
+            changes.extend(output.changes);
+        }
+        assert_eq!(changes, expected.changes, "the partials of {message} send its transactions");
+        for (partials_before, undo) in &sent.undos_to_itself {
+            assert_eq!(
+                *partials_before, 1,
+                "the undo signal naming {message} follows its first partial"
+            );
+            assert_eq!(
+                undo.last_valid_block,
+                Some(BlockRef { id: block_id(block).to_string(), number: block_number(block) }),
+            );
+            undone_to_itself += 1;
+        }
+        if !sent.sealed {
+            interrupted += 1;
+            assert!(
+                matches!(full_blocks.get(position + 1), Some(Recorded::Undo(_))),
+                "only an undo signal interrupts {message}"
+            );
+        }
+    }
+
+    assert!(partials.is_empty(), "the partial stream sends nothing else");
+    assert_eq!(whole, 1, "the first block is sent whole");
+    assert_eq!(interrupted, 2, "an undo signal interrupts each orphaned branch");
+    assert_eq!(undone_to_itself, 1, "one undo signal names the block being streamed");
 }
 
 #[test]
@@ -354,6 +484,23 @@ async fn the_tracer_traces_every_entry_point_in_request_order_the_same_way_every
             .await,
         traces
     );
+}
+
+#[tokio::test]
+async fn the_tracer_fails_the_untraceable_entry_point_every_time() {
+    let untraceable = EntryPointWithTracingParams::new(
+        EntryPoint::new("ep".into(), streams::UNTRACEABLE.target(), "f()".into()),
+        TracingParams::RPCTracer(RPCTracerParams::new(None, Bytes::from("0x01"))),
+    );
+    let tracer = rpc::tracer();
+
+    for block in [1_u64, 2] {
+        let traces = tracer
+            .trace(Bytes::from(block).lpad(32, 0), vec![untraceable.clone()])
+            .await;
+
+        assert!(matches!(traces.as_slice(), [Err(_)]), "{traces:?}");
+    }
 }
 
 #[tokio::test]

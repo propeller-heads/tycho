@@ -32,6 +32,7 @@ use crate::{
         dynamic_contract_indexer::dci::DynamicContractIndexer,
         protocol_cache::ProtocolMemoryCache,
         protocol_extractor::{ExtractorPgGateway, ProtocolExtractor},
+        runner::ExtractorRunner,
         Extractor,
     },
     pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal},
@@ -62,6 +63,20 @@ impl ExtractorKind {
         match self {
             Self::Native => "recorded_native",
             Self::Dci => "recorded_dci",
+        }
+    }
+
+    /// The first block of this kind's stream that an extractor restarted before it replays
+    /// differently from the original run, because of a known bug, if any. Replay tests restart
+    /// below it.
+    ///
+    /// The DCI does not persist its trace retry counts (deferred bug 16), so a restarted
+    /// extractor retries the paused pool's trace in the block where the original run had run out
+    /// of retries.
+    pub(super) fn replays_differ_from(self) -> Option<u64> {
+        match self {
+            Self::Native => None,
+            Self::Dci => Some(streams::DCI_RETRIES_RUN_OUT_AT),
         }
     }
 
@@ -96,7 +111,15 @@ pub(super) enum Recorded {
 impl fmt::Display for Recorded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Block(data) => write!(f, "block {} ({})", block_number(data), block_id(data)),
+            Self::Block(data) => match data.partial_index {
+                Some(index) => write!(
+                    f,
+                    "partial {index} of block {} ({})",
+                    block_number(data),
+                    block_id(data)
+                ),
+                None => write!(f, "block {} ({})", block_number(data), block_id(data)),
+            },
             Self::Undo(signal) => match &signal.last_valid_block {
                 Some(target) => write!(f, "undo to block {} ({})", target.number, target.id),
                 None => write!(f, "undo without a target"),
@@ -105,8 +128,22 @@ impl fmt::Display for Recorded {
     }
 }
 
-/// A recorded stream and the timestamp its block timestamps count from.
+/// How a recorded stream sends its blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Delivery {
+    /// One message per block.
+    FullBlocks,
+    /// Partial blocks, as flashblock chains send them: one partial per transaction, where every
+    /// partial but the last carries a temporary block hash, and the last one is flagged and
+    /// carries the block's hash. The extractor runs with partial blocks enabled.
+    PartialBlocks,
+}
+
+/// A recorded stream, how it sends its blocks, and the timestamp its block timestamps count
+/// from.
 pub(super) struct RecordedStream {
+    /// How the stream sends its blocks, which [`feed`] needs to dispatch them as the runner does.
+    pub(super) delivery: Delivery,
     /// Timestamp of block 0; block `n` is `n` times [`streams::BLOCK_TIME`] seconds later, on
     /// every branch. It is midnight of the day before the stream is written, since the test
     /// database only has partitions for recent days, so block timestamps and the component
@@ -120,9 +157,17 @@ pub(super) struct RecordedStream {
 /// its halfway point, and has blocks that are not final yet at that point.
 pub(super) fn recorded_stream(kind: ExtractorKind) -> RecordedStream {
     match kind {
-        ExtractorKind::Native => streams::native(),
+        ExtractorKind::Native => streams::native(Delivery::FullBlocks),
         ExtractorKind::Dci => streams::dci(),
     }
+}
+
+/// The blocks of the [`ExtractorKind::Native`] stream sent as partial blocks, as flashblock
+/// chains send them. The first block arrives whole, the undo signals interrupt the last block of
+/// each orphaned branch before its last partial, and one more undo signal names the block being
+/// streamed.
+pub(super) fn recorded_partial_block_stream() -> RecordedStream {
+    streams::native(Delivery::PartialBlocks)
 }
 
 /// The blocks of `stream` that no later undo signal orphaned, oldest first: what substreams
@@ -323,40 +368,51 @@ pub(super) async fn build_extractor(
     RecordedExtractor(extractor)
 }
 
-/// Feeds `stream` to `extractor` in order and returns every full-block and revert message it
-/// emitted. The extractor's commit task finishes before the next message. A commit writes the
-/// drained blocks to the database unless the extractor was syncing when it drained them: those
-/// stay in the gateway's open transaction until a later commit flushes it.
+/// Feeds `stream` to `extractor` in order and returns every message it emitted, in order. Blocks
+/// go through the runner's dispatch (`ExtractorRunner::process_block_data`), with partial blocks
+/// enabled when `delivery` sends them. Then a whole block also yields a partial copy, and a final
+/// partial also yields the full-block message merged from the block's partials. The extractor's
+/// commit task finishes before the next message. A commit writes the drained blocks to the
+/// database unless the extractor was syncing when it drained them: those stay in the gateway's
+/// open transaction until a later commit flushes it.
 ///
 /// # Panics
 /// If the extractor fails on a message or its commit fails.
 pub(super) async fn feed(
     extractor: &RecordedExtractor,
     stream: &[Recorded],
+    delivery: Delivery,
 ) -> Vec<BlockAggregatedChanges> {
     let RecordedExtractor(extractor) = extractor;
+    let partial_blocks = match delivery {
+        Delivery::FullBlocks => false,
+        Delivery::PartialBlocks => true,
+    };
     let mut emitted = Vec::new();
     for message in stream {
-        let output = match message {
+        match message {
             Recorded::Block(data) => {
-                extractor
-                    .handle_tick_scoped_data(data.as_ref().clone())
+                let outputs = ExtractorRunner::process_block_data(extractor, data, partial_blocks)
                     .await
+                    .unwrap_or_else(|err| panic!("{message} failed: {err}"));
+                emitted.extend(
+                    outputs
+                        .into_iter()
+                        .map(Arc::unwrap_or_clone),
+                );
             }
             Recorded::Undo(signal) => {
-                extractor
+                let output = extractor
                     .handle_revert(signal.clone())
                     .await
+                    .unwrap_or_else(|err| panic!("{message} failed: {err}"));
+                emitted.extend(output.map(Arc::unwrap_or_clone));
             }
         }
-        .unwrap_or_else(|err| panic!("{message} failed: {err}"));
         extractor
             .wait_for_commit()
             .await
             .unwrap_or_else(|err| panic!("commit after {message} failed: {err}"));
-        if let Some(changes) = output {
-            emitted.push(Arc::unwrap_or_clone(changes));
-        }
     }
     emitted
 }
