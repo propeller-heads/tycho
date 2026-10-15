@@ -171,6 +171,9 @@ pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
 /// Native components executed through `NativeFallbackRouter`.
 pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
 
+/// Liquorice components executed through `LiquoriceFallbackRouter`.
+pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
+
 #[cfg(test)]
 mod tests {
     use super::*;

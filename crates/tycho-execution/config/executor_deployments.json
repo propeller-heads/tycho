@@ -103,6 +103,10 @@
       "contract": "NativeFallbackExecutor",
       "args": ["0x0000000000000000000000000000000000000000"]
     },
+    "fallback:rfq:liquorice": {
+      "contract": "LiquoriceFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []

@@ -19,6 +19,7 @@ mod hashflow_fallback;
 mod lido_v4;
 mod liquidity_party;
 mod liquorice;
+mod liquorice_fallback;
 mod lunarbase;
 mod maverick_v2;
 mod metric;

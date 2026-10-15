@@ -22,6 +22,7 @@ pub struct LiquoriceClientBuilder {
     quote_expiry_secs: u64,
     component_layout: ComponentLayout,
     quote_rule: QuoteRule,
+    via_fallback_router: bool,
 }
 
 impl LiquoriceClientBuilder {
@@ -38,6 +39,7 @@ impl LiquoriceClientBuilder {
             quote_expiry_secs: 300,
             component_layout: ComponentLayout::PerPair,
             quote_rule: LiquoriceClient::DEFAULT_QUOTE_RULE,
+            via_fallback_router: false,
         }
     }
 
@@ -86,6 +88,12 @@ impl LiquoriceClientBuilder {
         self
     }
 
+    /// Executes the swaps through Tycho's `LiquoriceFallbackRouter`. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.via_fallback_router = true;
+        self
+    }
+
     pub fn build(self) -> Result<LiquoriceClient, RFQError> {
         let quote_tokens;
         if let Some(tokens) = self.quote_tokens {
@@ -94,7 +102,7 @@ impl LiquoriceClientBuilder {
             quote_tokens = default_quote_tokens_for_chain(&self.chain)?
         }
 
-        LiquoriceClient::new(
+        let client = LiquoriceClient::new(
             self.chain,
             self.tokens,
             self.tvl,
@@ -104,11 +112,9 @@ impl LiquoriceClientBuilder {
             self.poll_time,
             self.quote_timeout,
             self.quote_expiry_secs,
-        )
-        .map(|client| {
-            client
-                .with_component_layout(self.component_layout)
-                .with_quote_rule(self.quote_rule)
-        })
+        )?
+        .with_component_layout(self.component_layout)
+        .with_quote_rule(self.quote_rule);
+        Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }
