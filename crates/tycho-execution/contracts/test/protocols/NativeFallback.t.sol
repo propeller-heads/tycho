@@ -27,7 +27,6 @@ import {
 contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     uint256 constant FORK_BLOCK = 25_930_213;
     uint256 constant QUOTE_TIMESTAMP = 1_788_841_206;
-    /// The quote's deadline.
     uint256 constant QUOTE_DEADLINE = 0x6a9f8d3c;
     uint256 constant SIGNED_USDC_IN = 1_000_000;
     uint256 constant SIGNED_MINIMUM_WETH_OUT = 402_408_818_842_972;
