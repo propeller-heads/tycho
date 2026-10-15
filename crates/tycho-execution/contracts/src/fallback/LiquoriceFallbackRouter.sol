@@ -52,8 +52,9 @@ contract LiquoriceFallbackRouter is TychoFallbackRouter {
     }
 
     /// @notice Runs the Liquorice quote and, only if it fails, `fallbackSwap`. The quote fills
-    /// its signed amount; the rest of `swap_.amountIn` goes back to the caller. Below the signed
-    /// amount the settlement cannot pull its input, so the fallback fills the whole leg.
+    /// its signed amount; the rest of `swap_.amountIn` goes back to the caller. When
+    /// `swap_.amountIn` is below the signed amount, the settlement cannot pull its input, so the
+    /// fallback fills the whole leg.
     /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     function swap(
         Swap calldata swap_,
