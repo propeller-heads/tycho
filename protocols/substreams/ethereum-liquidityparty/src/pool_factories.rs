@@ -7,7 +7,10 @@ use substreams_ethereum::{
     pb::eth::v2::{Call, CallType, Log, TransactionTrace},
     Event,
 };
-use tycho_substreams::models::{ImplementationType, ProtocolComponent};
+use tycho_substreams::{
+    attributes::json_serialize_address_list,
+    models::{ImplementationType, ProtocolComponent},
+};
 
 /// Potentially constructs a new ProtocolComponent given a call
 ///
@@ -45,6 +48,13 @@ pub fn maybe_create_component(
                 ProtocolComponent::new(&encode_addr(&event.pool))
                     .with_tokens(&event.tokens.clone())
                     .with_contracts(&contracts)
+                    // No token contracts are indexed, so tokens are self-contained proxies in the
+                    // simulation DB. Flag them so the simulator does not bind them to an
+                    // implementation another VM protocol indexed for the same token.
+                    .with_attributes(&[(
+                        "self_contained_tokens",
+                        json_serialize_address_list(&event.tokens),
+                    )])
                     .as_swap_type("liquidityparty_pool", ImplementationType::Vm),
             );
         }
