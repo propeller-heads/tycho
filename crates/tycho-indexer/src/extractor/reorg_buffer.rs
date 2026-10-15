@@ -1305,6 +1305,39 @@ mod test {
     }
 
     #[test]
+    fn test_committing_span_covers_only_the_committing_section() {
+        let start = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        assert_eq!(reorg_buffer.committing_span(), None);
+        for (number, minutes) in [(1_u64, 0), (2, 10), (3, 25)] {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: Block::new(
+                        number,
+                        Chain::Ethereum,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        start + chrono::Duration::minutes(minutes),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+
+        assert_eq!(reorg_buffer.committing_span(), Some(chrono::Duration::minutes(10)));
+        reorg_buffer.release_committed(1);
+        assert_eq!(reorg_buffer.committing_span(), Some(chrono::Duration::zero()));
+        reorg_buffer.release_committed(2);
+        assert_eq!(reorg_buffer.committing_span(), None);
+    }
+
+    #[test]
     fn arc_same_timestamp_blocks_enter_persistence_in_number_order() {
         let timestamp = "2020-01-01T00:00:00"
             .parse::<NaiveDateTime>()
