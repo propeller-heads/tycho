@@ -783,9 +783,24 @@ async fn ensure_protocol_systems(protocol_systems: &[String], conn: &mut AsyncPg
     debug!("Ensured protocol system enum presence for: {:?}", protocol_systems);
 }
 
+/// Postgres advisory lock key held while migrations run.
+const MIGRATION_LOCK_KEY: i64 = 0x7479_6368_6f5f_6d67;
+
+/// Applies pending migrations, waiting for any other process that is migrating the same database.
+///
+/// Several instances can start against one database at the same time, e.g. during a rolling
+/// deploy. Without the lock both would apply the same migration concurrently.
 fn run_migrations(db_url: &str) {
     info!("Upgrading database...");
     let mut conn = PgConnection::establish(db_url).expect("Connection to database should succeed");
+    // Session-scoped lock: closing `conn` at the end of this function releases it, also when a
+    // migration panics.
+    diesel::RunQueryDsl::execute(
+        diesel::sql_query("SELECT pg_advisory_lock($1)")
+            .bind::<diesel::sql_types::BigInt, _>(MIGRATION_LOCK_KEY),
+        &mut conn,
+    )
+    .expect("Acquiring the migration lock should succeed");
     conn.run_pending_migrations(MIGRATIONS)
         .expect("migrations should execute without errors");
 }
