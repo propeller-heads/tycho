@@ -1804,6 +1804,86 @@ impl ComponentTvlRequestResponse {
     }
 }
 
+fn default_include_state_flag() -> bool {
+    true
+}
+
+/// Asks for the messages a WebSocket subscriber missed between the last block it applied and the
+/// block its new subscription continues from.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeltaCatchUpRequestBody {
+    #[serde(default)]
+    pub chain: Chain,
+    /// Protocol system (extractor name) whose messages are requested.
+    pub protocol_system: String,
+    /// Hash of the last block the client applied.
+    #[schema(value_type = String)]
+    #[serde(with = "hex_bytes")]
+    pub from_block_hash: Bytes,
+    /// Number of the last block the client applied. It only tells a block below the server's
+    /// window apart from a block the server never saw.
+    pub from_block_number: u64,
+    /// Hash of the block the messages must lead to: the parent of the new subscription's first
+    /// message, or that message's target when it is a revert.
+    #[schema(value_type = String)]
+    #[serde(with = "hex_bytes")]
+    pub to_block_hash: Bytes,
+    /// Fingerprint the subscription reported when the client synced. Catch-up is unavailable when
+    /// the extractor's fingerprint differs.
+    #[schema(value_type = String)]
+    pub fingerprint: ExtractorFingerprint,
+    /// Whether the messages carry state updates (`state_updates` and `account_updates`), like the
+    /// subscription option of the same name. Defaults to true.
+    #[serde(default = "default_include_state_flag")]
+    pub include_state: bool,
+}
+
+/// Answer to a [`DeltaCatchUpRequestBody`].
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DeltaCatchUpRequestResponse {
+    /// The missed messages, oldest first, as the WebSocket sent them: revert messages and full
+    /// blocks. Applied in order to the client's state at `from_block_hash`, they give the state at
+    /// `to_block_hash`; the last one may be a revert to that block. Empty when the two blocks are
+    /// the same.
+    Available {
+        #[schema(value_type = Vec<Object>)]
+        messages: Vec<BlockAggregatedChanges>,
+    },
+    /// The server cannot serve the messages: the client must resync from a snapshot.
+    Unavailable { reason: DeltaCatchUpUnavailable },
+}
+
+/// Why the server cannot serve a delta catch-up. Servers never send `unknown`: clients read it for
+/// a reason added after them.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeltaCatchUpUnavailable {
+    /// The server keeps no delta windows: it runs no extractors (the standalone RPC server).
+    NoWindow,
+    /// The extractor's fingerprint differs from the request's, or the extractor has none, so its
+    /// deltas may differ from the ones the client applied.
+    FingerprintChanged,
+    /// The extractor's window holds no block: at startup, or right after the extractor restarted.
+    EmptyWindow,
+    /// `to_block_hash` is not a canonical block in the window. The window can lag the WebSocket
+    /// by a few messages, so it may not hold the block yet.
+    ToNotInWindow,
+    /// `from_block_hash` is older than the parent of the window's oldest block.
+    BelowFloor,
+    /// `from_block_hash` is not a block the window holds, was orphaned by no revert the window
+    /// still remembers, and is not the parent of the window's oldest block.
+    UnknownHash,
+    /// The path from `from_block_hash` joins the window's chain after `to_block_hash`: the client
+    /// received a revert the window has not applied yet.
+    ToNotAhead,
+    /// A reason this client version does not know; treat it as unavailable. Only clients produce
+    /// it, when the server names a reason added after them; servers never send it.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(
     Serialize, Deserialize, Debug, Default, PartialEq, ToSchema, Eq, Hash, Clone, DeepSizeOf,
 )]
@@ -3412,6 +3492,79 @@ mod test {
         } else {
             panic!("Expected CompressionError variant");
         }
+    }
+
+    #[test]
+    fn delta_catch_up_request_defaults_to_ethereum_with_state() {
+        let body = r#"{
+            "protocol_system": "uniswap_v2",
+            "from_block_hash": "0x04",
+            "from_block_number": 4,
+            "to_block_hash": "0x06",
+            "fingerprint": "0xabcdef"
+        }"#;
+
+        let request: DeltaCatchUpRequestBody = serde_json::from_str(body).unwrap();
+
+        assert_eq!(
+            request,
+            DeltaCatchUpRequestBody {
+                chain: Chain::Ethereum,
+                protocol_system: "uniswap_v2".to_string(),
+                from_block_hash: Bytes::from("0x04"),
+                from_block_number: 4,
+                to_block_hash: Bytes::from("0x06"),
+                fingerprint: ExtractorFingerprint(Bytes::from("0xabcdef")),
+                include_state: true,
+            }
+        );
+    }
+
+    #[test]
+    fn delta_catch_up_responses_are_tagged_by_status() {
+        let available = DeltaCatchUpRequestResponse::Available {
+            messages: vec![BlockAggregatedChanges {
+                extractor: "uniswap_v2".to_string(),
+                revert: true,
+                ..Default::default()
+            }],
+        };
+        let unavailable = DeltaCatchUpRequestResponse::Unavailable {
+            reason: DeltaCatchUpUnavailable::ToNotInWindow,
+        };
+
+        let available_json = serde_json::to_value(&available).unwrap();
+        let unavailable_json = serde_json::to_value(&unavailable).unwrap();
+
+        assert_eq!(available_json["status"], "available");
+        assert_eq!(available_json["messages"][0]["extractor"], "uniswap_v2");
+        assert_eq!(available_json["messages"][0]["revert"], true);
+        assert_eq!(
+            unavailable_json,
+            serde_json::json!({"status": "unavailable", "reason": "to_not_in_window"})
+        );
+        assert_eq!(
+            serde_json::from_value::<DeltaCatchUpRequestResponse>(available_json).unwrap(),
+            available
+        );
+        assert_eq!(
+            serde_json::from_value::<DeltaCatchUpRequestResponse>(unavailable_json).unwrap(),
+            unavailable
+        );
+    }
+
+    /// A reason added after this client still parses, so the client falls back instead of failing.
+    #[test]
+    fn delta_catch_up_reason_unknown_to_the_client_is_unknown() {
+        let sent_by_newer_servers = r#"{"status": "unavailable", "reason": "window_too_busy"}"#;
+
+        let response: DeltaCatchUpRequestResponse =
+            serde_json::from_str(sent_by_newer_servers).unwrap();
+
+        assert_eq!(
+            response,
+            DeltaCatchUpRequestResponse::Unavailable { reason: DeltaCatchUpUnavailable::Unknown }
+        );
     }
 }
 
