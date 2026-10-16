@@ -1580,6 +1580,8 @@ mod test {
         DeltasError, RPCError,
     };
 
+    mod catch_up_properties;
+
     // Required for mock client to implement clone
     struct ArcRPCClient<T>(Arc<T>);
 

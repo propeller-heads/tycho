@@ -70,6 +70,8 @@ TychoStreamBuilder (stream.rs)
    (setting `last_synced_block` and `synced_fingerprint`). Any failure is logged once with a
    `CatchUpSkipped` reason, at warn for an RPC error or an answer that is not a path to the
    target and at info otherwise, and takes the snapshot path, delay included.
+   `feed/synchronizer/test/catch_up_properties.rs` checks resubscriptions over random histories
+   against `catch_up_spec` and the model in `tycho-common`'s `testing::delta_history`.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
    tracked component) and cannot catch up, the synchronizer discards deltas for a random delay in
    `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least
