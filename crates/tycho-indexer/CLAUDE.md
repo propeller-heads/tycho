@@ -176,10 +176,10 @@ tries the `LeaderLock` once:
   path and behaves as before.
 - **Lock held elsewhere**: role `Follower`. A background task polls
   `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
-  On success it increments the writer epoch (fencing the former leader) and only then switches
-  the role to `Leader`, so no extractor commits before the fence. A promoted process does not run
-  `initialize_accounts`: the initialized accounts are a testing aid to start indexing from a later
-  block, and the first leader wrote them.
+  On success it increments the writer epoch (fencing the former leader, see "Writer fencing" in
+  `crates/tycho-storage/CLAUDE.md`) and only then switches the role to `Leader`, so no extractor
+  commits before the fence. A promoted process does not run `initialize_accounts`: the initialized
+  accounts are a testing aid to start indexing from a later block, and the first leader wrote them.
 - **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
   it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
   follower. `tycho_leader` (gauge, 0/1) shows the role.
