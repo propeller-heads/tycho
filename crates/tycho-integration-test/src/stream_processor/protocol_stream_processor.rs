@@ -172,7 +172,7 @@ impl ProtocolStreamProcessor {
 
         let protocols_to_enable = match &self.protocols {
             Some(protocols) => protocols.clone(),
-            None => self.get_default_protocols_for_chain(),
+            None => Self::default_protocols(self.chain),
         };
         info!("Building protocol stream for protocols: {:?}", protocols_to_enable);
 
@@ -206,8 +206,9 @@ impl ProtocolStreamProcessor {
             .wrap_err("Failed building protocol stream")
     }
 
-    fn get_default_protocols_for_chain(&self) -> Vec<String> {
-        match self.chain {
+    /// The protocols streamed on `chain` when none are given.
+    pub fn default_protocols(chain: Chain) -> Vec<String> {
+        match chain {
             Chain::Ethereum => vec![
                 "uniswap_v2".to_string(),
                 "sushiswap_v2".to_string(),
@@ -489,23 +490,9 @@ impl ProtocolStreamProcessor {
 mod tests {
     use super::*;
 
-    fn processor(chain: Chain) -> ProtocolStreamProcessor {
-        ProtocolStreamProcessor::new(
-            chain,
-            "http://localhost".to_string(),
-            "key".to_string(),
-            0.0,
-            1.0,
-            None,
-            false,
-            false,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn robinhood_defaults_include_uniswap_v4_hooks() {
-        let defaults = processor(Chain::Robinhood).get_default_protocols_for_chain();
+        let defaults = ProtocolStreamProcessor::default_protocols(Chain::Robinhood);
         assert!(
             defaults.contains(&"uniswap_v4_hooks".to_string()),
             "Robinhood defaults must include uniswap_v4_hooks: {defaults:?}"
