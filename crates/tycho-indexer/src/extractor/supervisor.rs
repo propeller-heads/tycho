@@ -435,9 +435,12 @@ mod tests {
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},
         MetricKind,
     };
+    use tokio::sync::watch;
     use tycho_common::models::Chain;
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
+    use crate::extractor::writer_status::Role;
 
     fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
         snapshotter
@@ -498,5 +501,102 @@ mod tests {
         });
 
         assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+
+    /// Long enough for many polls of a waiting supervisor.
+    const STILL_WAITING: Duration = Duration::from_millis(200);
+    const EXTRACTOR: &str = "uniswap_v2";
+
+    struct WriterChannels {
+        role: watch::Sender<Role>,
+        committed: watch::Sender<HashMap<String, CommittedBlock>>,
+    }
+
+    impl WriterChannels {
+        fn follower() -> (Self, WriterStatus) {
+            let (role, role_rx) = watch::channel(Role::Follower);
+            let (committed, committed_rx) = watch::channel(HashMap::new());
+            let (_, confirmed_rx) = watch::channel(tokio::time::Instant::now());
+            (Self { role, committed }, WriterStatus::new(role_rx, committed_rx, confirmed_rx))
+        }
+
+        fn leader_committed_block_of_age(&self, age: chrono::Duration) {
+            let ts = chrono::Utc::now().naive_utc() - age;
+            self.committed
+                .send(HashMap::from([(EXTRACTOR.to_string(), CommittedBlock { number: 100, ts })]))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_leader_needs_the_stream_at_once() {
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+
+        let wait = tokio::time::timeout(
+            STILL_WAITING,
+            wait_for_stream_need(&WriterStatus::leader(), EXTRACTOR, &mut control_rx),
+        )
+        .await;
+
+        assert!(matches!(wait, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_follower_waits_until_the_leader_is_near_the_head() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+
+        let syncing = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
+        let near_head = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(syncing.is_err(), "a follower must not stream while the leader syncs");
+        assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_follower_needs_the_stream_once_promoted() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+
+        let first_sync = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels
+            .role
+            .send(Role::Leader)
+            .unwrap();
+        let promoted = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(first_sync.is_err(), "a follower must not stream before the first commit");
+        assert!(matches!(promoted, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_waiting_follower_rejects_subscriptions_and_stops_on_stop() {
+        let (_channels, writer) = WriterChannels::follower();
+        let (ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let (sender, _subscriber_rx) = mpsc::channel(1);
+        let (reply, reply_rx) = oneshot::channel();
+        ctrl_tx
+            .send(ControlMessage::Subscribe(SubscribeRequest { sender, reply }))
+            .await
+            .unwrap();
+        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+
+        let still_waiting = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        let answer = reply_rx
+            .await
+            .expect("the waiting follower must answer the subscription");
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        let stop = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(still_waiting.is_err(), "a subscription must not end the wait");
+        assert_eq!(answer, SubscribeReply::NotStreaming);
+        assert!(matches!(stop, Ok(StreamWait::Stopped)));
     }
 }
