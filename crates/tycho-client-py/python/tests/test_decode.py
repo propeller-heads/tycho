@@ -3,6 +3,8 @@ import json
 from hexbytes import HexBytes
 
 from tycho_indexer_client.dto import (
+    AccountBalance,
+    BlockChanges,
     Chain,
     ContractId,
     ContractStateParams,
@@ -89,3 +91,46 @@ def test_decode_contract_state_params_backward_compatibility():
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
     assert msg_old == ContractStateParams(
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
+
+
+def test_decode_block_changes(asset_dir):
+    # Serialised from the Rust `BlockAggregatedChanges` DTO.
+    with (asset_dir / "block_changes.json").open("r") as fp:
+        data = json.load(fp)
+
+    msg = BlockChanges(**data)
+
+    pool = "0x" + "b1" * 20
+    vault, weth = HexBytes("0x" + "d4" * 20), HexBytes("0x" + "c0" * 20)
+    assert msg.account_balances[vault][weth] == AccountBalance(
+        account=vault,
+        token=weth,
+        balance="0x0de0b6b3a7640000",
+        modify_tx="0x" + "e4" * 32,
+    )
+    assert msg.partial_block_index is None
+    entry_point_id = "0x" + "f5" * 20 + ":getRate()"
+    dci = msg.dci_update
+    assert [ep.external_id for ep in dci.new_entrypoints[pool]] == [entry_point_id]
+    [(tracer, component)] = dci.new_entrypoint_params[entry_point_id]
+    assert component == pool
+    assert tracer.calldata == HexBytes("0x679aefce")
+    diff = tracer.state_overrides[HexBytes("0x" + "f5" * 20)].slots
+    assert diff.diff == {HexBytes("0x" + "00" * 32): HexBytes("0x" + "01" * 32)}
+    assert diff.replace is None
+    assert tracer.state_overrides[HexBytes("0x" + "f6" * 20)].slots.replace == {}
+    [(address, location)] = dci.trace_results[entry_point_id].retriggers
+    assert address == HexBytes("0x" + "f5" * 20)
+    assert location.offset == 12
+    assert dci.trace_results[entry_point_id].accessed_slots == {
+        HexBytes("0x" + "f5" * 20): {HexBytes("0x" + "00" * 32)}
+    }
+
+
+def test_decode_partial_block_changes(asset_dir):
+    with (asset_dir / "block_changes.json").open("r") as fp:
+        data = json.load(fp)
+
+    msg = BlockChanges(**data, partial_block_index=2)
+
+    assert msg.partial_block_index == 2
