@@ -440,6 +440,7 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
     let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
         .enable_token_cache()
+        .set_component_index(global_args.component_index)
         .build_direct_gw()
         .await?;
 
@@ -457,6 +458,12 @@ async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(),
             .bind(&global_args.server_ip)
             .port(global_args.server_port)
             .plans_config(plans_config)
+            .disabled_rpc_caches(
+                global_args
+                    .disabled_rpc_caches
+                    .0
+                    .clone(),
+            )
             .run()?;
     info!(server_url, "Http and Ws server started");
     let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
@@ -489,12 +496,13 @@ async fn create_indexing_tasks(
         .map(|(name, _)| name.clone())
         .collect();
 
-    let (cached_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
+    let (cached_gw, rpc_gw, gw_writer_handle) = GatewayBuilder::new(&global_args.database_url)
         .set_chains(chains)
         .set_protocol_systems(&protocol_systems)
         .set_retention_horizon(retention_horizon)
         .enable_token_cache()
-        .build()
+        .set_component_index(global_args.component_index)
+        .build_with_rpc_gateway()
         .await?;
     let chain = *chains
         .first()
@@ -530,7 +538,7 @@ async fn create_indexing_tasks(
         EntityCacheMode::Off => EntityCacheSetup::Off,
         mode @ (EntityCacheMode::Shadow | EntityCacheMode::Serve) => {
             info!(?mode, "Loading the entity cache");
-            let cache = EntityCache::load(&cached_gw, &chain)
+            let cache = EntityCache::load(&rpc_gw, &chain)
                 .await
                 .map_err(|e| ExtractionError::Setup(format!("Entity cache load failed: {e}")))?;
             if mode == EntityCacheMode::Shadow {
@@ -541,23 +549,28 @@ async fn create_indexing_tasks(
         }
     };
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(cached_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .dci_protocols(dci_protocols)
-            .protocol_systems(protocol_systems)
-            .register_extractors(extractor_handles.clone())
-            .pending_deltas(pending_deltas_rxs)
-            .window_config(WindowConfig {
-                depth: global_args.delta_window_depth,
-                min_fold_batch: global_args.delta_window_fold_batch,
-            })
-            .entity_cache(entity_cache)
-            .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
-            .run()?;
+    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .dci_protocols(dci_protocols)
+        .protocol_systems(protocol_systems)
+        .register_extractors(extractor_handles.clone())
+        .pending_deltas(pending_deltas_rxs)
+        .window_config(WindowConfig {
+            depth: global_args.delta_window_depth,
+            min_fold_batch: global_args.delta_window_fold_batch,
+        })
+        .entity_cache(entity_cache)
+        .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
+        .disabled_rpc_caches(
+            global_args
+                .disabled_rpc_caches
+                .0
+                .clone(),
+        )
+        .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =

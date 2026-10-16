@@ -71,9 +71,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for LiquoriceState {
             .tokens(HashSet::from([base_token_address.clone(), quote_token_address.clone()]))
             .build()
             .map_err(|e| {
-                InvalidSnapshotError::MissingAttribute(format!(
-                    "Couldn't create LiquoriceClient: {e}"
-                ))
+                InvalidSnapshotError::ValueError(format!("Couldn't create LiquoriceClient: {e}"))
             })?;
 
         Ok(LiquoriceState::new(base_token, quote_token, prices_by_mm, client))

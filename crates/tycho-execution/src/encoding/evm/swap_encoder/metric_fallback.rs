@@ -97,6 +97,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: weth,
             group_token_out: usdc,
+            origin: None,
         };
 
         MetricFallbackSwapEncoder::new(Bytes::default(), Chain::Base, None)

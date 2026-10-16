@@ -94,9 +94,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for HashflowState {
             .tokens(HashSet::from([base_token_address.clone(), quote_token_address.clone()]))
             .build()
             .map_err(|e| {
-                InvalidSnapshotError::MissingAttribute(format!(
-                    "Couldn't create HashflowClient: {e}"
-                ))
+                InvalidSnapshotError::ValueError(format!("Couldn't create HashflowClient: {e}"))
             })?;
 
         Ok(HashflowState::new(base_token, quote_token, levels, market_maker, client))

@@ -118,6 +118,21 @@ let rfq_stream_builder = RFQStreamBuilder::new()
 
 RFQ streams are **timestamped**, not block-based. Each update provides the full known state from the provider at that moment (not just deltas). The `removed_pairs` field indicates any pairs that disappeared since the last update. The `new_pairs` field contains all the currently available pairs.
 
+### Venue components
+
+By default, Hashflow, Liquorice, Bebop and Native stream one component per token pair, and a swap leaves the state unchanged. `.component_layout(ComponentLayout::AllPairs)` on the client builder makes the client stream one component for all token pairs instead. Register an all-pairs client with `HashflowAllPairsState`, `LiquoriceAllPairsState`, `BebopAllPairsState` or `NativeAllPairsState` under the name `<venue>_all_pairs`, for example `.add_client::<HashflowAllPairsState>("hashflow_all_pairs", Box::new(client))`. The two layouts stream under different names, so one stream builder can carry a per-pair and an all-pairs client of the same venue. `ComponentLayout` and `QuoteRule` are in `tycho_simulation::rfq::models`.
+
+An all-pairs component has these properties. Its `tokens` are every token the venue quotes, and its `swap_directions` static attribute lists the directions it quotes, 40 bytes each: the token in, then the token out. Add graph edges from that attribute, not from every pair of `tokens`, and rebuild them when the component's `tokens` change between updates.
+
+A swap records what it used in the `new_state` it returns. How often one route may quote a venue is its quote rule, carried as the `quote_rule` static attribute:
+
+* Hashflow and Liquorice name their market makers. By default every maker quotes once per route (`once_per_maker`). `.quote_rule(QuoteRule::OncePerVenue)` on the client builder limits the venue to one quote per route.
+* Bebop and Native name no maker and quote once per route (`once_per_venue`).
+
+The rule takes effect wherever your algorithm threads `new_state` between two uses of the component. A swap the rule refuses returns a recoverable `No liquidity` error.
+
+Request the firm quote on the state the swap was simulated on, with the simulated amount. For Hashflow and Liquorice, that state picks the market maker the firm quote asks. On the `new_state` the swap returned, that maker is already used.
+
 ### Simulation
 
 You can simulate a swap against an RFQ state using:

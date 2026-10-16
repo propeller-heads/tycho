@@ -25,7 +25,7 @@ use crate::{
     deltas::{DeltasClient, DeltasError, DEFAULT_RECONNECTING_SUBSCRIPTION_BUFFER_SIZE},
     feed::{
         component_tracker::ComponentFilter,
-        synchronizer::{ProtocolStateSynchronizer, StateSynchronizer},
+        synchronizer::{ProtocolStateSynchronizer, StateSynchronizer, DEFAULT_SNAPSHOT_JITTER},
         BlockHeader, BlockSynchronizer, BlockSynchronizerError, FeedMessage,
     },
     rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
@@ -105,6 +105,7 @@ pub struct TychoStreamBuilder {
     max_missed_blocks: u64,
     state_sync_retry_config: RetryConfiguration,
     websockets_retry_config: RetryConfiguration,
+    snapshot_jitter: Duration,
     no_state: bool,
     auth_key: Option<String>,
     no_tls: bool,
@@ -138,6 +139,7 @@ impl TychoStreamBuilder {
                 128,
                 Duration::from_secs(max(block_time / 6, 1)),
             ),
+            snapshot_jitter: DEFAULT_SNAPSHOT_JITTER,
             no_state: false,
             auth_key: None,
             no_tls: true,
@@ -210,6 +212,16 @@ impl TychoStreamBuilder {
     pub fn state_synchronizer_retry_config(mut self, retry_config: &RetryConfiguration) -> Self {
         self.state_sync_retry_config = retry_config.clone();
         self.warn_on_potential_timing_issues();
+        self
+    }
+
+    /// Sets the maximum random delay before a restarted synchronizer requests a snapshot.
+    ///
+    /// After a restart that needs a snapshot, each synchronizer waits a random time in
+    /// `[0, jitter]` before it requests the snapshot. The first start has no delay. Defaults to
+    /// 60 seconds. A `jitter` below 5 seconds is raised to 5 seconds.
+    pub fn snapshot_jitter(mut self, jitter: Duration) -> Self {
+        self.snapshot_jitter = jitter;
         self
     }
 
@@ -459,7 +471,8 @@ impl TychoStreamBuilder {
                     self.block_time + self.timeout,
                 )
                 .with_dci(uses_dci)
-                .with_partial_blocks(self.partial_blocks),
+                .with_partial_blocks(self.partial_blocks)
+                .with_snapshot_jitter(self.snapshot_jitter),
             };
             block_sync = block_sync.register_synchronizer(id, sync);
         }
@@ -764,6 +777,15 @@ mod tests {
                 assert_eq!(state.cooldown, Duration::from_secs(5));
             }
         }
+    }
+
+    #[test]
+    fn test_stream_builder_snapshot_jitter() {
+        let builder = TychoStreamBuilder::new("localhost:4242", Chain::Ethereum);
+        assert_eq!(builder.snapshot_jitter, Duration::from_secs(60));
+
+        let builder = builder.snapshot_jitter(Duration::from_secs(10));
+        assert_eq!(builder.snapshot_jitter, Duration::from_secs(10));
     }
 
     #[test]

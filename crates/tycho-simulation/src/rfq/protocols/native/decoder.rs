@@ -70,7 +70,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for NativeState {
             .tokens(HashSet::from([base_token.address.clone(), quote_token.address.clone()]))
             .build()
             .map_err(|e| {
-                InvalidSnapshotError::MissingAttribute(format!("Couldn't create NativeClient: {e}"))
+                InvalidSnapshotError::ValueError(format!("Couldn't create NativeClient: {e}"))
             })?;
 
         NativeState::new(base_token, quote_token, book, client)

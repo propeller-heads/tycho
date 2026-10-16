@@ -4,7 +4,11 @@ use tokio::time::Duration;
 use tycho_common::{models::Chain, Bytes};
 
 use super::client::HashflowClient;
-use crate::rfq::{errors::RFQError, protocols::utils::default_quote_tokens_for_chain};
+use crate::rfq::{
+    errors::RFQError,
+    models::{ComponentLayout, QuoteRule},
+    protocols::utils::default_quote_tokens_for_chain,
+};
 
 /// `HashflowClientBuilder` is a builder pattern implementation for creating instances of
 /// `HashflowClient`.
@@ -40,6 +44,8 @@ pub struct HashflowClientBuilder {
     poll_time: Duration,
     quote_timeout: Duration,
     via_fallback_router: bool,
+    component_layout: ComponentLayout,
+    quote_rule: QuoteRule,
 }
 
 impl HashflowClientBuilder {
@@ -54,7 +60,23 @@ impl HashflowClientBuilder {
             poll_time: Duration::from_secs(5), // Default 5 second polling
             quote_timeout: Duration::from_secs(5), // Default 5 second timeout
             via_fallback_router: false,
+            component_layout: ComponentLayout::PerPair,
+            quote_rule: HashflowClient::DEFAULT_QUOTE_RULE,
         }
+    }
+
+    /// The components the client streams. One per pair, by default. Register a `PerPair` client
+    /// with `HashflowState` and a `AllPairs` client with `HashflowAllPairsState`.
+    pub fn component_layout(mut self, component_layout: ComponentLayout) -> Self {
+        self.component_layout = component_layout;
+        self
+    }
+
+    /// How often one route may take quotes from Hashflow, under the `AllPairs` layout. Every
+    /// maker once, by default.
+    pub fn quote_rule(mut self, quote_rule: QuoteRule) -> Self {
+        self.quote_rule = quote_rule;
+        self
     }
 
     /// Set the tokens for which to monitor prices
@@ -111,7 +133,9 @@ impl HashflowClientBuilder {
             self.auth_key,
             self.poll_time,
             self.quote_timeout,
-        )?;
+        )?
+        .with_component_layout(self.component_layout)
+        .with_quote_rule(self.quote_rule);
         Ok(if self.via_fallback_router { client.via_fallback_router() } else { client })
     }
 }

@@ -102,6 +102,8 @@ where
     min_token_quality: u32,
     registry: HashMap<String, Box<RegistryFn<H>>>,
     inclusion_filters: HashMap<String, Vec<FilterFn>>,
+    /// Protocols whose components drop an unknown token and keep the rest.
+    protocols_skip_unknown_tokens: HashSet<String>,
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
@@ -138,6 +140,7 @@ where
             min_token_quality: 100,
             registry: HashMap::new(),
             inclusion_filters: HashMap::new(),
+            protocols_skip_unknown_tokens: HashSet::new(),
             override_providers: HashMap::new(),
             block_time_secs: chain.block_time_secs(),
             chain,
@@ -314,6 +317,21 @@ where
         self.register_decoder_with_context::<T>(exchange, context);
     }
 
+    /// Registers a decoder for `exchange` that drops a token it does not know, or whose address it
+    /// cannot decode, and keeps the component. Other registrations fail the component. Use it for
+    /// a component with a fixed id, such as an all-pairs RFQ component: a failed one stays failed.
+    pub fn register_decoder_dropping_unknown_tokens<T>(&mut self, exchange: &str)
+    where
+        T: ProtocolSim
+            + TryFromWithBlock<ComponentWithState, H, Error = InvalidSnapshotError>
+            + Send
+            + 'static,
+    {
+        self.register_decoder::<T>(exchange);
+        self.protocols_skip_unknown_tokens
+            .insert(exchange.to_string());
+    }
+
     /// Registers a client-side filter function for a given exchange.
     ///
     /// Associates a filter function with an exchange ID, enabling custom filtering of protocol
@@ -376,6 +394,9 @@ where
             .unwrap_or(false);
 
         for (protocol, protocol_msg) in msg.state_msgs.iter() {
+            let drops_unknown_tokens = self
+                .protocols_skip_unknown_tokens
+                .contains(protocol.as_str());
             // Add any new tokens
             if let Some(deltas) = protocol_msg.deltas.as_ref() {
                 let mut state_guard = self.state.write().await;
@@ -604,12 +625,17 @@ where
                     for token in snapshot.component.tokens.clone() {
                         match state_guard.tokens.get(&token) {
                             Some(token) => {
-                                component_tokens.push(token.clone());
-
                                 // If the token is not an existing proxy token, we need to add it to
                                 // the simulation engine
                                 let token_address = match bytes_to_address(&token.address) {
                                     Ok(addr) => addr,
+                                    Err(_) if drops_unknown_tokens => {
+                                        warn!(
+                                            "Token address could not be decoded {}, ignoring the token in component {:x?}",
+                                            token.address, id
+                                        );
+                                        continue;
+                                    }
                                     Err(_) => {
                                         count_token_skips += 1;
                                         msg_failed_components.insert(id.clone());
@@ -620,6 +646,7 @@ where
                                         continue 'snapshot_loop;
                                     }
                                 };
+                                component_tokens.push(token.clone());
                                 // Deploy a proxy account without an implementation set
                                 if !state_guard
                                     .proxy_token_addresses
@@ -636,6 +663,12 @@ where
                                         ),
                                     );
                                 }
+                            }
+                            None if drops_unknown_tokens => {
+                                warn!(
+                                    "Token not found {}, ignoring the token in component {:x?}",
+                                    token, id
+                                );
                             }
                             None => {
                                 count_token_skips += 1;
@@ -1705,6 +1738,53 @@ mod tests {
             .expect("decode failure");
 
         assert_eq!(res1.states.len(), 0);
+    }
+
+    #[rstest]
+    #[case::unknown_token(false)]
+    #[case::undecodable_address(true)]
+    #[tokio::test]
+    async fn test_dropping_decoder_keeps_component(#[case] bad_address: bool) {
+        let weth = Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").lpad(20, 0);
+        // The unknown token is not in the decoder. The bad address is, but 21 bytes are no address.
+        let other = match bad_address {
+            true => Bytes::from([1u8; 21].to_vec()),
+            false => Bytes::from("0xdac17f958d2ee523a2206206994597c13d831ec7").lpad(20, 0),
+        };
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
+        decoder.register_decoder_dropping_unknown_tokens::<UniswapV2State>("uniswap_v2");
+        let token = |address: &Bytes, symbol| {
+            let token =
+                Token::new(address, symbol, 18, 100, &[Some(100_000)], Chain::Ethereum, 100);
+            (address.clone(), token)
+        };
+        let mut known = HashMap::from([token(&weth, "WETH")]);
+        if bad_address {
+            known.extend([token(&other, "OTHER")]);
+        }
+        decoder.set_tokens(known).await;
+        let mut msg = load_test_msg("uniswap_v2_snapshot");
+        let (id, snapshot) = msg
+            .state_msgs
+            .get_mut("uniswap_v2")
+            .unwrap()
+            .snapshots
+            .states
+            .iter_mut()
+            .next()
+            .unwrap();
+        snapshot.component.tokens = vec![weth, other];
+        let id = id.clone();
+
+        let update = decoder.decode(&msg).await.unwrap();
+
+        let symbols: Vec<_> = update.new_pairs[&id]
+            .tokens
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["WETH"]);
+        assert_eq!(update.states.len(), 1);
     }
 
     #[tokio::test]

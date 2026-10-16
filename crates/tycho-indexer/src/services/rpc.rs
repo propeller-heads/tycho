@@ -28,7 +28,7 @@ use tycho_common::{
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
     services::{
-        cache::RpcCache,
+        cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
@@ -58,6 +58,9 @@ pub enum RpcError {
     #[error("Page size must be less than or equal to {0}.")]
     Pagination(usize),
 
+    #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
+    InvalidPagination { page: i64, page_size: i64 },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 
@@ -79,6 +82,7 @@ impl ResponseError for RpcError {
             RpcError::Connection(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::DeltasError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::Pagination(_) => StatusCode::BAD_REQUEST,
+            RpcError::InvalidPagination { .. } => StatusCode::BAD_REQUEST,
             RpcError::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::PlanRestrictionViolation(_) => StatusCode::BAD_REQUEST,
         }
@@ -92,6 +96,7 @@ impl ResponseError for RpcError {
             RpcError::DeltasError(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::Pagination(e) => HttpResponse::BadRequest()
                 .body(format!("Page size must be less than or equal to {e}.")),
+            RpcError::InvalidPagination { .. } => HttpResponse::BadRequest().body(self.to_string()),
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
         }
@@ -178,6 +183,20 @@ where
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
         }
+    }
+
+    /// Turns the given response caches off. A request to an endpoint whose cache is off always
+    /// runs the full path and stores nothing.
+    pub(crate) fn with_disabled_caches(mut self, kinds: &[RpcCacheKind]) -> Self {
+        for kind in kinds {
+            match kind {
+                RpcCacheKind::ContractStorage => self.contract_storage_cache.disable(),
+                RpcCacheKind::ProtocolState => self.protocol_state_cache.disable(),
+                RpcCacheKind::ProtocolComponents => self.component_cache.disable(),
+                RpcCacheKind::TracedEntryPoints => self.traced_entry_point_cache.disable(),
+            }
+        }
+        self
     }
 
     /// Sets which path answers the state endpoints.
@@ -3332,6 +3351,44 @@ mod tests {
         assert_eq!(tokens.tokens.len(), 2);
         assert_eq!(tokens.tokens[0].symbol, "USDC");
         assert_eq!(tokens.tokens[1].symbol, "WETH");
+    }
+
+    #[tokio::test]
+    async fn test_disabled_cache_sends_every_request_to_the_gateway() {
+        let mut gw = MockGateway::new();
+        // The component cache is off: both identical requests reach the gateway.
+        gw.expect_get_protocol_components()
+            .times(2)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
+
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            component_ids: None,
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+
+        for _ in 0..2 {
+            let components = req_handler
+                .get_protocol_components(&request)
+                .await
+                .unwrap();
+            assert!(components
+                .protocol_components
+                .is_empty());
+        }
     }
 
     #[tokio::test]

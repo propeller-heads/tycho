@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use futures::{stream::select_all, StreamExt};
 use tycho_client::feed::{synchronizer::ComponentWithState, FeedMessage};
@@ -12,9 +12,15 @@ use crate::{
     evm::decoder::TychoStreamDecoder,
     protocol::{
         errors::InvalidSnapshotError,
-        models::{TryFromWithBlock, Update},
+        models::{ProtocolComponent, TryFromWithBlock, Update},
     },
-    rfq::{client::RFQClient, models::TimestampHeader},
+    rfq::{
+        client::RFQClient,
+        models::{ComponentLayout, TimestampHeader},
+        protocols::component::{
+            decode_swap_directions, encode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE,
+        },
+    },
 };
 
 /// `RFQStreamBuilder` is a utility for constructing and managing a merged stream of RFQ (Request
@@ -55,6 +61,8 @@ impl RFQStreamBuilder {
         }
     }
 
+    /// Adds `provider`, whose components decode to `T`. A provider that streams the all-pairs
+    /// layout keeps its component when a token is unknown: the decoder drops the token.
     pub fn add_client<T>(mut self, name: &str, provider: Box<dyn RFQClient>) -> Self
     where
         T: ProtocolSim
@@ -62,8 +70,13 @@ impl RFQStreamBuilder {
             + Send
             + 'static,
     {
+        match provider.component_layout() {
+            ComponentLayout::PerPair => self.decoder.register_decoder::<T>(name),
+            ComponentLayout::AllPairs => self
+                .decoder
+                .register_decoder_dropping_unknown_tokens::<T>(name),
+        }
         self.clients.push(provider);
-        self.decoder.register_decoder::<T>(name);
         self
     }
 
@@ -79,7 +92,7 @@ impl RFQStreamBuilder {
         while let Some(next) = merged.next().await {
             match next {
                 Ok((provider, msg)) => {
-                    let update = self
+                    let mut update = self
                         .decoder
                         .decode(&FeedMessage {
                             state_msgs: HashMap::from([(provider.clone(), msg)]),
@@ -89,6 +102,11 @@ impl RFQStreamBuilder {
                         .map_err(|e| {
                             SimulationError::RecoverableError(format!("Decoding error: {e}"))
                         })?;
+                    for component in update.new_pairs.values_mut() {
+                        retain_carried_directions(component).map_err(|e| {
+                            SimulationError::RecoverableError(format!("Decoding error: {e}"))
+                        })?;
+                    }
                     tx.send(update).await.map_err(|e| {
                         SimulationError::RecoverableError(format!(
                             "Failed to send update through channel: {e}"
@@ -114,6 +132,33 @@ impl RFQStreamBuilder {
         self.decoder.set_tokens(tokens).await;
         self
     }
+}
+
+/// Keeps the `swap_directions` of a component to the directions whose two tokens it carries, as
+/// the decoder drops the tokens it does not know.
+fn retain_carried_directions(component: &mut ProtocolComponent) -> Result<(), String> {
+    let Some(attribute) = component
+        .static_attributes
+        .get(SWAP_DIRECTIONS_ATTRIBUTE)
+    else {
+        return Ok(());
+    };
+    let carried: HashSet<&Bytes> = component
+        .tokens
+        .iter()
+        .map(|token| &token.address)
+        .collect();
+    let mut directions = BTreeSet::new();
+    for (token_in, token_out) in decode_swap_directions(attribute)? {
+        if carried.contains(&token_in) && carried.contains(&token_out) {
+            directions.insert((token_in, token_out));
+        }
+    }
+    let attribute = encode_swap_directions(&directions);
+    component
+        .static_attributes
+        .insert(SWAP_DIRECTIONS_ATTRIBUTE.to_string(), attribute);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -142,7 +187,19 @@ mod tests {
     };
 
     use super::*;
-    use crate::{protocol::models::DecoderContext, rfq::errors::RFQError};
+    use crate::{
+        protocol::models::DecoderContext,
+        rfq::{
+            errors::RFQError,
+            models::QuoteRule,
+            protocols::{
+                component::poll_message,
+                hashflow::all_pairs_state::HashflowAllPairsState,
+                maker_price_levels,
+                test_utils::{maker_price_levels as levels, usdc, wbtc, weth},
+            },
+        },
+    };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct DummyProtocol;
@@ -328,5 +385,66 @@ mod tests {
         // hashflow
         assert_eq!(bebop_updates.len(), 3);
         assert_eq!(hashflow_updates[2].block_number_or_timestamp, 400);
+    }
+
+    /// An all-pairs client that streams one message and stops.
+    struct AllPairsRFQClient(StateSyncMessage<TimestampHeader>);
+
+    #[async_trait]
+    impl RFQClient for AllPairsRFQClient {
+        fn component_layout(&self) -> ComponentLayout {
+            ComponentLayout::AllPairs
+        }
+
+        fn stream(
+            &self,
+        ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>>
+        {
+            Box::pin(futures::stream::iter([Ok(("hashflow".to_string(), self.0.clone()))]))
+        }
+
+        async fn request_binding_quote(
+            &self,
+            _params: &GetAmountOutParams,
+        ) -> Result<SignedQuote, RFQError> {
+            unimplemented!("Not needed for this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_all_pairs_component_drops_an_unknown_token_and_its_directions() {
+        std::env::set_var("HASHFLOW_USER", "test_user");
+        std::env::set_var("HASHFLOW_KEY", "test_key");
+        let component = maker_price_levels::all_pairs_component(
+            "rfq:hashflow",
+            "hashflow_pool",
+            Chain::Ethereum,
+            vec![
+                (levels("mm", &weth(), &usdc(), &[(1.0, 3000.0)]), 100.0),
+                (levels("mm", &wbtc(), &usdc(), &[(1.0, 65000.0)]), 100.0),
+            ],
+            QuoteRule::OncePerMaker,
+        )
+        .unwrap()
+        .unwrap();
+        let id = component.component.id.clone();
+        let message =
+            poll_message(&mut HashMap::new(), HashMap::from([(id.clone(), component)]), 1);
+        let (tx, mut rx) = mpsc::channel::<Update>(10);
+        let builder = RFQStreamBuilder::new()
+            .add_client::<HashflowAllPairsState>("hashflow", Box::new(AllPairsRFQClient(message)))
+            .set_tokens(HashMap::from([(weth().address, weth()), (usdc().address, usdc())]))
+            .await;
+
+        builder.build(tx).await.unwrap();
+
+        let update = rx.recv().await.unwrap();
+        let emitted = &update.new_pairs[&id];
+        assert_eq!(emitted.tokens.len(), 2);
+        assert_eq!(
+            emitted.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE],
+            encode_swap_directions(&BTreeSet::from([(weth().address, usdc().address)]))
+        );
+        assert!(update.states.contains_key(&id));
     }
 }

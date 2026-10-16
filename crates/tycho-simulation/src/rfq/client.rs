@@ -5,7 +5,10 @@ use tycho_common::{
     models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote,
 };
 
-use crate::rfq::{errors::RFQError, models::TimestampHeader};
+use crate::rfq::{
+    errors::RFQError,
+    models::{ComponentLayout, TimestampHeader},
+};
 
 #[async_trait]
 pub trait RFQClient: Send + Sync {
@@ -13,6 +16,11 @@ pub trait RFQClient: Send + Sync {
     fn stream(
         &self,
     ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>>;
+
+    /// The components this client streams. The default is one per pair.
+    fn component_layout(&self) -> ComponentLayout {
+        ComponentLayout::PerPair
+    }
 
     // This method is responsible for fetching the binding quote from the RFQ API. Use sender and
     // receiver from GetAmountOutParams to ask for the quote

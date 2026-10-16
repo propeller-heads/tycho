@@ -101,7 +101,7 @@ impl TryFromWithBlock<ComponentWithState, TimestampHeader> for BebopState {
             client_builder = client_builder.origin_source(origin_source);
         }
         let client = client_builder.build().map_err(|e| {
-            InvalidSnapshotError::MissingAttribute(format!("Couldn't create BebopClient: {e}"))
+            InvalidSnapshotError::ValueError(format!("Couldn't create BebopClient: {e}"))
         })?;
 
         Ok(BebopState { base_token, quote_token, price_data, client })
