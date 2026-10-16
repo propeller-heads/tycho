@@ -115,6 +115,9 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
    - Subscribes to WebSocket stream via `WsDeltasClient`
    - Discards WebSocket messages that arrive before the sync loop starts, then fetches the HTTP
      snapshot via `HttpRPCClient` **synchronously** at the first message's block height
+   - On a resubscription whose first message does not follow the last synced block, first asks
+     `/v1/delta_catch_up` for the missed messages and emits them merged with that message; falls
+     back to a snapshot after a random delay when it cannot (see `crates/tycho-client/CLAUDE.md`)
    - Components discovered later are snapshotted in background tasks and their deltas buffered
      until the snapshot lands, so the delta loop never blocks on RPC
 10. `BlockSynchronizer` (across all extractors):

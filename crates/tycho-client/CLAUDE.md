@@ -52,8 +52,22 @@ TychoStreamBuilder (stream.rs)
    components, DCI entry points, then filtering to the tracked components and contracts. With a
    snapshot, the first message is handled after the fetch succeeds and merged into the snapshot
    message.
+   When the first candidate message `T` does not follow the last synced block, the synchronizer
+   tries delta catch-up before the snapshot delay starts, if `may_resume` holds, the subscription
+   reported a fingerprint and partial-block mode is off. `catch_up_path` asks
+   `get_delta_catch_up` for the messages from the last synced block to `T`'s parent (to `T`'s own
+   block when `T` is a revert), with the subscription's fingerprint and `include_state =
+   include_snapshots`, bounded by the synchronizer's `timeout` (the RPC client waits 120 s before
+   retrying a 502/503/504). `check_catch_up_path` verifies the whole answer before anything runs
+   through `handle_block`: every message is of the subscription's extractor and chain, each
+   block's parent is the block reached so far, a revert moves to its target block, and the walk
+   ends at the target (so an empty path only when the last synced block is the target, and a path
+   may end with a revert to it). `apply_catch_up` then runs each message, then `T`, through
+   `handle_block` and merges the results into one message with `T`'s header, which leaves like any
+   first message (setting `last_synced_block` and `synced_fingerprint`). Any failure is logged
+   once at info with a `CatchUpSkipped` reason and takes the snapshot path, delay included.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
-   tracked component), the synchronizer discards deltas for a random delay in
+   tracked component) and cannot catch up, the synchronizer discards deltas for a random delay in
    `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least
    `MIN_SNAPSHOT_JITTER`, 5 s) to spread snapshot requests across clients; the first block after
    the delay sets the snapshot.
