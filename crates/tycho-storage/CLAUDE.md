@@ -43,7 +43,10 @@ All public DB operations go through one of two gateway structs:
   `WriteQueue` and always runs the oldest head transaction before any backfill one, so a syncing
   extractor's large batches delay only itself; a head write waits at most for the one
   transaction already running. The `DBTransactionCommitted` debug event carries the `priority` it ran with.
-- **Writer fencing**: `DBCacheWriteExecutor::new` claims a new epoch in the one-row
+- **Writer fencing**: to *fence* a writer is to make the database refuse all its writes from
+  the moment a different process becomes the writer. A former leader can still run after it lost
+  the lock (a long pause, a network failure), and the lock alone cannot stop it from writing.
+  `DBCacheWriteExecutor::new` claims a new epoch in the one-row
   `writer_epoch` table, and every executor transaction first reads that row `FOR SHARE`. When
   another process has claimed since, the transaction fails with `StorageError::Fenced` and
   writes nothing. A claim that commits while a write waits on the row makes the write fail with

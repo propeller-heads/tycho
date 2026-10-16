@@ -173,7 +173,8 @@ with a gateway built with `defer_writer_claim`) tries the `LeaderLock` once:
   This is the single-replica path and behaves as before.
 - **Lock held elsewhere**: role `Follower`. A background task polls
   `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
-  On success it claims the epoch (fencing the former leader), runs `initialize_accounts`, and only
+  On success it claims the epoch (fencing the former leader, see "Writer fencing" in
+  `crates/tycho-storage/CLAUDE.md`), runs `initialize_accounts`, and only
   then switches the role to `Leader`, so no extractor commits before the fence. The lock checks
   start at the claim; a promotion that takes longer than `PROMOTION_TIMEOUT` (5 minutes) ends the
   task with an error, so a hung promotion cannot leave the database without a writer.
