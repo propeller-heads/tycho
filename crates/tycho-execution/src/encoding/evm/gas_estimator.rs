@@ -2,8 +2,8 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
     },
     group_swaps::group_swaps,
 };
@@ -258,10 +258,8 @@ fn estimate_transfer_overhead(
         overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
     }
 
-    // The Bebop and Hashflow routers approve the venue themselves and forward the output.
-    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM ||
-        protocol_system == HASHFLOW_FALLBACK_PROTOCOL_SYSTEM
-    {
+    // The signed-quote routers approve the venue themselves and forward the output.
+    if SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
         overhead += transfer_token_gas(token_out);
     }
@@ -277,10 +275,17 @@ fn estimate_transfer_overhead(
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
     use super::*;
-    use crate::encoding::models::{default_token, Solution, Strategy, Swap, UserTransferType};
+    use crate::encoding::{
+        evm::constants::{
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+        },
+        models::{default_token, Solution, Strategy, Swap, UserTransferType},
+    };
 
     fn lido_swap(token_in: Bytes, token_out: Bytes) -> Swap {
         Swap::new(
@@ -433,9 +438,12 @@ mod tests {
         assert_eq!(gas, BigUint::from(325_000u64));
     }
 
-    #[test]
-    fn test_single_hashflow_fallback_router() {
-        let solution = make_solution(vec![make_swap(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]);
+    #[rstest]
+    #[case::hashflow(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::native(NATIVE_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::liquorice(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)]
+    fn test_single_signed_quote_fallback_router(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // The same charges as the Bebop fallback router.

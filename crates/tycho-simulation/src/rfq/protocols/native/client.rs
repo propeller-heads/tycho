@@ -87,10 +87,18 @@ pub struct NativeClient {
     quote_timeout: Duration,
     #[serde(default)]
     component_layout: ComponentLayout,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    NativeClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl NativeClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:native";
+    /// Components executed through Tycho's `NativeFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:native";
     pub const DEFAULT_ENDPOINT: &'static str = "https://v2.api.native.org/swap-api-v2/v1";
 
     // Native API error codes:
@@ -150,7 +158,13 @@ impl NativeClient {
             poll_time,
             quote_timeout,
             component_layout: ComponentLayout::PerPair,
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
+    }
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
     }
 
     pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
@@ -210,7 +224,7 @@ impl NativeClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "native_relay_pool".to_string(),
             chain: self.chain,
             tokens,
@@ -241,6 +255,7 @@ impl NativeClient {
         books: &'a HashMap<String, NativePriceData>,
     ) -> Vec<(&'a str, &'a NativePriceData, f64)> {
         let mut kept = Vec::new();
+        let native_token = self.chain.native_token().address;
 
         for (component_id, book) in books {
             // Keep unrequested books available for TVL conversion, but only emit requested
@@ -249,6 +264,13 @@ impl NativeClient {
                 !self
                     .tokens
                     .contains(&book.quote_address)
+            {
+                continue;
+            }
+            // NativeFallbackRouter trades ERC20s only, so the fallback client offers no
+            // native-token books.
+            if self.protocol_system == Self::FALLBACK_PROTOCOL_SYSTEM &&
+                (book.base_address == native_token || book.quote_address == native_token)
             {
                 continue;
             }
@@ -343,7 +365,7 @@ impl NativeClient {
             }
         }
         let component = component::all_pairs_component(
-            Self::PROTOCOL_SYSTEM,
+            &self.protocol_system,
             "native_relay_pool",
             self.chain,
             &swap_directions,
@@ -1232,6 +1254,64 @@ mod tests {
     }
 
     #[test]
+    fn test_fallback_router_labels_components() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        let labels = |client: NativeClient| {
+            let books = client.group_orderbook(vec![NativeOrderbookEntry {
+                base_address: weth.clone(),
+                quote_address: usdt.clone(),
+                minimum_in_base: 0.0,
+                side: NativeOrderbookSide::Bid,
+                levels: vec![NativePriceLevel { quantity: 1.0, price: 3000.0 }],
+            }]);
+            let (component_id, book) = books
+                .iter()
+                .next()
+                .expect("one grouped book");
+            let per_pair = client
+                .create_component_with_state(
+                    component_id.clone(),
+                    vec![weth.clone(), usdt.clone()],
+                    book.clone(),
+                    0.0,
+                )
+                .component
+                .protocol_system;
+            let all_pairs = client
+                .all_pairs_component(&books)
+                .unwrap()
+                .expect("the book clears the zero threshold")
+                .component
+                .protocol_system;
+            (per_pair, all_pairs)
+        };
+        let builder = || {
+            NativeClientBuilder::new(Chain::Ethereum, String::new())
+                .tokens(HashSet::from([weth.clone(), usdt.clone()]))
+                .quote_tokens(HashSet::from([usdt.clone()]))
+                .tvl_threshold(0.0)
+        };
+        let rfq = NativeClient::PROTOCOL_SYSTEM.to_string();
+        let fallback = NativeClient::FALLBACK_PROTOCOL_SYSTEM.to_string();
+
+        assert_eq!(labels(builder().build().unwrap()), (rfq.clone(), rfq));
+        assert_eq!(
+            labels(
+                builder()
+                    .with_fallback_router()
+                    .build()
+                    .unwrap()
+            ),
+            (fallback.clone(), fallback)
+        );
+        assert_eq!(
+            NativeClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::NATIVE_FALLBACK_PROTOCOL_SYSTEM
+        );
+    }
+
+    #[test]
     fn creates_all_pairs_component_from_relay_orderbook() {
         let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
         let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
@@ -1826,6 +1906,40 @@ mod tests {
 
         let book = books.values().next().unwrap();
         assert_eq!(book.base_address, tycho_native_eth);
+    }
+
+    #[rstest]
+    #[case::native(false, 1)]
+    #[case::fallback(true, 0)]
+    fn test_native_eth_book_by_mode(#[case] via_fallback_router: bool, #[case] expected: usize) {
+        let native_eth = Chain::Ethereum.native_token().address;
+        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let mut client = NativeClient::new(
+            Chain::Ethereum,
+            "test-api-key".to_string(),
+            HashSet::from([native_eth.clone(), usdc.clone()]),
+            0.0,
+            HashSet::from([usdc.clone()]),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        if via_fallback_router {
+            client = client.via_fallback_router();
+        }
+        let entry: NativeOrderbookEntry = serde_json::from_value(serde_json::json!({
+            "base_address": native_eth.to_string(),
+            "quote_address": usdc.to_string(),
+            "minimum_in_base": 1.0,
+            "side": "bid",
+            "levels": [[1.0, 3_000.0]]
+        }))
+        .unwrap();
+        let books = client.group_orderbook(vec![entry]);
+
+        let kept = client.books_above_tvl_threshold(&books);
+
+        assert_eq!(kept.len(), expected);
     }
 
     fn create_test_client(endpoint: String) -> NativeClient {

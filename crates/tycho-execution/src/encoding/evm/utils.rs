@@ -1,10 +1,10 @@
 use std::{
     env,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    io::{Read, Seek, SeekFrom, Write},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -18,7 +18,6 @@ use alloy::{
 };
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
-use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
 use tracing::{debug, warn};
 use tycho_common::{
@@ -400,28 +399,31 @@ pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Vec<u8> {
     encoded_action_data
 }
 
-static CALLDATA_WRITE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 // Function used in tests to write calldata to a file that then is used by the corresponding
 // solidity tests.
 pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
-    let _lock = CALLDATA_WRITE_MUTEX
-        .lock()
-        .expect("Couldn't acquire lock");
-
     let file_path = "contracts/test/assets/calldata.txt";
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
+        .write(true)
         .open(file_path)
-        .expect("Failed to open calldata file for reading");
-    let reader = BufReader::new(file);
+        .expect("Failed to open calldata file");
+    // nextest runs each test in its own process, so only a file lock keeps two tests from
+    // rewriting the file at once. Dropping `file` releases it.
+    file.lock()
+        .expect("Failed to lock calldata file");
 
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .expect("Failed to read calldata file");
+
+    let entry = format!("{test_identifier}:{hex_calldata}");
     let mut lines = Vec::new();
     let mut found = false;
-    for line in reader.lines().map_while(Result::ok) {
-        let mut parts = line.splitn(2, ':'); // split at the :
-        let key = parts.next().unwrap_or("");
+    for line in contents.lines() {
+        let key = line.split(':').next().unwrap_or("");
         if key == test_identifier {
-            lines.push(format!("{test_identifier}:{hex_calldata}"));
+            lines.push(entry.as_str());
             found = true;
         } else {
             lines.push(line);
@@ -430,19 +432,17 @@ pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {
 
     // If the test identifier wasn't found, append a new line
     if !found {
-        lines.push(format!("{test_identifier}:{hex_calldata}"));
+        lines.push(entry.as_str());
     }
 
-    // Write the updated contents back to the file
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(file_path)
-        .expect("Failed to open calldata file for writing");
-
-    for line in lines {
-        writeln!(file, "{line}").expect("Failed to write calldata");
-    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    file.set_len(0)
+        .expect("Failed to truncate calldata file");
+    file.seek(SeekFrom::Start(0))
+        .expect("Failed to rewind calldata file");
+    file.write_all(updated.as_bytes())
+        .expect("Failed to write calldata");
 }
 
 #[cfg(test)]

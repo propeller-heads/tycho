@@ -71,10 +71,18 @@ pub struct LiquoriceClient {
     /// permanently fall back to the legacy scheme if it returns 401.
     #[serde(skip)]
     use_legacy_auth: Arc<AtomicBool>,
+    #[serde(default = "default_protocol_system")]
+    protocol_system: String,
+}
+
+fn default_protocol_system() -> String {
+    LiquoriceClient::PROTOCOL_SYSTEM.to_string()
 }
 
 impl LiquoriceClient {
     pub const PROTOCOL_SYSTEM: &'static str = "rfq:liquorice";
+    /// Components executed through Tycho's `LiquoriceFallbackRouter`.
+    pub const FALLBACK_PROTOCOL_SYSTEM: &'static str = "fallback:rfq:liquorice";
     pub const DEFAULT_QUOTE_RULE: QuoteRule = QuoteRule::OncePerMaker;
 
     #[allow(clippy::too_many_arguments)]
@@ -104,11 +112,17 @@ impl LiquoriceClient {
             component_layout: ComponentLayout::PerPair,
             quote_rule: Self::DEFAULT_QUOTE_RULE,
             use_legacy_auth: Arc::new(AtomicBool::new(false)),
+            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
         })
     }
 
     fn default_quote_rule() -> QuoteRule {
         Self::DEFAULT_QUOTE_RULE
+    }
+
+    pub(super) fn via_fallback_router(mut self) -> Self {
+        self.protocol_system = Self::FALLBACK_PROTOCOL_SYSTEM.to_string();
+        self
     }
 
     pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
@@ -216,7 +230,7 @@ impl LiquoriceClient {
     ) -> ComponentWithState {
         let protocol_component = ProtocolComponent {
             id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
+            protocol_system: self.protocol_system.clone(),
             protocol_type_name: "liquorice_pool".to_string(),
             chain: self.chain,
             tokens,
@@ -346,7 +360,7 @@ impl LiquoriceClient {
             price_levels.push((maker_levels, tvl));
         }
         maker_price_levels::all_pairs_component(
-            Self::PROTOCOL_SYSTEM,
+            &self.protocol_system,
             "liquorice_pool",
             self.chain,
             price_levels,
@@ -721,9 +735,12 @@ mod tests {
         models::PriceLevel,
         protocols::{
             component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
-            liquorice::models::{
-                LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
-                LiquoriceTokenPairPrice, LiquoriceTx,
+            liquorice::{
+                client_builder::LiquoriceClientBuilder,
+                models::{
+                    LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
+                    LiquoriceTokenPairPrice, LiquoriceTx,
+                },
             },
             maker_price_levels::MakerPriceLevels,
             test_utils::{mock_quote_server, quote_params, LIQUORICE_QUOTE_RESPONSE},
@@ -820,6 +837,7 @@ mod tests {
             component_layout: ComponentLayout::PerPair,
             quote_rule: QuoteRule::OncePerMaker,
             use_legacy_auth: Arc::new(AtomicBool::new(false)),
+            protocol_system: LiquoriceClient::PROTOCOL_SYSTEM.to_string(),
         }
     }
 
@@ -983,6 +1001,54 @@ mod tests {
                 .collect(),
             updated_at: None,
         }
+    }
+
+    #[test]
+    fn test_fallback_router_labels_components() {
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        let prices_by_mm =
+            HashMap::from([("test_mm".to_string(), vec![levels(&weth, &usdc, &[(1.0, 3000.0)])])]);
+        let labels = |client: LiquoriceClient| {
+            let per_pair = client
+                .create_component_with_state(
+                    String::from("liquorice"),
+                    vec![weth.clone(), usdc.clone()],
+                    &HashMap::new(),
+                    0.0,
+                )
+                .component
+                .protocol_system;
+            let all_pairs = client
+                .all_pairs_component(&prices_by_mm)
+                .unwrap()
+                .expect("the price levels clear the zero threshold")
+                .component
+                .protocol_system;
+            (per_pair, all_pairs)
+        };
+        let builder = || {
+            LiquoriceClientBuilder::new(Chain::Ethereum, String::new(), String::new())
+                .tokens(HashSet::from([weth.clone(), usdc.clone()]))
+                .tvl_threshold(0.0)
+        };
+        let rfq = LiquoriceClient::PROTOCOL_SYSTEM.to_string();
+        let fallback = LiquoriceClient::FALLBACK_PROTOCOL_SYSTEM.to_string();
+
+        assert_eq!(labels(builder().build().unwrap()), (rfq.clone(), rfq));
+        assert_eq!(
+            labels(
+                builder()
+                    .with_fallback_router()
+                    .build()
+                    .unwrap()
+            ),
+            (fallback.clone(), fallback)
+        );
+        assert_eq!(
+            LiquoriceClient::FALLBACK_PROTOCOL_SYSTEM,
+            tycho_execution::encoding::evm::LIQUORICE_FALLBACK_PROTOCOL_SYSTEM
+        );
     }
 
     #[test]

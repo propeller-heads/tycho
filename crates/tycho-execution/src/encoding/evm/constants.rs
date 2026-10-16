@@ -168,6 +168,21 @@ pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
 /// Hashflow components executed through `HashflowFallbackRouter`.
 pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
 
+/// Native components executed through `NativeFallbackRouter`.
+pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
+
+/// Liquorice components executed through `LiquoriceFallbackRouter`.
+pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
+
+/// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
+/// forwarding the output.
+pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
+    BEBOP_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+    NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+    LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +196,8 @@ mod tests {
         assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus
