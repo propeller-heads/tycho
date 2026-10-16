@@ -23,12 +23,13 @@ local development since the package declares `maturin` as its build backend in `
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. |
+| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. Import `Literal` from `typing_extensions`: pydantic 1.8 only recognises `typing_extensions.Literal`, which below Python 3.10.1 is not `typing.Literal`. |
 | eth-abi | `2.2.0` | Pinned exact |
 | eth-typing | `2.3.0` | Pinned exact |
 | eth-utils | `1.9.5` | Pinned exact |
 | hexbytes | `0.3.1` | Pinned exact |
 | requests | `2.*` | Synchronous HTTP only |
+| typing-extensions | `>=3.7.4.3` | Same bound as pydantic 1.8; `dto.py` imports `Literal` from it |
 
 **Do not upgrade these without testing the full client.** The eth-* stack and pydantic v1 are
 tightly coupled — upgrading one usually breaks the others.
@@ -63,7 +64,14 @@ Synchronous HTTP client. All RPC methods follow the same pattern:
 4. Parse response into a pydantic response model
 
 Endpoints: `protocol_components`, `protocol_state`, `contract_state`, `tokens`,
-`protocol_systems`, `component_tvl`, `traced_entry_points`, `health` (GET).
+`protocol_systems`, `component_tvl`, `traced_entry_points`, `delta_catch_up`, `health` (GET).
+
+`get_delta_catch_up` mirrors the Rust client's three outcomes as three pydantic models nested in
+`DeltaCatchUp` (their union is `DeltaCatchUpResult`), each with a `status`: `Available`
+(`messages: List[BlockChanges]`), `Unavailable` (`reason: DeltaCatchUpUnavailable`, where a reason
+the client does not know parses as `unknown`) and `Unsupported`, returned on a 404 (a server
+without the endpoint). Other HTTP errors raise `TychoRPCError`, e.g. 400 with the plain-text
+`Unknown extractor: <chain>:<name>`.
 
 ### `TychoStream` (`stream.py`)
 Async wrapper that spawns the `tycho-client-cli` Rust binary as a subprocess. Reads JSON lines
@@ -73,10 +81,13 @@ from stdout, deserializes each into a `FeedMessage`. Implements `__aiter__`/`__a
 ### DTOs (`dto.py`)
 Pydantic v1 models mirroring the Rust types in `tycho-common/src/dto.rs`. Two categories:
 - **Request params**: `ProtocolComponentsParams`, `ProtocolStateParams`, `ContractStateParams`,
-  `TokensParams`, `ProtocolSystemsParams`, `ComponentTvlParams`, `TracedEntryPointParams`
+  `TokensParams`, `ProtocolSystemsParams`, `ComponentTvlParams`, `TracedEntryPointParams`,
+  `DeltaCatchUpParams`
 - **Response types**: `ProtocolComponentsResponse`, `ProtocolStateResponse`,
-  `ContractStateResponse`, `TokensResponse`, etc.
-- **Streaming types**: `FeedMessage`, `BlockChanges`, `StateSyncMessage`, `SynchronizerState`
+  `ContractStateResponse`, `TokensResponse`, `DeltaCatchUp`, etc.
+- **Streaming types**: `FeedMessage`, `BlockChanges`, `StateSyncMessage`, `SynchronizerState`.
+  `BlockChanges` mirrors the Rust `BlockAggregatedChanges` DTO field for field (`dci_update` and
+  `partial_block_index` included); the catch-up endpoint returns its messages in the same model.
 
 Custom `HexBytes` subclass adds pydantic v1 validators (`__get_validators__`, `__modify_schema__`).
 
@@ -103,6 +114,10 @@ cd tycho-client-py
 pip install -e ".[testing]"
 pytest python/tests/
 ```
+
+The tests need only the pure Python modules, so they also run without building the wheel: install
+the pinned dependencies from `pyproject.toml` plus `pytest` in a virtualenv, then run
+`PYTHONPATH=python pytest python/tests/`. No CI workflow runs them.
 
 Tests mock `requests.post` — no running server needed. JSON fixtures in `tests/assets/` provide
 response data.
