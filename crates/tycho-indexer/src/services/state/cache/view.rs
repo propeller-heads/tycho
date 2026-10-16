@@ -1,7 +1,7 @@
-//! Views of cached entries, which contract state answers are built from.
+//! Views of cached entries, which contract state answers are written from.
 //!
 //! A view holds a cached entry behind its `Arc`, plus only the values that the window changes
-//! override. It writes the response JSON directly from both, without a copy of the entry.
+//! override. It writes the response JSON directly from both, so serving an entry never copies it.
 //! The `From` impls build the owned DTOs from a view.
 
 use std::{collections::HashMap, hash::Hash, sync::Arc};
@@ -54,6 +54,20 @@ impl AccountView {
         at: WriteTimestamp,
     ) {
         apply_account_block(self, delta, balances, at);
+    }
+
+    /// Slots plus token balances the JSON holds, where an overridden key counts twice: an upper
+    /// bound for the JSON size estimate.
+    pub(crate) fn json_key_count_hint(&self) -> usize {
+        self.base.slots.len() +
+            self.slots.len() +
+            self.base.token_balances.len() +
+            self.token_balances.len()
+    }
+
+    /// Length of the code the JSON holds, in bytes.
+    pub(crate) fn code_len(&self) -> usize {
+        self.code().code.len()
     }
 }
 

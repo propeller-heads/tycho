@@ -19,13 +19,14 @@
 //! database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
-//! applies one whole block atomically, reads take the read side. Folds are expected to take well
-//! under a millisecond, so blocking is acceptable and a reader never observes half a block.
+//! applies one whole block atomically, reads take the read side. A reader never observes half a
+//! block.
 //!
 //! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
-//! only the `Arc` under the read lock, and a view (`view`) holds it outside the lock. A fold that
-//! changes an account a reader still holds copies the account first, under the write lock
-//! (`Arc::make_mut`), so that copy happens at most once per fold instead of once per read.
+//! only the `Arc` under the read lock, and the response is written from it through a view
+//! (`view`), without a full copy. A fold that changes an account a reader still holds copies the
+//! account first, under the write lock (`Arc::make_mut`). Reads wait for that copy, but it happens
+//! at most once per fold instead of once per read.
 
 use std::{
     collections::{hash_map::Entry, HashMap},

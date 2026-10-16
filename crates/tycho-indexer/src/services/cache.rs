@@ -74,6 +74,11 @@ where
     R: Clone + Hash + Eq + Send + Sync + Debug + DeepSizeOf + 'static,
     V: Send + Sync + DeepSizeOf + 'static,
 {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, request: &R) -> bool {
+        self.cache.contains_key(request)
+    }
+
     pub fn new(name: &str, capacity: u64, ttl: u64) -> Self {
         let weigher = Box::new(|key: &R, value_with_size: &Arc<ValueWithSize<V>>| {
             let key_weight = key.deep_size_of() as u32;

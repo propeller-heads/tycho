@@ -2,7 +2,7 @@
 //!
 //! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
 //! the service that answers state requests from both ([`service`]), and the views contract state
-//! answers are built from ([`view`]). Locking is described in the [`cache`] module doc; the read
+//! answers are written from ([`view`]). Locking is described in the [`cache`] module doc; the read
 //! order in the [`service`] module doc.
 //!
 //! # How a state request is served

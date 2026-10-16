@@ -51,7 +51,7 @@ services/
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
     cache/view.rs           AccountView — views of cache entries plus window changes;
-                            contract state answers are built from them
+                            contract state answers serialize from them without copying the entries
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -188,10 +188,13 @@ load, and the windows fold into `DiscardSink`.
 
 In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
 first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
-window changes up to the requested version, without reading the database. A request it cannot
-answer comes back as a `FallbackReason`, and the handler answers it from the database path and
-counts it in `db_path_requests{endpoint, reason}`. `shadow` answers every request from the
-database path.
+window changes up to the requested version, without reading the database. A `/contract_state`
+answer is made of views (`services/state/cache/view.rs`). The service builds them from the cached
+entries and the window changes, without copying the entries. The handler writes the JSON from the
+views. The answer does not enter the contract state response cache, which keeps only database
+answers. A request the service cannot answer comes back as a `FallbackReason`, and the handler
+answers it from the database path and counts it in `db_path_requests{endpoint, reason}`. `shadow`
+answers every request from the database path.
 
 In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the database path (the
 client's answer), then `StateService`, and `services/state/shadow.rs` compares the two.
