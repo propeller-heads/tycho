@@ -41,7 +41,7 @@ use tycho_simulation::{
     protocol::models::ProtocolComponent,
     rfq::protocols::hashflow::state::{HashflowAllPairsState, HashflowState},
     tycho_common::models::{chain_config::TvlThresholdTier, token::Token, Chain},
-    utils::load_all_tokens,
+    utils::{default_blocklist, load_all_tokens},
 };
 use tycho_test::{
     execution::{
@@ -238,8 +238,8 @@ struct Cli {
     /// Run the catch-up check: a separate stream of the same protocols whose subscriptions,
     /// about every this many blocks, drop a few messages and end, so the client resubscribes
     /// having missed blocks. The state it holds afterwards is compared with a snapshot at the same
-    /// block. Off by default.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    /// block. At least 50, since every gap can cost a snapshot per protocol. Off by default.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(50..))]
     force_catch_up_every_n_blocks: Option<u64>,
 }
 
@@ -475,10 +475,12 @@ async fn run(cli: Cli) -> miette::Result<()> {
                     .protocols
                     .clone()
                     .unwrap_or_else(|| ProtocolStreamProcessor::default_protocols(chain)),
+                // The protocol stream's filter, blocklist included.
                 component_filter: ComponentFilter::with_tvl_range(
                     tvl_threshold / cli.tvl_buffer_ratio,
                     tvl_threshold,
-                ),
+                )
+                .blocklist(default_blocklist()),
                 every_n_blocks,
             };
             Some(catch_up_check::spawn(config))
@@ -2519,5 +2521,29 @@ mod tests {
             .concat()
             .into();
         assert!(book_swap_directions(&unknown, &tokens).is_err());
+    }
+
+    #[rstest]
+    #[case::below_the_minimum("49", None)]
+    #[case::at_the_minimum("50", Some(50))]
+    fn test_forced_catch_up_needs_at_least_50_blocks(
+        #[case] every_n_blocks: &str,
+        #[case] expected: Option<u64>,
+    ) {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--force-catch-up-every-n-blocks",
+            every_n_blocks,
+        ]);
+
+        assert_eq!(
+            cli.ok()
+                .and_then(|cli| cli.force_catch_up_every_n_blocks),
+            expected
+        );
     }
 }

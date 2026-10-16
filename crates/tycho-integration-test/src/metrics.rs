@@ -109,15 +109,21 @@ pub fn initialize_metrics() {
     );
     describe_counter!(
         "tycho_integration_catch_up_comparisons_total",
-        "Comparisons of the catch-up check's state after a catch-up or snapshot with a snapshot \
-         at the same block: equal, known_gaps (differs only where reverts don't restore state), \
-         mismatch, or error (the snapshot could not be fetched)"
+        "Comparisons of the catch-up check's state after a recovery with a snapshot at the same \
+         block, judged by the differences that are not pre-existing: equal, known_gaps (differs \
+         only in known gaps), mismatch, or error (the snapshot could not be fetched)"
     );
     describe_counter!(
         "tycho_integration_catch_up_differences_total",
         "Entries in which the catch-up check's state differs from a snapshot at the same block, \
-         by field and status: mismatch, or known_gap for native balances, code, account token \
-         balances and contracts reached only through DCI, which reverts don't restore"
+         by field and status: mismatch; known_gap for native balances, code and account token \
+         balances, which reverts don't restore, and contracts reached only through DCI; or \
+         pre_existing when the state held when the gap was forced already differed there"
+    );
+    describe_counter!(
+        "tycho_integration_catch_up_unchanged_recoveries_total",
+        "Recoveries from a forced gap that changed none of the state the catch-up check compares, \
+         so their comparison could not catch a catch-up bug"
     );
 }
 
@@ -376,6 +382,15 @@ pub fn record_catch_up_comparison(protocol: &str, resync: &str, result: &str) {
         "protocol" => protocol.to_string(),
         "resync" => resync.to_string(),
         "result" => result.to_string(),
+    )
+    .increment(1);
+}
+
+/// Record a recovery from a forced gap that changed none of the state the catch-up check compares.
+pub fn record_catch_up_unchanged_recovery(protocol: &str) {
+    counter!(
+        "tycho_integration_catch_up_unchanged_recoveries_total",
+        "protocol" => protocol.to_string(),
     )
     .increment(1);
 }

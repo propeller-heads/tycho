@@ -8,20 +8,24 @@
 //! having missed those blocks, which they catch up on through the server's delta catch-up
 //! endpoint, or recover from with a snapshot when the server cannot serve them.
 //!
-//! Every resubscription is classified, forced or not. After a catch-up or a snapshot, the state
-//! held for the protocol is compared with a snapshot of its components at that block.
+//! Every resubscription is classified, forced or not. After each recovery of a protocol that
+//! tracks components, the state held for it is compared with a snapshot of its components at that
+//! block. When a forced gap's comparison finds differences, the state held when the gap was forced
+//! is compared with a snapshot at its own block too, and the differences both comparisons find are
+//! reported as pre-existing rather than as caused by the gap.
 
 pub mod gap_injector;
 pub mod held_state;
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tokio::{
-    sync::mpsc::{self, Receiver, UnboundedReceiver},
+    sync::mpsc::{self, Receiver, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
 use tracing::{debug, error, info, warn};
@@ -53,8 +57,9 @@ use crate::{
 };
 
 /// Messages each subscription drops before it ends, so a resubscription misses at least as many
-/// blocks.
-pub const GAP_BLOCKS: usize = 3;
+/// blocks. Enough that a gap usually changes some compared state, and well inside the server's
+/// window of at least 128 blocks.
+pub const GAP_BLOCKS: usize = 10;
 
 /// How long the protocols get to resubscribe after a gap. Covers the client's snapshot delay of up
 /// to a minute when it cannot catch up.
@@ -66,6 +71,9 @@ const MAX_LOGGED_DIFFERENCES: usize = 10;
 /// Retry settings of the protocol stream, so the check's stream recovers the same way.
 const WS_RETRY_COOLDOWN: Duration = Duration::from_secs(1);
 const SYNC_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
+
+/// The stream's output.
+type Feed = Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>;
 
 /// What the check streams and how often it forces a gap.
 pub struct CatchUpCheckConfig {
@@ -91,11 +99,8 @@ pub fn spawn(config: CatchUpCheckConfig) -> JoinHandle<miette::Report> {
     })
 }
 
-/// The stream's output.
-type Feed = Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>;
-
-/// Sets up the check's stream. Returns once every synchronizer delivered its first message or gave
-/// up.
+/// Sets up the check's stream and the task that runs its comparisons. Returns once every
+/// synchronizer delivered its first message or gave up.
 async fn start(
     config: CatchUpCheckConfig,
 ) -> miette::Result<(CatchUpCheck, Feed, JoinHandle<Result<(), DeltasError>>)> {
@@ -117,19 +122,25 @@ async fn start(
     )
     .into_diagnostic()
     .wrap_err("Failed to create the catch-up check's WebSocket client")?;
-    let rpc = HttpRPCClient::new(
-        &format!("{rpc_scheme}://{tycho_url}"),
-        HttpRPCClientOptions::new()
-            .with_auth_key(Some(api_key))
-            .with_compression(true),
-    )
-    .into_diagnostic()
-    .wrap_err("Failed to create the catch-up check's RPC client")?;
+    let rpc_client = || {
+        HttpRPCClient::new(
+            &format!("{rpc_scheme}://{tycho_url}"),
+            HttpRPCClientOptions::new()
+                .with_auth_key(Some(api_key.clone()))
+                .with_compression(true),
+        )
+        .into_diagnostic()
+        .wrap_err("Failed to create an RPC client for the catch-up check")
+    };
+    let sync_rpc = rpc_client()?;
+    // Comparisons get a client of their own: a client waits out a rate limit before its next
+    // request, which could push the synchronizers' catch-up requests past their timeout.
+    let comparison_rpc = rpc_client()?;
 
     let (resubscriptions_sender, resubscriptions) = mpsc::unbounded_channel();
     let (deltas, trigger) = GapInjector::new(ws_client, GAP_BLOCKS, resubscriptions_sender);
     let requested: HashSet<String> = protocols.iter().cloned().collect();
-    let dci_protocols = ProtocolSystemsInfo::fetch(&rpc, chain, &requested)
+    let dci_protocols = ProtocolSystemsInfo::fetch(&sync_rpc, chain, &requested)
         .await
         .dci_protocols;
     let StreamTiming { block_time, latency, max_missed_blocks } = StreamTiming::of(chain);
@@ -152,7 +163,7 @@ async fn start(
             include_snapshots,
             include_tvl,
             compression,
-            rpc.clone(),
+            sync_rpc.clone(),
             deltas.clone(),
             block_time + latency,
         )
@@ -175,22 +186,17 @@ async fn start(
         }
     };
 
-    let check = CatchUpCheck {
-        chain,
-        rpc,
-        dci_protocols,
-        every_n_blocks,
-        trigger,
-        resubscriptions,
-        held: HashMap::new(),
-        awaiting: HashMap::new(),
-        phase: Phase::Starting,
-    };
+    let (comparisons, requests) = mpsc::unbounded_channel();
+    let comparator =
+        Comparator { chain, rpc: comparison_rpc, dci_protocols: Arc::new(dci_protocols) };
+    tokio::spawn(comparator.run(requests));
+    let check = CatchUpCheck::new(every_n_blocks, trigger, resubscriptions, comparisons);
     Ok((check, feed, ws_task))
 }
 
 /// The timing `TychoStreamBuilder` uses for a chain, in seconds and blocks, so the check's stream
-/// waits for and gives up on synchronizers like a production one.
+/// waits for and gives up on synchronizers like a production one. A copy of the private
+/// `TychoStreamBuilder::default_timing` in `tycho-client/src/stream.rs`.
 struct StreamTiming {
     block_time: u64,
     latency: u64,
@@ -224,7 +230,7 @@ impl StreamTiming {
 /// How a protocol's synchronizer recovered after resubscribing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resync {
-    /// The new subscription's first block followed the last one synced: nothing was missed.
+    /// The new subscription's first block followed the last one delivered: nothing was missed.
     Resumed,
     /// The client applied the missed blocks without a snapshot.
     CaughtUp,
@@ -271,7 +277,25 @@ impl Resync {
     }
 }
 
+/// The state held for a protocol and the block of the last message applied to it.
+#[derive(Clone, Debug, Default)]
+struct Held {
+    state: ExtractorState,
+    header: BlockHeader,
+}
+
+/// A request to compare the state held for a protocol after a recovery with a snapshot.
+struct Comparison {
+    protocol: String,
+    resync: Resync,
+    held: Held,
+    /// What the protocol held when the gap it recovered from was forced; `None` after a
+    /// resubscription nobody forced.
+    baseline: Option<Held>,
+}
+
 /// When the check forces the next gap.
+#[derive(Debug, PartialEq)]
 enum Phase {
     /// Waiting for the stream's first message.
     Starting,
@@ -282,20 +306,37 @@ enum Phase {
 }
 
 struct CatchUpCheck {
-    chain: Chain,
-    rpc: HttpRPCClient,
-    dci_protocols: HashSet<String>,
     every_n_blocks: u64,
     trigger: GapTrigger,
     resubscriptions: UnboundedReceiver<Resubscription>,
-    /// The state held for each protocol, built from the stream's messages.
-    held: HashMap<String, ExtractorState>,
+    comparisons: UnboundedSender<Comparison>,
+    protocols: HashMap<String, Held>,
     /// Resubscriptions whose first message has not reached the stream's output yet, by protocol.
     awaiting: HashMap<String, Resubscription>,
+    /// What each protocol held when the last gap was forced, until it recovers.
+    baselines: HashMap<String, Held>,
     phase: Phase,
 }
 
 impl CatchUpCheck {
+    fn new(
+        every_n_blocks: u64,
+        trigger: GapTrigger,
+        resubscriptions: UnboundedReceiver<Resubscription>,
+        comparisons: UnboundedSender<Comparison>,
+    ) -> Self {
+        Self {
+            every_n_blocks,
+            trigger,
+            resubscriptions,
+            comparisons,
+            protocols: HashMap::new(),
+            awaiting: HashMap::new(),
+            baselines: HashMap::new(),
+            phase: Phase::Starting,
+        }
+    }
+
     /// Runs the check until the stream ends, and returns why it ended.
     async fn run(
         mut self,
@@ -341,11 +382,11 @@ impl CatchUpCheck {
     }
 
     /// Applies a protocol's message to the state held for it. When the message is the protocol's
-    /// first after a resubscription, records how it recovered and, after a catch-up or a
-    /// snapshot, starts a comparison with a snapshot at the message's block.
+    /// first after a resubscription, records how it recovered and, unless it tracks nothing,
+    /// requests a comparison with a snapshot at the message's block.
     fn apply(&mut self, protocol: &str, message: &StateSyncMessage<BlockHeader>) {
         let held = self
-            .held
+            .protocols
             .entry(protocol.to_string())
             .or_default();
         let recovers_here = self
@@ -353,30 +394,45 @@ impl CatchUpCheck {
             .get(protocol)
             .is_some_and(|resubscription| message.header.number >= resubscription.first_block);
         let resubscription = if recovers_here { self.awaiting.remove(protocol) } else { None };
-        let Some(resubscription) = resubscription else {
-            held.apply(message);
+        let resync = resubscription.map(|resubscription| {
+            Resync::classify(&held.state, message, resubscription.follows_previous)
+        });
+        held.state.apply(message);
+        held.header = message.header.clone();
+        let Some(resync) = resync else {
             return;
         };
-        let resync = Resync::classify(held, message, resubscription.follows_previous);
-        held.apply(message);
-        let state = held.clone();
-        let block = message.header.number;
-        info!(protocol, block, resync = resync.label(), "Protocol resubscribed");
+        let held = held.clone();
+        info!(
+            protocol,
+            block = held.header.number,
+            resync = resync.label(),
+            "Protocol resubscribed"
+        );
         metrics::record_catch_up_resync(protocol, resync.label());
         if let Phase::Resyncing { pending, deadline: _ } = &mut self.phase {
             pending.remove(protocol);
         }
+        let baseline = self.baselines.remove(protocol);
         match resync {
-            Resync::CaughtUp | Resync::Snapshot => {
-                self.spawn_comparison(protocol, state, block, resync)
+            Resync::CaughtUp | Resync::Snapshot | Resync::Resumed => {
+                let comparison =
+                    Comparison { protocol: protocol.to_string(), resync, held, baseline };
+                if self
+                    .comparisons
+                    .send(comparison)
+                    .is_err()
+                {
+                    error!(protocol, "The catch-up check's comparisons stopped; skipping one");
+                }
             }
-            Resync::Resumed | Resync::NothingTracked => {}
+            Resync::NothingTracked => {}
         }
     }
 
     fn advance(&mut self, block: u64) {
         let next = match &mut self.phase {
-            Phase::Starting => Some(Phase::Following { gap_at: block + self.every_n_blocks }),
+            Phase::Starting => Phase::Following { gap_at: block + self.every_n_blocks },
             Phase::Following { gap_at } if block >= *gap_at => {
                 info!(
                     block,
@@ -384,12 +440,13 @@ impl CatchUpCheck {
                     "Forcing the catch-up check's protocols to resubscribe after a gap"
                 );
                 self.trigger.request_gap();
-                Some(Phase::Resyncing {
-                    pending: self.held.keys().cloned().collect(),
+                self.baselines = self.protocols.clone();
+                Phase::Resyncing {
+                    pending: self.protocols.keys().cloned().collect(),
                     deadline: Instant::now() + RESYNC_DEADLINE,
-                })
+                }
             }
-            Phase::Following { gap_at: _ } => None,
+            Phase::Following { gap_at: _ } => return,
             Phase::Resyncing { pending, deadline } => {
                 if !pending.is_empty() && Instant::now() < *deadline {
                     return;
@@ -402,74 +459,156 @@ impl CatchUpCheck {
                     );
                     metrics::record_catch_up_resync(protocol, "no_resubscription");
                 }
-                Some(Phase::Following { gap_at: block + self.every_n_blocks })
+                self.baselines.clear();
+                Phase::Following { gap_at: block + self.every_n_blocks }
             }
         };
-        if let Some(next) = next {
-            self.phase = next;
+        self.phase = next;
+    }
+}
+
+/// Runs comparisons with snapshots, each in a task of its own.
+#[derive(Clone)]
+struct Comparator {
+    chain: Chain,
+    rpc: HttpRPCClient,
+    dci_protocols: Arc<HashSet<String>>,
+}
+
+impl Comparator {
+    async fn run(self, mut requests: UnboundedReceiver<Comparison>) {
+        while let Some(comparison) = requests.recv().await {
+            let comparator = self.clone();
+            tokio::spawn(async move { comparator.compare(comparison).await });
         }
     }
 
-    fn spawn_comparison(&self, protocol: &str, held: ExtractorState, block: u64, resync: Resync) {
-        let rpc = self.rpc.clone();
-        let chain = self.chain;
-        let protocol = protocol.to_string();
-        let uses_dci = self.dci_protocols.contains(&protocol);
-        tokio::spawn(async move {
-            match fetch_snapshot(&rpc, chain, &protocol, uses_dci, &held, block).await {
-                Ok(snapshot) => report(&protocol, block, resync, &diff(&held, &snapshot)),
-                Err(e) => {
-                    warn!(
-                        protocol,
-                        block,
-                        resync = resync.label(),
-                        error = %e,
-                        "Failed to fetch a snapshot to compare the catch-up check's state with"
-                    );
-                    metrics::record_catch_up_comparison(&protocol, resync.label(), "error");
+    async fn compare(&self, comparison: Comparison) {
+        let Comparison { protocol, resync, held, baseline } = comparison;
+        if let Some(baseline) = &baseline {
+            if diff(&baseline.state, &held.state).is_empty() {
+                info!(
+                    protocol,
+                    block = held.header.number,
+                    "The gap changed none of the compared state, so its comparison can't catch a \
+                     catch-up bug"
+                );
+                metrics::record_catch_up_unchanged_recovery(&protocol);
+            }
+        }
+        let differences = match self
+            .snapshot_differences(&protocol, &held)
+            .await
+        {
+            Ok(differences) => differences,
+            Err(e) => {
+                warn!(
+                    protocol,
+                    block = held.header.number,
+                    resync = resync.label(),
+                    error = %e,
+                    "Failed to fetch a snapshot to compare the catch-up check's state with"
+                );
+                metrics::record_catch_up_comparison(&protocol, resync.label(), "error");
+                return;
+            }
+        };
+        let pre_existing = match &baseline {
+            Some(baseline) if !differences.is_empty() => {
+                match self
+                    .snapshot_differences(&protocol, baseline)
+                    .await
+                {
+                    Ok(differences) => differences,
+                    Err(e) => {
+                        warn!(
+                            protocol,
+                            block = baseline.header.number,
+                            error = %e,
+                            "Failed to fetch the snapshot at the gap; no difference counts as \
+                             pre-existing"
+                        );
+                        Vec::new()
+                    }
                 }
             }
-        });
+            Some(_) | None => Vec::new(),
+        };
+        report(&protocol, &held.header, resync, &assess(&differences, &pre_existing));
     }
-}
 
-/// Fetches the state at `block` of the components `held` holds, with the contracts they name and,
-/// for a DCI protocol, the contracts their traced entry points reach.
-async fn fetch_snapshot(
-    rpc: &HttpRPCClient,
-    chain: Chain,
-    protocol: &str,
-    uses_dci: bool,
-    held: &ExtractorState,
-    block: u64,
-) -> Result<ExtractorState, RPCError> {
-    let components = held.components();
-    let mut contracts = held.component_contracts();
-    if uses_dci {
-        let traced = rpc
-            .get_traced_entry_points_paginated(TracedEntryPointsPaginatedParams::new(
-                chain,
-                protocol,
-                components.keys().cloned().collect(),
-                RPC_CLIENT_CONCURRENCY,
-            ))
+    /// The differences between `held` and a snapshot of its components at its block.
+    async fn snapshot_differences(
+        &self,
+        protocol: &str,
+        held: &Held,
+    ) -> Result<Vec<Difference>, RPCError> {
+        let snapshot = self
+            .fetch_snapshot(protocol, &held.state, held.header.number)
             .await?;
-        for traces in traced.values() {
-            for (_, TracingResult { retriggers: _, accessed_slots }) in traces {
-                contracts.extend(accessed_slots.keys().cloned());
+        Ok(diff(&held.state, &snapshot))
+    }
+
+    /// Fetches the state at `block` of the components `held` holds, with the contracts they name
+    /// and, for a DCI protocol, the contracts their traced entry points reach.
+    async fn fetch_snapshot(
+        &self,
+        protocol: &str,
+        held: &ExtractorState,
+        block: u64,
+    ) -> Result<ExtractorState, RPCError> {
+        let components = held.components();
+        let mut contracts = held.component_contracts();
+        if self.dci_protocols.contains(protocol) {
+            let traced = self
+                .rpc
+                .get_traced_entry_points_paginated(TracedEntryPointsPaginatedParams::new(
+                    self.chain,
+                    protocol,
+                    components.keys().cloned().collect(),
+                    RPC_CLIENT_CONCURRENCY,
+                ))
+                .await?;
+            for traces in traced.values() {
+                for (_, TracingResult { retriggers: _, accessed_slots }) in traces {
+                    contracts.extend(accessed_slots.keys().cloned());
+                }
             }
         }
+        let contracts: Vec<Bytes> = contracts.into_iter().collect();
+        let request = SnapshotParameters::new(self.chain, protocol, &components, &contracts, block)
+            .include_tvl(false);
+        let snapshot = self
+            .rpc
+            .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
+            .await?;
+        Ok(ExtractorState::from_snapshot(&snapshot))
     }
-    let contracts: Vec<Bytes> = contracts.into_iter().collect();
-    let request =
-        SnapshotParameters::new(chain, protocol, &components, &contracts, block).include_tvl(false);
-    let snapshot = rpc
-        .get_snapshots(&request, None, RPC_CLIENT_CONCURRENCY)
-        .await?;
-    Ok(ExtractorState::from_snapshot(&snapshot))
 }
 
-/// How a comparison ended.
+/// Pairs each difference with its status: [`Status::PreExisting`] when `pre_existing` has a
+/// difference at the same entry, whatever its values, otherwise its field's status.
+fn assess<'a>(
+    differences: &'a [Difference],
+    pre_existing: &[Difference],
+) -> Vec<(&'a Difference, Status)> {
+    let pre_existing: HashSet<_> = pre_existing
+        .iter()
+        .map(Difference::entry)
+        .collect();
+    let mut assessed = Vec::with_capacity(differences.len());
+    for difference in differences {
+        let status = if pre_existing.contains(&difference.entry()) {
+            Status::PreExisting
+        } else {
+            difference.field.status()
+        };
+        assessed.push((difference, status));
+    }
+    assessed
+}
+
+/// How a comparison ended, judged by the differences that are not pre-existing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComparisonResult {
     Equal,
@@ -479,12 +618,13 @@ enum ComparisonResult {
 }
 
 impl ComparisonResult {
-    fn of(differences: &[Difference]) -> Self {
+    fn of(assessed: &[(&Difference, Status)]) -> Self {
         let mut result = ComparisonResult::Equal;
-        for difference in differences {
-            match difference.field.status() {
+        for (_, status) in assessed {
+            match status {
                 Status::Mismatch => return ComparisonResult::Mismatch,
                 Status::KnownGap => result = ComparisonResult::KnownGaps,
+                Status::PreExisting => {}
             }
         }
         result
@@ -499,43 +639,51 @@ impl ComparisonResult {
     }
 }
 
-/// Records a comparison's differences in metrics and logs.
-fn report(protocol: &str, block: u64, resync: Resync, differences: &[Difference]) {
-    let mut by_field: HashMap<Field, usize> = HashMap::new();
-    for difference in differences {
-        *by_field
-            .entry(difference.field)
+/// Records a comparison's assessed differences in metrics and logs. Mismatches are logged with the
+/// hash of the block the state was held at: the snapshot is fetched by block number, so a reorg
+/// between the recovery and the request shows as a different hash at that number.
+fn report(
+    protocol: &str,
+    header: &BlockHeader,
+    resync: Resync,
+    assessed: &[(&Difference, Status)],
+) {
+    let mut counts: HashMap<(Field, Status), usize> = HashMap::new();
+    for (difference, status) in assessed {
+        *counts
+            .entry((difference.field, *status))
             .or_default() += 1;
     }
-    for (field, count) in &by_field {
-        metrics::record_catch_up_differences(
-            protocol,
-            field.label(),
-            field.status().label(),
-            *count,
-        );
+    for ((field, status), count) in &counts {
+        metrics::record_catch_up_differences(protocol, field.label(), status.label(), *count);
     }
-    let result = ComparisonResult::of(differences);
+    let result = ComparisonResult::of(assessed);
     metrics::record_catch_up_comparison(protocol, resync.label(), result.label());
 
-    let (mismatches, known_gaps): (Vec<&Difference>, Vec<&Difference>) = differences
-        .iter()
-        .partition(|difference| difference.field.status() == Status::Mismatch);
+    let count = |wanted: Status| {
+        assessed
+            .iter()
+            .filter(|(_, status)| *status == wanted)
+            .count()
+    };
+    let (mismatches, known_gaps, pre_existing) =
+        (count(Status::Mismatch), count(Status::KnownGap), count(Status::PreExisting));
+    let block = header.number;
+    let resync = resync.label();
     match result {
         ComparisonResult::Equal => {
             info!(
                 protocol,
-                block,
-                resync = resync.label(),
-                "State matches a snapshot at the same block"
+                block, resync, pre_existing, "State matches a snapshot at the same block"
             );
         }
         ComparisonResult::KnownGaps => {
             info!(
                 protocol,
                 block,
-                resync = resync.label(),
-                known_gaps = known_gaps.len(),
+                resync,
+                known_gaps,
+                pre_existing,
                 "State differs from a snapshot at the same block only in known gaps"
             );
         }
@@ -543,24 +691,31 @@ fn report(protocol: &str, block: u64, resync: Resync, differences: &[Difference]
             error!(
                 protocol,
                 block,
-                resync = resync.label(),
-                mismatches = mismatches.len(),
-                known_gaps = known_gaps.len(),
+                hash = %header.hash,
+                resync,
+                mismatches,
+                known_gaps,
+                pre_existing,
                 "State differs from a snapshot at the same block"
             );
-            for difference in mismatches
-                .iter()
-                .take(MAX_LOGGED_DIFFERENCES)
-            {
-                error!(protocol, block, %difference, "Catch-up check mismatch");
-            }
         }
     }
-    for difference in known_gaps
-        .iter()
-        .take(MAX_LOGGED_DIFFERENCES)
-    {
-        debug!(protocol, block, %difference, "Catch-up check known gap");
+    let mut logged: HashMap<Status, usize> = HashMap::new();
+    for (difference, status) in assessed {
+        let logged = logged.entry(*status).or_default();
+        if *logged == MAX_LOGGED_DIFFERENCES {
+            continue;
+        }
+        *logged += 1;
+        match status {
+            Status::Mismatch => {
+                error!(protocol, block, hash = %header.hash, %difference, "Catch-up check mismatch")
+            }
+            Status::KnownGap => debug!(protocol, block, %difference, "Catch-up check known gap"),
+            Status::PreExisting => {
+                debug!(protocol, block, %difference, "Catch-up check pre-existing difference")
+            }
+        }
     }
 }
 
@@ -571,6 +726,8 @@ mod tests {
 
     use super::{held_state::DifferenceKind, *};
 
+    const EVERY_N_BLOCKS: u64 = 50;
+
     fn component_state(component_id: &str) -> ComponentWithState {
         ComponentWithState {
             state: ProtocolComponentState::new(component_id, HashMap::new(), HashMap::new()),
@@ -580,8 +737,19 @@ mod tests {
         }
     }
 
-    fn message_with_snapshots(component_ids: &[&str]) -> StateSyncMessage<BlockHeader> {
+    fn hash(number: u64) -> Bytes {
+        Bytes::from(number).lpad(32, 0)
+    }
+
+    /// A message at block `number` carrying snapshots of `component_ids`.
+    fn message(number: u64, component_ids: &[&str]) -> StateSyncMessage<BlockHeader> {
         StateSyncMessage {
+            header: BlockHeader {
+                hash: hash(number),
+                number,
+                parent_hash: hash(number - 1),
+                ..BlockHeader::default()
+            },
             snapshots: Snapshot {
                 states: component_ids
                     .iter()
@@ -595,58 +763,255 @@ mod tests {
 
     fn holding(component_ids: &[&str]) -> ExtractorState {
         let mut state = ExtractorState::default();
-        state.apply(&message_with_snapshots(component_ids));
+        state.apply(&message(1, component_ids));
         state
+    }
+
+    fn feed(messages: Vec<(&str, StateSyncMessage<BlockHeader>)>) -> FeedMessage<BlockHeader> {
+        FeedMessage {
+            state_msgs: messages
+                .into_iter()
+                .map(|(protocol, message)| (protocol.to_string(), message))
+                .collect(),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    struct Setup {
+        check: CatchUpCheck,
+        trigger: GapTrigger,
+        resubscriptions: UnboundedSender<Resubscription>,
+        comparisons: UnboundedReceiver<Comparison>,
+    }
+
+    impl Setup {
+        fn resubscribed(&self, protocol: &str, first_block: u64, follows_previous: bool) {
+            self.resubscriptions
+                .send(Resubscription {
+                    extractor: protocol.to_string(),
+                    first_block,
+                    follows_previous,
+                })
+                .unwrap();
+        }
+    }
+
+    /// A check whose protocols `a` and `b` started at block 10, `a` tracking a component; its
+    /// first gap is due at block 60.
+    fn started() -> Setup {
+        let (resubscriptions, resubscriptions_receiver) = mpsc::unbounded_channel();
+        let (comparisons_sender, comparisons) = mpsc::unbounded_channel();
+        let (_, trigger) = GapInjector::new((), GAP_BLOCKS, mpsc::unbounded_channel().0);
+        let mut check = CatchUpCheck::new(
+            EVERY_N_BLOCKS,
+            trigger.clone(),
+            resubscriptions_receiver,
+            comparisons_sender,
+        );
+        check.handle(feed(vec![("a", message(10, &["pool"])), ("b", message(10, &[]))]));
+        Setup { check, trigger, resubscriptions, comparisons }
+    }
+
+    /// A started check after its first gap was forced at block 60.
+    fn resyncing() -> Setup {
+        let mut setup = started();
+        setup
+            .check
+            .handle(feed(vec![("a", message(60, &[])), ("b", message(60, &[]))]));
+        setup
+    }
+
+    #[test]
+    fn test_the_first_gap_is_due_every_n_blocks_after_the_newest_first_block() {
+        let (_, trigger) = GapInjector::new((), GAP_BLOCKS, mpsc::unbounded_channel().0);
+        let mut check = CatchUpCheck::new(
+            EVERY_N_BLOCKS,
+            trigger,
+            mpsc::unbounded_channel().1,
+            mpsc::unbounded_channel().0,
+        );
+
+        check.handle(feed(vec![("a", message(10, &[])), ("b", message(12, &[]))]));
+
+        assert_eq!(check.phase, Phase::Following { gap_at: 12 + EVERY_N_BLOCKS });
+    }
+
+    #[test]
+    fn test_a_gap_is_forced_at_its_block_with_a_baseline_per_protocol() {
+        let mut setup = started();
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(59, &[]))]));
+        assert_eq!(setup.trigger.requested_gaps(), 0);
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(60, &[])), ("b", message(60, &[]))]));
+        assert_eq!(setup.trigger.requested_gaps(), 1);
+        let Phase::Resyncing { pending, deadline: _ } = &setup.check.phase else {
+            panic!("expected to be resyncing, got {:?}", setup.check.phase);
+        };
+        assert_eq!(pending, &HashSet::from(["a".to_string(), "b".to_string()]));
+        assert_eq!(setup.check.baselines["a"].header.number, 60);
+        assert!(setup.check.baselines["a"]
+            .state
+            .holds_component("pool"));
+    }
+
+    #[test]
+    fn test_a_recovery_is_compared_from_its_first_block_with_the_baseline() {
+        let mut setup = resyncing();
+        setup.resubscribed("a", 75, false);
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(74, &[]))]));
+        assert!(setup.check.awaiting.contains_key("a"), "a message below the first block");
+        assert!(setup.comparisons.try_recv().is_err());
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(75, &[]))]));
+        let comparison = setup.comparisons.try_recv().unwrap();
+        assert_eq!(comparison.protocol, "a");
+        assert_eq!(comparison.resync, Resync::CaughtUp);
+        assert_eq!(comparison.held.header.number, 75);
+        assert_eq!(
+            comparison
+                .baseline
+                .map(|baseline| baseline.header.number),
+            Some(60)
+        );
+        assert!(setup.check.awaiting.is_empty());
+    }
+
+    #[test]
+    fn test_resyncing_ends_once_every_protocol_recovered() {
+        let mut setup = resyncing();
+        setup.resubscribed("a", 75, false);
+        setup.resubscribed("b", 75, false);
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(75, &[]))]));
+        assert!(matches!(setup.check.phase, Phase::Resyncing { .. }), "b has not recovered");
+
+        setup
+            .check
+            .handle(feed(vec![("b", message(76, &[]))]));
+        assert_eq!(setup.check.phase, Phase::Following { gap_at: 76 + EVERY_N_BLOCKS });
+        assert!(setup.check.baselines.is_empty());
+    }
+
+    #[test]
+    fn test_resyncing_gives_up_at_its_deadline() {
+        let mut setup = resyncing();
+        if let Phase::Resyncing { pending: _, deadline } = &mut setup.check.phase {
+            *deadline = Instant::now();
+        }
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(61, &[]))]));
+
+        assert_eq!(setup.check.phase, Phase::Following { gap_at: 61 + EVERY_N_BLOCKS });
+        assert!(setup.check.baselines.is_empty());
+    }
+
+    #[test]
+    fn test_resumed_recoveries_are_compared_and_untracked_ones_are_not() {
+        let mut setup = started();
+        setup.resubscribed("a", 20, true);
+        setup.resubscribed("b", 20, false);
+
+        setup
+            .check
+            .handle(feed(vec![("a", message(20, &[])), ("b", message(20, &[]))]));
+
+        let comparison = setup.comparisons.try_recv().unwrap();
+        assert_eq!((comparison.protocol.as_str(), comparison.resync), ("a", Resync::Resumed));
+        assert!(comparison.baseline.is_none(), "nobody forced this resubscription");
+        assert!(setup.comparisons.try_recv().is_err(), "b tracks nothing to compare");
     }
 
     #[test]
     fn test_a_message_resending_held_components_is_a_snapshot() {
         let held = holding(&["a", "b"]);
 
-        assert_eq!(
-            Resync::classify(&held, &message_with_snapshots(&["a", "b"]), true),
-            Resync::Snapshot
-        );
+        assert_eq!(Resync::classify(&held, &message(2, &["a", "b"]), true), Resync::Snapshot);
     }
 
     #[test]
     fn test_a_message_after_a_gap_without_held_components_is_a_catch_up() {
         let held = holding(&["a"]);
 
-        assert_eq!(
-            Resync::classify(&held, &message_with_snapshots(&["new"]), false),
-            Resync::CaughtUp
-        );
+        assert_eq!(Resync::classify(&held, &message(2, &["new"]), false), Resync::CaughtUp);
     }
 
     #[test]
-    fn test_a_message_following_the_last_synced_block_is_a_resume() {
+    fn test_a_message_following_the_last_delivered_block_is_a_resume() {
         let held = holding(&["a"]);
 
-        assert_eq!(Resync::classify(&held, &message_with_snapshots(&[]), true), Resync::Resumed);
+        assert_eq!(Resync::classify(&held, &message(2, &[]), true), Resync::Resumed);
     }
 
     #[test]
     fn test_nothing_tracked_cannot_be_classified() {
         assert_eq!(
-            Resync::classify(&ExtractorState::default(), &message_with_snapshots(&["a"]), false),
+            Resync::classify(&ExtractorState::default(), &message(2, &["a"]), false),
             Resync::NothingTracked
         );
     }
 
-    fn difference(field: Field) -> Difference {
-        Difference { field, entity: "a".to_string(), kind: DifferenceKind::OnlyHeld }
+    fn value_difference(field: Field, key: &str, held: u64) -> Difference {
+        Difference {
+            field,
+            entity: "pool".to_string(),
+            kind: DifferenceKind::Value {
+                key: key.to_string(),
+                held: Some(Bytes::from(held)),
+                snapshot: None,
+            },
+        }
     }
 
     #[test]
-    fn test_comparison_result_is_the_worst_difference() {
+    fn test_differences_at_an_entry_the_baseline_shares_are_pre_existing() {
+        let differences = vec![
+            value_difference(Field::Attribute, "fee", 1),
+            value_difference(Field::Attribute, "tick", 1),
+            value_difference(Field::Code, "code", 1),
+        ];
+        let baseline = vec![
+            value_difference(Field::Attribute, "fee", 2),
+            value_difference(Field::ComponentBalance, "tick", 1),
+        ];
+
+        let statuses: Vec<Status> = assess(&differences, &baseline)
+            .into_iter()
+            .map(|(_, status)| status)
+            .collect();
+
+        assert_eq!(statuses, vec![Status::PreExisting, Status::Mismatch, Status::KnownGap]);
+    }
+
+    #[test]
+    fn test_comparison_result_ignores_pre_existing_differences() {
+        let attribute = value_difference(Field::Attribute, "fee", 1);
+        let code = value_difference(Field::Code, "code", 1);
+
         assert_eq!(ComparisonResult::of(&[]), ComparisonResult::Equal);
         assert_eq!(
-            ComparisonResult::of(&[difference(Field::Code), difference(Field::DciAccount)]),
+            ComparisonResult::of(&[(&attribute, Status::PreExisting)]),
+            ComparisonResult::Equal
+        );
+        assert_eq!(
+            ComparisonResult::of(&[(&attribute, Status::PreExisting), (&code, Status::KnownGap)]),
             ComparisonResult::KnownGaps
         );
         assert_eq!(
-            ComparisonResult::of(&[difference(Field::Code), difference(Field::Storage)]),
+            ComparisonResult::of(&[(&code, Status::KnownGap), (&attribute, Status::Mismatch)]),
             ComparisonResult::Mismatch
         );
     }

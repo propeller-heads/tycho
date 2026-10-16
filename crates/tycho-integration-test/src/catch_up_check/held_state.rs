@@ -7,6 +7,12 @@
 //!
 //! TVL, tokens and DCI entry points are not held. The RPC serves TVL only for the latest block, and
 //! the DCI data shows in the contracts the client holds.
+//!
+//! Differences in contracts that only DCI traces reach are known gaps, never mismatches. Which of
+//! them a client holds depends on the reorgs it saw, since reverts carry no DCI data, and their
+//! storage can differ because `/v1/contract_state` does not filter by protocol system: a snapshot
+//! includes the slots other extractors write, while the client only receives this extractor's
+//! deltas. So a catch-up bug in the storage of such a contract cannot show as a mismatch.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -120,15 +126,27 @@ impl ExtractorState {
     /// Applies one message of the feed the way a consumer does: removed components go, snapshots
     /// replace what is held for their components and contracts, then the deltas apply.
     ///
-    /// Deltas for components the state does not hold are ignored, since a consumer has no state to
-    /// apply them to. An account `Creation` replaces the contract's storage, native balance and
-    /// code; its code is otherwise only taken from snapshots, as consumers do.
+    /// A component the message both removes and carries a snapshot of counts as removed. Deltas
+    /// for components the state does not hold are ignored, since a consumer has no state to apply
+    /// them to. An account `Creation` replaces the contract's storage, native balance and code;
+    /// its code is otherwise only taken from snapshots, as consumers do.
     pub fn apply(&mut self, message: &StateSyncMessage<BlockHeader>) {
         let StateSyncMessage { header: _, snapshots, deltas, removed_components } = message;
         for component_id in removed_components.keys() {
             self.components.remove(component_id);
         }
-        self.apply_snapshot(snapshots);
+        let Snapshot { states, vm_storage } = snapshots;
+        for (component_id, state) in states {
+            // The client can list a component as both a snapshot and a removal in one message
+            // (deferred bug 20). Holding it would keep a component the client no longer updates,
+            // which would differ from every later snapshot.
+            if removed_components.contains_key(component_id) {
+                continue;
+            }
+            self.components
+                .insert(component_id.clone(), HeldComponent::from_snapshot(state));
+        }
+        self.apply_accounts(vm_storage);
         if let Some(deltas) = deltas {
             self.apply_deltas(deltas);
         }
@@ -174,6 +192,10 @@ impl ExtractorState {
             self.components
                 .insert(component_id.clone(), HeldComponent::from_snapshot(state));
         }
+        self.apply_accounts(vm_storage);
+    }
+
+    fn apply_accounts(&mut self, vm_storage: &HashMap<Bytes, Account>) {
         for (address, account) in vm_storage {
             self.accounts
                 .insert(address.clone(), HeldAccount::from_snapshot(account));
@@ -325,7 +347,8 @@ pub enum Field {
 }
 
 impl Field {
-    /// Whether a difference in this field fails the comparison.
+    /// Whether a new difference in this field fails the comparison: [`Status::Mismatch`] or
+    /// [`Status::KnownGap`].
     pub fn status(self) -> Status {
         match self {
             Field::Component |
@@ -333,11 +356,13 @@ impl Field {
             Field::ComponentBalance |
             Field::Account |
             Field::Storage => Status::Mismatch,
-            // Reverts don't restore native balances, code or most account token balances, and
-            // carry no DCI data, so a client's values here depend on the reorgs it saw.
-            Field::NativeBalance | Field::Code | Field::AccountTokenBalance | Field::DciAccount => {
-                Status::KnownGap
-            }
+            // Reverts don't restore native balances, code or most account token balances, so a
+            // client's values here depend on the reorgs it saw.
+            Field::NativeBalance | Field::Code | Field::AccountTokenBalance => Status::KnownGap,
+            // Reverts carry no DCI data, so which of these contracts a client holds depends on the
+            // reorgs it saw. Their storage can differ too: `/v1/contract_state` does not filter by
+            // protocol system, so a snapshot includes slots other extractors write.
+            Field::DciAccount => Status::KnownGap,
         }
     }
 
@@ -358,12 +383,16 @@ impl Field {
 }
 
 /// Whether a difference fails the comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Status {
     /// The client must match the snapshot here: reverts restore this field.
     Mismatch,
-    /// The server does not restore this field on reverts yet, so the client may differ.
+    /// The server does not restore this field on reverts yet, or it is in a contract only DCI
+    /// traces reach, so the client may differ.
     KnownGap,
+    /// The state held before the gap already differed from its snapshot in this entry, so the
+    /// difference does not come from the gap.
+    PreExisting,
 }
 
 impl Status {
@@ -372,6 +401,7 @@ impl Status {
         match self {
             Status::Mismatch => "mismatch",
             Status::KnownGap => "known_gap",
+            Status::PreExisting => "pre_existing",
         }
     }
 }
@@ -383,6 +413,28 @@ pub struct Difference {
     /// The component id or contract address the difference is in.
     pub entity: String,
     pub kind: DifferenceKind,
+}
+
+impl Difference {
+    /// Where the difference is: its field, entity, and key or the side that holds the entity.
+    /// Two differences at the same entry may hold different values.
+    pub fn entry(&self) -> (Field, &str, Entry<'_>) {
+        let Self { field, entity, kind } = self;
+        let entry = match kind {
+            DifferenceKind::OnlyHeld => Entry::OnlyHeld,
+            DifferenceKind::OnlyInSnapshot => Entry::OnlyInSnapshot,
+            DifferenceKind::Value { key, held: _, snapshot: _ } => Entry::Value(key),
+        };
+        (*field, entity, entry)
+    }
+}
+
+/// The part of [`Difference::entry`] within an entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Entry<'a> {
+    OnlyHeld,
+    OnlyInSnapshot,
+    Value(&'a str),
 }
 
 /// How the client's state and the snapshot differ in one entry.
@@ -680,6 +732,15 @@ mod tests {
         )
     }
 
+    fn with_token_balance(mut account: Account, token: Bytes, balance: Bytes) -> Account {
+        let balance =
+            AccountBalance::new(account.address.clone(), token.clone(), balance, Bytes::zero(32));
+        account
+            .token_balances
+            .insert(token, balance);
+        account
+    }
+
     fn snapshot(states: Vec<ComponentWithState>, accounts: Vec<Account>) -> Snapshot {
         Snapshot {
             states: states
@@ -738,7 +799,7 @@ mod tests {
                 &[("liquidity", bytes(2))],
                 &[(address(9), bytes(20))],
             )],
-            vec![account(&contract, &[(1, 7)], 6)],
+            vec![with_token_balance(account(&contract, &[(1, 7)], 6), address(9), bytes(4))],
         );
         let mut state = held(&earlier);
 
@@ -768,6 +829,13 @@ mod tests {
                     None,
                     ChangeType::Update,
                 ),
+            )]),
+            account_balances: HashMap::from([(
+                contract.clone(),
+                HashMap::from([(
+                    address(9),
+                    AccountBalance::new(contract.clone(), address(9), bytes(4), Bytes::zero(32)),
+                )]),
             )]),
             ..BlockAggregatedChanges::default()
         }));
@@ -813,6 +881,17 @@ mod tests {
             ..StateSyncMessage::default()
         });
         assert!(state.has_no_components());
+
+        let mut state = ExtractorState::default();
+        state.apply(&StateSyncMessage {
+            snapshots: snapshot(vec![component_state(&[], &[], &[])], Vec::new()),
+            removed_components: HashMap::from([(POOL.to_string(), component(&[]))]),
+            ..StateSyncMessage::default()
+        });
+        assert!(
+            state.has_no_components(),
+            "a component a message both snapshots and removes counts as removed"
+        );
 
         let mut state = held(&snapshot(vec![component_state(&[], &[], &[])], Vec::new()));
         state.apply(&delta_message(BlockAggregatedChanges {
