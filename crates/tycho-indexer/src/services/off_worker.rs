@@ -10,7 +10,13 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tycho_common::dto;
 
-use crate::services::{rpc::RpcError, state::shadow::Endpoint};
+use crate::services::{
+    rpc::RpcError,
+    state::{
+        shadow::Endpoint,
+        view::{ContractStateView, ProtocolStateView},
+    },
+};
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
 /// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
@@ -185,6 +191,18 @@ impl JsonSizeHint for dto::StateRequestResponse {
     }
 }
 
+impl JsonSizeHint for ContractStateView {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
+        for account in &self.accounts {
+            size += account.json_key_count_hint() * JSON_BYTES_PER_SLOT;
+            // Code is a hex string: two characters per byte.
+            size += 2 * account.code_len() + JSON_BYTES_PER_ACCOUNT;
+        }
+        size
+    }
+}
+
 impl JsonSizeHint for dto::ProtocolStateRequestResponse {
     fn json_size_hint(&self) -> usize {
         let mut size = 0;
@@ -196,9 +214,21 @@ impl JsonSizeHint for dto::ProtocolStateRequestResponse {
     }
 }
 
+impl JsonSizeHint for ProtocolStateView {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
+        for state in &self.states {
+            size += state.json_key_count_hint() * JSON_BYTES_PER_ATTRIBUTE;
+            size += JSON_BYTES_PER_COMPONENT;
+        }
+        size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         sync::{
             atomic::{AtomicBool, Ordering},
             mpsc,
@@ -207,9 +237,22 @@ mod tests {
     };
 
     use actix_web::http::StatusCode;
-    use tycho_common::{dto::PaginationResponse, Bytes};
+    use tycho_common::{
+        dto::PaginationResponse,
+        models::{contract::AccountDelta, protocol::ProtocolComponentState, Chain, ChangeType},
+        storage::WriteTimestamp,
+        Bytes,
+    };
 
     use super::*;
+    use crate::{
+        extractor::models::fixtures,
+        services::state::{
+            cache::{CachedAccount, CachedComponentState},
+            view::{AccountView, ComponentView},
+        },
+        testing,
+    };
 
     /// Waits until `pool` has `n` permits available, and fails after one second.
     async fn wait_for_available_permits(pool: &Pool, n: usize) {
@@ -461,5 +504,48 @@ mod tests {
         );
         assert!(contract_built.is_err(), "a contract state build must wait for a permit");
         assert!(contract_serialized.is_err(), "a contract state serialization must wait");
+    }
+
+    #[test]
+    fn contract_state_view_with_many_slots_is_serialized_off_the_worker() {
+        let creation = AccountDelta::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            fixtures::optional_slots((0..2_000).map(|n| (n, n))),
+            Some(Bytes::from(1u64)),
+            Some(Bytes::from(vec![0u8])),
+            ChangeType::Creation,
+        );
+        let entry =
+            CachedAccount::from_creation(&creation, None, WriteTimestamp::from(&testing::block(1)));
+        let response = ContractStateView {
+            accounts: vec![AccountView::new(Arc::new(entry))],
+            pagination: PaginationResponse::new(0, 100, 1),
+        };
+
+        assert!(response.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
+        assert!(
+            serde_json::to_vec(&response)
+                .unwrap()
+                .len() >=
+                OFF_WORKER_MIN_JSON_BYTES
+        );
+    }
+
+    #[test]
+    fn protocol_state_view_with_many_attributes_is_serialized_off_the_worker() {
+        let attributes = (0..6_000u64)
+            .map(|n| (format!("ticks/{n}/net-liquidity"), Bytes::from(n)))
+            .collect();
+        let entry = CachedComponentState::from_snapshot(
+            ProtocolComponentState::new("c1", attributes, HashMap::new()),
+            WriteTimestamp::from(&testing::block(1)),
+        );
+        let response = ProtocolStateView {
+            states: vec![ComponentView::new("c1", Some(Arc::new(entry)), true)],
+            pagination: PaginationResponse::new(0, 100, 1),
+        };
+
+        assert!(response.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
     }
 }

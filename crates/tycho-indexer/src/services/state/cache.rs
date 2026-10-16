@@ -19,13 +19,15 @@
 //! database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
-//! applies one whole block atomically, reads take the read side. Folds are expected to take well
-//! under a millisecond, so blocking is acceptable and a reader never observes half a block.
+//! applies one whole block atomically, reads take the read side. A reader never observes half a
+//! block.
 //!
-//! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
-//! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
-//! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
-//! so that copy happens at most once per fold instead of once per read.
+//! Accounts and component states are held behind an `Arc`: an account can hold a large storage
+//! map, and a component many attributes. A reader copies only the `Arc` under the read lock, and
+//! the response is written from it through a view (`view`), without a full copy. A fold that
+//! changes an entry a reader still holds copies the entry first, under the write lock
+//! (`Arc::make_mut`). Reads wait for that copy, but it happens at most once per fold instead of
+//! once per read.
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -55,6 +57,8 @@ use tycho_common::{
     Bytes,
 };
 
+pub(crate) mod view;
+
 use super::window::FoldSink;
 
 /// What a write did to a [`Timestamped`].
@@ -83,8 +87,7 @@ impl<T> Timestamped<T> {
         Self { value, written_at }
     }
 
-    #[cfg(test)]
-    pub(crate) fn value(&self) -> &T {
+    fn value(&self) -> &T {
         &self.value
     }
 
@@ -237,60 +240,16 @@ impl CachedAccount {
         entry
     }
 
-    /// Applies one block's changes. Each value takes `at`; a value already written by that block
-    /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here:
-    /// values of one account can have different timestamps, so the entry's `updated_at` cannot
-    /// decide for each of them. A deleted slot becomes the zero value, as in
-    /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
-    /// [`WriteOutcome::Conflict`]s are counted and logged once here, where the address is known.
+    /// Applies one block's changes with the rule of [`apply_account_block`]. When a write applies,
+    /// `updated_at` moves to `at`.
     pub(crate) fn apply_block(
         &mut self,
         delta: Option<&AccountDelta>,
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
-        let mut applied = false;
-        let mut conflicts = 0;
-        let mut count = |outcome| match outcome {
-            WriteOutcome::Applied => applied = true,
-            WriteOutcome::Skipped => {}
-            WriteOutcome::Conflict => conflicts += 1,
-        };
-        if let Some(delta) = delta {
-            for (key, value) in &delta.slots {
-                count(write_timestamped(
-                    &mut self.slots,
-                    key.clone(),
-                    value.clone().unwrap_or_default(),
-                    at,
-                ));
-            }
-            if let Some(balance) = &delta.balance {
-                count(
-                    self.native_balance
-                        .write(balance.clone(), at),
-                );
-            }
-            if let Some(code) = delta.code() {
-                count(
-                    self.code
-                        .write(CachedCode::new(code.clone()), at),
-                );
-            }
-        }
-        for (token, balance) in balances.into_iter().flatten() {
-            count(write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at));
-        }
-        if applied {
+        if apply_account_block(self, delta, balances, at) {
             self.updated_at = self.updated_at.max(at);
-        }
-        if conflicts > 0 {
-            warn!(
-                address = %self.address,
-                block_ts = %at.block_ts(),
-                values = conflicts,
-                "Skipped writes from the applied block carry different values"
-            );
         }
     }
 
@@ -318,6 +277,92 @@ impl CachedAccount {
     pub(crate) fn code(&self) -> &Timestamped<CachedCode> {
         &self.code
     }
+}
+
+/// The values of one account that a block can write. Each write says what it did.
+trait AccountWrites {
+    fn address(&self) -> &Address;
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome;
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome;
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome;
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome;
+}
+
+impl AccountWrites for CachedAccount {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome {
+        write_timestamped(&mut self.slots, key.clone(), value, at)
+    }
+
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome {
+        self.native_balance.write(balance, at)
+    }
+
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome {
+        self.code.write(code, at)
+    }
+
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome {
+        write_timestamped(&mut self.token_balances, token.clone(), balance, at)
+    }
+}
+
+/// Writes one block's changes to `account` and returns whether any write applied. Each value
+/// takes `at`; a value already written by that block or a newer one is left alone, so the rule
+/// lives in [`Timestamped::write`] rather than here: values of one account can have different
+/// timestamps, so one timestamp for the whole account cannot decide for each of them. A deleted
+/// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code replaces
+/// the code and its hash together. [`WriteOutcome::Conflict`]s are counted and logged once per
+/// block.
+fn apply_account_block(
+    account: &mut impl AccountWrites,
+    delta: Option<&AccountDelta>,
+    balances: Option<&HashMap<Address, AccountBalance>>,
+    at: WriteTimestamp,
+) -> bool {
+    let mut applied = false;
+    let mut conflicts = 0;
+    let mut count = |outcome| match outcome {
+        WriteOutcome::Applied => applied = true,
+        WriteOutcome::Skipped => {}
+        WriteOutcome::Conflict => conflicts += 1,
+    };
+    if let Some(delta) = delta {
+        for (key, value) in &delta.slots {
+            count(account.write_slot(key, value.clone().unwrap_or_default(), at));
+        }
+        if let Some(balance) = &delta.balance {
+            count(account.write_native_balance(balance.clone(), at));
+        }
+        if let Some(code) = delta.code() {
+            count(account.write_code(CachedCode::new(code.clone()), at));
+        }
+    }
+    for (token, balance) in balances.into_iter().flatten() {
+        count(account.write_token_balance(token, balance.clone(), at));
+    }
+    if conflicts > 0 {
+        warn!(
+            address = %account.address(),
+            block_ts = %at.block_ts(),
+            values = conflicts,
+            "Skipped writes from the applied block carry different values"
+        );
+    }
+    applied
 }
 
 impl From<CachedAccount> for Account {
@@ -460,7 +505,7 @@ pub(crate) struct CacheState {
     accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
-    components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
+    components: HashMap<ProtocolSystem, HashMap<ComponentId, Arc<CachedComponentState>>>,
 }
 
 impl CacheState {
@@ -468,7 +513,7 @@ impl CacheState {
         self.accounts.get(address)
     }
 
-    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&CachedComponentState> {
+    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&Arc<CachedComponentState>> {
         self.components
             .get(system)
             .and_then(|components| components.get(id))
@@ -524,7 +569,7 @@ impl EntityCache {
         }
         let mut component_entries: HashMap<
             ProtocolSystem,
-            HashMap<ComponentId, CachedComponentState>,
+            HashMap<ComponentId, Arc<CachedComponentState>>,
         > = HashMap::new();
         for ComponentSnapshot { system, state, updated_at } in components {
             component_entries
@@ -532,7 +577,7 @@ impl EntityCache {
                 .or_default()
                 .insert(
                     state.component_id.clone(),
-                    CachedComponentState::from_snapshot(state, updated_at),
+                    Arc::new(CachedComponentState::from_snapshot(state, updated_at)),
                 );
         }
         Self {
@@ -623,12 +668,12 @@ impl CacheState {
                             "Creation of a component already cached skipped"
                         );
                     }
-                    entry.apply_block(delta, balances, at);
+                    Arc::make_mut(entry).apply_block(delta, balances, at);
                 }
                 (None, true) => {
                     system_components.insert(
                         id.clone(),
-                        CachedComponentState::from_creation(id, delta, balances, at),
+                        Arc::new(CachedComponentState::from_creation(id, delta, balances, at)),
                     );
                 }
                 (None, false) => warn!(
@@ -743,7 +788,7 @@ mod test {
             .read()
             .component(EXTRACTOR, id)
             .cloned()
-            .map(ProtocolComponentState::from)
+            .map(|entry| ProtocolComponentState::from(Arc::unwrap_or_clone(entry)))
     }
 
     fn addr(n: u64) -> Bytes {
@@ -1266,7 +1311,7 @@ mod test {
             .component(EXTRACTOR, "c1")
             .unwrap();
         assert_eq!(
-            ProtocolComponentState::from(entry.clone()).attributes["x"],
+            ProtocolComponentState::from(Arc::unwrap_or_clone(entry.clone())).attributes["x"],
             Bytes::from(2u64),
             "the repeated creation does not rebuild the entry"
         );
@@ -1367,6 +1412,34 @@ mod test {
                 .unwrap()
                 .slots,
             fixtures::slots([(1, 12)])
+        );
+    }
+
+    #[test]
+    fn fold_leaves_a_component_a_reader_holds_unchanged() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(1), "c1"), "c1", 1))
+            .unwrap();
+        let held = cache
+            .read()
+            .component(EXTRACTOR, "c1")
+            .cloned()
+            .unwrap();
+
+        cache
+            .fold(&with_state_delta(msg(2), "c1", 2))
+            .unwrap();
+
+        assert_eq!(
+            ProtocolComponentState::from(Arc::unwrap_or_clone(held)).attributes["x"],
+            Bytes::from(1u64)
+        );
+        assert_eq!(
+            cached_component(&cache, "c1")
+                .unwrap()
+                .attributes["x"],
+            Bytes::from(2u64)
         );
     }
 
