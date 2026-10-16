@@ -1,0 +1,19 @@
+[package]
+name = "base-biconomy"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "base_biconomy"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0.95"
+hex = "0.4.3"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+tycho-substreams = "0.8.1"
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }

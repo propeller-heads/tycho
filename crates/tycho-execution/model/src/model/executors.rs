@@ -44,6 +44,7 @@ pub enum Executor {
     LiquidityParty,
     LunarBase,
     PropAMM,
+    Biconomy,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -64,7 +65,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 12] = [
+    pub const VARIANTS: [Executor; 13] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -77,6 +78,7 @@ impl Executor {
         Executor::LiquidityParty,
         Executor::LunarBase,
         Executor::PropAMM,
+        Executor::Biconomy,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -338,7 +340,8 @@ impl Executor {
                 })
             }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
-            Self::PropAMM => Ok(TransferData {
+            // BiconomyExecutor.sol has the same layout and transfers (it also rejects native ETH).
+            Self::PropAMM | Self::Biconomy => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
@@ -646,7 +649,8 @@ impl Executor {
                 Ok(())
             }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
-            Self::PropAMM => {
+            // BiconomyExecutor.sol has the same layout and transfers (it also rejects native ETH).
+            Self::PropAMM | Self::Biconomy => {
                 let pamm = params.request(
                     ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                     // trying more variants might find some very obscure bugs
@@ -699,7 +703,7 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!(),
             Self::LiquidityParty => unimplemented!(),
             Self::LunarBase => unimplemented!(),
-            Self::PropAMM => unimplemented!(),
+            Self::PropAMM | Self::Biconomy => unimplemented!(),
         }
     }
 
@@ -727,7 +731,7 @@ impl Executor {
             Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
             Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
-            Self::PropAMM => {
+            Self::PropAMM | Self::Biconomy => {
                 unimplemented!("PropAMM doesn't use callbacks")
             }
         }
@@ -791,7 +795,8 @@ impl Executor {
             // https://github.com/propeller-heads/tycho-indexer/blob/ae386ce3a9decbf8d73dab474e80a3d3785f02ef/crates/tycho-execution/contracts/src/executors/LunarBaseExecutor.sol#L37
             Self::LunarBase => Address::Router,
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
-            Self::PropAMM => params.request(
+            // BiconomyExecutor.sol has the same layout and transfers (it also rejects native ETH).
+            Self::PropAMM | Self::Biconomy => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
                 // trying more variants might find some very obscure bugs
                 // in the future but slows down simulation a lot
