@@ -103,9 +103,11 @@ catch-up endpoint to prove anything.
   - `mod.rs`: `CatchUpCheck`, the loop. `Resync::classify` tells a catch-up from a snapshot
     fallback by whether the protocol's first message after the resubscription re-sends held
     components. At a forced gap it keeps each protocol's state as a baseline. After each recovery
-    (unless nothing is tracked) it sends a `Comparison` to the `Comparator` task, which has its own
-    RPC client: `get_snapshots` at the recovery's block, and when that differs, at the baseline's
-    block too; entries both differ at are `Status::PreExisting`. Metrics:
+    (unless nothing is tracked) it sends a `Comparison` to the `run_comparisons` task. `compare`
+    gets differences from a `SnapshotSource` (`RpcSnapshots`, an RPC client of its own; scripted in
+    tests): at the recovery's block, and when that differs, at the baseline's block too. A
+    difference the baseline has exactly (same entry and values) is `Status::PreExisting`. Each
+    comparison is bounded by `COMPARISON_TIMEOUT`; a timeout counts as `result="error"`. Metrics:
     `tycho_integration_catch_up_{resyncs,comparisons,differences,unchanged_recoveries}_total`. The
     task only ends with an error, which stops the binary
 - **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed

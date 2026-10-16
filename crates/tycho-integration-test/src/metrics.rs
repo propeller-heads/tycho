@@ -122,8 +122,9 @@ pub fn initialize_metrics() {
     );
     describe_counter!(
         "tycho_integration_catch_up_unchanged_recoveries_total",
-        "Recoveries from a forced gap that changed none of the state the catch-up check compares, \
-         so their comparison could not catch a catch-up bug"
+        "Recoveries from a forced gap whose held state changed nothing between the baseline, \
+         taken when the gap was forced, and the recovery, so their comparison could not catch a \
+         catch-up bug"
     );
 }
 
@@ -386,7 +387,8 @@ pub fn record_catch_up_comparison(protocol: &str, resync: &str, result: &str) {
     .increment(1);
 }
 
-/// Record a recovery from a forced gap that changed none of the state the catch-up check compares.
+/// Record a recovery from a forced gap whose held state changed nothing between the baseline and
+/// the recovery.
 pub fn record_catch_up_unchanged_recovery(protocol: &str) {
     counter!(
         "tycho_integration_catch_up_unchanged_recoveries_total",

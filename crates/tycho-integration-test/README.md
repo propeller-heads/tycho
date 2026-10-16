@@ -109,15 +109,15 @@ DCI entry points are not compared.
 The state the client holds also carries everything the stream delivered before the gap, and may
 already differ from a snapshot there. So when the forced gap is taken, the check keeps a copy of
 each protocol's state at that block (the baseline). If the comparison after the recovery finds
-differences, it compares the baseline with a snapshot at the baseline's block too. A difference
-found at the same entry (field, component or contract, and key) by both comparisons counts as
-`pre_existing`, not as a mismatch. A difference that arose in the few blocks between the baseline
-and the gap still counts as new.
+differences, it compares the baseline with a snapshot at the baseline's block too. A difference that
+both comparisons find exactly (same field, component or contract, key, and the same values on both
+sides) counts as `pre_existing`, not as a mismatch. A stale value that changed across the gap, and a
+difference that arose in the few blocks between the baseline and the gap, still count as new.
 
 The stream is wired like `TychoStreamBuilder` builds it, with a `DeltasClient` wrapper that ends the
 subscriptions; the synchronizers and the catch-up itself are unchanged `tycho-client` code.
 Comparisons use an RPC client of their own, so their requests can't delay the synchronizers' catch-up
-requests.
+requests, and each may take at most 5 minutes.
 
 ```bash
 cargo run --package tycho-integration-test -- \
@@ -142,9 +142,9 @@ cargo run --package tycho-integration-test -- \
 | Metric | Labels | Counts |
 |--------|--------|--------|
 | `tycho_integration_catch_up_resyncs_total` | `protocol`, `outcome` | How the client recovered from each resubscription: `caught_up` (applied the missed blocks without a snapshot), `snapshot` (fell back to a snapshot), `resumed` (missed no block), `nothing_tracked` (tracks no component, so the two look the same), or `no_resubscription` (did not resubscribe within 5 minutes of a forced gap) |
-| `tycho_integration_catch_up_comparisons_total` | `protocol`, `resync`, `result` | Comparisons after each recovery of a protocol that tracks components, judged by the differences that are not pre-existing: `equal`, `known_gaps`, `mismatch`, or `error` (the snapshot could not be fetched) |
+| `tycho_integration_catch_up_comparisons_total` | `protocol`, `resync`, `result` | Comparisons after each recovery of a protocol that tracks components, judged by the differences that are not pre-existing: `equal`, `known_gaps`, `mismatch`, or `error` (the snapshot could not be fetched in 5 minutes, or the comparison could not be started) |
 | `tycho_integration_catch_up_differences_total` | `protocol`, `field`, `status` | Entries that differ from the snapshot, by field and status: `mismatch`, `known_gap` or `pre_existing` |
-| `tycho_integration_catch_up_unchanged_recoveries_total` | `protocol` | Recoveries from a forced gap that changed none of the compared state, so their comparison could not catch a catch-up bug |
+| `tycho_integration_catch_up_unchanged_recoveries_total` | `protocol` | Recoveries from a forced gap whose held state changed nothing between the baseline and the recovery, so their comparison could not catch a catch-up bug |
 
 - **The check proves nothing unless `outcome="caught_up"` grows.** If only `outcome="snapshot"`
   grows, the client never catches up: the server or its gateway does not serve the catch-up endpoint,
