@@ -1127,11 +1127,8 @@ where
         path: Vec<BlockAggregatedChanges>,
         first: BlockAggregatedChanges,
     ) -> StateSyncMessage<BlockHeader> {
-        let mut path = path.into_iter();
-        let Some(oldest) = path.next() else {
-            return self.handle_block(first);
-        };
-        let mut merged = self.handle_block(oldest);
+        // Merging into an empty message yields the merged message unchanged.
+        let mut merged = StateSyncMessage::default();
         for message in path {
             let handled = self.handle_block(message);
             merged = merged.merge(handled);
