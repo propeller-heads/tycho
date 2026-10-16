@@ -46,6 +46,8 @@ use crate::{
 pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
 /// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
 pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
+/// Lowest time a resubscribed synchronizer waits for the server's answer to a catch-up request.
+const MIN_CATCH_UP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -270,6 +272,25 @@ enum CatchUpSkipped {
     /// This includes an empty path when the last synced block is not that block.
     #[error("the missed deltas lead to block {reached}, not to {to}")]
     WrongEnd { reached: BlockHash, to: BlockHash },
+}
+
+impl CatchUpSkipped {
+    /// Whether the reason points at a faulty server or transport rather than at an ordinary
+    /// fallback: a correct server answers with a path that checks out, or says why it can't.
+    fn is_fault(&self) -> bool {
+        match self {
+            CatchUpSkipped::Rpc(_) |
+            CatchUpSkipped::ForeignMessage { .. } |
+            CatchUpSkipped::DetachedBlock { .. } |
+            CatchUpSkipped::RevertToNonAncestor { .. } |
+            CatchUpSkipped::WrongEnd { .. } => true,
+            CatchUpSkipped::PartialBlocks |
+            CatchUpSkipped::NoFingerprint |
+            CatchUpSkipped::Unsupported |
+            CatchUpSkipped::Unavailable(_) |
+            CatchUpSkipped::TimedOut(_) => false,
+        }
+    }
 }
 
 /// Checks that `path` takes a consumer of `extractor` from block `from` to block `to`.
@@ -739,10 +760,18 @@ where
                             let last_synced =
                                 self.last_synced_block.as_ref().filter(|_| may_resume);
                             if let Some(last_synced) = last_synced {
-                                match self
-                                    .catch_up_path(last_synced, fingerprint.as_ref(), &incoming)
-                                    .await
-                                {
+                                let caught_up = select! {
+                                    caught_up = self.catch_up_path(
+                                        last_synced,
+                                        fingerprint.as_ref(),
+                                        &incoming,
+                                    ) => caught_up,
+                                    _ = &mut end_rx => {
+                                        info!("Received close signal during delta catch-up");
+                                        return Ok(());
+                                    }
+                                };
+                                match caught_up {
                                     Ok(path) => {
                                         info!(
                                             height = incoming.number,
@@ -750,6 +779,12 @@ where
                                             "Caught up on missed deltas"
                                         );
                                         break 'init (self.apply_catch_up(path, msg), incoming);
+                                    }
+                                    Err(skipped) if skipped.is_fault() => {
+                                        warn!(
+                                            %skipped,
+                                            "Delta catch-up failed; resyncing from a snapshot"
+                                        );
                                     }
                                     Err(skipped) => {
                                         info!(
@@ -1130,8 +1165,12 @@ where
         .with_include_state(self.include_snapshots);
         // The RPC client waits 120 s before retrying a 502/503/504, which would hold back the
         // snapshot fallback. The synchronizer's timeout spans a few blocks (the stream builder
-        // sets `block_time + timeout`), so the subscription buffers only a few messages meanwhile.
-        let limit = Duration::from_secs(self.timeout);
+        // sets `block_time + timeout`), so the subscription buffers few messages meanwhile. On
+        // fast chains that is only a few seconds (3 s on Arbitrum), in which a long path may not
+        // arrive while every client catches up at once after a server restart; they would all
+        // fall back to heavier snapshots. The 128-message subscription buffer lasts about 32 s at
+        // 0.25 s blocks, so waiting at least `MIN_CATCH_UP_TIMEOUT` does not overflow it.
+        let limit = Duration::from_secs(self.timeout).max(MIN_CATCH_UP_TIMEOUT);
         let answer = timeout(
             limit,
             self.rpc_client
@@ -6277,13 +6316,14 @@ mod test {
         }
     }
 
-    #[test_log::test(tokio::test(start_paused = true))]
-    async fn test_catch_up_falls_back_to_a_snapshot_when_the_server_answers_too_late() {
-        // A valid path, but only after the 120 s the RPC client waits for a restarting server.
-        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
-            make_block_changes(5, None),
-            make_block_changes(6, None),
-        ])));
+    /// A synchronizer whose timeout is `synchronizer_timeout` seconds, synced up to block 4 under
+    /// fingerprint 1, that resubscribes under the same fingerprint. Its RPC holds back the answer
+    /// to a catch-up request for the 120 s the RPC client waits for a restarting server. Returns
+    /// it running, with the sender of its new subscription.
+    async fn resubscribe_to_a_slow_server(
+        rpc_client: MockRPCClient,
+        synchronizer_timeout: u64,
+    ) -> (RunningSync, Sender<BlockAggregatedChanges>) {
         let rpc_client = SlowCatchUpRPCClient {
             inner: ArcRPCClient(Arc::new(rpc_client)),
             delay: Duration::from_secs(120),
@@ -6293,7 +6333,6 @@ mod test {
             inner: ArcDeltasClient(Arc::new(deltas_client)),
             fingerprint: Some(fingerprint(1)),
         };
-        let synchronizer_timeout = 10;
         let mut state_sync = ProtocolStateSynchronizer::new(
             ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
             true,
@@ -6308,8 +6347,26 @@ mod test {
             synchronizer_timeout,
         );
         state_sync.synced_fingerprint = Some(fingerprint(1));
-        let mut sync =
+        let sync =
             RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+        (sync, deltas_tx)
+    }
+
+    #[rstest]
+    #[case::the_synchronizer_timeout(30, Duration::from_secs(30))]
+    #[case::raised_to_the_minimum(1, MIN_CATCH_UP_TIMEOUT)]
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_catch_up_falls_back_to_a_snapshot_when_the_server_answers_too_late(
+        #[case] synchronizer_timeout: u64,
+        #[case] expected_wait: Duration,
+    ) {
+        // A valid path, but only after the 120 s the RPC client waits for a restarting server.
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let (mut sync, deltas_tx) =
+            resubscribe_to_a_slow_server(rpc_client, synchronizer_timeout).await;
 
         let sent_at = Instant::now();
         deltas_tx
@@ -6331,9 +6388,40 @@ mod test {
             .states
             .contains_key("Component1"));
         assert!(
-            waited >= Duration::from_secs(synchronizer_timeout) && waited < Duration::from_secs(20),
+            waited >= expected_wait && waited < expected_wait + Duration::from_secs(1),
             "Fell back after {waited:?}"
         );
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_close_signal_during_catch_up_ends_the_synchronizer() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let (sync, deltas_tx) = resubscribe_to_a_slow_server(rpc_client, 10).await;
+        let RunningSync { mut block_rx, end_tx, task } = sync;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while calls.catch_up_requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Should ask to catch up");
+        let _ = end_tx.send(());
+        let ended = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Should end before the catch-up times out")
+            .expect("Task should not panic");
+
+        assert!(ended.is_ok(), "A close signal is a clean exit");
+        assert!(block_rx.try_recv().is_err(), "Nothing is emitted after the close signal");
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
     }
 
     #[rstest]
