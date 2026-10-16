@@ -1,10 +1,13 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 from uuid import UUID
 
 from hexbytes import HexBytes as _HexBytes
 from pydantic import BaseModel, Field, root_validator
+
+# pydantic 1.8 recognises only its own Literal (typing_extensions'), not typing.Literal.
+from pydantic.typing import Literal
 
 
 class HexBytes(_HexBytes):
@@ -177,7 +180,73 @@ class ResponseToken(BaseModel):
     quality: int
 
 
+class AccountBalance(BaseModel):
+    account: HexBytes
+    token: HexBytes
+    balance: HexBytes
+    modify_tx: HexBytes
+
+
+class EntryPoint(BaseModel):
+    external_id: str
+    target: HexBytes
+    signature: str
+
+
+class StorageOverride(BaseModel):
+    """Rust serialises it as ``{"Diff": {...}}`` or ``{"Replace": {...}}``: one of the two is
+    set. ``diff`` changes only the given slots; ``replace`` replaces the whole storage.
+    """
+
+    diff: Optional[Dict[HexBytes, HexBytes]] = Field(default=None, alias="Diff")
+    replace: Optional[Dict[HexBytes, HexBytes]] = Field(default=None, alias="Replace")
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class AccountOverrides(BaseModel):
+    slots: Optional[StorageOverride] = None
+    native_balance: Optional[HexBytes] = None
+    code: Optional[HexBytes] = None
+
+
+class RPCTracerParams(BaseModel):
+    """The only tracing method (``TracingParams::RPCTracer`` in Rust)."""
+
+    method: Literal["rpctracer"] = "rpctracer"
+    caller: Optional[HexBytes] = None
+    calldata: HexBytes
+    state_overrides: Optional[Dict[HexBytes, AccountOverrides]] = None
+    prune_addresses: Optional[List[HexBytes]] = None
+
+
+class AddressStorageLocation(BaseModel):
+    key: HexBytes
+    offset: int
+
+
+class TracingResult(BaseModel):
+    retriggers: List[Tuple[HexBytes, AddressStorageLocation]] = Field(
+        default_factory=list
+    )
+    accessed_slots: Dict[HexBytes, Set[HexBytes]] = Field(default_factory=dict)
+
+
+class DCIUpdate(BaseModel):
+    # component id -> entry points newly associated with it
+    new_entrypoints: Dict[str, List[EntryPoint]] = Field(default_factory=dict)
+    # entry point id -> new tracing params, each with the component they belong to
+    new_entrypoint_params: Dict[str, List[Tuple[RPCTracerParams, str]]] = Field(
+        default_factory=dict
+    )
+    # entry point id -> its trace result
+    trace_results: Dict[str, TracingResult] = Field(default_factory=dict)
+
+
 class BlockChanges(BaseModel):
+    """One block's changes, as the WebSocket sends them (``BlockAggregatedChanges`` in Rust)."""
+
     extractor: str
     chain: Union[Chain, CustomChain]
     block: Block
@@ -189,10 +258,14 @@ class BlockChanges(BaseModel):
     new_protocol_components: Dict[str, ProtocolComponent]
     deleted_protocol_components: Dict[str, ProtocolComponent]
     component_balances: Dict[str, TokenBalances]
-    account_balances: Dict[HexBytes, Dict[HexBytes, HexBytes]] = Field(
+    # account -> token -> balance
+    account_balances: Dict[HexBytes, Dict[HexBytes, AccountBalance]] = Field(
         default_factory=dict
     )
     component_tvl: Dict[str, float]
+    dci_update: DCIUpdate = Field(default_factory=DCIUpdate)
+    # The index of a partial block; None for a full block.
+    partial_block_index: Optional[int] = None
 
 
 class ResponseProtocolState(BaseModel):

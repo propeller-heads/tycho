@@ -23,7 +23,7 @@ local development since the package declares `maturin` as its build backend in `
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. |
+| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. Import `Literal` from `pydantic.typing`: pydantic 1.8 only recognises `typing_extensions.Literal`, which on Python 3.9 is not `typing.Literal`. |
 | eth-abi | `2.2.0` | Pinned exact |
 | eth-typing | `2.3.0` | Pinned exact |
 | eth-utils | `1.9.5` | Pinned exact |
@@ -76,7 +76,9 @@ Pydantic v1 models mirroring the Rust types in `tycho-common/src/dto.rs`. Two ca
   `TokensParams`, `ProtocolSystemsParams`, `ComponentTvlParams`, `TracedEntryPointParams`
 - **Response types**: `ProtocolComponentsResponse`, `ProtocolStateResponse`,
   `ContractStateResponse`, `TokensResponse`, etc.
-- **Streaming types**: `FeedMessage`, `BlockChanges`, `StateSyncMessage`, `SynchronizerState`
+- **Streaming types**: `FeedMessage`, `BlockChanges`, `StateSyncMessage`, `SynchronizerState`.
+  `BlockChanges` mirrors the Rust `BlockAggregatedChanges` DTO field for field (`dci_update` and
+  `partial_block_index` included).
 
 Custom `HexBytes` subclass adds pydantic v1 validators (`__get_validators__`, `__modify_schema__`).
 
@@ -103,6 +105,10 @@ cd tycho-client-py
 pip install -e ".[testing]"
 pytest python/tests/
 ```
+
+The tests need only the pure Python modules, so they also run without building the wheel: install
+the pinned dependencies from `pyproject.toml` plus `pytest` in a virtualenv, then run
+`PYTHONPATH=python pytest python/tests/`. No CI workflow runs them.
 
 Tests mock `requests.post` — no running server needed. JSON fixtures in `tests/assets/` provide
 response data.
