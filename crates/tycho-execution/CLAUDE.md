@@ -487,8 +487,9 @@ same `FallbackSwapData` `user_data`:
   from `fallback_router` under `fallback:rfq:hashflow`, and wraps the 345-byte quote in the tokens and the fallback.
 - `NativeFallbackSwapEncoder` and `LiquoriceFallbackSwapEncoder` request the signed quote with the chain's fallback
   router as recipient (and, for Liquorice, trader), read from `fallback_router` under their protocol. The Native one
-  also reads `router_v6` there. Each inserts a length prefix before the venue data and appends the fallback; the
-  Liquorice one drops the partial-fill fields and keeps the settlement calldata.
+  also reads `router_v6` there, and rejects a swap in or out of the chain's native token, which the router cannot
+  trade. Each inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the
+  partial-fill fields and keeps the settlement calldata.
 
 The Native and Liquorice routers are not deployed, so no chain lists their entries yet. The gas estimator charges a
 Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop, Hashflow, Native or Liquorice leg the

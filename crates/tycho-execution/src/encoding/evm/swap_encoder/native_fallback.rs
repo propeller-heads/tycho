@@ -82,6 +82,15 @@ impl SwapEncoder for NativeFallbackSwapEncoder {
                 self.chain
             )));
         }
+        let native_token = self.chain.native_token().address;
+        if swap.token_in().address == native_token || swap.token_out().address == native_token {
+            return Err(EncodingError::InvalidInput(format!(
+                "The native token is not supported on fallback:rfq:native: the chain's \
+                 NativeFallbackRouter only trades ERC20s and would revert the swap. Use the \
+                 wrapped token's book, or rfq:native, for {}",
+                self.chain
+            )));
+        }
 
         let native = self
             .native
@@ -121,6 +130,7 @@ mod tests {
 
     use alloy::hex::{decode, encode};
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
@@ -160,6 +170,14 @@ mod tests {
     }
 
     fn usdc_weth_swap(user_data: &str) -> Swap {
+        swap(
+            Bytes::from(format!("0x{USDC}").as_str()),
+            Bytes::from(format!("0x{WETH}").as_str()),
+            user_data,
+        )
+    }
+
+    fn swap(token_in: Bytes, token_out: Bytes, user_data: &str) -> Swap {
         let state = MockRFQState {
             quote_amount_in: None,
             quote_amount_out: BigUint::from(402_408_818_842_972u64),
@@ -176,8 +194,8 @@ mod tests {
                 protocol_system: String::from("fallback:rfq:native"),
                 ..Default::default()
             },
-            default_token(Bytes::from(format!("0x{USDC}").as_str())),
-            default_token(Bytes::from(format!("0x{WETH}").as_str())),
+            default_token(token_in),
+            default_token(token_out),
             BigUint::ZERO,
         )
         .with_estimated_amount_in(BigUint::from(1_000_000u64))
@@ -261,6 +279,25 @@ mod tests {
 
         assert!(
             matches!(err, EncodingError::InvalidInput(message) if message.contains("ethereum"))
+        );
+    }
+
+    #[rstest]
+    #[case::native_token_in(Chain::Ethereum.native_token().address, Bytes::from(format!("0x{WETH}").as_str()))]
+    #[case::native_token_out(Bytes::from(format!("0x{USDC}").as_str()), Chain::Ethereum.native_token().address)]
+    fn test_native_token_leg(#[case] token_in: Bytes, #[case] token_out: Bytes) {
+        let swap = swap(
+            token_in,
+            token_out,
+            &format!(r#"{{"fallback_protocol":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#),
+        );
+
+        let err = encoder()
+            .encode_swap(&swap, &context())
+            .unwrap_err();
+
+        assert!(
+            matches!(err, EncodingError::InvalidInput(message) if message.contains("native token"))
         );
     }
 }
