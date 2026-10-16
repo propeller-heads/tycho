@@ -37,6 +37,11 @@ TychoStreamBuilder (stream.rs)
 ## Sync Lifecycle
 
 1. `WsDeltasClient` subscribes; first message determines snapshot block.
+   On a restart, a first message that follows the last synced block (`is_next_expected`) resumes
+   without a snapshot. Every message, the first included, goes through `handle_block`: TVL
+   tracking, background snapshots for new components, DCI entry points, then filtering to the
+   tracked components and contracts. With a snapshot, the first message is handled after the
+   fetch succeeds and merged into the snapshot message.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
    tracked component), the synchronizer discards deltas for a random delay in
    `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least
