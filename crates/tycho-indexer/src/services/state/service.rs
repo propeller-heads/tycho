@@ -38,8 +38,8 @@ use tracing::debug;
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
-        blockchain::BlockAggregatedChanges, contract::Account, protocol::ProtocolComponentState,
-        MergeError, PaginationParams,
+        blockchain::BlockAggregatedChanges, protocol::ProtocolComponentState, MergeError,
+        PaginationParams,
     },
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
@@ -47,6 +47,7 @@ use tycho_common::{
 
 use super::{
     cache::{CachedAccount, CachedComponentState, EntityCache},
+    view::{AccountView, ContractStateView},
     window::{account_changes, component_changes, DeltaWindow, WindowResolution},
 };
 
@@ -236,12 +237,12 @@ impl StateService {
     ///   delta in any window.
     /// - [`StateServiceError::InvalidVersion`] when the version is malformed.
     /// - [`StateServiceError::VersionAboveTip`] when the version is a block number above the tip.
-    /// - [`StateServiceError::LockPoisoned`], [`StateServiceError::WindowRead`] or
-    ///   [`StateServiceError::Merge`] when the window cannot be read or a change cannot be merged.
-    pub(crate) fn contract_state(
+    /// - [`StateServiceError::LockPoisoned`] or [`StateServiceError::WindowRead`] when the window
+    ///   cannot be read.
+    pub(crate) fn contract_state_view(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<dto::StateRequestResponse, StateServiceError> {
+    ) -> Result<ContractStateView, StateServiceError> {
         // The cache serves explicit ids only; the database path lists every entity.
         let Some(ids) = request.contract_ids.as_deref() else {
             return Err(StateServiceError::Fallback(FallbackReason::NoIds));
@@ -288,16 +289,15 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock. The full copy of
-        // an entry happens here, unless a fold already replaced it in the cache.
+        // Lay the window changes over each entry, without holding any lock. The entry itself is
+        // not copied.
         let mut accounts = Vec::with_capacity(page.len());
         for (address, entry) in page.iter().zip(entries) {
-            let entry = entry.map(Arc::unwrap_or_clone);
             let changes = window_changes
                 .get(address)
                 .map_or(&[][..], Vec::as_slice);
-            let (mut entry, changes) = match entry {
-                Some(entry) => (entry, changes),
+            let (mut view, changes) = match entry {
+                Some(entry) => (AccountView::new(entry), changes),
                 // Not cached: build the account from its first delta in the windows and apply the
                 // rest. An address with no delta fails the whole request.
                 // Token balances from blocks before the first delta are dropped, as on the
@@ -321,27 +321,39 @@ impl StateService {
                         return Err(StateServiceError::ContractNotFound(address.clone()));
                     };
                     let first = &changes[start];
-                    (
-                        CachedAccount::from_creation(delta, first.balances.as_ref(), first.at),
-                        &changes[start + 1..],
-                    )
+                    let entry =
+                        CachedAccount::from_creation(delta, first.balances.as_ref(), first.at);
+                    (AccountView::new(Arc::new(entry)), &changes[start + 1..])
                 }
             };
             for change in changes {
-                entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
+                view.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts.push(dto::ResponseAccount::from(Account::from(entry)));
+            accounts.push(view);
         }
 
-        Ok(dto::StateRequestResponse::new(
+        Ok(ContractStateView {
             accounts,
-            PaginationResponse::new(pagination.page, pagination.page_size, ids.len() as i64),
-        ))
+            pagination: PaginationResponse::new(
+                pagination.page,
+                pagination.page_size,
+                ids.len() as i64,
+            ),
+        })
+    }
+
+    /// [`Self::contract_state_view`] as an owned DTO.
+    pub(crate) fn contract_state(
+        &self,
+        request: &dto::StateRequestBody,
+    ) -> Result<dto::StateRequestResponse, StateServiceError> {
+        self.contract_state_view(request)
+            .map(dto::StateRequestResponse::from)
     }
 
     /// Serves `/protocol_state` from the cache.
     ///
-    /// Same shape as [`Self::contract_state`]. Components are looked up under
+    /// Same shape as [`Self::contract_state_view`]. Components are looked up under
     /// `request.protocol_system`, the key folds use. An id the cache does not hold is served as an
     /// empty state with its window changes applied, so no id fails the request. The database path
     /// does the same only at an uncommitted version; at a committed version it leaves the id out.
@@ -975,6 +987,29 @@ mod test {
             .unwrap();
 
         assert_eq!(response.accounts[0].slots[&word(1)], word(1));
+    }
+
+    /// The view answer, a cached and an uncached account, writes the JSON of its owned DTO.
+    #[test]
+    fn contract_state_view_serializes_like_its_owned_answer() {
+        let harness = accounts();
+        harness.push(with_account(msg(6), account_delta(&addr(2), 6, ChangeType::Creation)));
+        let request = contract_request(vec![addr(1), addr(2)], dto::VersionParam::default());
+
+        let view = harness
+            .service
+            .contract_state_view(&request)
+            .unwrap();
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["accounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(json, serde_json::to_value(dto::StateRequestResponse::from(view)).unwrap());
     }
 
     #[test]

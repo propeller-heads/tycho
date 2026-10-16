@@ -23,9 +23,9 @@
 //! under a millisecond, so blocking is acceptable and a reader never observes half a block.
 //!
 //! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
-//! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
-//! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
-//! so that copy happens at most once per fold instead of once per read.
+//! only the `Arc` under the read lock, and a view (`view`) holds it outside the lock. A fold that
+//! changes an account a reader still holds copies the account first, under the write lock
+//! (`Arc::make_mut`), so that copy happens at most once per fold instead of once per read.
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -55,6 +55,8 @@ use tycho_common::{
     Bytes,
 };
 
+pub(crate) mod view;
+
 use super::window::FoldSink;
 
 /// What a write did to a [`Timestamped`].
@@ -83,8 +85,7 @@ impl<T> Timestamped<T> {
         Self { value, written_at }
     }
 
-    #[cfg(test)]
-    pub(crate) fn value(&self) -> &T {
+    fn value(&self) -> &T {
         &self.value
     }
 
