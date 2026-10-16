@@ -1,8 +1,9 @@
-//! Runs the CPU-heavy steps of state responses off the actix request workers.
+//! Runs the CPU-heavy steps of state and delta catch-up responses off the actix request workers.
 //!
 //! A request worker serves all requests on its connections from one thread, so CPU-heavy work
 //! that runs on it delays every other request it serves, health checks included. Building or
-//! serializing a large state response can take seconds.
+//! serializing a large state response can take seconds; a catch-up of a full window, tens of
+//! milliseconds.
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{http::header::ContentType, HttpResponse};
@@ -27,14 +28,16 @@ const JSON_BYTES_PER_ACCOUNT: usize = 512;
 /// JSON bytes of the fixed fields of one component state.
 const JSON_BYTES_PER_COMPONENT: usize = 100;
 
-/// Runs the CPU-heavy steps of state responses off the actix request workers. Each endpoint and
-/// step (build, serialize) has its own pool of one permit per request worker, so a job never
-/// waits behind jobs of another endpoint or step: a protocol state response, built in
-/// milliseconds, does not queue behind contract state builds that take seconds, and a built
-/// response does not queue behind builds that started after it.
+/// Runs the CPU-heavy steps of state and delta catch-up responses off the actix request workers.
+/// Each state endpoint and step (build, serialize) has its own pool of one permit per request
+/// worker, so a job never waits behind jobs of another endpoint or step: a protocol state
+/// response, built in milliseconds, does not queue behind contract state builds that take seconds,
+/// and a built response does not queue behind builds that started after it. Delta catch-ups have
+/// one pool of their own, as each runs as a single job.
 pub(super) struct OffWorker {
     contract_state: EndpointPools,
     protocol_state: EndpointPools,
+    delta_catch_up: Pool,
 }
 
 impl OffWorker {
@@ -45,6 +48,7 @@ impl OffWorker {
         Self {
             contract_state: EndpointPools::new(Endpoint::ContractState, workers),
             protocol_state: EndpointPools::new(Endpoint::ProtocolState, workers),
+            delta_catch_up: Pool::new(DELTA_CATCH_UP, DELTA_CATCH_UP_STEP, workers),
         }
     }
 
@@ -98,6 +102,35 @@ impl OffWorker {
             .body(body))
     }
 
+    /// Runs `answer` and serializes its value in one job on the blocking thread pool, in the
+    /// caller's tracing span, and answers the value as a `200 OK` JSON response, the same as
+    /// [`HttpResponse::json`]. The job keeps its permit until it returns, also when the caller
+    /// stops waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `answer`, or [`RpcError::Unknown`] if serialization fails or the job
+    /// panics.
+    pub(super) async fn delta_catch_up<V>(
+        &self,
+        answer: impl FnOnce() -> Result<V, RpcError> + Send + 'static,
+    ) -> Result<HttpResponse, RpcError>
+    where
+        V: Serialize,
+    {
+        let body = self
+            .delta_catch_up
+            .run(move || {
+                serde_json::to_vec(&answer()?).map_err(|err| {
+                    RpcError::Unknown(format!("Failed to serialize response: {err}"))
+                })
+            })
+            .await??;
+        Ok(HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .body(body))
+    }
+
     fn pools(&self, endpoint: Endpoint) -> &EndpointPools {
         match endpoint {
             Endpoint::ContractState => &self.contract_state,
@@ -115,22 +148,27 @@ struct EndpointPools {
 impl EndpointPools {
     fn new(endpoint: Endpoint, size: usize) -> Self {
         Self {
-            build: Pool::new(endpoint, "build", size),
-            serialize: Pool::new(endpoint, "serialize", size),
+            build: Pool::new(endpoint.label(), "build", size),
+            serialize: Pool::new(endpoint.label(), "serialize", size),
         }
     }
 }
 
+/// The `endpoint` label of the delta catch-up pool.
+const DELTA_CATCH_UP: &str = "delta_catch_up";
+/// The `step` label of the delta catch-up pool, whose jobs build and serialize a response.
+const DELTA_CATCH_UP_STEP: &str = "build_and_serialize";
+
 /// A bounded share of the blocking thread pool.
 struct Pool {
     /// The `endpoint` and `step` labels of the `off_worker_permit_wait_ms` histogram.
-    endpoint: Endpoint,
+    endpoint: &'static str,
     step: &'static str,
     permits: Arc<Semaphore>,
 }
 
 impl Pool {
-    fn new(endpoint: Endpoint, step: &'static str, size: usize) -> Self {
+    fn new(endpoint: &'static str, step: &'static str, size: usize) -> Self {
         Self { endpoint, step, permits: Arc::new(Semaphore::new(size)) }
     }
 
@@ -152,7 +190,7 @@ impl Pool {
             .map_err(|err| RpcError::Unknown(format!("Off-worker permits closed: {err}")))?;
         metrics::histogram!(
             "off_worker_permit_wait_ms",
-            "endpoint" => self.endpoint.label(),
+            "endpoint" => self.endpoint,
             "step" => self.step
         )
         .record(wait_started.elapsed().as_secs_f64() * 1000.0);
@@ -226,7 +264,7 @@ mod tests {
     // `recv_timeout` gives up.
     #[tokio::test]
     async fn run_keeps_the_runtime_free_while_the_work_blocks() {
-        let pool = Pool::new(Endpoint::ContractState, "test", 1);
+        let pool = Pool::new(Endpoint::ContractState.label(), "test", 1);
         let (release, released) = mpsc::channel::<()>();
 
         let job = pool.run(move || {
@@ -242,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_keeps_the_permit_until_the_work_returns() {
-        let pool = Pool::new(Endpoint::ContractState, "test", 1);
+        let pool = Pool::new(Endpoint::ContractState.label(), "test", 1);
         let (release, released) = mpsc::channel::<()>();
 
         // Stop waiting while the work still runs, as the handler does when it is dropped.
@@ -264,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_runs_no_more_jobs_than_permits() {
-        let pool = Arc::new(Pool::new(Endpoint::ContractState, "test", 1));
+        let pool = Arc::new(Pool::new(Endpoint::ContractState.label(), "test", 1));
         let (release, released) = mpsc::channel::<()>();
         let first = tokio::spawn({
             let pool = Arc::clone(&pool);
@@ -299,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_reports_a_panicking_job_and_frees_its_permit() {
-        let pool = Pool::new(Endpoint::ContractState, "test", 1);
+        let pool = Pool::new(Endpoint::ContractState.label(), "test", 1);
 
         let result = pool
             .run(|| -> () { panic!("job failed") })
@@ -415,10 +453,11 @@ mod tests {
     async fn json_serializes_only_large_responses_off_the_worker() {
         let off_worker = OffWorker {
             contract_state: EndpointPools {
-                build: Pool::new(Endpoint::ContractState, "build", 1),
-                serialize: Pool::new(Endpoint::ContractState, "serialize", 0),
+                build: Pool::new(Endpoint::ContractState.label(), "build", 1),
+                serialize: Pool::new(Endpoint::ContractState.label(), "serialize", 0),
             },
             protocol_state: EndpointPools::new(Endpoint::ProtocolState, 1),
+            delta_catch_up: Pool::new(DELTA_CATCH_UP, DELTA_CATCH_UP_STEP, 1),
         };
         let below = contract_state_response(slots_at_threshold() - 1, 0);
         let at = contract_state_response(slots_at_threshold(), 0);
@@ -442,6 +481,7 @@ mod tests {
         let off_worker = OffWorker {
             contract_state: EndpointPools::new(Endpoint::ContractState, 0),
             protocol_state: EndpointPools::new(Endpoint::ProtocolState, 1),
+            delta_catch_up: Pool::new(DELTA_CATCH_UP, DELTA_CATCH_UP_STEP, 1),
         };
         let large = contract_state_response(slots_at_threshold(), 0);
         let wait = Duration::from_millis(50);
@@ -461,5 +501,50 @@ mod tests {
         );
         assert!(contract_built.is_err(), "a contract state build must wait for a permit");
         assert!(contract_serialized.is_err(), "a contract state serialization must wait");
+    }
+
+    // Every state pool is full, so only a job that does not queue behind state jobs can return.
+    #[actix_web::test]
+    async fn delta_catch_up_jobs_do_not_wait_for_state_permits() {
+        let off_worker = OffWorker {
+            contract_state: EndpointPools::new(Endpoint::ContractState, 0),
+            protocol_state: EndpointPools::new(Endpoint::ProtocolState, 0),
+            delta_catch_up: Pool::new(DELTA_CATCH_UP, DELTA_CATCH_UP_STEP, 1),
+        };
+        let value = contract_state_response(10, 0);
+        let expected = HttpResponse::Ok().json(Arc::clone(&value));
+
+        let answered = tokio::time::timeout(
+            Duration::from_millis(50),
+            off_worker.delta_catch_up(move || Ok(value)),
+        )
+        .await;
+
+        let actual = answered
+            .expect("a catch-up must not wait for state permits")
+            .unwrap();
+        assert_eq!(actual.status(), StatusCode::OK);
+        let content_type = actix_web::http::header::CONTENT_TYPE;
+        assert_eq!(actual.headers().get(&content_type), expected.headers().get(&content_type));
+        let actual_body = actix_web::body::to_bytes(actual.into_body())
+            .await
+            .unwrap();
+        let expected_body = actix_web::body::to_bytes(expected.into_body())
+            .await
+            .unwrap();
+        assert_eq!(actual_body, expected_body);
+    }
+
+    #[actix_web::test]
+    async fn delta_catch_up_returns_the_error_of_its_answer() {
+        let off_worker = OffWorker::new();
+
+        let answer = off_worker
+            .delta_catch_up(|| -> Result<(), RpcError> {
+                Err(RpcError::UnknownExtractor("ethereum:sushiswap".to_string()))
+            })
+            .await;
+
+        assert!(matches!(answer, Err(RpcError::UnknownExtractor(_))), "{answer:?}");
     }
 }

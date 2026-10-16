@@ -107,12 +107,6 @@ pub trait PendingDeltasBuffer {
     ///
     /// `UnknownExtractor` when no window serves `protocol_system`, `LockError` when its lock is
     /// poisoned.
-    // An `expect`, unlike an `allow`, fails the build once the endpoint calls this, so it cannot
-    // outlive the gap between the two changes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the delta catch-up endpoint will call it; tests do already")
-    )]
     fn catch_up_path(
         &self,
         protocol_system: &str,
