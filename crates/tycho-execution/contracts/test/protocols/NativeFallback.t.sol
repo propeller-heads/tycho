@@ -78,7 +78,7 @@ contract NativeFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     /// Native scales the signed minimum output to an input below the signed amount.
-    function testNativeUnderDelivery() public {
+    function testInputBelowSignedAmount() public {
         uint256 amountIn = SIGNED_USDC_IN * 9 / 10;
         deal(USDC_ADDR, address(router), amountIn);
 
