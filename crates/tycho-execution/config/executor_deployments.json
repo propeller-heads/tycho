@@ -269,6 +269,14 @@
       "contract": "NativeExecutor",
       "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
     },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x0000000000000000000000000000000000000000"]
+    },
     "pancakeswap_infinity_cl": {
       "contract": "PancakeswapInfinityExecutor",
       "args": [
