@@ -89,6 +89,9 @@ impl LiquoriceClientBuilder {
     }
 
     /// Executes the swaps through Tycho's `LiquoriceFallbackRouter`. Off by default.
+    ///
+    /// The router does not support Liquorice partial fills: a swap whose input is below the
+    /// quote's signed amount fills through the fallback pool instead.
     pub fn with_fallback_router(mut self) -> Self {
         self.via_fallback_router = true;
         self
