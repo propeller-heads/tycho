@@ -23,7 +23,7 @@ use tycho_common::{
         },
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
-        Chain, ExtractorIdentity,
+        Chain, ExtractorFingerprint, ExtractorIdentity,
     },
     Bytes,
 };
@@ -130,6 +130,9 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     include_snapshots: bool,
     component_tracker: ComponentTracker<R>,
     last_synced_block: Option<BlockHeader>,
+    /// The fingerprint the subscription that emitted `last_synced_block` reported. `None` before
+    /// the first sync, or when the server or deltas client predates fingerprints.
+    synced_fingerprint: Option<ExtractorFingerprint>,
     timeout: u64,
     include_tvl: bool,
     compression: bool,
@@ -441,6 +444,7 @@ where
             max_retries,
             retry_cooldown,
             last_synced_block: None,
+            synced_fingerprint: None,
             timeout,
             include_tvl,
             compression,
@@ -511,9 +515,9 @@ where
             .with_state(self.include_snapshots)
             .with_compression(self.compression)
             .with_partial_blocks(self.partial_blocks);
-        let (subscription_id, mut msg_rx) = match self
+        let (subscription_id, mut msg_rx, fingerprint) = match self
             .deltas_client
-            .subscribe(self.extractor_id.clone(), subscription_options)
+            .subscribe_with_fingerprint(self.extractor_id.clone(), subscription_options)
             .await
         {
             Ok(result) => result,
@@ -535,6 +539,17 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
+            // An upgraded extractor may have emitted other deltas for the blocks the consumer
+            // already applied, so a block that follows `last_synced_block` resumes the stream only
+            // when the fingerprint is unchanged. Otherwise the consumer resyncs from a snapshot.
+            let may_resume = self.may_resume(fingerprint.as_ref());
+            if !may_resume && self.last_synced_block.is_some() {
+                info!(
+                    synced = ?self.synced_fingerprint,
+                    reported = ?fingerprint,
+                    "Extractor fingerprint changed; resyncing from a snapshot"
+                );
+            }
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
@@ -600,7 +615,9 @@ where
 
                     // Check if we've already synced this block (applies to both modes)
                     if let Some(current) = &self.last_synced_block {
-                        if current.number >= incoming.number && !self.is_next_expected(&incoming) {
+                        if current.number >= incoming.number &&
+                            !(may_resume && self.is_next_expected(&incoming))
+                        {
                             if !warned_skipping_synced {
                                 info!(extractor=%self.extractor_id, from=incoming.number, to=current.number, "Syncing. Skipping already synced block");
                                 warned_skipping_synced = true;
@@ -610,7 +627,9 @@ where
                     }
                     match snapshot_not_before {
                         Some(not_before) if Instant::now() < not_before => continue,
-                        None if !snapshot_delay.is_zero() && !self.is_next_expected(&incoming) => {
+                        None if !snapshot_delay.is_zero() &&
+                            !(may_resume && self.is_next_expected(&incoming)) =>
+                        {
                             info!(
                                 extractor=%self.extractor_id,
                                 delay_ms=snapshot_delay.as_millis(),
@@ -629,7 +648,7 @@ where
                 let header: BlockHeader = (&first_msg).into();
 
                 // If possible skip retrieving snapshots
-                if !self.is_next_expected(&header) {
+                if !(may_resume && self.is_next_expected(&header)) {
                     info!("Retrieving snapshot");
                     // With partial blocks, the server only has full blocks in its buffer; pass the
                     // previous block's header so we request state at N-1, then merge with deltas.
@@ -736,6 +755,7 @@ where
 
             block_tx.send(Ok(msg)).await?;
             self.last_synced_block = Some(header);
+            self.synced_fingerprint = fingerprint;
             loop {
                 select! {
                     deltas_opt = msg_rx.recv() => {
@@ -1123,8 +1143,14 @@ where
         result
     }
 
-    /// Whether `incoming` continues the stream from `last_synced_block`, so the consumer needs no
-    /// snapshot. Never true for a revert.
+    /// Whether a subscription that reported `fingerprint` may continue the consumer's stream from
+    /// `last_synced_block` without a snapshot: the fingerprint equals the one the consumer synced
+    /// under, or neither subscription reported one (servers that predate fingerprints).
+    fn may_resume(&self, fingerprint: Option<&ExtractorFingerprint>) -> bool {
+        self.synced_fingerprint.as_ref() == fingerprint
+    }
+
+    /// Whether `incoming` follows `last_synced_block`. Never true for a revert.
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
         // A revert to the block after `last_synced_block` has the right parent, but it carries
         // only the keys the reverted blocks above it changed, not the target block's own changes.
@@ -1293,6 +1319,7 @@ mod test {
 
     use std::{collections::HashSet, sync::Arc};
 
+    use rstest::rstest;
     use tycho_common::models::{
         blockchain::{
             AddressStorageLocation, Block, BlockAggregatedChanges, DCIUpdate, EntryPoint,
@@ -4025,13 +4052,13 @@ mod test {
 
     impl RunningSync {
         /// Initializes `state_sync` and subscribes as if it had synced up to `last_synced`.
-        async fn start(
-            mut state_sync: ProtocolStateSynchronizer<
-                ArcRPCClient<MockRPCClient>,
-                ArcDeltasClient<MockDeltasClient>,
-            >,
+        async fn start<D>(
+            mut state_sync: ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, D>,
             last_synced: Option<BlockHeader>,
-        ) -> Self {
+        ) -> Self
+        where
+            D: DeltasClient + Clone + Send + Sync + 'static,
+        {
             state_sync
                 .initialize()
                 .await
@@ -4768,6 +4795,359 @@ mod test {
             Some(&Bytes::from(vec![3u8])),
             "Component3's snapshot misses the partial that fired it"
         );
+    }
+
+    /// A deltas client whose subscriptions all report `fingerprint`. `ArcDeltasClient` keeps the
+    /// trait's default, which reports none.
+    #[derive(Clone)]
+    struct FingerprintedDeltasClient {
+        inner: ArcDeltasClient<MockDeltasClient>,
+        fingerprint: Option<ExtractorFingerprint>,
+    }
+
+    #[async_trait]
+    impl DeltasClient for FingerprintedDeltasClient {
+        async fn subscribe(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+            self.inner
+                .subscribe(extractor_id, options)
+                .await
+        }
+
+        async fn subscribe_with_fingerprint(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<
+            (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>),
+            DeltasError,
+        > {
+            let (subscription_id, receiver) = self
+                .inner
+                .subscribe(extractor_id, options)
+                .await?;
+            Ok((subscription_id, receiver, self.fingerprint.clone()))
+        }
+
+        async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError> {
+            self.inner
+                .unsubscribe(subscription_id)
+                .await
+        }
+
+        async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+            self.inner.connect().await
+        }
+
+        async fn close(&self) -> Result<(), DeltasError> {
+            self.inner.close().await
+        }
+    }
+
+    fn fingerprint(byte: u8) -> ExtractorFingerprint {
+        ExtractorFingerprint(Bytes::from(vec![byte]))
+    }
+
+    /// A deltas client that forwards every method to the mock, `subscribe_with_fingerprint`
+    /// included, so each subscription's expectation sets the fingerprint it reports.
+    #[derive(Clone)]
+    struct ForwardingDeltasClient(Arc<MockDeltasClient>);
+
+    #[async_trait]
+    impl DeltasClient for ForwardingDeltasClient {
+        async fn subscribe(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+            self.0
+                .subscribe(extractor_id, options)
+                .await
+        }
+
+        async fn subscribe_with_fingerprint(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<
+            (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>),
+            DeltasError,
+        > {
+            self.0
+                .subscribe_with_fingerprint(extractor_id, options)
+                .await
+        }
+
+        async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError> {
+            self.0
+                .unsubscribe(subscription_id)
+                .await
+        }
+
+        async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+            self.0.connect().await
+        }
+
+        async fn close(&self) -> Result<(), DeltasError> {
+            self.0.close().await
+        }
+    }
+
+    /// Like `with_mocked_clients(true, false, ..)`, but with any deltas client.
+    fn with_deltas_client<D>(
+        rpc_client: MockRPCClient,
+        deltas_client: D,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, D>
+    where
+        D: DeltasClient + Clone + Send + Sync + 'static,
+    {
+        ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            true,
+            ComponentFilter::with_tvl_range(50.0, 50.0),
+            1,
+            Duration::from_secs(0),
+            true,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            deltas_client,
+            10_u64,
+        )
+    }
+
+    /// Like `with_mocked_clients(true, false, ..)`, but every subscription reports `fingerprint`.
+    fn with_fingerprinted_clients(
+        rpc_client: MockRPCClient,
+        deltas_client: MockDeltasClient,
+        fingerprint: Option<ExtractorFingerprint>,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, FingerprintedDeltasClient> {
+        with_deltas_client(
+            rpc_client,
+            FingerprintedDeltasClient {
+                inner: ArcDeltasClient(Arc::new(deltas_client)),
+                fingerprint,
+            },
+        )
+    }
+
+    #[rstest]
+    #[case::unchanged(Some(fingerprint(1)), Some(fingerprint(1)), vec![])]
+    #[case::upgraded(Some(fingerprint(1)), Some(fingerprint(2)), vec![6])]
+    #[case::server_predates_fingerprints(None, None, vec![])]
+    #[case::server_stopped_reporting_one(Some(fingerprint(1)), None, vec![6])]
+    #[case::server_started_reporting_one(None, Some(fingerprint(1)), vec![6])]
+    #[test_log::test(tokio::test)]
+    async fn test_restart_resumes_only_under_the_synced_fingerprint(
+        #[case] synced: Option<ExtractorFingerprint>,
+        #[case] reported: Option<ExtractorFingerprint>,
+        #[case] expected_snapshot_blocks: Vec<u64>,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = with_fingerprinted_clients(rpc_client, deltas_client, reported);
+        state_sync.synced_fingerprint = synced;
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // The restarted extractor replays blocks 4 and 5, which the consumer already applied,
+        // then block 6, which follows block 5. An upgraded extractor may have emitted other
+        // deltas for blocks 4 and 5 than the ones the consumer applied.
+        for block in [4, 5, 6] {
+            deltas_tx
+                .send(make_block_changes(block, None))
+                .await
+                .unwrap();
+        }
+        let first = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), expected_snapshot_blocks);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_snapshot_delay_applies_when_the_fingerprint_changed() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let deltas_client = mock_deltas_emitting((10..=20).collect());
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let first = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        // Block 10 follows block 9, but the fingerprint changed. Blocks 10-15 arrive within the
+        // 300 ms delay, 50 ms apart.
+        let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
+        assert_eq!(snapshot_blocks.len(), 1, "Should request one snapshot");
+        assert!(
+            snapshot_blocks[0] >= 16,
+            "Snapshot at block {} is inside the delay",
+            snapshot_blocks[0]
+        );
+        assert_eq!(first.header.number, snapshot_blocks[0]);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_restart_after_a_resync_resumes_under_the_new_fingerprint() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        // Two subscriptions, each ending after one block.
+        for block in [6, 7] {
+            let (tx, rx) = channel(1);
+            tx.try_send(make_block_changes(block, None))
+                .unwrap();
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let ended = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The first subscription ends");
+        let (_, Some(end_rx)) = *ended else {
+            panic!("The close signal was never sent");
+        };
+        state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The second subscription ends");
+
+        let mut emitted = Vec::new();
+        while let Ok(message) = block_rx.try_recv() {
+            emitted.push(
+                message
+                    .expect("Should not be an error")
+                    .header
+                    .number,
+            );
+        }
+        assert_eq!(emitted, vec![6, 7]);
+        // The fingerprint changed before block 6, so the consumer resynced under the new one;
+        // block 7 then follows block 6 under the same fingerprint.
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![6]);
+    }
+
+    /// Runs a synchronizer through `start()` with a 5 s snapshot jitter. Its first subscription
+    /// delivers blocks 1 and 2 under fingerprint 1, then ends. The second reports
+    /// `second_fingerprint` and delivers block 3, which follows block 2, then a block per second.
+    /// Returns the blocks of the first three messages it emits and of every snapshot request.
+    async fn restart_reporting(second_fingerprint: ExtractorFingerprint) -> (Vec<u64>, Vec<u64>) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        let (first_tx, first_rx) = channel(2);
+        for block in [1, 2] {
+            first_tx
+                .try_send(make_block_changes(block, None))
+                .unwrap();
+        }
+        drop(first_tx);
+        deltas_client
+            .expect_subscribe_with_fingerprint()
+            .times(1)
+            .return_once(move |_, _| Ok((Uuid::default(), first_rx, Some(fingerprint(1)))));
+        let (second_tx, second_rx) = channel(16);
+        deltas_client
+            .expect_subscribe_with_fingerprint()
+            .times(1)
+            .return_once(move |_, _| {
+                tokio::spawn(async move {
+                    for block in 3..=10 {
+                        let _ = second_tx
+                            .send(make_block_changes(block, None))
+                            .await;
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                    second_tx.closed().await;
+                });
+                Ok((Uuid::default(), second_rx, Some(second_fingerprint)))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_deltas_client(rpc_client, ForwardingDeltasClient(Arc::new(deltas_client)))
+                .with_snapshot_jitter(MIN_SNAPSHOT_JITTER);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+        let mut emitted = Vec::new();
+        for _ in 0..3 {
+            let message = timeout(Duration::from_secs(30), block_rx.recv())
+                .await
+                .expect("Should emit a message")
+                .expect("Channel should be open")
+                .expect("Should not be an error");
+            emitted.push(message.header.number);
+        }
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
+        (emitted, snapshot_blocks)
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_restart_through_start_resumes_under_an_unchanged_fingerprint() {
+        let (emitted, snapshot_blocks) = restart_reporting(fingerprint(1)).await;
+
+        assert_eq!(emitted, vec![1, 2, 3]);
+        assert_eq!(snapshot_blocks, vec![1]);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_restart_through_start_takes_a_delayed_snapshot_after_an_upgrade() {
+        let (emitted, snapshot_blocks) = restart_reporting(fingerprint(2)).await;
+
+        assert_eq!(emitted[..2], [1, 2]);
+        // Block 3 follows block 2 but starts the delay instead; the snapshot comes at the first
+        // block at least the delay (at most 5 s, a block per second) after it.
+        let restarted_at = emitted[2];
+        assert!((4..=8).contains(&restarted_at), "Snapshot at block {restarted_at}");
+        assert_eq!(snapshot_blocks, vec![1, restarted_at]);
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {

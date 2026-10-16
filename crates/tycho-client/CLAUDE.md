@@ -40,11 +40,18 @@ TychoStreamBuilder (stream.rs)
 
 1. `WsDeltasClient` subscribes; first message determines snapshot block.
    On a restart, a first message that follows the last synced block (`is_next_expected`) resumes
-   without a snapshot. A revert never does: it carries only the keys the reverted blocks changed,
-   not its target block's own changes. Every message, the first included, goes through
-   `handle_block`: TVL tracking, background snapshots for new components, DCI entry points, then
-   filtering to the tracked components and contracts. With a snapshot, the first message is
-   handled after the fetch succeeds and merged into the snapshot message.
+   without a snapshot, but only if the subscription reports the fingerprint the client synced
+   under (`may_resume`: `synced_fingerprint`, set with `last_synced_block` when a subscription's
+   first message is emitted). An upgraded extractor may have emitted other deltas for blocks the
+   client already applied, so a changed fingerprint, or one that only one of the two
+   subscriptions reported, forces a snapshot. Two `None`s (servers that predate fingerprints)
+   resume as before. Blocks at or below the last synced one are still skipped, and a snapshot the
+   fingerprint forces waits for the snapshot delay below. A revert never resumes: it carries only
+   the keys the reverted blocks changed, not its target block's own changes. Every message, the
+   first included, goes through `handle_block`: TVL tracking, background snapshots for new
+   components, DCI entry points, then filtering to the tracked components and contracts. With a
+   snapshot, the first message is handled after the fetch succeeds and merged into the snapshot
+   message.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
    tracked component), the synchronizer discards deltas for a random delay in
    `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least
