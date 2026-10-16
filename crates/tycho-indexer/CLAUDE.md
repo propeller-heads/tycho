@@ -332,7 +332,9 @@ clients that predate it). `/delta_catch_up` serves only clients that send the sa
 Not in the fingerprint:
 
 - The `partial_blocks` flag: partial delivery yields the same full-block messages (see "Delta
-  format files"), and partial-block subscribers always resync from a snapshot.
+  format files"). Partial-block subscribers never catch up through `/delta_catch_up`: when their
+  next message does not follow their last one, they resync from a snapshot. They resume without
+  one, like full-block subscribers, only when it follows under an unchanged fingerprint.
 - The `TRACE_*` variables: they pick the tracing node and its retry policy, not what is traced
   (see `create_rpc_dci`).
 - The code of `main.rs`'s `initialize_accounts`: its config fields are hashed, its code is not.
