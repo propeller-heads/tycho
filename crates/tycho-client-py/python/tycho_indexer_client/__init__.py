@@ -8,6 +8,7 @@ from .rpc_client import (
     ProtocolSystemsParams,
     ComponentTvlParams,
     TracedEntryPointParams,
+    DeltaCatchUpParams,
 )
 from .dto import (
     Chain,
@@ -26,5 +27,9 @@ from .dto import (
     ContractStateResponse,
     TokensResponse,
     TracedEntryPointsResponse,
+    BlockChanges,
+    DeltaCatchUp,
+    DeltaCatchUpResult,
+    DeltaCatchUpUnavailable,
 )
 from .stream import TychoStream

@@ -22,6 +22,9 @@ from .dto import (
     TokensResponse,
     TracedEntryPointsResponse,
     PaginationParams,
+    DeltaCatchUpParams,
+    DeltaCatchUp,
+    DeltaCatchUpResult,
 )
 
 
@@ -283,6 +286,38 @@ class TychoRPCClient:
 
         res = self._post_request("/v1/traced_entry_points", body=params_dict)
         return TracedEntryPointsResponse(**res)
+
+    def get_delta_catch_up(self, params: DeltaCatchUpParams) -> DeltaCatchUpResult:
+        """
+        Get the messages a WebSocket subscriber missed while it was disconnected.
+
+        Args:
+            params: The extractor, the last block the client applied, the block to reach and
+                the fingerprint the client synced under
+
+        Returns:
+            ``DeltaCatchUp.Available`` with the messages, ``DeltaCatchUp.Unavailable`` with
+            the reason the server cannot serve them, or ``DeltaCatchUp.Unsupported`` when the
+            server answers 404 (it predates the endpoint). Resync from a snapshot unless the
+            answer is ``Available``.
+
+        Raises:
+            TychoRPCError: On any other failed request, e.g. 400 for an extractor the server
+                does not run or a plan without access to it
+        """
+        params_dict = params.dict(exclude_none=True)
+        params_dict["chain"] = self._chain
+
+        try:
+            res = self._post_request("/v1/delta_catch_up", body=params_dict)
+        except TychoRPCError as e:
+            if e.status_code == 404:
+                return DeltaCatchUp.Unsupported()
+            raise
+        if res.get("status") == "available":
+            return DeltaCatchUp.Available(**res)
+        # Any status other than "unavailable" fails validation here.
+        return DeltaCatchUp.Unavailable(**res)
 
     def health(self) -> dict:
         """

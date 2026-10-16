@@ -1,0 +1,237 @@
+{
+  "status": "available",
+  "messages": [
+    {
+      "extractor": "vm:balancer_v2",
+      "chain": "ethereum",
+      "block": {
+        "number": 2,
+        "hash": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "parent_hash": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "chain": "ethereum",
+        "ts": "2026-10-15T12:00:24"
+      },
+      "finalized_block_height": 1,
+      "revert": true,
+      "new_tokens": {},
+      "account_updates": {
+        "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": {
+          "address": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+          "chain": "ethereum",
+          "slots": {
+            "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0505050505050505050505050505050505050505050505050505050505050505"
+          },
+          "balance": null,
+          "code": null,
+          "change": "Update"
+        }
+      },
+      "state_updates": {
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+          "component_id": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          "updated_attributes": {
+            "reserve0": "0x0de0b6b3a7640000"
+          },
+          "deleted_attributes": [
+            "paused"
+          ]
+        }
+      },
+      "new_protocol_components": {},
+      "deleted_protocol_components": {
+        "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": {
+          "id": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+          "protocol_system": "vm:balancer_v2",
+          "protocol_type_name": "balancer_v2_pool",
+          "chain": "ethereum",
+          "tokens": [
+            "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+          ],
+          "contract_ids": [
+            "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+          ],
+          "static_attributes": {
+            "pool_id": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+          },
+          "change": "Deletion",
+          "creation_tx": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "created_at": "2026-10-15T12:00:36"
+        }
+      },
+      "component_balances": {
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0": {
+            "token": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "balance": "0x0de0b6b3a7640000",
+            "balance_float": 1e+18,
+            "modify_tx": "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+            "component_id": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+          }
+        }
+      },
+      "account_balances": {},
+      "component_tvl": {},
+      "dci_update": {
+        "new_entrypoints": {},
+        "new_entrypoint_params": {},
+        "trace_results": {}
+      }
+    },
+    {
+      "extractor": "vm:balancer_v2",
+      "chain": "ethereum",
+      "block": {
+        "number": 3,
+        "hash": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "parent_hash": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "chain": "ethereum",
+        "ts": "2026-10-15T12:00:36"
+      },
+      "finalized_block_height": 1,
+      "revert": false,
+      "new_tokens": {
+        "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+          "chain": "ethereum",
+          "address": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+          "symbol": "USDC",
+          "decimals": 6,
+          "tax": 0,
+          "gas": [
+            29962
+          ],
+          "quality": 100
+        }
+      },
+      "account_updates": {
+        "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": {
+          "address": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+          "chain": "ethereum",
+          "slots": {
+            "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0707070707070707070707070707070707070707070707070707070707070707"
+          },
+          "balance": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "code": "0x60806040",
+          "change": "Update"
+        }
+      },
+      "state_updates": {
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+          "component_id": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          "updated_attributes": {
+            "reserve0": "0x1bc16d674ec80000"
+          },
+          "deleted_attributes": []
+        }
+      },
+      "new_protocol_components": {
+        "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": {
+          "id": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "protocol_system": "vm:balancer_v2",
+          "protocol_type_name": "balancer_v2_pool",
+          "chain": "ethereum",
+          "tokens": [
+            "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+          ],
+          "contract_ids": [
+            "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+          ],
+          "static_attributes": {
+            "pool_id": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+          },
+          "change": "Creation",
+          "creation_tx": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "created_at": "2026-10-15T12:00:36"
+        }
+      },
+      "deleted_protocol_components": {},
+      "component_balances": {
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": {
+          "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+            "token": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+            "balance": "0x05f5e100",
+            "balance_float": 100000000.0,
+            "modify_tx": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "component_id": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+          }
+        }
+      },
+      "account_balances": {
+        "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": {
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0": {
+            "account": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+            "token": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "balance": "0x0de0b6b3a7640000",
+            "modify_tx": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4"
+          }
+        }
+      },
+      "component_tvl": {
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": 1234.5
+      },
+      "dci_update": {
+        "new_entrypoints": {
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1": [
+            {
+              "external_id": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:getRate()",
+              "target": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+              "signature": "getRate()"
+            }
+          ]
+        },
+        "new_entrypoint_params": {
+          "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:getRate()": [
+            [
+              {
+                "method": "rpctracer",
+                "caller": "0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+                "calldata": "0x679aefce",
+                "state_overrides": {
+                  "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5": {
+                    "slots": {
+                      "Diff": {
+                        "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                      }
+                    },
+                    "native_balance": "0x01",
+                    "code": null
+                  },
+                  "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": {
+                    "slots": {
+                      "Replace": {}
+                    },
+                    "native_balance": null,
+                    "code": "0x6080"
+                  }
+                },
+                "prune_addresses": [
+                  "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+                ]
+              },
+              "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+            ]
+          ]
+        },
+        "trace_results": {
+          "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:getRate()": {
+            "retriggers": [
+              [
+                "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+                {
+                  "key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                  "offset": 12
+                }
+              ]
+            ],
+            "accessed_slots": {
+              "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5": [
+                "0x0000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

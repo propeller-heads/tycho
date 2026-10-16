@@ -445,6 +445,26 @@ class TracedEntryPointParams(BaseModel):
         allow_population_by_field_name = True
 
 
+class DeltaCatchUpParams(BaseModel):
+    """Asks for the messages a WebSocket subscriber of ``protocol_system`` missed between the
+    last block it applied and the block its new subscription continues from.
+    ``TychoRPCClient`` adds its chain; the server rejects any other field."""
+
+    protocol_system: str
+    # Hash and number of the last block the client applied.
+    from_block_hash: HexBytes
+    from_block_number: int
+    # The block the messages must lead to: the parent of the new subscription's first
+    # message, or that message's target when it is a revert.
+    to_block_hash: HexBytes
+    # The fingerprint the subscription reported when the client synced
+    # (`Response.NewSubscription.fingerprint`).
+    fingerprint: HexBytes
+    # Whether the messages carry state updates (`state_updates` and `account_updates`), like
+    # the subscription option of the same name.
+    include_state: bool = True
+
+
 # Response objects
 
 
@@ -503,3 +523,62 @@ class TracedEntryPointsResponse(BaseModel):
         str, List[tuple]
     ]  # component_id -> [(EntryPointWithTracingParams, TracingResult)]
     pagination: PaginationResponse
+
+
+class DeltaCatchUpUnavailable(str, Enum):
+    """Why the server cannot serve a delta catch-up. A reason this client does not know
+    parses as ``unknown``; servers never send ``unknown`` themselves."""
+
+    # The server runs no extractors (the standalone RPC server).
+    no_window = "no_window"
+    # The extractor's fingerprint differs from the request's, or it has none.
+    fingerprint_changed = "fingerprint_changed"
+    # The extractor's window holds no block: at startup, or right after a restart.
+    empty_window = "empty_window"
+    # `to_block_hash` is not a canonical block in the window (yet).
+    to_not_in_window = "to_not_in_window"
+    # `from_block_hash` is older than the parent of the window's oldest block.
+    below_floor = "below_floor"
+    # `from_block_hash` is neither in the window nor orphaned by a revert it remembers.
+    unknown_hash = "unknown_hash"
+    # The client received a revert the window has not applied yet.
+    to_not_ahead = "to_not_ahead"
+    # A reason added to the server after this client.
+    unknown = "unknown"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            return cls.unknown
+        return None
+
+
+class DeltaCatchUp:
+    """Answer of ``TychoRPCClient.get_delta_catch_up``: an instance of ``Available``,
+    ``Unavailable`` or ``Unsupported``, each with a ``status`` naming it. Only ``Available``
+    lets the client continue without a snapshot."""
+
+    class Available(BaseModel):
+        """The missed messages, oldest first, as the WebSocket sent them: revert messages
+        and full blocks. Applied in order to the state at `from_block_hash`, they give the
+        state at `to_block_hash`; the last one may be a revert to that block. Empty when the
+        two blocks are the same."""
+
+        status: Literal["available"] = "available"
+        messages: List[BlockChanges]
+
+    class Unavailable(BaseModel):
+        """The server cannot serve the messages; resync from a snapshot."""
+
+        status: Literal["unavailable"] = "unavailable"
+        reason: DeltaCatchUpUnavailable
+
+    class Unsupported(BaseModel):
+        """The server predates delta catch-up (it answered 404); resync from a snapshot."""
+
+        status: Literal["unsupported"] = "unsupported"
+
+
+DeltaCatchUpResult = Union[
+    DeltaCatchUp.Available, DeltaCatchUp.Unavailable, DeltaCatchUp.Unsupported
+]

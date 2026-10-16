@@ -63,7 +63,14 @@ Synchronous HTTP client. All RPC methods follow the same pattern:
 4. Parse response into a pydantic response model
 
 Endpoints: `protocol_components`, `protocol_state`, `contract_state`, `tokens`,
-`protocol_systems`, `component_tvl`, `traced_entry_points`, `health` (GET).
+`protocol_systems`, `component_tvl`, `traced_entry_points`, `delta_catch_up`, `health` (GET).
+
+`get_delta_catch_up` mirrors the Rust client's three outcomes as three pydantic models nested in
+`DeltaCatchUp` (their union is `DeltaCatchUpResult`), each with a `status`: `Available`
+(`messages: List[BlockChanges]`), `Unavailable` (`reason: DeltaCatchUpUnavailable`, where a reason
+the client does not know parses as `unknown`) and `Unsupported`, returned on a 404 (a server
+without the endpoint). Other HTTP errors raise `TychoRPCError`, e.g. 400 with the plain-text
+`Unknown extractor: <chain>:<name>`.
 
 ### `TychoStream` (`stream.py`)
 Async wrapper that spawns the `tycho-client-cli` Rust binary as a subprocess. Reads JSON lines
@@ -73,12 +80,13 @@ from stdout, deserializes each into a `FeedMessage`. Implements `__aiter__`/`__a
 ### DTOs (`dto.py`)
 Pydantic v1 models mirroring the Rust types in `tycho-common/src/dto.rs`. Two categories:
 - **Request params**: `ProtocolComponentsParams`, `ProtocolStateParams`, `ContractStateParams`,
-  `TokensParams`, `ProtocolSystemsParams`, `ComponentTvlParams`, `TracedEntryPointParams`
+  `TokensParams`, `ProtocolSystemsParams`, `ComponentTvlParams`, `TracedEntryPointParams`,
+  `DeltaCatchUpParams`
 - **Response types**: `ProtocolComponentsResponse`, `ProtocolStateResponse`,
-  `ContractStateResponse`, `TokensResponse`, etc.
+  `ContractStateResponse`, `TokensResponse`, `DeltaCatchUp`, etc.
 - **Streaming types**: `FeedMessage`, `BlockChanges`, `StateSyncMessage`, `SynchronizerState`.
   `BlockChanges` mirrors the Rust `BlockAggregatedChanges` DTO field for field (`dci_update` and
-  `partial_block_index` included).
+  `partial_block_index` included); the catch-up endpoint returns its messages in the same model.
 
 Custom `HexBytes` subclass adds pydantic v1 validators (`__get_validators__`, `__modify_schema__`).
 
