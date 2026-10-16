@@ -26,6 +26,7 @@ dependencies = [
     "hexbytes==0.3.1",
     "pydantic==1.8.*",
     "requests==2.*",
+    "typing-extensions>=3.7.4.3",
 ]
 
 [project.optional-dependencies]

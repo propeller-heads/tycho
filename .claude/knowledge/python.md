@@ -23,12 +23,13 @@ local development since the package declares `maturin` as its build backend in `
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. Import `Literal` from `pydantic.typing`: pydantic 1.8 only recognises `typing_extensions.Literal`, which on Python 3.9 is not `typing.Literal`. |
+| pydantic | `1.8.*` | **v1 only.** Do not use v2 APIs (`model_validate`, `model_dump`, `ConfigDict`). Use `BaseModel.dict()`, `@root_validator`, `__get_validators__`, `class Config`. Import `Literal` from `typing_extensions`: pydantic 1.8 only recognises `typing_extensions.Literal`, which below Python 3.10.1 is not `typing.Literal`. |
 | eth-abi | `2.2.0` | Pinned exact |
 | eth-typing | `2.3.0` | Pinned exact |
 | eth-utils | `1.9.5` | Pinned exact |
 | hexbytes | `0.3.1` | Pinned exact |
 | requests | `2.*` | Synchronous HTTP only |
+| typing-extensions | `>=3.7.4.3` | Same bound as pydantic 1.8; `dto.py` imports `Literal` from it |
 
 **Do not upgrade these without testing the full client.** The eth-* stack and pydantic v1 are
 tightly coupled — upgrading one usually breaks the others.

@@ -6,8 +6,9 @@ from uuid import UUID
 from hexbytes import HexBytes as _HexBytes
 from pydantic import BaseModel, Field, root_validator
 
-# pydantic 1.8 recognises only its own Literal (typing_extensions'), not typing.Literal.
-from pydantic.typing import Literal
+# pydantic 1.8 compares Literal fields against typing_extensions.Literal, which below Python
+# 3.10.1 is not typing.Literal.
+from typing_extensions import Literal
 
 
 class HexBytes(_HexBytes):
