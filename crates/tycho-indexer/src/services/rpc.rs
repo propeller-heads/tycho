@@ -37,7 +37,7 @@ use crate::{
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
-            view::ContractStateView,
+            view::{ContractStateView, ProtocolStateView},
         },
     },
 };
@@ -584,11 +584,13 @@ where
         }
     }
 
+    /// Answers `/protocol_state`. In `serve`, the entity cache answers first, and the response
+    /// cache keeps only database answers.
     #[instrument(skip(self, request))]
     async fn get_protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<Arc<dto::ProtocolStateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<ProtocolStateView, dto::ProtocolStateRequestResponse>, RpcError> {
         if let Some(ref component_ids) = request.protocol_ids {
             info!(
                 n_component_ids = component_ids.len(),
@@ -599,36 +601,43 @@ where
         } else {
             info!("Getting protocol state (all protocols)");
         }
+        if let Some(service) = self.serving_state_service() {
+            // The service cannot answer without ids; skip the off-worker permit.
+            if request.protocol_ids.is_none() {
+                count_db_path(Endpoint::ProtocolState, FallbackReason::NoIds);
+            } else {
+                let cache_request = request.clone();
+                let answer = self
+                    .off_worker
+                    .build(Endpoint::ProtocolState, move || {
+                        service.protocol_state_view(&cache_request)
+                    })
+                    .await?;
+                match answer {
+                    Ok(view) => return Ok(StateAnswer::EntityCache(view)),
+                    Err(StateServiceError::Fallback(reason)) => {
+                        count_db_path(Endpoint::ProtocolState, reason)
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
         self.protocol_state_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_state_routed(r)
+                self.get_protocol_state_from_db(r)
                     .await
                     .map(|res| (res, true))
             })
             .await
+            .map(StateAnswer::Db)
     }
 
-    /// Answers from the entity cache when it serves and can serve this request, otherwise from
-    /// the database path. In `shadow`, a sampled request also runs the cache path to compare it;
-    /// the client still gets the database answer.
-    async fn get_protocol_state_routed(
+    /// Answers from the database path. In `shadow`, a sampled request also runs the cache path to
+    /// compare it; the client still gets the database answer.
+    async fn get_protocol_state_from_db(
         &self,
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
-        if let Some(service) = self.serving_state_service() {
-            let cache_request = request.clone();
-            let answer = self
-                .off_worker
-                .build(Endpoint::ProtocolState, move || service.protocol_state(&cache_request))
-                .await?;
-            match answer {
-                Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => {
-                    count_db_path(Endpoint::ProtocolState, reason)
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
         if let Some(shadow) = self.sampling_shadow(&request) {
             let sampled = SampledRequest {
                 endpoint: Endpoint::ProtocolState,
@@ -1485,7 +1494,13 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_protocol_state(&body).await;
 
     match response {
-        Ok(state) => {
+        Ok(StateAnswer::EntityCache(view)) => {
+            handler
+                .off_worker
+                .json(Endpoint::ProtocolState, Arc::new(view))
+                .await
+        }
+        Ok(StateAnswer::Db(state)) => {
             handler
                 .off_worker
                 .json(Endpoint::ProtocolState, state)
@@ -1707,7 +1722,8 @@ mod tests {
             ChangeType,
         },
         storage::{
-            AccountSnapshot, AccountWriteTimestamps, StateSnapshot, WithTotal, WriteTimestamp,
+            AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
+            WriteTimestamp,
         },
         traits::MockEntryPointTracer,
     };
@@ -2343,7 +2359,7 @@ mod tests {
         };
 
         let answer = handler
-            .get_protocol_state_routed(request)
+            .get_protocol_state_from_db(request)
             .await;
 
         assert_eq!(answer.unwrap().states, vec![state.into()]);
@@ -2505,7 +2521,7 @@ mod tests {
         };
 
         handler
-            .get_protocol_state_routed(request)
+            .get_protocol_state_from_db(request)
             .await
             .unwrap();
 
@@ -2604,6 +2620,8 @@ mod tests {
         );
     }
 
+    /// A serve answer from the entity cache does not enter the response cache. A database answer
+    /// does.
     #[rstest]
     #[case::serve_in_window(CacheMode::Serve, 6, 0)]
     #[case::serve_below_window(CacheMode::Serve, 1, 1)]
@@ -2622,18 +2640,27 @@ mod tests {
             });
         let handler = state_routing_handler(gw, mode);
 
+        let request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "ex".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+
         let result = handler
-            .get_protocol_state_routed(dto::ProtocolStateRequestBody {
-                protocol_ids: Some(vec!["c1".to_string()]),
-                protocol_system: "ex".to_string(),
-                chain: dto::Chain::Ethereum,
-                include_balances: true,
-                version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
-                pagination: dto::PaginationParams::new(0, 100),
-            })
+            .get_protocol_state(&request)
             .await;
 
-        assert!(result.is_ok(), "{result:?}");
+        let from_cache = matches!(result.unwrap(), StateAnswer::EntityCache(_));
+        assert_eq!(from_cache, db_calls == 0);
+        assert_eq!(
+            handler
+                .protocol_state_cache
+                .contains(&request),
+            !from_cache
+        );
     }
 
     /// The `db_path_requests` counters that moved since the last snapshot, as
@@ -2738,9 +2765,21 @@ mod tests {
         )
     }
 
-    /// A `serve` handler whose cache holds [`loaded_account`] from block 4. The `ex` window then
-    /// sets slot 1 and the native balance to `n` in blocks 5 and 6. The gateway panics on any
-    /// database call, so only a cache answer passes.
+    /// Component `c1` as the startup load reads it.
+    fn loaded_component() -> ProtocolComponentState {
+        ProtocolComponentState::new(
+            "c1",
+            HashMap::from([
+                ("x".to_string(), Bytes::from(1u64)),
+                ("y".to_string(), Bytes::from(2u64)),
+            ]),
+            HashMap::from([(Bytes::from(9u64).lpad(20, 0), Bytes::from(5u64))]),
+        )
+    }
+
+    /// A `serve` handler whose cache holds [`loaded_account`] and [`loaded_component`] from block
+    /// 4. The `ex` window then sets slot 1, the native balance and attribute `x` to `n` in blocks 5
+    /// and 6. The gateway panics on any database call, so only a cache answer passes.
     fn loaded_cache_handler() -> RpcHandler<MockGateway, MockEntryPointTracer> {
         let account = loaded_account();
         let at = WriteTimestamp::from(&testing::block(4));
@@ -2749,7 +2788,11 @@ mod tests {
                 written_at: AccountWriteTimestamps::uniform(&account, at),
                 account,
             }],
-            components: vec![],
+            components: vec![ComponentSnapshot {
+                system: "ex".to_string(),
+                state: loaded_component(),
+                updated_at: at,
+            }],
         });
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);
@@ -2766,6 +2809,7 @@ mod tests {
                     ChangeType::Update,
                 ),
             );
+            let block = testing::with_state_delta(block, "c1", n);
             windows["ex"]
                 .lock()
                 .unwrap()
@@ -2809,6 +2853,42 @@ mod tests {
                 protocol_system: "ex".to_string(),
                 version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
                 chain: dto::Chain::Ethereum,
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .to_request();
+
+        let body: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body, serde_json::to_value(&expected).unwrap());
+    }
+
+    #[actix_web::test]
+    async fn test_protocol_state_cache_answer_is_the_json_of_the_dto() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(loaded_cache_handler()))
+                .route(
+                    "/v1/protocol_state",
+                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut state = loaded_component();
+        state
+            .attributes
+            .insert("x".to_string(), Bytes::from(6u64));
+        let expected = dto::ProtocolStateRequestResponse::new(
+            vec![state.into()],
+            PaginationResponse::new(0, 100, 1),
+        );
+        let request = test::TestRequest::post()
+            .uri("/v1/protocol_state")
+            .set_json(dto::ProtocolStateRequestBody {
+                protocol_ids: Some(vec!["c1".to_string()]),
+                protocol_system: "ex".to_string(),
+                chain: dto::Chain::Ethereum,
+                include_balances: true,
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
                 pagination: dto::PaginationParams::new(0, 100),
             })
             .to_request();

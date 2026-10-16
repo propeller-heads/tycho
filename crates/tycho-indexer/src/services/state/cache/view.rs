@@ -1,4 +1,4 @@
-//! Views of cached entries, which contract state answers are written from.
+//! Views of cached entries, which state responses are written from.
 //!
 //! A view holds a cached entry behind its `Arc`, plus only the values that the window changes
 //! override. It writes the response JSON directly from both, so serving an entry never copies it.
@@ -340,6 +340,18 @@ impl ComponentView {
             self.updated_balances
                 .insert(token.clone(), balance.balance.clone());
         }
+    }
+
+    /// Attributes plus balances the JSON holds, where an overridden key counts twice: an upper
+    /// bound for the JSON size estimate.
+    pub(crate) fn json_key_count_hint(&self) -> usize {
+        let (attributes, balances) = self
+            .base
+            .as_ref()
+            .map_or((0, 0), |base| (base.attributes.len(), base.balances.len()));
+        let balances =
+            if self.include_balances { balances + self.updated_balances.len() } else { 0 };
+        attributes + self.updated.len() + balances
     }
 
     /// The base attributes that the window changes neither set nor delete, then the ones they

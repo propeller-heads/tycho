@@ -12,7 +12,10 @@ use tycho_common::dto;
 
 use crate::services::{
     rpc::RpcError,
-    state::{shadow::Endpoint, view::ContractStateView},
+    state::{
+        shadow::Endpoint,
+        view::{ContractStateView, ProtocolStateView},
+    },
 };
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
@@ -211,9 +214,21 @@ impl JsonSizeHint for dto::ProtocolStateRequestResponse {
     }
 }
 
+impl JsonSizeHint for ProtocolStateView {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
+        for state in &self.states {
+            size += state.json_key_count_hint() * JSON_BYTES_PER_ATTRIBUTE;
+            size += JSON_BYTES_PER_COMPONENT;
+        }
+        size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         sync::{
             atomic::{AtomicBool, Ordering},
             mpsc,
@@ -224,7 +239,7 @@ mod tests {
     use actix_web::http::StatusCode;
     use tycho_common::{
         dto::PaginationResponse,
-        models::{contract::AccountDelta, Chain, ChangeType},
+        models::{contract::AccountDelta, protocol::ProtocolComponentState, Chain, ChangeType},
         storage::WriteTimestamp,
         Bytes,
     };
@@ -232,7 +247,10 @@ mod tests {
     use super::*;
     use crate::{
         extractor::models::fixtures,
-        services::state::{cache::CachedAccount, view::AccountView},
+        services::state::{
+            cache::{CachedAccount, CachedComponentState},
+            view::{AccountView, ComponentView},
+        },
         testing,
     };
 
@@ -512,5 +530,22 @@ mod tests {
                 .len() >=
                 OFF_WORKER_MIN_JSON_BYTES
         );
+    }
+
+    #[test]
+    fn protocol_state_view_with_many_attributes_is_serialized_off_the_worker() {
+        let attributes = (0..6_000u64)
+            .map(|n| (format!("ticks/{n}/net-liquidity"), Bytes::from(n)))
+            .collect();
+        let entry = CachedComponentState::from_snapshot(
+            ProtocolComponentState::new("c1", attributes, HashMap::new()),
+            WriteTimestamp::from(&testing::block(1)),
+        );
+        let response = ProtocolStateView {
+            states: vec![ComponentView::new("c1", Some(Arc::new(entry)), true)],
+            pagination: PaginationResponse::new(0, 100, 1),
+        };
+
+        assert!(response.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
     }
 }
