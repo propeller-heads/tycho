@@ -4124,6 +4124,37 @@ mod test {
             .is_some_and(|d| d.account_deltas.contains_key(contract))
     }
 
+    /// A snapshot with an empty state for every component `request` asks for.
+    fn snapshot_of_requested(request: &SnapshotParameters) -> Snapshot {
+        let states = request
+            .components
+            .values()
+            .map(|component| {
+                let state = ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        &component.id,
+                        Default::default(),
+                        Default::default(),
+                    ),
+                    component: component.clone(),
+                    component_tvl: None,
+                    entrypoints: vec![],
+                };
+                (component.id.clone(), state)
+            })
+            .collect();
+        Snapshot { states, vm_storage: HashMap::new() }
+    }
+
+    /// A block that puts `component`'s TVL below the remove threshold (50) of
+    /// `with_mocked_clients`.
+    fn block_dropping_tvl(block_num: u64, component: &str) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            component_tvl: HashMap::from([(component.to_string(), 10.0)]),
+            ..make_block_changes(block_num, None)
+        }
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_resume_tracks_contract_traced_in_first_message() {
         let mut rpc_client = make_mock_client();
@@ -4205,25 +4236,8 @@ mod test {
                     .lock()
                     .unwrap()
                     .push(request.block_number);
-                let states = request
-                    .components
-                    .values()
-                    .map(|component| {
-                        let state = ComponentWithState {
-                            state: ProtocolComponentState::new(
-                                &component.id,
-                                Default::default(),
-                                Default::default(),
-                            ),
-                            component: component.clone(),
-                            component_tvl: Some(100.0),
-                            entrypoints: vec![],
-                        };
-                        (component.id.clone(), state)
-                    })
-                    .collect();
                 notify.notify_one();
-                Ok(Snapshot { states, vm_storage: HashMap::new() })
+                Ok(snapshot_of_requested(request))
             });
         let (deltas_client, deltas_tx) = mock_deltas_channel();
         let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
@@ -4336,6 +4350,101 @@ mod test {
         assert!(has_account_delta(&first, &contract_x), "The traced contract's delta is dropped");
         assert_eq!(second.header.number, 2);
         assert!(has_account_delta(&second, &contract_x), "The traced contract is not tracked");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_snapshot_restart_removes_component_dropping_below_tvl_in_first_message() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|request, _chunk_size, _concurrency| Ok(snapshot_of_requested(request)));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // Block 7 doesn't follow block 5, so the snapshot is taken at block 7 while Component1 is
+        // still tracked; block 7 then drops Component1 below the threshold.
+        deltas_tx
+            .send(block_dropping_tvl(7, "Component1"))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 7);
+        assert!(first
+            .removed_components
+            .contains_key("Component1"));
+        assert!(!first
+            .snapshots
+            .states
+            .contains_key("Component1"));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_stale_snapshot_discards_first_message_without_side_effects() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                let mut blocks = recorded.lock().unwrap();
+                blocks.push(request.block_number);
+                if blocks.len() == 1 {
+                    return Err(RPCError::StaleBlock("outside the retention window".to_string()));
+                }
+                Ok(snapshot_of_requested(request))
+            });
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // Block 7 drops Component1 below the threshold, but its snapshot is stale: the
+        // synchronizer discards block 7 and takes the snapshot at block 8 instead.
+        deltas_tx
+            .send(block_dropping_tvl(7, "Component1"))
+            .await
+            .unwrap();
+        deltas_tx
+            .send(make_block_changes(8, None))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 8);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![7, 8]);
+        assert!(
+            first
+                .snapshots
+                .states
+                .contains_key("Component1"),
+            "The discarded block 7 stopped tracking Component1"
+        );
+        assert!(first.removed_components.is_empty());
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
