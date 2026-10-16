@@ -5090,21 +5090,26 @@ mod test {
         }
     }
 
-    /// Mocks an RPC that tracks Component1, serves a snapshot with an empty state for every
-    /// component it is asked for, and answers one catch-up request with `answer`.
+    /// Mocks an RPC that tracks Component1, knows every component asked for by id, serves a
+    /// snapshot with an empty state for every component it is asked for, and answers one catch-up
+    /// request with `answer`.
     fn mock_rpc_answering_catch_up(
         answer: Result<DeltaCatchUp, RPCError>,
     ) -> (MockRPCClient, RpcCalls) {
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| {
-                Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
-                    1,
-                    0,
-                    100,
-                ))
+            .returning(|params| {
+                let ids = params
+                    .component_ids()
+                    .cloned()
+                    .unwrap_or_else(|| vec!["Component1".to_string()]);
+                let components: Vec<_> = ids
+                    .into_iter()
+                    .map(|id| ProtocolComponent { id, ..Default::default() })
+                    .collect();
+                let total = components.len() as i64;
+                Ok(Page::new(components, total, 0, 100))
             });
         let calls =
             RpcCalls { catch_up_requests: Default::default(), snapshot_blocks: Default::default() };
@@ -5498,6 +5503,123 @@ mod test {
                 .contains_key("Component9")));
         assert!(caught_up.removed_components.is_empty());
         assert_eq!(attributes_set(&next), attributes(&[("x", "0x16")]));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_stops_tracking_a_component_a_missed_block_drops() {
+        // Block 6, the second missed block, drops Component1 below the TVL threshold.
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            block_dropping_tvl(6, "Component1"),
+        ])));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(setting(make_block_changes(7, None), "x", "0x07"))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(message.header.number, 7);
+        assert!(message
+            .removed_components
+            .contains_key("Component1"));
+        assert_eq!(attributes_set(&message), HashMap::new(), "An untracked component's change");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_filters_the_missed_blocks_to_the_tracked_components() {
+        // Block 6, the second missed block, also changes Component2 and a contract, neither of
+        // which the client tracks.
+        let untracked_contract = Bytes::from("0xdead");
+        let mut block_6 = setting(block_changing_slot(6, &untracked_contract), "x", "0x06");
+        block_6.state_deltas.insert(
+            "Component2".to_string(),
+            ProtocolComponentStateDelta::new(
+                "Component2",
+                HashMap::from([("x".to_string(), Bytes::from("0x06"))]),
+                HashSet::new(),
+            ),
+        );
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            block_6,
+        ])));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(attributes_set(&message), attributes(&[("x", "0x06")]));
+        assert!(!message
+            .deltas
+            .as_ref()
+            .is_some_and(|deltas| deltas
+                .state_deltas
+                .contains_key("Component2")));
+        assert!(!has_account_delta(&message, &untracked_contract));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_brings_a_background_snapshot_from_before_the_gap_up_to_date() {
+        // Missed block 5 changes Component3, whose background snapshot block 3 started before the
+        // gap. The snapshot completes while the synchronizer is away.
+        let mut block_5 = make_block_changes(5, None);
+        block_5.state_deltas.insert(
+            "Component3".to_string(),
+            ProtocolComponentStateDelta::new(
+                "Component3",
+                HashMap::from([("x".to_string(), Bytes::from("0x05"))]),
+                HashSet::new(),
+            ),
+        );
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            block_5,
+            make_block_changes(6, None),
+        ])));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        let block_3 = make_block_changes(3, None);
+        state_sync.spawn_snapshot_task(
+            vec!["Component3".to_string()],
+            header_of(&block_3),
+            &block_3,
+        );
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+        timeout(Duration::from_secs(1), async {
+            while calls.snapshot_blocks().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("The background snapshot should complete");
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), vec![3]);
+        let component3 = message
+            .snapshots
+            .states
+            .get("Component3")
+            .expect("The background snapshot is dropped");
+        assert_eq!(
+            component3.state.attributes,
+            HashMap::from([("x".to_string(), Bytes::from("0x05"))]),
+            "The snapshot misses the missed block's change"
+        );
     }
 
     #[rstest]
