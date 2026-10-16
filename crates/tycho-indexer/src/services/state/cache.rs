@@ -237,60 +237,16 @@ impl CachedAccount {
         entry
     }
 
-    /// Applies one block's changes. Each value takes `at`; a value already written by that block
-    /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here:
-    /// values of one account can have different timestamps, so the entry's `updated_at` cannot
-    /// decide for each of them. A deleted slot becomes the zero value, as in
-    /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
-    /// [`WriteOutcome::Conflict`]s are counted and logged once here, where the address is known.
+    /// Applies one block's changes with the rule of [`apply_account_block`]. When a write applies,
+    /// `updated_at` moves to `at`.
     pub(crate) fn apply_block(
         &mut self,
         delta: Option<&AccountDelta>,
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
-        let mut applied = false;
-        let mut conflicts = 0;
-        let mut count = |outcome| match outcome {
-            WriteOutcome::Applied => applied = true,
-            WriteOutcome::Skipped => {}
-            WriteOutcome::Conflict => conflicts += 1,
-        };
-        if let Some(delta) = delta {
-            for (key, value) in &delta.slots {
-                count(write_timestamped(
-                    &mut self.slots,
-                    key.clone(),
-                    value.clone().unwrap_or_default(),
-                    at,
-                ));
-            }
-            if let Some(balance) = &delta.balance {
-                count(
-                    self.native_balance
-                        .write(balance.clone(), at),
-                );
-            }
-            if let Some(code) = delta.code() {
-                count(
-                    self.code
-                        .write(CachedCode::new(code.clone()), at),
-                );
-            }
-        }
-        for (token, balance) in balances.into_iter().flatten() {
-            count(write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at));
-        }
-        if applied {
+        if apply_account_block(self, delta, balances, at) {
             self.updated_at = self.updated_at.max(at);
-        }
-        if conflicts > 0 {
-            warn!(
-                address = %self.address,
-                block_ts = %at.block_ts(),
-                values = conflicts,
-                "Skipped writes from the applied block carry different values"
-            );
         }
     }
 
@@ -318,6 +274,92 @@ impl CachedAccount {
     pub(crate) fn code(&self) -> &Timestamped<CachedCode> {
         &self.code
     }
+}
+
+/// The values of one account that a block can write. Each write says what it did.
+trait AccountWrites {
+    fn address(&self) -> &Address;
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome;
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome;
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome;
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome;
+}
+
+impl AccountWrites for CachedAccount {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome {
+        write_timestamped(&mut self.slots, key.clone(), value, at)
+    }
+
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome {
+        self.native_balance.write(balance, at)
+    }
+
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome {
+        self.code.write(code, at)
+    }
+
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome {
+        write_timestamped(&mut self.token_balances, token.clone(), balance, at)
+    }
+}
+
+/// Writes one block's changes to `account` and returns whether any write applied. Each value
+/// takes `at`; a value already written by that block or a newer one is left alone, so the rule
+/// lives in [`Timestamped::write`] rather than here: values of one account can have different
+/// timestamps, so one timestamp for the whole account cannot decide for each of them. A deleted
+/// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code replaces
+/// the code and its hash together. [`WriteOutcome::Conflict`]s are counted and logged once per
+/// block.
+fn apply_account_block(
+    account: &mut impl AccountWrites,
+    delta: Option<&AccountDelta>,
+    balances: Option<&HashMap<Address, AccountBalance>>,
+    at: WriteTimestamp,
+) -> bool {
+    let mut applied = false;
+    let mut conflicts = 0;
+    let mut count = |outcome| match outcome {
+        WriteOutcome::Applied => applied = true,
+        WriteOutcome::Skipped => {}
+        WriteOutcome::Conflict => conflicts += 1,
+    };
+    if let Some(delta) = delta {
+        for (key, value) in &delta.slots {
+            count(account.write_slot(key, value.clone().unwrap_or_default(), at));
+        }
+        if let Some(balance) = &delta.balance {
+            count(account.write_native_balance(balance.clone(), at));
+        }
+        if let Some(code) = delta.code() {
+            count(account.write_code(CachedCode::new(code.clone()), at));
+        }
+    }
+    for (token, balance) in balances.into_iter().flatten() {
+        count(account.write_token_balance(token, balance.clone(), at));
+    }
+    if conflicts > 0 {
+        warn!(
+            address = %account.address(),
+            block_ts = %at.block_ts(),
+            values = conflicts,
+            "Skipped writes from the applied block carry different values"
+        );
+    }
+    applied
 }
 
 impl From<CachedAccount> for Account {
