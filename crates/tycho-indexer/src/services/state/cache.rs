@@ -24,10 +24,10 @@
 //!
 //! Accounts and component states are held behind an `Arc`: an account can hold a large storage
 //! map, and a component many attributes. A reader copies only the `Arc` under the read lock. An
-//! account response is written from it through a view (`view`), without a full copy; a component
-//! state is copied outside the lock. A fold that changes an entry a reader still holds copies the
-//! entry first, under the write lock (`Arc::make_mut`). Reads wait for that copy, but it happens
-//! at most once per fold instead of once per read.
+//! account response is written from it through a view (`view`), without a full copy. A fold that
+//! changes an entry a reader still holds copies the entry first, under the write lock
+//! (`Arc::make_mut`). Reads wait for that copy, but it happens at most once per fold instead of
+//! once per read.
 
 use std::{
     collections::{hash_map::Entry, HashMap},

@@ -1269,7 +1269,6 @@ impl From<StateServiceError> for RpcError {
                 PendingDeltasError::LockError(system, reason).into()
             }
             StateServiceError::WindowRead(err) => PendingDeltasError::from(err).into(),
-            StateServiceError::Merge(err) => PendingDeltasError::from(err).into(),
         }
     }
 }

@@ -4,22 +4,28 @@
 //! override. It writes the response JSON directly from both, so serving an entry never copies it.
 //! The `From` impls build the owned DTOs from a view.
 
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+    sync::Arc,
+};
 
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
         contract::{AccountBalance, AccountDelta},
-        Address, Balance, StoreKey, StoreVal,
+        protocol::{ComponentBalance, ProtocolComponentStateDelta},
+        Address, AttrStoreKey, Balance, ComponentId, StoreKey, StoreVal,
     },
-    serde_primitives::hex_hashmap_key_value,
+    serde_primitives::{hex_hashmap_key_value, hex_hashmap_value},
     storage::WriteTimestamp,
     Bytes,
 };
 
 use super::{
-    apply_account_block, AccountWrites, CachedAccount, CachedCode, Timestamped, WriteOutcome,
+    apply_account_block, AccountWrites, CachedAccount, CachedCode, CachedComponentState,
+    Timestamped, WriteOutcome,
 };
 
 /// A cached account with the window changes up to the requested version laid over it. Each overlay
@@ -163,6 +169,18 @@ where
     }
 }
 
+/// Writes the pairs an iterator yields as a map of plain keys and hex values.
+struct HexValueMap<I>(I);
+
+impl<'a, I> Serialize for HexValueMap<I>
+where
+    I: Iterator<Item = (&'a AttrStoreKey, &'a Bytes)> + Clone,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        hex_hashmap_value::serialize_iter(self.0.clone(), serializer)
+    }
+}
+
 impl AccountView {
     /// The slots of the account with the window changes laid over them.
     fn slots(&self) -> impl Iterator<Item = (&StoreKey, &StoreVal)> + Clone {
@@ -255,13 +273,158 @@ impl From<ContractStateView> for dto::StateRequestResponse {
     }
 }
 
+/// A cached component state with the window changes newer than the entry laid over it.
+#[derive(Debug)]
+pub(crate) struct ComponentView {
+    component_id: ComponentId,
+    /// `None` for an id the cache does not hold: the view then starts from an empty state.
+    base: Option<Arc<CachedComponentState>>,
+    /// Attributes the window changes set. Disjoint from `deleted`.
+    updated: HashMap<AttrStoreKey, StoreVal>,
+    /// Attributes the window changes delete. Disjoint from `updated`.
+    deleted: HashSet<AttrStoreKey>,
+    /// Balances the window changes set.
+    updated_balances: HashMap<Address, Balance>,
+    include_balances: bool,
+}
+
+impl ComponentView {
+    pub(crate) fn new(
+        component_id: &str,
+        base: Option<Arc<CachedComponentState>>,
+        include_balances: bool,
+    ) -> Self {
+        Self {
+            component_id: component_id.to_string(),
+            base,
+            updated: HashMap::new(),
+            deleted: HashSet::new(),
+            updated_balances: HashMap::new(),
+            include_balances,
+        }
+    }
+
+    /// Lays one block's changes over the view in the order of
+    /// `ProtocolComponentState::apply_state_delta`, then `apply_balance_delta`: updated
+    /// attributes, then deleted ones, then balances. An update in a later block sets a deleted
+    /// attribute again. A block at or before the base entry is already folded into it, so the
+    /// method leaves the view as it is.
+    pub(crate) fn apply_block(
+        &mut self,
+        delta: Option<&ProtocolComponentStateDelta>,
+        balances: Option<&HashMap<Bytes, ComponentBalance>>,
+        at: WriteTimestamp,
+    ) {
+        if self
+            .base
+            .as_ref()
+            .is_some_and(|base| at <= base.updated_at())
+        {
+            return;
+        }
+        if let Some(delta) = delta {
+            for (key, value) in &delta.updated_attributes {
+                self.deleted.remove(key);
+                self.updated
+                    .insert(key.clone(), value.clone());
+            }
+            for key in &delta.deleted_attributes {
+                self.updated.remove(key);
+                self.deleted.insert(key.clone());
+            }
+        }
+        if !self.include_balances {
+            return;
+        }
+        for (token, balance) in balances.into_iter().flatten() {
+            self.updated_balances
+                .insert(token.clone(), balance.balance.clone());
+        }
+    }
+
+    /// The base attributes that the window changes neither set nor delete, then the ones they
+    /// set.
+    fn attributes(&self) -> impl Iterator<Item = (&AttrStoreKey, &StoreVal)> + Clone + '_ {
+        let kept = self
+            .base
+            .iter()
+            .flat_map(|base| base.attributes.iter())
+            .filter(|(key, _)| !self.deleted.contains(*key) && !self.updated.contains_key(*key));
+        kept.chain(self.updated.iter())
+    }
+
+    /// The base balances the window changes do not set, then the ones they set. Empty when the
+    /// request leaves balances out.
+    fn balances(&self) -> impl Iterator<Item = (&Address, &Balance)> + Clone + '_ {
+        let base = self
+            .base
+            .as_ref()
+            .filter(|_| self.include_balances);
+        let kept = base
+            .into_iter()
+            .flat_map(|base| base.balances.iter())
+            .filter(|(token, _)| {
+                !self
+                    .updated_balances
+                    .contains_key(*token)
+            });
+        kept.chain(self.updated_balances.iter())
+    }
+}
+
+/// Writes the JSON of [`dto::ResponseProtocolState`]: the same fields, the same hex strings.
+impl Serialize for ComponentView {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("ResponseProtocolState", 3)?;
+        state.serialize_field("component_id", &self.component_id)?;
+        state.serialize_field("attributes", &HexValueMap(self.attributes()))?;
+        state.serialize_field("balances", &HexKeyValueMap(self.balances()))?;
+        state.end()
+    }
+}
+
+/// Copies the state out of the view.
+impl From<ComponentView> for dto::ResponseProtocolState {
+    fn from(view: ComponentView) -> Self {
+        let attributes = view
+            .attributes()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let balances = view
+            .balances()
+            .map(|(token, balance)| (token.clone(), balance.clone()))
+            .collect();
+        dto::ResponseProtocolState { component_id: view.component_id, attributes, balances }
+    }
+}
+
+/// A `/protocol_state` answer made of component views. Serializes like
+/// [`dto::ProtocolStateRequestResponse`].
+#[derive(Debug, Serialize)]
+pub(crate) struct ProtocolStateView {
+    pub(crate) states: Vec<ComponentView>,
+    pub(crate) pagination: PaginationResponse,
+}
+
+impl From<ProtocolStateView> for dto::ProtocolStateRequestResponse {
+    fn from(view: ProtocolStateView) -> Self {
+        dto::ProtocolStateRequestResponse::new(
+            view.states
+                .into_iter()
+                .map(dto::ResponseProtocolState::from)
+                .collect(),
+            view.pagination,
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
 
     use rstest::rstest;
     use tycho_common::{
-        models::{contract::Account, Chain, ChangeType},
+        models::{contract::Account, protocol::ProtocolComponentState, Chain, ChangeType},
         storage::AccountWriteTimestamps,
     };
 
@@ -418,5 +581,159 @@ mod test {
             expected.token_balances.len()
         );
         assert_eq!(dto::ResponseAccount::from(view), expected);
+    }
+
+    /// One block's changes to component `c1`.
+    struct ComponentBlock {
+        at: WriteTimestamp,
+        delta: Option<ProtocolComponentStateDelta>,
+        balances: Option<HashMap<Bytes, ComponentBalance>>,
+    }
+
+    fn attributes_block(n: u64, updated: &[(&str, u64)], deleted: &[&str]) -> ComponentBlock {
+        ComponentBlock {
+            at: at(n),
+            delta: Some(ProtocolComponentStateDelta::new(
+                "c1",
+                updated
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), Bytes::from(*value)))
+                    .collect(),
+                deleted
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect::<HashSet<_>>(),
+            )),
+            balances: None,
+        }
+    }
+
+    fn component_balance_block(n: u64, token: u64, amount: u64) -> ComponentBlock {
+        let balance = ComponentBalance {
+            token: addr(token),
+            balance: Bytes::from(amount),
+            balance_float: amount as f64,
+            modify_tx: Bytes::default(),
+            component_id: "c1".to_string(),
+        };
+        ComponentBlock {
+            at: at(n),
+            delta: None,
+            balances: Some(HashMap::from([(addr(token), balance)])),
+        }
+    }
+
+    /// Component `c1` at block 3 with attributes `a` = 1 and `b` = 2 and 5 of token `addr(9)`.
+    fn base_component() -> Arc<CachedComponentState> {
+        Arc::new(CachedComponentState::from_snapshot(
+            ProtocolComponentState::new(
+                "c1",
+                HashMap::from([
+                    ("a".to_string(), Bytes::from(1u64)),
+                    ("b".to_string(), Bytes::from(2u64)),
+                ]),
+                HashMap::from([(addr(9), Bytes::from(5u64))]),
+            ),
+            at(3),
+        ))
+    }
+
+    /// The owned answer: copy the entry, merge every block newer than it with the database path's
+    /// merge, drop the balances when they are not requested.
+    fn owned_component(
+        base: Option<&CachedComponentState>,
+        blocks: &[ComponentBlock],
+        include_balances: bool,
+    ) -> dto::ResponseProtocolState {
+        let updated_at = base.map(CachedComponentState::updated_at);
+        let mut state = base.cloned().map_or_else(
+            || ProtocolComponentState::new("c1", HashMap::new(), HashMap::new()),
+            ProtocolComponentState::from,
+        );
+        for block in blocks
+            .iter()
+            .filter(|block| updated_at.is_none_or(|at| block.at > at))
+        {
+            if let Some(delta) = &block.delta {
+                state.apply_state_delta(delta).unwrap();
+            }
+            if let Some(balances) = &block.balances {
+                state
+                    .apply_balance_delta(balances)
+                    .unwrap();
+            }
+        }
+        if !include_balances {
+            state.balances.clear();
+        }
+        dto::ResponseProtocolState::from(state)
+    }
+
+    fn component_view(
+        base: Option<Arc<CachedComponentState>>,
+        blocks: &[ComponentBlock],
+        include_balances: bool,
+    ) -> ComponentView {
+        let mut view = ComponentView::new("c1", base, include_balances);
+        for block in blocks {
+            view.apply_block(block.delta.as_ref(), block.balances.as_ref(), block.at);
+        }
+        view
+    }
+
+    #[rstest]
+    #[case::no_changes(Some(base_component()), vec![], true)]
+    #[case::updated(Some(base_component()), vec![attributes_block(4, &[("a", 11)], &[])], true)]
+    #[case::added(Some(base_component()), vec![attributes_block(4, &[("c", 3)], &[])], true)]
+    #[case::deleted(Some(base_component()), vec![attributes_block(4, &[], &["a"])], true)]
+    #[case::updated_and_deleted_in_one_block(
+        Some(base_component()),
+        vec![attributes_block(4, &[("a", 11)], &["a"])],
+        true
+    )]
+    #[case::deleted_then_set_again(
+        Some(base_component()),
+        vec![attributes_block(4, &[], &["a"]), attributes_block(5, &[("a", 12)], &[])],
+        true
+    )]
+    #[case::added_then_deleted(
+        Some(base_component()),
+        vec![attributes_block(4, &[("c", 3)], &[]), attributes_block(5, &[], &["c"])],
+        true
+    )]
+    #[case::block_at_the_entry_is_skipped(
+        Some(base_component()),
+        vec![attributes_block(3, &[("a", 11)], &[])],
+        true
+    )]
+    #[case::balances(
+        Some(base_component()),
+        vec![component_balance_block(4, 9, 6), component_balance_block(4, 8, 1)],
+        true
+    )]
+    #[case::balances_left_out(
+        Some(base_component()),
+        vec![component_balance_block(4, 8, 1)],
+        false
+    )]
+    #[case::uncached_id_starts_empty(
+        None,
+        vec![attributes_block(4, &[("a", 1)], &[]), component_balance_block(4, 8, 1)],
+        true
+    )]
+    fn component_view_writes_the_json_of_the_owned_path(
+        #[case] base: Option<Arc<CachedComponentState>>,
+        #[case] blocks: Vec<ComponentBlock>,
+        #[case] include_balances: bool,
+    ) {
+        let expected = owned_component(base.as_deref(), &blocks, include_balances);
+
+        let view = component_view(base, &blocks, include_balances);
+
+        assert_eq!(serde_json::to_value(&view).unwrap(), serde_json::to_value(&expected).unwrap());
+        // `to_value` merges duplicate keys, so only the counts catch a key written twice.
+        assert_eq!(view.attributes().count(), expected.attributes.len());
+        assert_eq!(view.balances().count(), expected.balances.len());
+        assert_eq!(dto::ResponseProtocolState::from(view), expected);
     }
 }

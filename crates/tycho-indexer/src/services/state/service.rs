@@ -37,17 +37,14 @@ use thiserror::Error;
 use tracing::debug;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{
-        blockchain::BlockAggregatedChanges, protocol::ProtocolComponentState, MergeError,
-        PaginationParams,
-    },
+    models::{blockchain::BlockAggregatedChanges, PaginationParams},
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
 use super::{
     cache::{CachedAccount, EntityCache},
-    view::{AccountView, ContractStateView},
+    view::{AccountView, ComponentView, ContractStateView, ProtocolStateView},
     window::{account_changes, component_changes, DeltaWindow, WindowResolution},
 };
 
@@ -149,9 +146,6 @@ pub(crate) enum StateServiceError {
     /// The window cannot be read.
     #[error("Window cannot be read: {0}")]
     WindowRead(StorageError),
-    /// A window change cannot be merged into an entry.
-    #[error("Window change cannot be merged: {0}")]
-    Merge(#[from] MergeError),
 }
 
 /// What a read depends on besides the request: the window of the requested system and the entity
@@ -363,12 +357,12 @@ impl StateService {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::contract_state`], with `protocol_ids` in place of `contract_ids`, except
-    /// that an unknown id is never an error.
-    pub(crate) fn protocol_state(
+    /// Same as [`Self::contract_state_view`], with `protocol_ids` in place of `contract_ids`,
+    /// except that an unknown id is never an error.
+    pub(crate) fn protocol_state_view(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<dto::ProtocolStateRequestResponse, StateServiceError> {
+    ) -> Result<ProtocolStateView, StateServiceError> {
         // The cache serves explicit ids only; the database path lists every entity.
         let Some(ids) = request.protocol_ids.as_deref() else {
             return Err(StateServiceError::Fallback(FallbackReason::NoIds));
@@ -413,46 +407,43 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock, with the
-        // database path's merge.
+        // Lay the window changes over each entry, without holding any lock. The entry itself is
+        // not copied.
         let mut states = Vec::with_capacity(page.len());
         for (id, entry) in page.iter().zip(entries) {
-            // Not cached: start from an empty state. An id the window never changed is served as
-            // that empty state. The database path does this only at an uncommitted version; at a
-            // committed version it leaves the id out.
+            // Not cached: the view starts from an empty state. An id the window never changed is
+            // served as that empty state. The database path does this only at an uncommitted
+            // version; at a committed version it leaves the id out.
             // TODO: serve unknown ids the same way for accounts and components: both as an empty
             // entity or both as an error.
-            let updated_at = entry
-                .as_ref()
-                .map(|entry| entry.updated_at());
-            let mut state = entry.map_or_else(
-                || ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
-                |entry| ProtocolComponentState::from(Arc::unwrap_or_clone(entry)),
-            );
+            let mut view = ComponentView::new(id, entry, request.include_balances);
             for change in window_changes
                 .get(*id)
                 .into_iter()
                 .flatten()
-                // Skip blocks a fold already moved into the entry.
-                .filter(|change| updated_at.is_none_or(|at| change.at > at))
             {
-                if let Some(delta) = &change.delta {
-                    state.apply_state_delta(delta)?;
-                }
-                if let Some(balances) = &change.balances {
-                    state.apply_balance_delta(balances)?;
-                }
+                view.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            if !request.include_balances {
-                state.balances.clear();
-            }
-            states.push(dto::ResponseProtocolState::from(state));
+            states.push(view);
         }
 
-        Ok(dto::ProtocolStateRequestResponse::new(
+        Ok(ProtocolStateView {
             states,
-            PaginationResponse::new(pagination.page, pagination.page_size, ids.len() as i64),
-        ))
+            pagination: PaginationResponse::new(
+                pagination.page,
+                pagination.page_size,
+                ids.len() as i64,
+            ),
+        })
+    }
+
+    /// [`Self::protocol_state_view`] as an owned DTO.
+    pub(crate) fn protocol_state(
+        &self,
+        request: &dto::ProtocolStateRequestBody,
+    ) -> Result<dto::ProtocolStateRequestResponse, StateServiceError> {
+        self.protocol_state_view(request)
+            .map(dto::ProtocolStateRequestResponse::from)
     }
 
     /// Resolves `version` in the window of `protocol_system` and copies the window's blocks up to
@@ -1362,6 +1353,26 @@ mod test {
         assert_eq!(response.states[1].attributes["x"], Bytes::from(6u64));
         assert_eq!(response.states[2].attributes["x"], Bytes::from(6u64));
         assert!(response.states[3].attributes.is_empty() && response.states[3].balances.is_empty());
+    }
+
+    /// The view answer, cached and uncached ids, writes the JSON of its owned DTO.
+    #[test]
+    fn protocol_state_view_serializes_like_its_owned_answer() {
+        let harness = components();
+        harness.push(testing::with_state_delta(with_component(msg(6), "c2"), "c2", 6));
+        let request = protocol_request(&["c1", "c2", "c4"], dto::VersionParam::default());
+
+        let view = harness
+            .service
+            .protocol_state_view(&request)
+            .unwrap();
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["states"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            json,
+            serde_json::to_value(dto::ProtocolStateRequestResponse::from(view)).unwrap()
+        );
     }
 
     #[test]
