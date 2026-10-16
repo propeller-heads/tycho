@@ -8,7 +8,9 @@ Consumer library implementing the snapshot + deltas pattern for real-time protoc
 rpc.rs              HTTP snapshot client — fetches protocol state at a block height;
                     get_delta_catch_up fetches the messages a resubscribing client missed
                     (Unsupported on a 404 from servers without the endpoint)
-deltas.rs           WebSocket client — streams real-time state deltas
+deltas.rs           WebSocket client — streams real-time state deltas; subscribe_with_fingerprint
+                    also returns the extractor fingerprint from NewSubscription (None from older
+                    servers and from DeltasClient impls that keep the trait default)
 stream.rs           Builder entry point — wires RPC + WS clients into a TychoStream.
                     build() eagerly loads and validates the chain registry before any network I/O
 client_metadata.rs  X-Tycho-Client-Metadata header (CLIENT_METADATA_HEADER, size caps);
