@@ -18,7 +18,7 @@ error NativeFallbackRouter__UnexpectedOverride();
 
 /// @title NativeFallbackRouter
 /// @notice A `TychoFallbackRouter` whose primary is a signed Native RFQ-T quote. The quote MUST
-/// name this contract as recipient.
+/// name this contract as recipient. Trades ERC20s only; native-token quotes are not supported.
 /// @dev The price is signed off-chain, so the quote runs first and the fallback runs only when it
 /// fails.
 contract NativeFallbackRouter is TychoFallbackRouter {

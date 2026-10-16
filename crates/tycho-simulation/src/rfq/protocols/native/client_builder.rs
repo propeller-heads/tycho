@@ -74,6 +74,8 @@ impl NativeClientBuilder {
     }
 
     /// Executes the swaps through Tycho's `NativeFallbackRouter`. Off by default.
+    ///
+    /// The router trades ERC20s only, so the client then offers no native-token books.
     pub fn with_fallback_router(mut self) -> Self {
         self.via_fallback_router = true;
         self
