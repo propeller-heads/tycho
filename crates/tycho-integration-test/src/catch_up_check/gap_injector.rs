@@ -56,6 +56,12 @@ impl GapTrigger {
         self.0
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
+
+    /// How many gaps were requested so far.
+    #[cfg(test)]
+    pub fn requested_gaps(&self) -> u64 {
+        *self.0.borrow()
+    }
 }
 
 /// Wraps a deltas client and passes each subscription's messages through a forwarder task. When a
@@ -247,11 +253,16 @@ mod tests {
 
     use super::*;
 
+    /// Capacity of a scripted subscription.
+    const SCRIPTED_BUFFER: usize = 16;
+
     /// A deltas client whose subscriptions deliver what the test sends them.
     #[derive(Clone, Default)]
     struct ScriptedDeltasClient {
         /// The senders of the subscriptions made so far, oldest first.
         subscriptions: Arc<Mutex<Vec<Sender<BlockAggregatedChanges>>>>,
+        /// The fingerprint every subscription reports.
+        fingerprint: Option<ExtractorFingerprint>,
     }
 
     impl ScriptedDeltasClient {
@@ -270,13 +281,28 @@ mod tests {
     impl DeltasClient for ScriptedDeltasClient {
         async fn subscribe(
             &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+            let (subscription_id, receiver, _) = self
+                .subscribe_with_fingerprint(extractor_id, options)
+                .await?;
+            Ok((subscription_id, receiver))
+        }
+
+        async fn subscribe_with_fingerprint(
+            &self,
             _extractor_id: ExtractorIdentity,
             _options: SubscriptionOptions,
-        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
-            let (sender, receiver) = mpsc::channel(16);
+        ) -> Result<
+            (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>),
+            DeltasError,
+        > {
+            let (sender, receiver) = mpsc::channel(SCRIPTED_BUFFER);
             let mut subscriptions = self.subscriptions.lock().unwrap();
             subscriptions.push(sender);
-            Ok((Uuid::from_u128(subscriptions.len() as u128), receiver))
+            let subscription_id = Uuid::from_u128(subscriptions.len() as u128);
+            Ok((subscription_id, receiver, self.fingerprint.clone()))
         }
 
         async fn unsubscribe(&self, _subscription_id: Uuid) -> Result<(), DeltasError> {
@@ -388,6 +414,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(receive(&mut receiver).await, None);
+        for number in 5..5 + 2 * SCRIPTED_BUFFER as u64 {
+            let sent = timeout(
+                Duration::from_secs(1),
+                client
+                    .subscription(0)
+                    .send(block(number)),
+            )
+            .await
+            .expect("the ended subscription is still drained");
+            assert!(sent.is_ok(), "the ended subscription stays open until unsubscribed");
+        }
     }
 
     #[tokio::test]
@@ -439,6 +476,47 @@ mod tests {
                 follows_previous: true,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_a_revert_does_not_follow_the_previous_subscription() {
+        let Setup { client, injector, mut resubscriptions, .. } = setup(2);
+        let mut receiver = subscribe(&injector).await;
+        deliver(&client, 0, &mut receiver, &[1, 2]).await;
+        client.end(0);
+        assert_eq!(receive(&mut receiver).await, None);
+
+        let mut receiver = subscribe(&injector).await;
+        client
+            .subscription(1)
+            .send(BlockAggregatedChanges { revert: true, ..block(3) })
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut receiver).await, Some(3));
+
+        assert_eq!(
+            resubscriptions.try_recv(),
+            Ok(Resubscription {
+                extractor: "uniswap_v2".to_string(),
+                first_block: 3,
+                follows_previous: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_report_the_wrapped_clients_fingerprint() {
+        let fingerprint = ExtractorFingerprint(Bytes::from(vec![7; 32]));
+        let client =
+            ScriptedDeltasClient { fingerprint: Some(fingerprint.clone()), ..Default::default() };
+        let (injector, _) = GapInjector::new(client, 2, mpsc::unbounded_channel().0);
+
+        let (_, _, reported) = injector
+            .subscribe_with_fingerprint(extractor(), SubscriptionOptions::new())
+            .await
+            .unwrap();
+
+        assert_eq!(reported, Some(fingerprint));
     }
 
     #[tokio::test]
