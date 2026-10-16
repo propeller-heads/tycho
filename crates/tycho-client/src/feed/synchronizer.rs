@@ -536,8 +536,10 @@ where
             // up without tearing down the WS subscription and rebuilding state from scratch.
             const MAX_STALE_RETRIES: u32 = 5;
             let mut stale_retries: u32 = 0;
-            // Messages keep arriving during the delay, so we discard them instead of sleeping:
-            // a sleep would overflow the subscription buffer on fast chains.
+            // Set when the first candidate that cannot resume the stream arrives, so later
+            // candidates (after a stale snapshot, for instance) don't decide again. Messages keep
+            // arriving during the delay, so we discard them instead of sleeping: a sleep would
+            // overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
             // An upgraded extractor may have emitted other deltas for the blocks the consumer
             // already applied, so a block that follows `last_synced_block` resumes the stream only
@@ -627,18 +629,19 @@ where
                     }
                     match snapshot_not_before {
                         Some(not_before) if Instant::now() < not_before => continue,
-                        None if !snapshot_delay.is_zero() &&
-                            !(may_resume && self.is_next_expected(&incoming)) =>
-                        {
-                            info!(
-                                extractor=%self.extractor_id,
-                                delay_ms=snapshot_delay.as_millis(),
-                                "Syncing. Delaying snapshot request"
-                            );
+                        Some(_) => {}
+                        None if may_resume && self.is_next_expected(&incoming) => {}
+                        None => {
                             snapshot_not_before = Some(Instant::now() + snapshot_delay);
-                            continue;
+                            if !snapshot_delay.is_zero() {
+                                info!(
+                                    extractor=%self.extractor_id,
+                                    delay_ms=snapshot_delay.as_millis(),
+                                    "Syncing. Delaying snapshot request"
+                                );
+                                continue;
+                            }
                         }
-                        _ => {}
                     }
                     break msg;
                 };
