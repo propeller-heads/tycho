@@ -255,6 +255,7 @@ impl NativeClient {
         books: &'a HashMap<String, NativePriceData>,
     ) -> Vec<(&'a str, &'a NativePriceData, f64)> {
         let mut kept = Vec::new();
+        let native_token = self.chain.native_token().address;
 
         for (component_id, book) in books {
             // Keep unrequested books available for TVL conversion, but only emit requested
@@ -263,6 +264,13 @@ impl NativeClient {
                 !self
                     .tokens
                     .contains(&book.quote_address)
+            {
+                continue;
+            }
+            // NativeFallbackRouter trades ERC20s only, so the fallback client offers no
+            // native-token books.
+            if self.protocol_system == Self::FALLBACK_PROTOCOL_SYSTEM &&
+                (book.base_address == native_token || book.quote_address == native_token)
             {
                 continue;
             }
@@ -1894,6 +1902,40 @@ mod tests {
 
         let book = books.values().next().unwrap();
         assert_eq!(book.base_address, tycho_native_eth);
+    }
+
+    #[rstest]
+    #[case::native(false, 1)]
+    #[case::fallback(true, 0)]
+    fn test_native_eth_book_by_mode(#[case] via_fallback_router: bool, #[case] expected: usize) {
+        let native_eth = Chain::Ethereum.native_token().address;
+        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let mut client = NativeClient::new(
+            Chain::Ethereum,
+            "test-api-key".to_string(),
+            HashSet::from([native_eth.clone(), usdc.clone()]),
+            0.0,
+            HashSet::from([usdc.clone()]),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        if via_fallback_router {
+            client = client.via_fallback_router();
+        }
+        let entry: NativeOrderbookEntry = serde_json::from_value(serde_json::json!({
+            "base_address": native_eth.to_string(),
+            "quote_address": usdc.to_string(),
+            "minimum_in_base": 1.0,
+            "side": "bid",
+            "levels": [[1.0, 3_000.0]]
+        }))
+        .unwrap();
+        let books = client.group_orderbook(vec![entry]);
+
+        let kept = client.books_above_tvl_threshold(&books);
+
+        assert_eq!(kept.len(), expected);
     }
 
     fn create_test_client(endpoint: String) -> NativeClient {
