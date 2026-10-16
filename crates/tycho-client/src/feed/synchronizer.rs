@@ -538,7 +538,7 @@ where
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
-                let mut first_msg = loop {
+                let first_msg = loop {
                     let msg = select! {
                         deltas_result = timeout(Duration::from_secs(self.timeout), msg_rx.recv()) => {
                             deltas_result
@@ -624,17 +624,9 @@ where
                     break msg;
                 };
 
-                self.filter_deltas(&mut first_msg);
-
                 // initial snapshot
                 info!(height = first_msg.get_block().number, "First deltas received");
                 let header: BlockHeader = (&first_msg).into();
-                let deltas_msg = StateSyncMessage {
-                    header: header.clone(),
-                    snapshots: Default::default(),
-                    deltas: Some(first_msg),
-                    removed_components: Default::default(),
-                };
 
                 // If possible skip retrieving snapshots
                 if !self.is_next_expected(&header) {
@@ -729,9 +721,16 @@ where
                         deltas: None,
                         removed_components: HashMap::new(),
                     };
+                    // The snapshot's DCI data comes from the server's database, which lags
+                    // behind the subscription, so the first message's DCI and TVL changes are
+                    // applied on top of it. Only after a successful fetch: a stale snapshot
+                    // discards this message, which must then leave the tracker untouched.
+                    let deltas_msg = self.handle_block(first_msg);
                     break 'init (snapshot_msg.merge(deltas_msg), header);
                 } else {
-                    break 'init (deltas_msg, header);
+                    // The consumer holds the state at `last_synced_block` and this message
+                    // follows it, so it is handled like a live message.
+                    break 'init (self.handle_block(first_msg), header);
                 }
             };
 
@@ -1292,9 +1291,10 @@ mod test {
             AddressStorageLocation, Block, BlockAggregatedChanges, DCIUpdate, EntryPoint,
             EntryPointWithTracingParams, RPCTracerParams, TracingParams, TracingResult,
         },
-        protocol::{ProtocolComponent, ProtocolComponentState},
+        contract::AccountDelta,
+        protocol::{ProtocolComponent, ProtocolComponentState, ProtocolComponentStateDelta},
         token::Token,
-        Chain,
+        Chain, ChangeType,
     };
     use uuid::Uuid;
 
@@ -3983,6 +3983,320 @@ mod test {
         let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
 
         assert_eq!(first_block_after_restart(state_sync).await, 10);
+    }
+
+    /// Returns a deltas client whose subscription receives what the returned sender sends.
+    fn mock_deltas_channel() -> (MockDeltasClient, Sender<BlockAggregatedChanges>) {
+        let mut deltas_client = MockDeltasClient::new();
+        let (tx, rx) = channel(10);
+        deltas_client
+            .expect_subscribe()
+            .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        deltas_client
+            .expect_unsubscribe()
+            .return_once(|_| Ok(()));
+        (deltas_client, tx)
+    }
+
+    /// A synchronizer running one `state_sync` subscription, without a snapshot delay.
+    struct RunningSync {
+        block_rx: Receiver<SyncResult<StateSyncMessage<BlockHeader>>>,
+        end_tx: oneshot::Sender<()>,
+        task: JoinHandle<Result<(), Box<SyncError>>>,
+    }
+
+    impl RunningSync {
+        /// Initializes `state_sync` and subscribes as if it had synced up to `last_synced`.
+        async fn start(
+            mut state_sync: ProtocolStateSynchronizer<
+                ArcRPCClient<MockRPCClient>,
+                ArcDeltasClient<MockDeltasClient>,
+            >,
+            last_synced: Option<BlockHeader>,
+        ) -> Self {
+            state_sync
+                .initialize()
+                .await
+                .expect("Init should succeed");
+            state_sync.last_synced_block = last_synced;
+            let (mut block_tx, block_rx) = channel(10);
+            let (end_tx, end_rx) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                state_sync
+                    .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                    .await
+            });
+            Self { block_rx, end_tx, task }
+        }
+
+        async fn next(&mut self) -> StateSyncMessage<BlockHeader> {
+            timeout(Duration::from_secs(1), self.block_rx.recv())
+                .await
+                .expect("Should emit a message")
+                .expect("Channel should be open")
+                .expect("Should not be an error")
+        }
+
+        async fn stop(self) {
+            let _ = self.end_tx.send(());
+            let _ = self
+                .task
+                .await
+                .expect("Task should not panic");
+        }
+    }
+
+    /// A block whose DCI update links a new entry point to `component` and traces `contract`, and
+    /// that changes a slot of `contract`.
+    fn block_tracing_contract(
+        block_num: u64,
+        component: &str,
+        contract: &Bytes,
+    ) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            dci_update: DCIUpdate {
+                new_entrypoints: HashMap::from([(
+                    component.to_string(),
+                    HashSet::from([EntryPoint {
+                        external_id: "entrypoint_x".to_string(),
+                        target: contract.clone(),
+                        signature: "sig()".to_string(),
+                    }]),
+                )]),
+                trace_results: HashMap::from([(
+                    "entrypoint_x".to_string(),
+                    TracingResult {
+                        retriggers: HashSet::new(),
+                        accessed_slots: HashMap::from([(
+                            contract.clone(),
+                            HashSet::from([Bytes::from("0x01")]),
+                        )]),
+                    },
+                )]),
+                ..Default::default()
+            },
+            ..block_changing_slot(block_num, contract)
+        }
+    }
+
+    /// A block that only changes a slot of `contract`.
+    fn block_changing_slot(block_num: u64, contract: &Bytes) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            account_deltas: HashMap::from([(
+                contract.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    contract.clone(),
+                    HashMap::from([(
+                        Bytes::from("0x01"),
+                        Some(Bytes::from(vec![block_num as u8])),
+                    )]),
+                    None,
+                    None,
+                    ChangeType::Update,
+                ),
+            )]),
+            ..make_block_changes(block_num, None)
+        }
+    }
+
+    fn has_account_delta(msg: &StateSyncMessage<BlockHeader>, contract: &Bytes) -> bool {
+        msg.deltas
+            .as_ref()
+            .is_some_and(|d| d.account_deltas.contains_key(contract))
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_resume_tracks_contract_traced_in_first_message() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client)).with_dci(true);
+        let contract_x = Bytes::from("0xc0ffee");
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // Block 6 follows block 5, so the subscription resumes without a snapshot.
+        deltas_tx
+            .send(block_tracing_contract(6, "Component1", &contract_x))
+            .await
+            .unwrap();
+        deltas_tx
+            .send(block_changing_slot(7, &contract_x))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        let second = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        assert!(has_account_delta(&first, &contract_x), "The traced contract's delta is dropped");
+        assert_eq!(second.header.number, 7);
+        assert!(has_account_delta(&second, &contract_x), "The traced contract is not tracked");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_resume_tracks_component_crossing_tvl_in_first_message() {
+        let bg_done = Arc::new(tokio::sync::Notify::new());
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .withf(|params: &crate::rpc::ProtocolComponentsParams| {
+                params
+                    .component_ids()
+                    .is_some_and(|ids| ids.contains(&"Component3".to_string()))
+            })
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component3".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        let notify = bg_done.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(request.block_number);
+                let states = request
+                    .components
+                    .values()
+                    .map(|component| {
+                        let state = ComponentWithState {
+                            state: ProtocolComponentState::new(
+                                &component.id,
+                                Default::default(),
+                                Default::default(),
+                            ),
+                            component: component.clone(),
+                            component_tvl: Some(100.0),
+                            entrypoints: vec![],
+                        };
+                        (component.id.clone(), state)
+                    })
+                    .collect();
+                notify.notify_one();
+                Ok(Snapshot { states, vm_storage: HashMap::new() })
+            });
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // Component3 crosses the TVL threshold (50) in block 6, which follows block 5.
+        deltas_tx
+            .send(BlockAggregatedChanges {
+                component_tvl: HashMap::from([("Component3".to_string(), 100.0)]),
+                ..make_block_changes(6, None)
+            })
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        timeout(Duration::from_secs(1), bg_done.notified())
+            .await
+            .expect("Component3's snapshot should be requested");
+        deltas_tx
+            .send(BlockAggregatedChanges {
+                state_deltas: HashMap::from([(
+                    "Component3".to_string(),
+                    ProtocolComponentStateDelta::new(
+                        "Component3",
+                        HashMap::from([("reserve".to_string(), Bytes::from("0x07"))]),
+                        HashSet::new(),
+                    ),
+                )]),
+                ..make_block_changes(7, None)
+            })
+            .await
+            .unwrap();
+        let second = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        assert!(first.snapshots.states.is_empty());
+        // The resume itself needs no snapshot; Component3's is fetched at the block it crossed in.
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![6]);
+        assert!(second
+            .snapshots
+            .states
+            .contains_key("Component3"));
+        assert!(second.deltas.as_ref().is_some_and(|d| d
+            .state_deltas
+            .contains_key("Component3")));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_snapshot_start_tracks_contract_traced_in_first_message() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        // The server reads traced entry points from its database, which lags behind the
+        // subscription: the snapshot knows nothing of the first message's DCI update.
+        rpc_client
+            .expect_get_traced_entry_points()
+            .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_request, _chunk_size, _concurrency| Ok(Snapshot::default()));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client)).with_dci(true);
+        let contract_x = Bytes::from("0xc0ffee");
+        let mut sync = RunningSync::start(state_sync, None).await;
+
+        deltas_tx
+            .send(block_tracing_contract(1, "Component1", &contract_x))
+            .await
+            .unwrap();
+        deltas_tx
+            .send(block_changing_slot(2, &contract_x))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        let second = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 1);
+        assert!(has_account_delta(&first, &contract_x), "The traced contract's delta is dropped");
+        assert_eq!(second.header.number, 2);
+        assert!(has_account_delta(&second, &contract_x), "The traced contract is not tracked");
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
