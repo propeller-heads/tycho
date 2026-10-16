@@ -44,13 +44,15 @@ All public DB operations go through one of two gateway structs:
   `WriteQueue` and always runs the oldest head transaction before any backfill one, so a syncing
   extractor's large batches delay only itself; a head write waits at most for the one
   transaction already running. The `DBTransactionCommitted` debug event carries the `priority` it ran with.
-- **Writer fencing**: the writer calls `CachedGateway::increment_writer_epoch`, which increments
-  the one-row `writer_epoch` table, and every executor transaction first reads that row
-  `FOR SHARE`. When another process has incremented it since, the transaction fails with
-  `StorageError::Fenced` and writes nothing. An increment that commits while a write waits on the
-  row makes the write fail with a serialization error; the retry then sees the new epoch. Writes
-  that bypass the executor (migrations, `ensure_*` at startup, `add_protocol_types`,
-  `update_tokens`) are not fenced.
+- **Writer fencing**: to *fence* a writer is to make the database refuse all its writes from
+  the moment a different process becomes the writer. A former leader can still run after it lost
+  the lock (a long pause, a network failure), and the lock alone cannot stop it from writing.
+  The writer calls `CachedGateway::increment_writer_epoch`, which increments the one-row
+  `writer_epoch` table, and every executor transaction first reads that row `FOR SHARE`. When
+  another process has incremented it since, the transaction fails with `StorageError::Fenced` and
+  writes nothing. An increment that commits while a write waits on the row makes the write fail
+  with a serialization error; the retry then sees the new epoch. Writes that bypass the executor
+  (migrations, `ensure_*` at startup, `add_protocol_types`, `update_tokens`) are not fenced.
   An increment waits for every open write transaction (it logs a warning every 10s). So that a
   vanished writer cannot block it for long, every pool session sets server-side TCP keepalives
   (`SESSION_KEEPALIVES`): Postgres drops a dead peer's session, and its lock, after about 25s.
