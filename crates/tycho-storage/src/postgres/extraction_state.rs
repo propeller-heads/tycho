@@ -1,8 +1,13 @@
+use std::collections::HashMap;
+
+use chrono::NaiveDateTime;
 use diesel::{ExpressionMethods, QueryDsl};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::models::{Chain, ExtractionState};
 
-use super::{orm, schema, storage_error_from_diesel, PostgresGateway, StorageError};
+use super::{
+    cache::CommittedBlock, orm, schema, storage_error_from_diesel, PostgresGateway, StorageError,
+};
 
 impl PostgresGateway {
     pub async fn get_state(
@@ -27,6 +32,37 @@ impl PostgresGateway {
             Ok(None) => Err(StorageError::NotFound("ExtractionState".to_owned(), name.to_owned())),
             Err(err) => Err(storage_error_from_diesel(err, "ExtractionState", name, None).into()),
         }
+    }
+
+    /// Returns the block each extraction state of `chain` last saved, keyed by the state's name.
+    ///
+    /// A state is saved in the same transaction as the block data it covers, so this is the
+    /// newest block whose data is in the database for that extractor.
+    pub async fn get_committed_blocks(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<String, CommittedBlock>, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<(String, i64, NaiveDateTime)> = schema::extraction_state::table
+            .inner_join(schema::block::table)
+            .filter(schema::extraction_state::chain_id.eq(chain_id))
+            .select((schema::extraction_state::name, schema::block::number, schema::block::ts))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ExtractionState", &chain.to_string(), None)
+            })?;
+        let mut blocks = HashMap::with_capacity(rows.len());
+        for (name, number, ts) in rows {
+            let number = u64::try_from(number).map_err(|_| {
+                StorageError::Unexpected(format!(
+                    "Extraction state {name} points to a block with negative number {number}"
+                ))
+            })?;
+            blocks.insert(name, CommittedBlock { number, ts });
+        }
+        Ok(blocks)
     }
 
     pub async fn save_state(
@@ -184,6 +220,73 @@ mod test {
         assert_eq!(query_res.name, extractor_name);
         assert_eq!(query_res.version, "0.1.0".to_string());
         assert_eq!(&query_res.cursor.unwrap(), "10".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_get_committed_blocks() {
+        let mut conn = setup_db().await;
+        let gateway = get_dgw(&mut conn).await;
+        let blocks: Vec<(i64, i64, NaiveDateTime)> = schema::block::table
+            .select((schema::block::id, schema::block::number, schema::block::ts))
+            .order_by(schema::block::number)
+            .load(&mut conn)
+            .await
+            .unwrap();
+        let (first_block_id, first_block_number, first_block_ts) = blocks[0];
+        let (_, last_block_number, last_block_ts) = *blocks.last().unwrap();
+        let chain_id = gateway
+            .get_chain_id(&Chain::Ethereum)
+            .unwrap();
+        diesel::insert_into(schema::extraction_state::table)
+            .values(&orm::NewExtractionState {
+                name: "lagging_extractor",
+                chain_id,
+                attributes: None,
+                cursor: None,
+                version: "0.1.0",
+                modified_ts: chrono::Utc::now().naive_utc(),
+                block_id: first_block_id,
+            })
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let committed = gateway
+            .get_committed_blocks(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        assert_ne!(first_block_ts, last_block_ts, "the fixture blocks need distinct timestamps");
+        assert_eq!(
+            committed,
+            HashMap::from([
+                (
+                    "setup_extractor".to_string(),
+                    CommittedBlock { number: last_block_number as u64, ts: last_block_ts }
+                ),
+                (
+                    "lagging_extractor".to_string(),
+                    CommittedBlock { number: first_block_number as u64, ts: first_block_ts }
+                ),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_committed_blocks_of_chain_without_states() {
+        let mut conn = setup_db().await;
+        let gateway = get_dgw(&mut conn).await;
+        diesel::delete(schema::extraction_state::table)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let committed = gateway
+            .get_committed_blocks(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        assert!(committed.is_empty());
     }
 
     #[tokio::test]

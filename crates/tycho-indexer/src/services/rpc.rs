@@ -26,7 +26,10 @@ use tycho_common::{
 };
 
 use crate::{
-    extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+    extractor::{
+        reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+        writer_status::WriterStatus,
+    },
     services::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
@@ -1638,21 +1641,37 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
     }
 }
 
+/// How long a leader may go without confirming its leader lock before it reports unhealthy.
+///
+/// A leader confirms its lock every second. A leader that stops confirming but keeps the lock
+/// blocks every other process from taking over, so it must be restarted.
+const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Health check endpoint
 ///
-/// This endpoint is used to check the health of the service.
+/// This endpoint is used to check the health of the service. It fails with 503 while this
+/// process is the database writer but has not confirmed its leader lock for 30 seconds.
 #[utoipa::path(
     get,
     path = "/v1/health",
     responses(
         (status = 200, description = "OK", body=Health),
+        (status = 503, description = "The database writer stopped confirming its lock", body=Health),
     ),
     security(
          ("apiKey" = [])
     )
 )]
-pub async fn health() -> Result<HttpResponse, RpcError> {
-    Ok(HttpResponse::Ok().json(dto::Health::Ready))
+pub async fn health(writer_status: Option<web::Data<WriterStatus>>) -> HttpResponse {
+    let since_confirmed = writer_status.and_then(|status| status.time_since_lead_confirmed());
+    match since_confirmed {
+        Some(elapsed) if elapsed > LEAD_CONFIRMATION_LIMIT => HttpResponse::ServiceUnavailable()
+            .json(dto::Health::NotReady(format!(
+                "Leader has not confirmed its leader lock for {}s",
+                elapsed.as_secs()
+            ))),
+        _ => HttpResponse::Ok().json(dto::Health::Ready),
+    }
 }
 
 #[cfg(test)]
@@ -4221,5 +4240,57 @@ plans:
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use std::collections::HashMap;
+
+    use actix_web::{test, App};
+    use tokio::{sync::watch, time::Instant};
+
+    use super::*;
+    use crate::extractor::writer_status::Role;
+
+    fn writer_status(role: Role, last_confirmed_ago: std::time::Duration) -> WriterStatus {
+        let confirmed_at = Instant::now()
+            .checked_sub(last_confirmed_ago)
+            .expect("the clock should be past the duration");
+        let (_, role) = watch::channel(role);
+        let (_, heights) = watch::channel(HashMap::new());
+        let (_, confirmed_at) = watch::channel(confirmed_at);
+        WriterStatus::new(role, heights).with_lead_confirmations(confirmed_at)
+    }
+
+    async fn health_status(writer_status: Option<WriterStatus>) -> StatusCode {
+        let mut app = App::new();
+        if let Some(writer_status) = writer_status {
+            app = app.app_data(web::Data::new(writer_status));
+        }
+        let app = test::init_service(app.route("/health", web::get().to(health))).await;
+        let req = test::TestRequest::get()
+            .uri("/health")
+            .to_request();
+        test::call_service(&app, req)
+            .await
+            .status()
+    }
+
+    #[actix_web::test]
+    async fn test_health_fails_when_the_leader_stopped_confirming_its_lock() {
+        let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(stale)).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[actix_web::test]
+    async fn test_health_passes_for_a_confirming_leader_a_follower_and_no_status() {
+        let confirming = writer_status(Role::Leader, std::time::Duration::from_secs(1));
+        let follower = writer_status(Role::Follower, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(confirming)).await, StatusCode::OK);
+        assert_eq!(health_status(Some(follower)).await, StatusCode::OK);
+        assert_eq!(health_status(None).await, StatusCode::OK);
     }
 }

@@ -6,12 +6,13 @@ use tokio::sync::{
 };
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, warn};
-use tycho_common::models::ExtractorIdentity;
+use tycho_common::{models::ExtractorIdentity, storage::StorageError};
 
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
     factory::ExtractorFactory,
     runner::{ControlMessage, ExtractorHandle, SubscriptionsMap},
+    writer_status::WriterStatus,
     DeltaCommand, ExtractionError,
 };
 
@@ -22,6 +23,38 @@ const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4 * 60 * 60);
 /// Minimum run duration after which a failure is treated as a fresh incident rather than a
 /// continuation of the previous one, resetting the restart count and backoff.
 const HEALTHY_RUN_THRESHOLD: Duration = Duration::from_secs(10 * 60);
+
+/// How often a supervisor that does not need its extractor's stream checks again.
+#[cfg(not(test))]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// What ended [`wait_for_stream_need`].
+enum StreamWait {
+    /// This process needs the extractor's stream now.
+    Needed,
+    /// A control message arrived first.
+    Control(ControlMessage),
+}
+
+/// Waits until `writer` says that this process needs the stream of `extractor`, or until a
+/// control message arrives on `control_rx`.
+async fn wait_for_stream_need(
+    writer: &WriterStatus,
+    extractor: &str,
+    control_rx: &mut Receiver<ControlMessage>,
+) -> StreamWait {
+    loop {
+        if writer.needs_stream(extractor, chrono::Utc::now().naive_utc()) {
+            return StreamWait::Needed;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(STREAM_NEED_POLL_INTERVAL) => {}
+            Some(ctrl) = control_rx.recv() => return StreamWait::Control(ctrl),
+        }
+    }
+}
 
 /// Exponential backoff for restarts: 60s, 120s, 240s, ... capped at [`MAX_RESTART_BACKOFF`].
 fn restart_backoff() -> ExponentialBackoff {
@@ -42,9 +75,22 @@ fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
     restarts
 }
 
+/// Returns the error to end supervision with when `err` must not lead to a restart.
+///
+/// A fenced writer means another process took over writing to the database. A rebuilt extractor
+/// would be fenced again on its first commit, so restarting cannot help.
+fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
+    let ExtractionError::Storage(StorageError::Fenced { claimed, current }) = err else {
+        return None;
+    };
+    Some(ExtractionError::Storage(StorageError::Fenced { claimed: *claimed, current: *current }))
+}
+
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
 ///
 /// The supervisor:
+/// - On a follower, waits to build the extractor while the leader syncs its history, so only the
+///   leader pays for that stream.
 /// - Builds an extractor and runner via its factory.
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
@@ -55,6 +101,7 @@ fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
 /// - Forwards `ControlMessage::Stop` by signalling the runner's stop channel.
 pub struct ExtractorSupervisor {
     factory: ExtractorFactory,
+    writer_status: WriterStatus,
     ctrl_tx: Sender<ControlMessage>,
     control_rx: Receiver<ControlMessage>,
     subscriptions: Arc<Mutex<SubscriptionsMap>>,
@@ -68,8 +115,10 @@ impl ExtractorSupervisor {
         let id = factory.extractor_id();
         let max_restarts: Option<u32> = factory.config.max_restarts;
         let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let writer_status = factory.writer_status().clone();
         Self {
             factory,
+            writer_status,
             ctrl_tx,
             control_rx,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -93,6 +142,49 @@ impl ExtractorSupervisor {
             .lock()
             .await
             .insert(subscriber_id, sender);
+    }
+
+    /// Waits until this process needs the extractor's stream, and serves control messages
+    /// meanwhile. Returns `false` when a `Stop` arrives first.
+    async fn wait_until_stream_is_needed(&mut self) -> bool {
+        let now = chrono::Utc::now().naive_utc();
+        if self
+            .writer_status
+            .needs_stream(&self.id.name, now)
+        {
+            return true;
+        }
+        info!(
+            extractor = %self.id,
+            leader_committed_height = ?self.writer_status.committed_height(&self.id.name),
+            "FollowerWaitsForLeaderSync: the leader syncs history; not opening the stream"
+        );
+        loop {
+            match wait_for_stream_need(&self.writer_status, &self.id.name, &mut self.control_rx)
+                .await
+            {
+                StreamWait::Needed => {
+                    info!(
+                        extractor = %self.id,
+                        role = ?self.writer_status.role(),
+                        leader_committed_height =
+                            ?self.writer_status.committed_height(&self.id.name),
+                        "FollowerStreamStarts"
+                    );
+                    return true;
+                }
+                StreamWait::Control(ControlMessage::Stop) => {
+                    info!(
+                        extractor = %self.id,
+                        "Stop signal received while waiting for the leader to sync"
+                    );
+                    return false;
+                }
+                StreamWait::Control(ControlMessage::Subscribe(sender)) => {
+                    self.add_subscriber(sender).await;
+                }
+            }
+        }
     }
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
@@ -121,6 +213,9 @@ impl ExtractorSupervisor {
         let restarts = restart_counter(&self.id);
 
         loop {
+            if !self.wait_until_stream_is_needed().await {
+                return Ok(());
+            }
             let (stop_tx, stop_rx) = oneshot::channel();
             let runner = match self
                 .factory
@@ -195,6 +290,9 @@ impl ExtractorSupervisor {
                         "reason" => err.variant_name()
                     )
                     .increment(1);
+                    if let Some(fatal) = unrecoverable(err) {
+                        return Err(fatal);
+                    }
                 }
                 Err(ref join_err) => {
                     error!(
@@ -323,9 +421,12 @@ mod tests {
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},
         MetricKind,
     };
+    use tokio::sync::watch;
     use tycho_common::models::Chain;
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
+    use crate::extractor::writer_status::Role;
 
     fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
         snapshotter
@@ -347,6 +448,20 @@ mod tests {
                 (labels, count)
             })
             .collect()
+    }
+
+    #[test]
+    fn fenced_writer_is_unrecoverable() {
+        let fenced = ExtractionError::Storage(StorageError::Fenced { claimed: 3, current: 4 });
+
+        assert_eq!(unrecoverable(&fenced), Some(fenced));
+    }
+
+    #[test]
+    fn other_storage_errors_are_restarted() {
+        let err = ExtractionError::Storage(StorageError::Unexpected("connection reset".into()));
+
+        assert_eq!(unrecoverable(&err), None);
     }
 
     #[test]
@@ -372,5 +487,103 @@ mod tests {
         });
 
         assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+
+    /// Long enough for many polls of a waiting supervisor.
+    const STILL_WAITING: Duration = Duration::from_millis(200);
+    const EXTRACTOR: &str = "uniswap_v2";
+
+    struct WriterChannels {
+        role: watch::Sender<Role>,
+        committed: watch::Sender<HashMap<String, CommittedBlock>>,
+    }
+
+    impl WriterChannels {
+        fn follower() -> (Self, WriterStatus) {
+            let (role, role_rx) = watch::channel(Role::Follower);
+            let (committed, committed_rx) = watch::channel(HashMap::new());
+            (Self { role, committed }, WriterStatus::new(role_rx, committed_rx))
+        }
+
+        fn leader_committed_block_of_age(&self, age: chrono::Duration) {
+            let ts = chrono::Utc::now().naive_utc() - age;
+            self.committed
+                .send(HashMap::from([(EXTRACTOR.to_string(), CommittedBlock { number: 100, ts })]))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_leader_needs_the_stream_at_once() {
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+
+        let wait = tokio::time::timeout(
+            STILL_WAITING,
+            wait_for_stream_need(&WriterStatus::leader(), EXTRACTOR, &mut control_rx),
+        )
+        .await;
+
+        assert!(matches!(wait, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_follower_waits_until_the_leader_is_near_the_head() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+
+        let syncing = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
+        let near_head = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(syncing.is_err(), "a follower must not stream while the leader syncs");
+        assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_follower_needs_the_stream_once_promoted() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let mut wait = std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx));
+
+        let first_sync = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels
+            .role
+            .send(Role::Leader)
+            .unwrap();
+        let promoted = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(first_sync.is_err(), "a follower must not stream before the first commit");
+        assert!(matches!(promoted, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_waiting_follower_returns_control_messages() {
+        let (_channels, writer) = WriterChannels::follower();
+        let (ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let (subscriber, _subscriber_rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(ControlMessage::Subscribe(subscriber))
+            .await
+            .unwrap();
+
+        let subscribe = tokio::time::timeout(
+            STILL_WAITING,
+            wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx),
+        )
+        .await;
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        let stop = tokio::time::timeout(
+            STILL_WAITING,
+            wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx),
+        )
+        .await;
+
+        assert!(matches!(subscribe, Ok(StreamWait::Control(ControlMessage::Subscribe(_)))));
+        assert!(matches!(stop, Ok(StreamWait::Control(ControlMessage::Stop))));
     }
 }

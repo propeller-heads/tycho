@@ -9,12 +9,13 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task
 testing.rs                  Test utilities
 
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; on a follower, waits to build the extractor while the leader syncs history
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -22,6 +23,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed blocks as watch receivers; `needs_stream`
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -145,7 +147,12 @@ database cursor.
 ## Persistence
 
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
-block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
+block batch arrives. Each commit has a `WritePriority` (`write_priority`): `Backfill` when the
+newest block the extractor has received is older than `BACKFILL_BLOCK_AGE` (10 minutes, by block
+timestamp), else `Head`, so the executor runs the commits of extractors at the chain head first. A
+takeover commit uses the same rule. The committed blocks' own age cannot decide it, as only
+finalized blocks are committed and these are minutes old at the head; finality cannot either, as on
+many chains a block at the head is already final. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
 `valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
@@ -155,6 +162,65 @@ they are provably behind the finality horizon.
 Drained blocks stay in the buffer's committing section (shared with the commit task via
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
+
+### Leader election
+
+Several `index` processes can run against one database. All of them extract and serve WS/RPC;
+only the leader commits. `leadership::elect` (called in `main.rs` before the extractors are built,
+with a gateway built with `defer_writer_claim`) tries the `LeaderLock` once:
+
+- **Lock taken**: claims the writer epoch, runs `initialize_accounts`, role `Leader` from the start.
+  This is the single-replica path and behaves as before.
+- **Lock held elsewhere**: role `Follower`. A background task polls
+  `CachedGateway::get_committed_blocks` into the `WriterStatus` every second and retries the lock.
+  On success it claims the epoch (fencing the former leader, see "Writer fencing" in
+  `crates/tycho-storage/CLAUDE.md`), runs `initialize_accounts`, and only
+  then switches the role to `Leader`, so no extractor commits before the fence. The lock checks
+  start at the claim; a promotion that takes longer than `PROMOTION_TIMEOUT` (5 minutes) ends the
+  task with an error, so a hung promotion cannot leave the database without a writer.
+- **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
+  it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
+  follower. `tycho_leader` (gauge, 0/1) shows the role.
+- **Health**: each successful lock check is published in the `WriterStatus`
+  (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
+  confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
+  the lock. A frozen process does not answer the probe at all, which has the same effect.
+
+### Leader and follower extractors
+
+Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
+set by `ExtractorFactory::with_writer_status`; without it the extractor is the only writer):
+
+- **Committing** (leader): the path above.
+- **Following**: drained blocks go into the committing section but are never written. They are
+  released once the leader's committed height for this extractor (`WriterStatus::committed_height`)
+  passes them, and the released blocks' `new_tokens` go into the token cache
+  (`ExtractorGateway::cache_tokens`), the same point at which the leader's write-through caches them.
+  Outgoing messages carry the leader's committed height as `db_committed_block_height`.
+  A following extractor keeps committing blocks that span less than `FOLLOWER_RETENTION_SPAN`
+  (30 minutes of chain time, newest minus oldest committing block timestamp; chain time and not a
+  block count, as block times range from 100 ms to minutes). At the limit,
+  `Extractor::wait_for_capacity` (awaited by the runner before it pulls the next block, in the
+  same `select!` as the stop signal) pauses it until the leader's commits release blocks or it
+  becomes leader; it logs `FollowerPaused` and `FollowerResumed` with the span and block count.
+  It never drops retained blocks: revert lookups rely on them until the database covers them.
+- **Takeover**: on the first full block after the role turns `Leader`, the extractor reads its
+  `extraction_state` block (the former leader's last commit, `floor`), releases retained blocks at or
+  below it, commits the rest, and from then on drops every drained block at or below `floor`. A
+  follower that was behind the former leader therefore never writes a block twice. Messages report
+  `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
+  and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
+  extractor from its cursor.
+- **No stream while the leader syncs**: before it builds an extractor (at start and on each
+  restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
+  follows and the leader's newest committed block for the extractor is missing (first sync) or
+  older than `LEADER_NEAR_HEAD_AGE` (1 hour, more than the finality delay of every chain). So only
+  the leader pays Substreams for history, and a follower cannot serve history anyway. The wait
+  polls every second and still serves `Stop` and `Subscribe`; it logs `FollowerWaitsForLeaderSync`
+  and `FollowerStreamStarts`. It ends when the leader gets near the head or this process becomes
+  leader. A process that is already leader builds the extractor with `CommitMode::Committing`
+  from the database cursor, as at a normal start. Once the stream is open, the wait does not
+  apply again until the next restart; `FOLLOWER_RETENTION_SPAN` bounds memory instead.
 
 ## Why extractor messages must be broadcast to the RPC service
 
@@ -242,7 +308,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check |
+| `/health` | GET — health check; 503 when the leader stopped confirming its lock |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at

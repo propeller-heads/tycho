@@ -15,6 +15,7 @@ pub struct GatewayBuilder {
     chains: Vec<Chain>,
     token_cache: bool,
     component_index: bool,
+    defer_writer_claim: bool,
 }
 
 /// How often the token cache polls for token rows modified by other processes.
@@ -65,6 +66,14 @@ impl GatewayBuilder {
         self
     }
 
+    /// Starts the write executor of [`GatewayBuilder::build`] without claiming the database
+    /// writer epoch. Every write fails until [`CachedGateway::claim_writer`] is called. For a
+    /// process that waits to become the database writer.
+    pub fn defer_writer_claim(mut self) -> Self {
+        self.defer_writer_claim = true;
+        self
+    }
+
     // TODO: remove once all interfaces are refactored to be single-chain targeted.
     fn single_chain(&self) -> Result<Chain, StorageError> {
         match self.chains.as_slice() {
@@ -101,14 +110,25 @@ impl GatewayBuilder {
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
         let (tx, rx) = mpsc::channel(10);
-        let write_executor = postgres::cache::DBCacheWriteExecutor::new(
-            chain.to_string(),
-            chain,
-            pool.clone(),
-            inner_gw.clone(),
-            rx,
-        )
-        .await;
+        let write_executor = if self.defer_writer_claim {
+            postgres::cache::DBCacheWriteExecutor::new_unclaimed(
+                chain.to_string(),
+                chain,
+                pool.clone(),
+                inner_gw.clone(),
+                rx,
+            )
+            .await
+        } else {
+            postgres::cache::DBCacheWriteExecutor::new(
+                chain.to_string(),
+                chain,
+                pool.clone(),
+                inner_gw.clone(),
+                rx,
+            )
+            .await
+        };
         let handle = write_executor.run();
 
         let cached_gw = CachedGateway::new(tx, pool.clone(), inner_gw.clone());

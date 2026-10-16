@@ -35,7 +35,7 @@ use tycho_common::{
     Bytes,
 };
 use tycho_protobuf::{convert::TryFromMessage, pb::tycho::evm::v1 as tycho_pb};
-use tycho_storage::postgres::cache::CachedGateway;
+use tycho_storage::postgres::cache::{CachedGateway, WritePriority};
 
 use crate::{
     extractor::{
@@ -43,6 +43,7 @@ use crate::{
         models::BlockChanges,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
         reorg_buffer::{PurgeOutcome, ReorgBuffer},
+        writer_status::{Role, WriterStatus},
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::{
@@ -61,6 +62,66 @@ pub struct Inner {
 }
 
 type BatchCommitHandle = JoinHandle<Result<(), ExtractionError>>;
+
+/// A block drained from the reorg buffer, shared with the commit task.
+type DrainedBlock = Arc<BlockUpdateWithCursor<BlockChanges>>;
+
+/// Most chain time the drained blocks of a following extractor may cover while they wait for the
+/// leader to commit them. At this span it stops taking blocks until the leader's commits release
+/// some, so its memory stays bounded when the leader does not commit for this extractor, e.g.
+/// while it runs an older configuration. Chain time and not a block count, so the limit means the
+/// same on chains with very different block times.
+const FOLLOWER_RETENTION_SPAN: Duration = Duration::minutes(30);
+
+/// How often a following extractor at its retention limit checks whether it can continue.
+const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Age from which a block's write counts as backfill: it then runs after the writes of
+/// extractors at the chain head. Generous, so a head extractor that briefly lags keeps priority,
+/// while one syncing history from an old snapshot is far past it.
+const BACKFILL_BLOCK_AGE: Duration = Duration::minutes(10);
+
+/// Returns the priority of the writes an extractor queues while `newest_block` is the newest
+/// block it has received: [`WritePriority::Backfill`] while the extractor syncs history, else
+/// [`WritePriority::Head`].
+///
+/// Decided by how far the extractor is behind the chain head, not by the age of the blocks it
+/// writes: it writes only finalized blocks, which are minutes old even at the head on many
+/// chains. Finality cannot decide it either: on other chains a block at the head is already final.
+fn write_priority(newest_block: &Block, now: NaiveDateTime) -> WritePriority {
+    if now.signed_duration_since(newest_block.ts) > BACKFILL_BLOCK_AGE {
+        WritePriority::Backfill
+    } else {
+        WritePriority::Head
+    }
+}
+
+/// How an extractor handles the finalized blocks it drains from its reorg buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitMode {
+    /// Commits drained blocks to the database. Blocks at or below `floor` were committed by a
+    /// former leader before this process took over, so they are dropped instead.
+    Committing { floor: Option<u64> },
+    /// Retains drained blocks until the leader's commits cover them.
+    Following,
+}
+
+/// The drained blocks a following extractor retains for the leader to commit.
+#[derive(Clone, Copy, Debug)]
+struct Retention {
+    /// Chain time the retained blocks cover, `None` without retained blocks.
+    span: Option<Duration>,
+    blocks: usize,
+}
+
+impl Retention {
+    /// Returns whether the extractor may retain another block: not once the retained blocks
+    /// span [`FOLLOWER_RETENTION_SPAN`] or more.
+    fn has_capacity(&self) -> bool {
+        self.span
+            .is_none_or(|span| span < FOLLOWER_RETENTION_SPAN)
+    }
+}
 
 #[derive(Default)]
 struct GatewayInner<G> {
@@ -92,6 +153,8 @@ pub struct ProtocolExtractor<G, T, E> {
     reorg_buffer: Mutex<ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>>,
     partial_block_buffer: Mutex<PartialBlockBuffer>,
     dci_plugin: Option<Arc<Mutex<E>>>,
+    writer: WriterStatus,
+    commit_mode: Mutex<CommitMode>,
 }
 
 impl<G, T, E> ProtocolExtractor<G, T, E>
@@ -157,6 +220,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    writer: WriterStatus::leader(),
+                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
                 }
             }
             Ok((cursor, block_hash)) => {
@@ -202,6 +267,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    writer: WriterStatus::leader(),
+                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
                 }
             }
             Err(err) => return Err(ExtractionError::Setup(err.to_string())),
@@ -209,6 +276,18 @@ where
 
         res.ensure_protocol_types().await?;
         Ok(res)
+    }
+
+    /// Makes the extractor commit or follow according to `writer`. Without this call the
+    /// extractor commits as the only writer.
+    pub fn with_writer_status(mut self, writer: WriterStatus) -> Self {
+        let mode = match writer.role() {
+            Role::Leader => CommitMode::Committing { floor: None },
+            Role::Follower => CommitMode::Following,
+        };
+        self.commit_mode = Mutex::new(mode);
+        self.writer = writer;
+        self
     }
 
     async fn update_cursor(&self, cursor: String) {
@@ -748,52 +827,225 @@ where
         Ok(new_tokens)
     }
 
-    /// Process a full block
-    ///
-    /// This includes updating the reorg buffer, committing to the database, emitting sync updates
-    /// and metrics and aggregating the changes).
-    #[instrument(skip_all, fields(block_number = msg.block.number, final_block_height))]
-    async fn process_full_block_message(
-        &self,
-        msg: BlockChanges,
-        cursor: String,
-        final_block_height: u64,
-    ) -> Result<Option<ExtractorMsg>, ExtractionError> {
-        let is_syncing = final_block_height == msg.block.number;
-        if final_block_height > msg.block.number {
-            return Err(ExtractionError::ReorgBufferError(format!(
-                "Final block height ({}) greater than block number ({}) are unsupported by the reorg buffer",
-                final_block_height, msg.block.number
-            )));
+    /// Returns how drained blocks are handled now, taking over database commits first when
+    /// this process became the leader since the previous block. The takeover's commit runs at
+    /// `priority`.
+    async fn commit_mode(&self, priority: WritePriority) -> Result<CommitMode, ExtractionError> {
+        let mut mode = self.commit_mode.lock().await;
+        if *mode == CommitMode::Following && self.writer.role() == Role::Leader {
+            *mode = CommitMode::Committing { floor: self.take_over_commits(priority).await? };
         }
+        Ok(*mode)
+    }
 
+    /// Starts committing after this process became the leader.
+    ///
+    /// Reads the newest block the former leader committed for this extractor, drops the
+    /// retained blocks it covers and queues a commit of the remaining ones. Returns that
+    /// block's number, or `None` when no block was ever committed for this extractor.
+    async fn take_over_commits(
+        &self,
+        priority: WritePriority,
+    ) -> Result<Option<u64>, ExtractionError> {
+        let floor_block = match self.gateway.inner.get_cursor().await {
+            Ok((_, block_hash)) => Some(
+                self.gateway
+                    .inner
+                    .get_block(block_hash)
+                    .await
+                    .map_err(ExtractionError::Storage)?,
+            ),
+            Err(StorageError::NotFound(_, _)) => None,
+            Err(err) => return Err(ExtractionError::Storage(err)),
+        };
+        let floor = floor_block
+            .as_ref()
+            .map(|block| block.number);
+        let (released, retained) = {
+            let mut reorg_buffer = self.reorg_buffer.lock().await;
+            let released = floor
+                .map(|height| reorg_buffer.release_committed(height))
+                .unwrap_or_default();
+            (released, reorg_buffer.committing_blocks())
+        };
+        self.cache_committed_tokens(&released);
+        if let (Some(floor), Some(first)) = (&floor_block, retained.first()) {
+            let first = &first.block_update().block;
+            if first.number != floor.number + 1 {
+                return Err(ExtractionError::ReorgBufferError(format!(
+                    "Cannot take over commits: the database ends at block {} but the \
+                     retained blocks start at {}. Restart the extractor from its cursor.",
+                    floor.number, first.number
+                )));
+            }
+            if first.parent_hash != floor.hash {
+                return Err(ExtractionError::ReorgBufferError(format!(
+                    "Cannot take over commits: the database ends at block {} ({}) but the \
+                     retained block {} has parent hash {}. Restart the extractor from its cursor.",
+                    floor.number, floor.hash, first.number, first.parent_hash
+                )));
+            }
+        }
+        if floor.is_some() {
+            *self
+                .gateway
+                .committed_block_height
+                .lock()
+                .await = floor;
+        }
+        info!(
+            extractor_id = self.name,
+            chain = %self.chain,
+            ?floor,
+            retained = retained.len(),
+            "TakingOverDatabaseCommits"
+        );
+        self.queue_commit(retained, false, priority)
+            .await?;
+        Ok(floor)
+    }
+
+    /// Buffers `msg` and returns the finalized blocks to commit once a batch is complete.
+    ///
+    /// Blocks at or below `floor` are dropped instead of returned: a former leader committed
+    /// them already.
+    async fn drain_for_commit(
+        &self,
+        msg: &BlockChanges,
+        cursor: &str,
+        final_block_height: u64,
+        floor: Option<u64>,
+    ) -> Result<Vec<DrainedBlock>, ExtractionError> {
         let flushed_block_height = self
             .gateway
             .inner
             .flushed_block_height()
             .await;
-        let blocks_to_commit = {
+        let mut reorg_buffer = self.reorg_buffer.lock().await;
+        if let Some(height) = flushed_block_height {
+            reorg_buffer.release_committed(height);
+        }
+        reorg_buffer
+            .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.to_string()))
+            .map_err(ExtractionError::Storage)?;
+        if reorg_buffer.count_blocks_before(final_block_height) < self.gateway.commit_batch_size {
+            return Ok(Vec::new());
+        }
+        let mut drained = reorg_buffer
+            .drain_into_committing(final_block_height)
+            .map_err(ExtractionError::Storage)?;
+        if let Some(floor) = floor {
+            reorg_buffer.release_committed(floor);
+            drained.retain(|block| block.block_update().block.number > floor);
+        }
+        Ok(drained)
+    }
+
+    /// Buffers `msg` like the leader does, but keeps drained blocks until the leader's commits
+    /// cover them, without writing anything.
+    async fn retain_until_leader_commits(
+        &self,
+        msg: &BlockChanges,
+        cursor: &str,
+        final_block_height: u64,
+    ) -> Result<(), ExtractionError> {
+        let released = {
             let mut reorg_buffer = self.reorg_buffer.lock().await;
-
-            if let Some(height) = flushed_block_height {
-                reorg_buffer.release_committed(height);
-            }
-
+            let released = self.release_leader_commits(&mut reorg_buffer);
             reorg_buffer
-                .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.clone()))
+                .insert_block(BlockUpdateWithCursor::new(msg.clone(), cursor.to_string()))
                 .map_err(ExtractionError::Storage)?;
-
             if reorg_buffer.count_blocks_before(final_block_height) >=
                 self.gateway.commit_batch_size
             {
                 reorg_buffer
                     .drain_into_committing(final_block_height)
-                    .map_err(ExtractionError::Storage)?
-            } else {
-                Vec::new()
+                    .map_err(ExtractionError::Storage)?;
+            }
+            released
+        };
+        self.cache_committed_tokens(&released);
+        Ok(())
+    }
+
+    /// Returns the newest block the database holds for this extractor, as reported on outgoing
+    /// messages: the leader's committed height while following, else this process's own.
+    ///
+    /// After a takeover the former leader may have committed past the blocks this extractor
+    /// has seen, so the height never exceeds `final_block_height`.
+    async fn reported_committed_height(&self, final_block_height: u64) -> Option<u64> {
+        let committed = match *self.commit_mode.lock().await {
+            CommitMode::Following => self.writer.committed_height(&self.name),
+            CommitMode::Committing { .. } => {
+                *self
+                    .gateway
+                    .committed_block_height
+                    .lock()
+                    .await
             }
         };
+        committed.map(|height| height.min(final_block_height))
+    }
 
+    /// Drops the retained blocks the leader has committed and returns them.
+    fn release_leader_commits(
+        &self,
+        reorg_buffer: &mut ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+    ) -> Vec<DrainedBlock> {
+        self.writer
+            .committed_height(&self.name)
+            .map(|height| reorg_buffer.release_committed(height))
+            .unwrap_or_default()
+    }
+
+    /// Returns what a following extractor retains for the leader, after it released what the
+    /// leader committed, or `None` when the extractor commits itself.
+    async fn retention(&self) -> Option<Retention> {
+        if *self.commit_mode.lock().await != CommitMode::Following ||
+            self.writer.role() == Role::Leader
+        {
+            return None;
+        }
+        let (released, retention) = {
+            let mut reorg_buffer = self.reorg_buffer.lock().await;
+            let released = self.release_leader_commits(&mut reorg_buffer);
+            let retention = Retention {
+                span: reorg_buffer.committing_span(),
+                blocks: reorg_buffer.committing_len(),
+            };
+            (released, retention)
+        };
+        self.cache_committed_tokens(&released);
+        Some(retention)
+    }
+
+    /// Caches the new tokens of blocks the database now covers. The leader's writes put a
+    /// block's tokens into its token cache when it commits the block; this gives every other
+    /// process the same tokens at the same point.
+    fn cache_committed_tokens(&self, blocks: &[DrainedBlock]) {
+        let tokens: Vec<Token> = blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .block_update()
+                    .new_tokens
+                    .values()
+                    .cloned()
+            })
+            .collect();
+        if !tokens.is_empty() {
+            self.gateway.inner.cache_tokens(&tokens);
+        }
+    }
+
+    /// Commits `blocks_to_commit` at `priority` in a background task, after the previous commit
+    /// task ended.
+    async fn queue_commit(
+        &self,
+        blocks_to_commit: Vec<DrainedBlock>,
+        is_syncing: bool,
+        priority: WritePriority,
+    ) -> Result<(), ExtractionError> {
         if let Some(last_block) = blocks_to_commit.last() {
             let mut commit_handle_guard = self.gateway.commit_handle.lock().await;
             let gateway = self.gateway.inner.clone();
@@ -857,7 +1109,7 @@ where
                             if is_syncing { false } else { it.peek().is_none() };
 
                         gateway
-                            .advance(block.block_update(), block.cursor(), force_db_commit)
+                            .advance(block.block_update(), block.cursor(), force_db_commit, priority)
                             .await
                             .map_err(ExtractionError::Storage)?;
                     }
@@ -883,6 +1135,42 @@ where
 
             trace!(batch_size, block_height = last_block_height, extractor_id = self.name.clone(), chain = %self.chain, "CommitTaskQueued");
         };
+        Ok(())
+    }
+
+    /// Process a full block
+    ///
+    /// This includes updating the reorg buffer, committing to the database, emitting sync updates
+    /// and metrics and aggregating the changes).
+    #[instrument(skip_all, fields(block_number = msg.block.number, final_block_height))]
+    async fn process_full_block_message(
+        &self,
+        msg: BlockChanges,
+        cursor: String,
+        final_block_height: u64,
+    ) -> Result<Option<ExtractorMsg>, ExtractionError> {
+        let is_syncing = final_block_height == msg.block.number;
+        if final_block_height > msg.block.number {
+            return Err(ExtractionError::ReorgBufferError(format!(
+                "Final block height ({}) greater than block number ({}) are unsupported by the reorg buffer",
+                final_block_height, msg.block.number
+            )));
+        }
+
+        let priority = write_priority(&msg.block, chrono::Utc::now().naive_utc());
+        match self.commit_mode(priority).await? {
+            CommitMode::Following => {
+                self.retain_until_leader_commits(&msg, &cursor, final_block_height)
+                    .await?;
+            }
+            CommitMode::Committing { floor } => {
+                let blocks_to_commit = self
+                    .drain_for_commit(&msg, &cursor, final_block_height, floor)
+                    .await?;
+                self.queue_commit(blocks_to_commit, is_syncing, priority)
+                    .await?;
+            }
+        }
 
         self.update_last_processed_block(msg.block.clone())
             .await;
@@ -892,10 +1180,8 @@ where
 
         self.update_cursor(cursor).await;
 
-        let committed_block_height = *self
-            .gateway
-            .committed_block_height
-            .lock()
+        let committed_block_height = self
+            .reported_committed_height(final_block_height)
             .await;
         let mut changes = msg.into_aggregated(committed_block_height)?;
         self.handle_tvl_changes(&mut changes)
@@ -1101,10 +1387,8 @@ where
 
             self.update_cursor(inp.cursor).await;
 
-            let committed_block_height = *self
-                .gateway
-                .committed_block_height
-                .lock()
+            let committed_block_height = self
+                .reported_committed_height(inp.final_block_height)
                 .await;
             let mut changes = msg.into_aggregated(committed_block_height)?;
             self.handle_tvl_changes(&mut changes)
@@ -1775,6 +2059,37 @@ where
     async fn handle_progress(&self, _inp: ModulesProgress) -> Result<(), ExtractionError> {
         todo!()
     }
+
+    async fn wait_for_capacity(&self) {
+        let mut paused = false;
+        loop {
+            let retention = self.retention().await;
+            if retention.is_none_or(|retention| retention.has_capacity()) {
+                if paused {
+                    info!(
+                        extractor_id = self.name,
+                        chain = %self.chain,
+                        retained_span = ?retention.and_then(|retention| retention.span),
+                        retained_blocks = retention.map_or(0, |retention| retention.blocks),
+                        "FollowerResumed"
+                    );
+                }
+                return;
+            }
+            if !paused {
+                warn!(
+                    extractor_id = self.name,
+                    chain = %self.chain,
+                    retained_span = ?retention.and_then(|retention| retention.span),
+                    retained_blocks = retention.map_or(0, |retention| retention.blocks),
+                    limit = %FOLLOWER_RETENTION_SPAN,
+                    "FollowerPaused: waiting for the leader to commit retained blocks"
+                );
+                paused = true;
+            }
+            tokio::time::sleep(CAPACITY_POLL_INTERVAL).await;
+        }
+    }
 }
 pub struct ExtractorPgGateway {
     name: String,
@@ -1810,7 +2125,8 @@ pub trait ExtractorGateway: Send + Sync {
     ///
     /// All writes for the block are staged within one transaction. When `force_commit` is `true`
     /// the transaction is flushed to the store immediately; otherwise it is only flushed once
-    /// enough blocks have accumulated to reach the configured batch size.
+    /// enough blocks have accumulated to reach the configured batch size. `priority` orders the
+    /// transaction against the writes of other extractors.
     ///
     /// # Errors
     /// Returns a [`StorageError`] if any staged write or the commit fails. On error the block's
@@ -1820,11 +2136,15 @@ pub trait ExtractorGateway: Send + Sync {
         changes: &BlockChanges,
         new_cursor: &str,
         force_commit: bool,
+        priority: WritePriority,
     ) -> Result<(), StorageError>;
 
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when nothing has been flushed since startup.
     async fn flushed_block_height(&self) -> Option<u64>;
+
+    /// Makes `tokens` available to token queries of this process without persisting them.
+    fn cache_tokens(&self, tokens: &[Token]);
 
     /// Returns the current state of the protocol components identified by `component_ids`.
     ///
@@ -1964,10 +2284,20 @@ impl ExtractorGateway for ExtractorPgGateway {
         changes: &BlockChanges,
         new_cursor: &str,
         force_commit: bool,
+        priority: WritePriority,
     ) -> Result<(), StorageError> {
-        self.state_gateway
-            .start_transaction(&changes.block, Some(self.name.as_str()))
-            .await;
+        match priority {
+            WritePriority::Head => {
+                self.state_gateway
+                    .start_transaction(&changes.block, Some(self.name.as_str()))
+                    .await
+            }
+            WritePriority::Backfill => {
+                self.state_gateway
+                    .start_backfill_transaction(&changes.block, Some(self.name.as_str()))
+                    .await
+            }
+        }
 
         // Insert new tokens
         if !changes.new_tokens.is_empty() {
@@ -2184,6 +2514,10 @@ impl ExtractorGateway for ExtractorPgGateway {
             .flushed_block_height()
     }
 
+    fn cache_tokens(&self, tokens: &[Token]) {
+        self.state_gateway.cache_tokens(tokens);
+    }
+
     async fn get_protocol_states<'a>(
         &self,
         component_ids: &[&'a str],
@@ -2250,6 +2584,7 @@ mod test {
     use futures03::FutureExt;
     use mockall::mock;
     use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
     use crate::{
@@ -2324,6 +2659,589 @@ mod test {
         create_extractor_with_batch_size(gw, 1).await
     }
 
+    /// Writer status channels a test drives: the role and the leader's committed blocks.
+    struct WriterChannels {
+        role: tokio::sync::watch::Sender<Role>,
+        heights: tokio::sync::watch::Sender<HashMap<String, CommittedBlock>>,
+    }
+
+    impl WriterChannels {
+        fn follower() -> (Self, WriterStatus) {
+            let (role, role_rx) = tokio::sync::watch::channel(Role::Follower);
+            let (heights, heights_rx) = tokio::sync::watch::channel(HashMap::new());
+            (Self { role, heights }, WriterStatus::new(role_rx, heights_rx))
+        }
+
+        fn leader_committed(&self, height: u64) {
+            self.heights
+                .send(HashMap::from([(
+                    EXTRACTOR_NAME.to_string(),
+                    CommittedBlock { number: height, ts: crate::testing::block(height).ts },
+                )]))
+                .unwrap();
+        }
+
+        fn promote(&self) {
+            self.role.send(Role::Leader).unwrap();
+        }
+    }
+
+    /// An empty block `number` whose finalized height trails it by one block.
+    fn trailing_block(number: u64) -> BlockChanges {
+        BlockChanges::new(
+            EXTRACTOR_NAME.to_string(),
+            Chain::Ethereum,
+            crate::testing::block(number),
+            number - 1,
+            false,
+            vec![],
+            vec![],
+        )
+    }
+
+    async fn process_trailing_blocks(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        numbers: std::ops::RangeInclusive<u64>,
+    ) -> Option<ExtractorMsg> {
+        let mut last = None;
+        for number in numbers {
+            let msg = trailing_block(number);
+            last = extractor
+                .process_full_block_message(msg, format!("cursor@{number}"), number - 1)
+                .await
+                .expect("block should process");
+        }
+        last
+    }
+
+    async fn committing_numbers(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+    ) -> Vec<u64> {
+        extractor
+            .reorg_buffer
+            .lock()
+            .await
+            .committing_blocks()
+            .iter()
+            .map(|block| block.block_update().block.number)
+            .collect()
+    }
+
+    /// A gateway whose cursor is missing at startup and points at block `takeover_height` when
+    /// read again, and that records the number of every block it is asked to commit.
+    fn takeover_gateway(
+        takeover_height: u64,
+    ) -> (MockExtractorGateway, Arc<std::sync::Mutex<Vec<u64>>>) {
+        takeover_gateway_at(crate::testing::block(takeover_height))
+    }
+
+    /// Like [`takeover_gateway`], with the cursor pointing at `floor`.
+    fn takeover_gateway_at(
+        floor: Block,
+    ) -> (MockExtractorGateway, Arc<std::sync::Mutex<Vec<u64>>>) {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        let floor_hash = floor.hash.clone();
+        gw.expect_get_cursor()
+            .returning(move || match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(StorageError::NotFound("ExtractionState".into(), EXTRACTOR_NAME.into())),
+                _ => Ok((b"cursor".to_vec(), floor_hash.clone())),
+            });
+        gw.expect_get_block()
+            .returning(move |_| Ok(floor.clone()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _, _| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        (gw, committed)
+    }
+
+    async fn wait_for_commits(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+    ) {
+        let handle = extractor
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take();
+        if let Some(handle) = handle {
+            handle
+                .await
+                .expect("commit task should not panic")
+                .expect("commit should succeed");
+        }
+    }
+
+    #[test]
+    fn test_extractor_behind_the_chain_head_writes_at_backfill_priority() {
+        let now: NaiveDateTime = "2026-10-05T12:00:00".parse().unwrap();
+        let block_at = |ts: NaiveDateTime| Block { ts, ..Default::default() };
+        let priority_at = |ts| write_priority(&block_at(ts), now);
+
+        assert_eq!(priority_at(now - Duration::days(3)), WritePriority::Backfill);
+        assert_eq!(
+            priority_at(now - BACKFILL_BLOCK_AGE - Duration::seconds(1)),
+            WritePriority::Backfill
+        );
+        assert_eq!(priority_at(now - BACKFILL_BLOCK_AGE), WritePriority::Head);
+        assert_eq!(priority_at(now - Duration::seconds(2)), WritePriority::Head);
+        assert_eq!(priority_at(now + Duration::seconds(2)), WritePriority::Head, "clock skew");
+    }
+
+    /// An empty block `number`, received `age` ago, whose finalized height trails it by one.
+    fn trailing_block_aged(number: u64, age: Duration) -> BlockChanges {
+        let mut msg = trailing_block(number);
+        msg.block.ts = chrono::Utc::now().naive_utc() - age;
+        msg
+    }
+
+    /// The number and the priority of every block a gateway was asked to commit.
+    type CommittedPriorities = Arc<std::sync::Mutex<Vec<(u64, WritePriority)>>>;
+
+    /// A gateway that records the number and the priority of every block it is asked to commit.
+    /// Its cursor is missing at startup and points at block `takeover_height` when read again.
+    fn priority_gateway(takeover_height: u64) -> (MockExtractorGateway, CommittedPriorities) {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        gw.expect_get_cursor()
+            .returning(move || match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(StorageError::NotFound("ExtractionState".into(), EXTRACTOR_NAME.into())),
+                _ => Ok((b"cursor".to_vec(), crate::testing::block(takeover_height).hash)),
+            });
+        gw.expect_get_block()
+            .returning(move |_| Ok(crate::testing::block(takeover_height)));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_cache_tokens()
+            .returning(|_| ());
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _, priority| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push((changes.block.number, priority));
+                Ok(())
+            });
+        (gw, committed)
+    }
+
+    #[tokio::test]
+    async fn test_extractor_at_the_chain_head_commits_old_finalized_blocks_at_head_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let extractor = create_extractor(gw).await;
+        let finality_lag = Duration::minutes(18);
+
+        for (number, age) in [(1, finality_lag), (2, finality_lag), (3, Duration::seconds(5))] {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, age),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![(1, WritePriority::Head)]);
+    }
+
+    #[tokio::test]
+    async fn test_syncing_extractor_commits_at_backfill_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let extractor = create_extractor(gw).await;
+        let age = Duration::days(3);
+
+        for number in 1..=3 {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, age),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![(1, WritePriority::Backfill)]);
+    }
+
+    #[tokio::test]
+    async fn test_promoted_follower_at_the_chain_head_takes_over_at_head_priority() {
+        let (gw, committed) = priority_gateway(1);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        for number in 1..=4 {
+            extractor
+                .process_full_block_message(
+                    trailing_block_aged(number, Duration::minutes(18)),
+                    format!("cursor@{number}"),
+                    number - 1,
+                )
+                .await
+                .unwrap();
+        }
+
+        channels.promote();
+        extractor
+            .process_full_block_message(
+                trailing_block_aged(5, Duration::seconds(5)),
+                "cursor@5".into(),
+                4,
+            )
+            .await
+            .unwrap();
+        wait_for_commits(&extractor).await;
+
+        let committed = committed.lock().unwrap().clone();
+        assert_eq!(
+            committed
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(
+            committed
+                .iter()
+                .all(|(_, priority)| *priority == WritePriority::Head),
+            "unexpected priorities: {committed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_follower_retains_drained_blocks_until_the_leader_commits_them() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        gw.expect_cache_tokens().never();
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+
+        let msg = process_trailing_blocks(&extractor, 1..=4)
+            .await
+            .unwrap();
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2]);
+        assert_eq!(msg.db_committed_block_height, None);
+
+        channels.leader_committed(1);
+        let msg = process_trailing_blocks(&extractor, 5..=5)
+            .await
+            .unwrap();
+
+        assert_eq!(committing_numbers(&extractor).await, vec![2, 3]);
+        assert_eq!(msg.db_committed_block_height, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_follower_caches_tokens_once_the_leader_commits_their_block() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        let cached = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cached_clone = cached.clone();
+        gw.expect_cache_tokens()
+            .returning(move |tokens| {
+                cached_clone
+                    .lock()
+                    .unwrap()
+                    .extend(tokens.iter().map(|t| t.symbol.clone()))
+            });
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        let mut first = trailing_block(1);
+        let usdc = Bytes::from_str("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        first
+            .new_tokens
+            .insert(usdc.clone(), Token::new(&usdc, "USDC", 6, 0, &[], Chain::Ethereum, 100));
+
+        extractor
+            .process_full_block_message(first, "cursor@1".into(), 0)
+            .await
+            .unwrap();
+        process_trailing_blocks(&extractor, 2..=3).await;
+        assert!(cached.lock().unwrap().is_empty(), "tokens must wait for the leader's commit");
+
+        channels.leader_committed(1);
+        process_trailing_blocks(&extractor, 4..=4).await;
+
+        assert_eq!(*cached.lock().unwrap(), vec!["USDC".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_promoted_follower_commits_only_blocks_above_the_former_leaders_height() {
+        let (gw, committed) = takeover_gateway(2);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2, 3]);
+        assert!(committed.lock().unwrap().is_empty());
+
+        channels.promote();
+        process_trailing_blocks(&extractor, 6..=6).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![3, 4]);
+    }
+
+    fn following_gateway() -> MockExtractorGateway {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        gw.expect_advance().never();
+        gw.expect_cache_tokens()
+            .returning(|_| ());
+        gw
+    }
+
+    async fn has_capacity_within(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        timeout: std::time::Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, extractor.wait_for_capacity())
+            .await
+            .is_ok()
+    }
+
+    /// Processes empty blocks `numbers`, each `interval` of chain time after the previous one,
+    /// with finality trailing by one block. Retains every block below the last two.
+    async fn process_blocks_every(
+        extractor: &ProtocolExtractor<
+            MockExtractorGateway,
+            MockTokenPreProcessor,
+            MockExtractorExtension,
+        >,
+        numbers: std::ops::RangeInclusive<u64>,
+        interval: Duration,
+    ) {
+        let start = crate::testing::block(1).ts;
+        for number in numbers {
+            let mut msg = trailing_block(number);
+            msg.block.ts = start + interval * (number - 1) as i32;
+            extractor
+                .process_full_block_message(msg, format!("cursor@{number}"), number - 1)
+                .await
+                .expect("block should process");
+        }
+    }
+
+    async fn following_extractor() -> (
+        WriterChannels,
+        ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>,
+    ) {
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(following_gateway())
+            .await
+            .with_writer_status(writer);
+        (channels, extractor)
+    }
+
+    const SHORT_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+    /// Longer than two capacity polls.
+    const LONG_WAIT: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+    #[tokio::test]
+    async fn test_follower_without_retained_blocks_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=2, Duration::hours(1)).await;
+        assert!(committing_numbers(&extractor)
+            .await
+            .is_empty());
+
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_retaining_many_blocks_of_a_short_span_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+
+        process_blocks_every(&extractor, 1..=2_002, Duration::milliseconds(100)).await;
+
+        assert_eq!(
+            committing_numbers(&extractor)
+                .await
+                .len(),
+            2_000
+        );
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_retaining_just_below_the_span_takes_blocks() {
+        let (_channels, extractor) = following_extractor().await;
+
+        process_blocks_every(&extractor, 1..=4, FOLLOWER_RETENTION_SPAN - Duration::seconds(1))
+            .await;
+
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2]);
+        assert!(has_capacity_within(&extractor, SHORT_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_follower_at_the_retention_span_waits_for_the_leader() {
+        let (channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=6, Duration::minutes(10)).await;
+        assert_eq!(committing_numbers(&extractor).await, vec![1, 2, 3, 4]);
+
+        assert!(
+            !has_capacity_within(&extractor, LONG_WAIT).await,
+            "retained blocks spanning exactly the limit must pause the follower"
+        );
+
+        channels.leader_committed(1);
+        assert!(
+            has_capacity_within(&extractor, LONG_WAIT).await,
+            "the leader's commit must release the follower"
+        );
+        assert_eq!(committing_numbers(&extractor).await, vec![2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_follower_at_the_retention_span_continues_once_promoted() {
+        let (channels, extractor) = following_extractor().await;
+        process_blocks_every(&extractor, 1..=4, FOLLOWER_RETENTION_SPAN).await;
+        assert!(!has_capacity_within(&extractor, SHORT_WAIT).await);
+
+        channels.promote();
+
+        assert!(has_capacity_within(&extractor, LONG_WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn test_leader_never_waits_for_capacity() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "x".into())));
+        let extractor = create_extractor(gw).await;
+
+        assert!(has_capacity_within(&extractor, std::time::Duration::from_millis(50)).await);
+    }
+
+    #[tokio::test]
+    async fn test_takeover_fails_when_retained_blocks_do_not_continue_the_database() {
+        let (gw, committed) = takeover_gateway(1);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+        // Lose block 2: the database ends at block 1 and the retained blocks start at 3.
+        extractor
+            .reorg_buffer
+            .lock()
+            .await
+            .release_committed(2);
+
+        channels.promote();
+        let result = extractor
+            .process_full_block_message(trailing_block(6), "cursor@6".into(), 5)
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtractionError::ReorgBufferError(ref msg)) if msg.contains("start at 3")),
+            "unexpected takeover result: {result:?}"
+        );
+        assert!(committed.lock().unwrap().is_empty(), "nothing may be written over a gap");
+    }
+
+    #[tokio::test]
+    async fn test_takeover_fails_when_retained_blocks_fork_from_the_database() {
+        let mut floor = crate::testing::block(2);
+        floor.hash = Bytes::from(0xdead_u64).lpad(32, 0);
+        let (gw, committed) = takeover_gateway_at(floor);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=5).await;
+
+        channels.promote();
+        let result = extractor
+            .process_full_block_message(trailing_block(6), "cursor@6".into(), 5)
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtractionError::ReorgBufferError(ref msg)) if msg.contains("Cannot take over") && msg.contains("parent hash")),
+            "unexpected takeover result: {result:?}"
+        );
+        assert!(committed.lock().unwrap().is_empty(), "nothing may be written onto another fork");
+    }
+
+    #[tokio::test]
+    async fn test_promoted_lagging_follower_drops_blocks_the_former_leader_committed() {
+        let (gw, committed) = takeover_gateway(5);
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(gw)
+            .await
+            .with_writer_status(writer);
+        process_trailing_blocks(&extractor, 1..=3).await;
+
+        channels.promote();
+        let msg = process_trailing_blocks(&extractor, 4..=4)
+            .await
+            .unwrap();
+        assert_eq!(
+            msg.db_committed_block_height,
+            Some(3),
+            "the reported commit never exceeds the message's finality"
+        );
+        process_trailing_blocks(&extractor, 5..=8).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![6]);
+        assert_eq!(committing_numbers(&extractor).await, vec![6]);
+    }
+
     #[tokio::test]
     async fn test_get_cursor() {
         let mut gw = MockExtractorGateway::new();
@@ -2354,7 +3272,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(1)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_block()
@@ -2414,7 +3332,7 @@ mod test {
         let call_count_clone = call_count.clone();
         gw.expect_advance()
             .times(4)
-            .returning(move |_, _, _| {
+            .returning(move |_, _, _, _| {
                 rx.recv().unwrap();
                 call_count_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -2562,7 +3480,7 @@ mod test {
         let flushed_writer = flushed.clone();
         gw.expect_advance()
             .times(2)
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 if changes.block.number <= flush_through {
                     flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
                 }
@@ -2687,7 +3605,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_get_block()
             .times(1)
             .returning(|_| Ok(Block::default()));
@@ -2720,7 +3638,7 @@ mod test {
             .returning(|| Ok(("cursor".into(), Bytes::default())));
         gw.expect_advance()
             .times(1)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_block()
@@ -2808,7 +3726,7 @@ mod test {
         let persisted_by_mock = Arc::clone(&persisted);
         gw.expect_advance()
             .times(2)
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 persisted_by_mock
                     .lock()
                     .unwrap()
@@ -3222,6 +4140,23 @@ mod test {
         bsd
     }
 
+    #[tokio::test]
+    async fn test_follower_partial_block_reports_the_leaders_committed_height() {
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor(following_gateway())
+            .await
+            .with_writer_status(writer);
+        channels.leader_committed(3);
+
+        let msg = extractor
+            .handle_tick_scoped_data(make_partial_block_with_data(5, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.db_committed_block_height, Some(3));
+    }
+
     /// Helper: build a full `BlockScopedData` with complete block data from
     /// `pb_vm_block_changes(block_num)`. This method strips balance changes and token balances to
     /// avoid triggering TVL code paths, which would require the CachedGateway to be setup.
@@ -3270,7 +4205,7 @@ mod test {
         // doesn't satisfy count_blocks_before(final_block_height) >= 1.
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
 
@@ -3386,7 +4321,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
 
         let extractor = create_extractor(gw).await;
 
@@ -3414,7 +4349,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
 
@@ -3460,7 +4395,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         // Revert lookups: contracts, protocol states, protocol components, component
         // balances, account balances.
         gw.expect_flushed_block_height()
@@ -3576,7 +4511,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -3809,7 +4744,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -4792,7 +5727,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
             .times(0)
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         gw.expect_flushed_block_height()
             .returning(|| None);
         gw.expect_get_contracts()
@@ -4837,7 +5772,7 @@ mod test {
             .times(1)
             .returning(|_| Ok(Block::default()));
         gw.expect_advance()
-            .returning(|_, _, _| Ok(()));
+            .returning(|_, _, _, _| Ok(()));
         // The write never lands: retention must keep the drained block reachable.
         gw.expect_flushed_block_height()
             .returning(|| None);
@@ -4919,7 +5854,7 @@ mod test {
             .returning(|_| Ok(Block::default()));
         let flushed_writer = flushed.clone();
         gw.expect_advance()
-            .returning(move |changes, _, _| {
+            .returning(move |changes, _, _, _| {
                 flushed_writer.fetch_max(changes.block.number, Ordering::SeqCst);
                 Ok(())
             });
@@ -5064,7 +5999,7 @@ mod test {
                     .returning(|_| Ok(Block::default()));
                 gw.expect_advance()
                     .times(0)
-                    .returning(|_, _, _| Ok(()));
+                    .returning(|_, _, _, _| Ok(()));
                 gw.expect_flushed_block_height()
                     .returning(|| None);
                 gw.expect_get_contracts()
@@ -5183,7 +6118,7 @@ mod test {
                     .times(1)
                     .returning(|_| Ok(Block::default()));
                 gw.expect_advance()
-                    .returning(|_, _, _| Ok(()));
+                    .returning(|_, _, _, _| Ok(()));
                 // The write never lands: the creation stays reachable in the committing
                 // section.
                 gw.expect_flushed_block_height()
@@ -5761,7 +6696,7 @@ mod test_serial_db {
                 ..Default::default()
             }];
 
-            gw.advance(&msg, "cursor@500", false)
+            gw.advance(&msg, "cursor@500", false, WritePriority::Head)
                 .await
                 .expect("upsert should succeed");
 
@@ -5791,7 +6726,7 @@ mod test_serial_db {
             let msg = vm_creation_and_update();
             let exp = vm_account(0);
 
-            gw.advance(&msg, "cursor@500", true)
+            gw.advance(&msg, "cursor@500", true, WritePriority::Head)
                 .await
                 .expect("upsert should succeed");
 

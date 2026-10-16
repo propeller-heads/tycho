@@ -188,16 +188,44 @@ where
         Ok(drained)
     }
 
-    /// Drops every retained block at or below `flushed_block_height`: their writes
-    /// reached the store, so the database covers them from here on.
-    pub fn release_committed(&mut self, flushed_block_height: u64) {
-        while self
+    /// Drops every retained block at or below `flushed_block_height` and returns them, oldest
+    /// first: their writes reached the store, so the database covers them from here on.
+    pub fn release_committed(&mut self, flushed_block_height: u64) -> Vec<Arc<B>> {
+        let mut released = Vec::new();
+        while let Some(block) = self
             .committing_blocks
-            .front()
-            .is_some_and(|b| b.block().number <= flushed_block_height)
+            .pop_front_if(|b| b.block().number <= flushed_block_height)
         {
-            self.committing_blocks.pop_front();
+            released.push(block);
         }
+        released
+    }
+
+    /// Returns the number of retained committing blocks.
+    pub fn committing_len(&self) -> usize {
+        self.committing_blocks.len()
+    }
+
+    /// Returns the chain time the retained committing blocks cover: the newest one's timestamp
+    /// minus the oldest one's, or `None` without retained blocks. Blocks outside the committing
+    /// section do not count.
+    pub fn committing_span(&self) -> Option<chrono::Duration> {
+        let oldest = self.committing_blocks.front()?;
+        let newest = self.committing_blocks.back()?;
+        Some(
+            newest
+                .block()
+                .ts
+                .signed_duration_since(oldest.block().ts),
+        )
+    }
+
+    /// Returns the retained committing blocks, oldest first.
+    pub fn committing_blocks(&self) -> Vec<Arc<B>> {
+        self.committing_blocks
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Iterates the buffered history newest to oldest: buffered blocks first, then
@@ -1274,6 +1302,39 @@ mod test {
         let unknown = reorg_buffer.drain_blocks_until(999);
 
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn test_committing_span_covers_only_the_committing_section() {
+        let start = "2020-01-01T00:00:00"
+            .parse::<NaiveDateTime>()
+            .unwrap();
+        let mut reorg_buffer = ReorgBuffer::new();
+        assert_eq!(reorg_buffer.committing_span(), None);
+        for (number, minutes) in [(1_u64, 0), (2, 10), (3, 25)] {
+            reorg_buffer
+                .insert_block(BlockAggregatedChanges {
+                    block: Block::new(
+                        number,
+                        Chain::Ethereum,
+                        Bytes::from(number).lpad(32, 0),
+                        Bytes::from(number - 1).lpad(32, 0),
+                        start + chrono::Duration::minutes(minutes),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        reorg_buffer
+            .drain_into_committing(3)
+            .unwrap();
+
+        assert_eq!(reorg_buffer.committing_span(), Some(chrono::Duration::minutes(10)));
+        reorg_buffer.release_committed(1);
+        assert_eq!(reorg_buffer.committing_span(), Some(chrono::Duration::zero()));
+        reorg_buffer.release_committed(2);
+        assert_eq!(reorg_buffer.committing_span(), None);
     }
 
     #[test]
