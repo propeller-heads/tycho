@@ -134,4 +134,49 @@ mod tests {
         assert_eq!(follower.time_since_lead_confirmed(), None);
         assert_eq!(WriterStatus::leader().time_since_lead_confirmed(), None);
     }
+
+    fn now() -> NaiveDateTime {
+        chrono::DateTime::from_timestamp(1_800_000_000, 0)
+            .expect("a valid timestamp")
+            .naive_utc()
+    }
+
+    fn follower_with_committed_block_of_age(age: Option<chrono::Duration>) -> WriterStatus {
+        let (_, role) = watch::channel(Role::Follower);
+        let committed = age
+            .map(|age| {
+                HashMap::from([(
+                    "uniswap_v2".to_string(),
+                    CommittedBlock { number: 100, ts: now() - age },
+                )])
+            })
+            .unwrap_or_default();
+        let (_, committed) = watch::channel(committed);
+        WriterStatus::new(role, committed)
+    }
+
+    #[test]
+    fn test_leader_needs_the_stream_without_a_committed_block() {
+        assert!(WriterStatus::leader().needs_stream("uniswap_v2", now()));
+    }
+
+    #[test]
+    fn test_follower_does_not_need_the_stream_before_the_first_commit() {
+        let follower = follower_with_committed_block_of_age(None);
+
+        assert!(!follower.needs_stream("uniswap_v2", now()));
+    }
+
+    #[test]
+    fn test_follower_needs_the_stream_only_while_the_leader_is_near_the_head() {
+        let near_head = follower_with_committed_block_of_age(Some(chrono::Duration::minutes(59)));
+        let syncing = follower_with_committed_block_of_age(Some(chrono::Duration::minutes(61)));
+
+        assert!(near_head.needs_stream("uniswap_v2", now()));
+        assert!(!syncing.needs_stream("uniswap_v2", now()));
+        assert!(
+            !near_head.needs_stream("sushiswap", now()),
+            "a block committed for another extractor does not count"
+        );
+    }
 }
