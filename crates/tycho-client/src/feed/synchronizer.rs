@@ -1123,7 +1123,14 @@ where
         result
     }
 
+    /// Whether `incoming` continues the stream from `last_synced_block`, so the consumer needs no
+    /// snapshot. Never true for a revert.
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
+        // A revert to the block after `last_synced_block` has the right parent, but it carries
+        // only the keys the reverted blocks above it changed, not the target block's own changes.
+        if incoming.revert {
+            return false;
+        }
         if let Some(block) = self.last_synced_block.as_ref() {
             return incoming.parent_hash == block.hash;
         }
@@ -3338,6 +3345,17 @@ mod test {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_a_revert_is_never_next_expected() {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(4, None)));
+        // A revert to block 5 carries block 5's header, whose parent is block 4.
+        let revert_to_5 =
+            header_of(&BlockAggregatedChanges { revert: true, ..make_block_changes(5, None) });
+
+        assert!(!state_sync.is_next_expected(&revert_to_5));
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_synchronizer_restart_skip_snapshot_on_expected_block() {
         // Test that on synchronizer restart with the next expected block,
         // get_snapshot is not called and only deltas are sent
@@ -4252,6 +4270,27 @@ mod test {
         assert!(second.deltas.as_ref().is_some_and(|d| d
             .state_deltas
             .contains_key("Component3")));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_resume_from_revert_to_next_block_takes_snapshot() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // A revert to block 6 has block 6's header, whose parent is block 5, but carries only
+        // the keys the reverted blocks above 6 changed, not block 6's own changes.
+        deltas_tx
+            .send(BlockAggregatedChanges { revert: true, ..make_block_changes(6, None) })
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![6]);
     }
 
     #[test_log::test(tokio::test)]
