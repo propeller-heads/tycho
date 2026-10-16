@@ -8,12 +8,12 @@
 //! # Read order
 //!
 //! A read holds the window lock while it resolves the version and copies the window changes for
-//! its ids, releases it, then takes the cache read lock and copies the entries out. Folds hold the
-//! window lock while they take the cache write lock, so a fold can land between the two steps.
-//! That is harmless: the fold moves blocks from the copied changes into the entries, and a change
-//! applies only when it is newer than the entry's write timestamp, so nothing is applied twice or
-//! lost. Accounts check the timestamp of each value, because several extractors can write one
-//! account. For the same reason an account read also copies the other windows' blocks up to the
+//! its ids, releases it, then takes the cache read lock and copies the `Arc`s of the entries out.
+//! Folds hold the window lock while they take the cache write lock, so a fold can land between the
+//! two steps. That is harmless: the fold moves blocks from the copied changes into the entries, and
+//! a change applies only when it is newer than the entry's write timestamp, so nothing is applied
+//! twice or lost. Accounts check the timestamp of each value, because several extractors can write
+//! one account. For the same reason an account read also copies the other windows' blocks up to the
 //! resolved version, one window lock at a time. Components check one timestamp for the whole
 //! entry, because one extractor writes each component, in order.
 //! A fold can also carry an entry past the requested version; the request then falls back with
@@ -46,7 +46,7 @@ use tycho_common::{
 };
 
 use super::{
-    cache::{CachedAccount, CachedComponentState, EntityCache},
+    cache::{CachedAccount, EntityCache},
     view::{AccountView, ContractStateView},
     window::{account_changes, component_changes, DeltaWindow, WindowResolution},
 };
@@ -390,7 +390,7 @@ impl StateService {
         let (version, blocks) = self.read_window(system, &request.version)?;
         let window_changes = component_changes(&blocks, &page);
 
-        // Copy the cached entries under the cache read lock; folds wait until it is released.
+        // Copy only the `Arc` of each cached entry under the cache read lock.
         let mut entries = Vec::with_capacity(page.len());
         {
             let cache = self.cache.read();
@@ -424,10 +424,10 @@ impl StateService {
             // entity or both as an error.
             let updated_at = entry
                 .as_ref()
-                .map(CachedComponentState::updated_at);
+                .map(|entry| entry.updated_at());
             let mut state = entry.map_or_else(
                 || ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
-                ProtocolComponentState::from,
+                |entry| ProtocolComponentState::from(Arc::unwrap_or_clone(entry)),
             );
             for change in window_changes
                 .get(*id)

@@ -22,10 +22,11 @@
 //! applies one whole block atomically, reads take the read side. A reader never observes half a
 //! block.
 //!
-//! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
-//! only the `Arc` under the read lock, and the response is written from it through a view
-//! (`view`), without a full copy. A fold that changes an account a reader still holds copies the
-//! account first, under the write lock (`Arc::make_mut`). Reads wait for that copy, but it happens
+//! Accounts and component states are held behind an `Arc`: an account can hold a large storage
+//! map, and a component many attributes. A reader copies only the `Arc` under the read lock. An
+//! account response is written from it through a view (`view`), without a full copy; a component
+//! state is copied outside the lock. A fold that changes an entry a reader still holds copies the
+//! entry first, under the write lock (`Arc::make_mut`). Reads wait for that copy, but it happens
 //! at most once per fold instead of once per read.
 
 use std::{
@@ -504,7 +505,7 @@ pub(crate) struct CacheState {
     accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
-    components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
+    components: HashMap<ProtocolSystem, HashMap<ComponentId, Arc<CachedComponentState>>>,
 }
 
 impl CacheState {
@@ -512,7 +513,7 @@ impl CacheState {
         self.accounts.get(address)
     }
 
-    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&CachedComponentState> {
+    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&Arc<CachedComponentState>> {
         self.components
             .get(system)
             .and_then(|components| components.get(id))
@@ -568,7 +569,7 @@ impl EntityCache {
         }
         let mut component_entries: HashMap<
             ProtocolSystem,
-            HashMap<ComponentId, CachedComponentState>,
+            HashMap<ComponentId, Arc<CachedComponentState>>,
         > = HashMap::new();
         for ComponentSnapshot { system, state, updated_at } in components {
             component_entries
@@ -576,7 +577,7 @@ impl EntityCache {
                 .or_default()
                 .insert(
                     state.component_id.clone(),
-                    CachedComponentState::from_snapshot(state, updated_at),
+                    Arc::new(CachedComponentState::from_snapshot(state, updated_at)),
                 );
         }
         Self {
@@ -667,12 +668,12 @@ impl CacheState {
                             "Creation of a component already cached skipped"
                         );
                     }
-                    entry.apply_block(delta, balances, at);
+                    Arc::make_mut(entry).apply_block(delta, balances, at);
                 }
                 (None, true) => {
                     system_components.insert(
                         id.clone(),
-                        CachedComponentState::from_creation(id, delta, balances, at),
+                        Arc::new(CachedComponentState::from_creation(id, delta, balances, at)),
                     );
                 }
                 (None, false) => warn!(
@@ -787,7 +788,7 @@ mod test {
             .read()
             .component(EXTRACTOR, id)
             .cloned()
-            .map(ProtocolComponentState::from)
+            .map(|entry| ProtocolComponentState::from(Arc::unwrap_or_clone(entry)))
     }
 
     fn addr(n: u64) -> Bytes {
@@ -1310,7 +1311,7 @@ mod test {
             .component(EXTRACTOR, "c1")
             .unwrap();
         assert_eq!(
-            ProtocolComponentState::from(entry.clone()).attributes["x"],
+            ProtocolComponentState::from(Arc::unwrap_or_clone(entry.clone())).attributes["x"],
             Bytes::from(2u64),
             "the repeated creation does not rebuild the entry"
         );
@@ -1411,6 +1412,34 @@ mod test {
                 .unwrap()
                 .slots,
             fixtures::slots([(1, 12)])
+        );
+    }
+
+    #[test]
+    fn fold_leaves_a_component_a_reader_holds_unchanged() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(1), "c1"), "c1", 1))
+            .unwrap();
+        let held = cache
+            .read()
+            .component(EXTRACTOR, "c1")
+            .cloned()
+            .unwrap();
+
+        cache
+            .fold(&with_state_delta(msg(2), "c1", 2))
+            .unwrap();
+
+        assert_eq!(
+            ProtocolComponentState::from(Arc::unwrap_or_clone(held)).attributes["x"],
+            Bytes::from(1u64)
+        );
+        assert_eq!(
+            cached_component(&cache, "c1")
+                .unwrap()
+                .attributes["x"],
+            Bytes::from(2u64)
         );
     }
 
