@@ -12,6 +12,7 @@ pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig
 use crate::extractor::{
     factory::ExtractorFactory,
     runner::{ControlMessage, ExtractorHandle, SubscriptionsMap},
+    writer_status::WriterStatus,
     DeltaCommand, ExtractionError,
 };
 
@@ -22,6 +23,38 @@ const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4 * 60 * 60);
 /// Minimum run duration after which a failure is treated as a fresh incident rather than a
 /// continuation of the previous one, resetting the restart count and backoff.
 const HEALTHY_RUN_THRESHOLD: Duration = Duration::from_secs(10 * 60);
+
+/// How often a supervisor that does not need its extractor's stream checks again.
+#[cfg(not(test))]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// What ended [`wait_for_stream_need`].
+enum StreamWait {
+    /// This process needs the extractor's stream now.
+    Needed,
+    /// A control message arrived first.
+    Control(ControlMessage),
+}
+
+/// Waits until `writer` says that this process needs the stream of `extractor`, or until a
+/// control message arrives on `control_rx`.
+async fn wait_for_stream_need(
+    writer: &WriterStatus,
+    extractor: &str,
+    control_rx: &mut Receiver<ControlMessage>,
+) -> StreamWait {
+    loop {
+        if writer.needs_stream(extractor, chrono::Utc::now().naive_utc()) {
+            return StreamWait::Needed;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(STREAM_NEED_POLL_INTERVAL) => {}
+            Some(ctrl) = control_rx.recv() => return StreamWait::Control(ctrl),
+        }
+    }
+}
 
 /// Exponential backoff for restarts: 60s, 120s, 240s, ... capped at [`MAX_RESTART_BACKOFF`].
 fn restart_backoff() -> ExponentialBackoff {
@@ -56,6 +89,8 @@ fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
 ///
 /// The supervisor:
+/// - On a follower, waits to build the extractor while the leader syncs its history, so only the
+///   leader pays for that stream.
 /// - Builds an extractor and runner via its factory.
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
@@ -66,6 +101,7 @@ fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
 /// - Forwards `ControlMessage::Stop` by signalling the runner's stop channel.
 pub struct ExtractorSupervisor {
     factory: ExtractorFactory,
+    writer_status: WriterStatus,
     ctrl_tx: Sender<ControlMessage>,
     control_rx: Receiver<ControlMessage>,
     subscriptions: Arc<Mutex<SubscriptionsMap>>,
@@ -79,8 +115,10 @@ impl ExtractorSupervisor {
         let id = factory.extractor_id();
         let max_restarts: Option<u32> = factory.config.max_restarts;
         let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let writer_status = factory.writer_status().clone();
         Self {
             factory,
+            writer_status,
             ctrl_tx,
             control_rx,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -104,6 +142,49 @@ impl ExtractorSupervisor {
             .lock()
             .await
             .insert(subscriber_id, sender);
+    }
+
+    /// Waits until this process needs the extractor's stream, and serves control messages
+    /// meanwhile. Returns `false` when a `Stop` arrives first.
+    async fn wait_until_stream_is_needed(&mut self) -> bool {
+        let now = chrono::Utc::now().naive_utc();
+        if self
+            .writer_status
+            .needs_stream(&self.id.name, now)
+        {
+            return true;
+        }
+        info!(
+            extractor = %self.id,
+            leader_committed_height = ?self.writer_status.committed_height(&self.id.name),
+            "FollowerWaitsForLeaderSync: the leader syncs history; not opening the stream"
+        );
+        loop {
+            match wait_for_stream_need(&self.writer_status, &self.id.name, &mut self.control_rx)
+                .await
+            {
+                StreamWait::Needed => {
+                    info!(
+                        extractor = %self.id,
+                        role = ?self.writer_status.role(),
+                        leader_committed_height =
+                            ?self.writer_status.committed_height(&self.id.name),
+                        "FollowerStreamStarts"
+                    );
+                    return true;
+                }
+                StreamWait::Control(ControlMessage::Stop) => {
+                    info!(
+                        extractor = %self.id,
+                        "Stop signal received while waiting for the leader to sync"
+                    );
+                    return false;
+                }
+                StreamWait::Control(ControlMessage::Subscribe(sender)) => {
+                    self.add_subscriber(sender).await;
+                }
+            }
+        }
     }
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
@@ -132,6 +213,9 @@ impl ExtractorSupervisor {
         let restarts = restart_counter(&self.id);
 
         loop {
+            if !self.wait_until_stream_is_needed().await {
+                return Ok(());
+            }
             let (stop_tx, stop_rx) = oneshot::channel();
             let runner = match self
                 .factory

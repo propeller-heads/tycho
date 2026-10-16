@@ -2584,6 +2584,7 @@ mod test {
     use futures03::FutureExt;
     use mockall::mock;
     use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
     use crate::{
@@ -2658,10 +2659,10 @@ mod test {
         create_extractor_with_batch_size(gw, 1).await
     }
 
-    /// Writer status channels a test drives: the role and the leader's committed heights.
+    /// Writer status channels a test drives: the role and the leader's committed blocks.
     struct WriterChannels {
         role: tokio::sync::watch::Sender<Role>,
-        heights: tokio::sync::watch::Sender<HashMap<String, u64>>,
+        heights: tokio::sync::watch::Sender<HashMap<String, CommittedBlock>>,
     }
 
     impl WriterChannels {
@@ -2673,7 +2674,10 @@ mod test {
 
         fn leader_committed(&self, height: u64) {
             self.heights
-                .send(HashMap::from([(EXTRACTOR_NAME.to_string(), height)]))
+                .send(HashMap::from([(
+                    EXTRACTOR_NAME.to_string(),
+                    CommittedBlock { number: height, ts: crate::testing::block(height).ts },
+                )]))
                 .unwrap();
         }
 

@@ -15,7 +15,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; on a follower, waits to build the extractor while the leader syncs history
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -23,7 +23,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
-  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed heights as watch receivers
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed blocks as watch receivers; `needs_stream`
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -172,7 +172,7 @@ with a gateway built with `defer_writer_claim`) tries the `LeaderLock` once:
 - **Lock taken**: claims the writer epoch, runs `initialize_accounts`, role `Leader` from the start.
   This is the single-replica path and behaves as before.
 - **Lock held elsewhere**: role `Follower`. A background task polls
-  `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
+  `CachedGateway::get_committed_blocks` into the `WriterStatus` every second and retries the lock.
   On success it claims the epoch (fencing the former leader, see "Writer fencing" in
   `crates/tycho-storage/CLAUDE.md`), runs `initialize_accounts`, and only
   then switches the role to `Leader`, so no extractor commits before the fence. The lock checks
@@ -211,6 +211,16 @@ set by `ExtractorFactory::with_writer_status`; without it the extractor is the o
   `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
   and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
   extractor from its cursor.
+- **No stream while the leader syncs**: before it builds an extractor (at start and on each
+  restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
+  follows and the leader's newest committed block for the extractor is missing (first sync) or
+  older than `LEADER_NEAR_HEAD_AGE` (1 hour, more than the finality delay of every chain). So only
+  the leader pays Substreams for history, and a follower cannot serve history anyway. The wait
+  polls every second and still serves `Stop` and `Subscribe`; it logs `FollowerWaitsForLeaderSync`
+  and `FollowerStreamStarts`. It ends when the leader gets near the head or this process becomes
+  leader. A process that is already leader builds the extractor with `CommitMode::Committing`
+  from the database cursor, as at a normal start. Once the stream is open, the wait does not
+  apply again until the next restart; `FOLLOWER_RETENTION_SPAN` bounds memory instead.
 
 ## Why extractor messages must be broadcast to the RPC service
 
