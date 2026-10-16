@@ -258,9 +258,14 @@ enum CatchUpSkipped {
     /// hashes, so the hashes alone cannot tell their messages apart.
     #[error("the missed deltas include block {number} of extractor {chain}:{extractor}")]
     ForeignMessage { extractor: String, chain: Chain, number: u64 },
-    /// A block's parent is not the block the messages before it lead to.
+    /// A block does not extend the block the messages before it lead to: another parent, or a
+    /// number that is not one higher.
     #[error("missed block {number} does not extend the blocks before it")]
     DetachedBlock { number: u64 },
+    /// A revert's target is not an ancestor of the block the messages before it lead to: it is not
+    /// lower, or it differs from the block the walk passed at its height.
+    #[error("missed revert to block {number} does not go back to an earlier block of the path")]
+    RevertToNonAncestor { number: u64 },
     /// The messages lead to another block than the one the first live message continues from.
     /// This includes an empty path when the last synced block is not that block.
     #[error("the missed deltas lead to block {reached}, not to {to}")]
@@ -269,32 +274,57 @@ enum CatchUpSkipped {
 
 /// Checks that `path` takes a consumer of `extractor` from block `from` to block `to`.
 ///
-/// Every message must belong to `extractor` and its chain. Walking from `from`, each block's
-/// parent must be the block reached so far, and a revert moves to its target block (the block its
-/// header names). The walk must end at `to`, so an empty path is valid only when `from` is `to`,
-/// and a path may end with a revert to `to`.
+/// Every message must belong to `extractor` and its chain. Walking from `from`, each block must
+/// extend the block reached so far: its parent is that block and its number is one higher. A
+/// revert moves back to its target block (the block its header names), which must be lower than
+/// the block reached and, when the walk passed a block at the target's height and has not reverted
+/// it, must be that block. The walk must end at `to`, so an empty path is valid only when `from` is
+/// `to`, and a path may end with a revert to `to`.
 fn check_catch_up_path(
     path: &[BlockAggregatedChanges],
     extractor: &ExtractorIdentity,
-    from: &BlockHash,
+    from: &BlockHeader,
     to: &BlockHash,
 ) -> Result<(), CatchUpSkipped> {
-    let mut reached = from;
+    let mut reached_number = from.number;
+    let mut reached_hash = &from.hash;
+    // The blocks below the one reached that the walk passed and has not reverted, at consecutive
+    // heights, oldest first. A revert can only check targets the walk passed: the client keeps no
+    // history below `from`.
+    let mut passed: Vec<(u64, &BlockHash)> = Vec::new();
     for message in path {
+        let block = &message.block;
         if message.extractor != extractor.name || message.chain != extractor.chain {
             return Err(CatchUpSkipped::ForeignMessage {
                 extractor: message.extractor.clone(),
                 chain: message.chain,
-                number: message.block.number,
+                number: block.number,
             });
         }
-        if !message.revert && &message.block.parent_hash != reached {
-            return Err(CatchUpSkipped::DetachedBlock { number: message.block.number });
+        if message.revert {
+            if block.number >= reached_number {
+                return Err(CatchUpSkipped::RevertToNonAncestor { number: block.number });
+            }
+            passed.retain(|&(number, _)| number <= block.number);
+            if let Some(&(number, hash)) = passed.last() {
+                if number == block.number {
+                    if hash != &block.hash {
+                        return Err(CatchUpSkipped::RevertToNonAncestor { number: block.number });
+                    }
+                    passed.pop();
+                }
+            }
+        } else {
+            if &block.parent_hash != reached_hash || block.number != reached_number + 1 {
+                return Err(CatchUpSkipped::DetachedBlock { number: block.number });
+            }
+            passed.push((reached_number, reached_hash));
         }
-        reached = &message.block.hash;
+        reached_number = block.number;
+        reached_hash = &block.hash;
     }
-    if reached != to {
-        return Err(CatchUpSkipped::WrongEnd { reached: reached.clone(), to: to.clone() });
+    if reached_hash != to {
+        return Err(CatchUpSkipped::WrongEnd { reached: reached_hash.clone(), to: to.clone() });
     }
     Ok(())
 }
@@ -1115,7 +1145,7 @@ where
             DeltaCatchUp::Unavailable(reason) => return Err(CatchUpSkipped::Unavailable(reason)),
             DeltaCatchUp::Unsupported => return Err(CatchUpSkipped::Unsupported),
         };
-        check_catch_up_path(&path, &self.extractor_id, &last_synced.hash, to)?;
+        check_catch_up_path(&path, &self.extractor_id, last_synced, to)?;
         Ok(path)
     }
 
@@ -5697,6 +5727,12 @@ mod test {
         block_dropping_tvl(5, "Component1"),
         fork_block(6, 0, 1),
     ])))]
+    #[case::revert_to_a_block_the_path_did_not_pass(Ok(DeltaCatchUp::Available(vec![
+        block_dropping_tvl(5, "Component1"),
+        make_block_changes(6, None),
+        revert_to(fork_block(5, 1, 0)),
+        fork_block(6, 0, 1),
+    ])))]
     #[case::path_short_of_the_first_message(Ok(DeltaCatchUp::Available(vec![
         block_dropping_tvl(5, "Component1"),
     ])))]
@@ -6033,6 +6069,26 @@ mod test {
         fork_hash(5, 0),
         true
     )]
+    #[case::nested_reverts(
+        vec![
+            revert_to(make_block_changes(3, None)),
+            revert_to(make_block_changes(2, None)),
+            fork_block(3, 1, 0),
+            fork_block(4, 1, 1),
+        ],
+        fork_hash(4, 1),
+        true
+    )]
+    #[case::revert_to_the_last_synced_block(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(4, None)),
+            fork_block(5, 1, 0),
+        ],
+        fork_hash(5, 1),
+        true
+    )]
     #[case::empty_from_the_target(vec![], fork_hash(4, 0), true)]
     #[case::empty_from_another_block(vec![], fork_hash(6, 0), false)]
     #[case::short_of_the_target(vec![make_block_changes(5, None)], fork_hash(6, 0), false)]
@@ -6044,6 +6100,44 @@ mod test {
     #[case::detached_block(
         vec![make_block_changes(5, None), fork_block(6, 0, 1)],
         fork_hash(6, 0),
+        false
+    )]
+    #[case::block_at_the_wrong_height(
+        vec![BlockAggregatedChanges {
+            block: Block { number: 6, ..make_block_changes(5, None).block },
+            ..make_block_changes(5, None)
+        }],
+        fork_hash(5, 0),
+        false
+    )]
+    #[case::revert_ahead_of_the_walk(
+        vec![revert_to(make_block_changes(7, None))],
+        fork_hash(7, 0),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_the_last_synced_block(
+        vec![revert_to(fork_block(4, 1, 0))],
+        fork_hash(4, 1),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_a_passed_block(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(fork_block(5, 1, 0)),
+            fork_block(6, 1, 1),
+        ],
+        fork_hash(6, 1),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_the_last_synced_block_after_blocks(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(fork_block(4, 1, 0)),
+            fork_block(5, 1, 1),
+        ],
+        fork_hash(5, 1),
         false
     )]
     #[case::revert_ending_elsewhere(
@@ -6073,7 +6167,7 @@ mod test {
         let checked = check_catch_up_path(
             &path,
             &ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
-            &fork_hash(4, 0),
+            &header_of(&make_block_changes(4, None)),
             &to,
         );
 
