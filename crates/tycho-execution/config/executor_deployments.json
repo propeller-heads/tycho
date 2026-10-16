@@ -276,7 +276,8 @@
         "0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b",
         "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
       ]
-    }
+    },
+    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] }
   },
   "plasma": {
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },

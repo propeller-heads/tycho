@@ -218,7 +218,8 @@
         "uniswap_v4": "0x925A1aE9494ec8d92C2900dCdd6ca9Ee621E10ed",
         "native_wrapper": "0x8c41B3842D767Bb07818E9E82fB62964910a82Ef",
         "rfq:native": "0x19e8F03Be0159Af8c04A9553f82eb1f17C2e8451",
-        "ring_swap_v2": "0x5De5D17985716AB919b806023Bd0Ed294450FFd7"
+        "ring_swap_v2": "0x5De5D17985716AB919b806023Bd0Ed294450FFd7",
+        "lunarbase": "0x99576B7C64Fe225785bd69E91fc9dC857Dd7AaA5"
       },
       "superseded": [{
         "status": "superseded",

@@ -71,6 +71,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('bsc', '0x8a61866f7f9c979bee4426247e144add46cd21aa', ARRAY['rfq:metric']),
     ('bsc', '0x8c41b3842d767bb07818e9e82fb62964910a82ef', ARRAY['native_wrapper']),
     ('bsc', '0x925a1ae9494ec8d92c2900dcdd6ca9ee621e10ed', ARRAY['uniswap_v4']),
+    ('bsc', '0x99576b7c64fe225785bd69e91fc9dc857dd7aaa5', ARRAY['lunar_base', 'lunarbase']),
     ('ethereum', '0x0017c84f2b3414514b67bfc9a63830c8e0e690d0', ARRAY['sushiswap_v2', 'uniswap_v2']),
     ('ethereum', '0x03ad6010948ac034c0bbf7e449217798b4504e1d', ARRAY['sky']),
     ('ethereum', '0x08ba9e85c8944098deaace0e164b7ec379a7e810', ARRAY['ring_swap_v2']),
