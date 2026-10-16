@@ -1,6 +1,8 @@
 import json
 
+import pytest
 from hexbytes import HexBytes
+from pydantic import ValidationError
 
 from tycho_indexer_client.dto import (
     AccountBalance,
@@ -11,6 +13,7 @@ from tycho_indexer_client.dto import (
     CustomChain,
     ExtractorIdentity,
     FeedMessage,
+    RPCTracerParams,
     SynchronizerState,
     SynchronizerStateEnum,
     Header,
@@ -134,3 +137,9 @@ def test_decode_partial_block_changes(asset_dir):
     msg = BlockChanges(**data, partial_block_index=2)
 
     assert msg.partial_block_index == 2
+
+
+
+def test_decode_tracing_params_of_an_unknown_method():
+    with pytest.raises(ValidationError):
+        RPCTracerParams(method="other", calldata="0x00")
