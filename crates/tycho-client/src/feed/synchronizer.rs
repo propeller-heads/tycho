@@ -740,156 +740,15 @@ where
             loop {
                 select! {
                     deltas_opt = msg_rx.recv() => {
-                        if let Some(mut deltas) = deltas_opt {
+                        if let Some(deltas) = deltas_opt {
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
-                            // Buffer unfiltered delta while any snapshot task is in-flight.
-                            if !self.snapshot_tasks.is_empty() {
-                                self.buffered_deltas.push(deltas.clone());
-                            }
-
-                            let background_snapshots = self.drain_completed_snapshots();
-
-                            // Trim buffered_deltas: discard blocks no longer needed by any pending task.
-                            if self.snapshot_tasks.is_empty() {
-                                self.buffered_deltas.clear();
-                            } else {
-                                let oldest_pending_block = self
-                                    .snapshot_tasks
-                                    .iter()
-                                    .map(|p| p.snapshot_block)
-                                    .min()
-                                    .unwrap_or(u64::MAX);
-                                self.buffered_deltas
-                                    .retain(|d| d.block.number > oldest_pending_block);
-                            }
-
-                            let (snapshots, removed_components) = {
-                                let (to_add, to_remove) =
-                                    self.component_tracker.filter_updated_components(&deltas);
-
-                                // Harvest transient retries now so they feed into truly_new.
-                                // TVL changes are not re-emitted, so without explicit re-queuing
-                                // a transiently failed component would never be retried.
-                                // Remove from the map first so the truly_new filter below treats
-                                // them the same as brand-new components.
-                                let retry_ids: Vec<String> = self
-                                    .snapshot_queue
-                                    .iter()
-                                    .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-                                for id in &retry_ids {
-                                    self.snapshot_queue.remove(id);
-                                }
-
-                                // Components not yet tracked and not in the staged state machine
-                                // (not in-flight, not deferred, not blacklisted). Merges
-                                // delta-triggered new components with transient retries; `seen`
-                                // deduplicates the two sources.
-                                let truly_new: Vec<String> = {
-                                    let mut seen = HashSet::new();
-                                    to_add
-                                        .iter()
-                                        .chain(retry_ids.iter())
-                                        .filter(|id| {
-                                            !self.component_tracker
-                                                .components
-                                                .contains_key(id.as_str())
-                                                && !self
-                                                    .snapshot_queue
-                                                    .contains_key(id.as_str())
-                                                && seen.insert(id.as_str())
-                                        })
-                                        .cloned()
-                                        .collect()
-                                };
-
-                                if self.partial_blocks {
-                                    let is_new_block = self
-                                        .last_synced_block
-                                        .as_ref()
-                                        .map(|b| header.number > b.number)
-                                        .unwrap_or(true);
-
-                                    let has_deferred = self
-                                        .snapshot_queue
-                                        .values()
-                                        .any(|s| matches!(s, SnapshotStatus::Deferred));
-                                    if is_new_block && has_deferred && header.number > 0 {
-                                        // Block number incremented: the previous block is
-                                        // complete. Fire deferred components at that block's
-                                        // height.
-                                        let to_fire: Vec<String> = self
-                                            .snapshot_queue
-                                            .iter()
-                                            .filter(|(_, s)| matches!(s, SnapshotStatus::Deferred))
-                                            .map(|(id, _)| id.clone())
-                                            .collect();
-                                        for id in &to_fire {
-                                            self.snapshot_queue.remove(id);
-                                        }
-                                        let snapshot_header = BlockHeader {
-                                            number: header.number - 1,
-                                            hash: header.parent_hash.clone(),
-                                            ..Default::default()
-                                        };
-                                        debug!(
-                                            components = ?to_fire,
-                                            extractor = %self.extractor_id.name,
-                                            snapshot_block = header.number - 1,
-                                            "snapshot_deferred_to_background"
-                                        );
-                                        self.spawn_snapshot_task(
-                                            to_fire,
-                                            snapshot_header,
-                                            &deltas,
-                                        );
-                                    }
-
-                                    // Accumulate truly_new into the deferred set for the current
-                                    // block; they will be fired when the next block arrives.
-                                    for id in truly_new {
-                                        self.snapshot_queue
-                                            .insert(id, SnapshotStatus::Deferred);
-                                    }
-                                } else if !truly_new.is_empty() {
-                                    debug!(
-                                        components = ?truly_new,
-                                        extractor = %self.extractor_id.name,
-                                        block_number = ?header.number,
-                                        "snapshot_deferred_to_background"
-                                    );
-                                    let snapshot_header =
-                                        BlockHeader { revert: false, ..header.clone() };
-                                    self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
-                                }
-
-                                let snapshots = background_snapshots;
-
-                                let removed_components = if !to_remove.is_empty() {
-                                    self.component_tracker.stop_tracking(&to_remove)
-                                } else {
-                                    Default::default()
-                                };
-
-                                (snapshots, removed_components)
-                            };
-
-                            // Update entrypoints on the tracker (affects which contracts are tracked for DCI).
-                            self.component_tracker.process_entrypoints(&deltas.dci_update);
-
-                            // Filter deltas by currently tracked components / contracts.
-                            self.filter_deltas(&mut deltas);
-                            let n_changes = deltas.n_changes();
-
-                            let next = StateSyncMessage {
-                                header: header.clone(),
-                                snapshots,
-                                deltas: Some(deltas),
-                                removed_components,
-                            };
+                            let next = self.handle_block(deltas);
+                            let n_changes = next
+                                .deltas
+                                .as_ref()
+                                .map_or(0, BlockAggregatedChanges::n_changes);
                             block_tx.send(Ok(next)).await?;
                             self.last_synced_block = Some(header.clone());
 
@@ -928,6 +787,163 @@ where
                 Err(Box::new((e, Some(end_rx))))
             }
         }
+    }
+
+    /// Runs one block's message through the per-block handling and returns the message to emit
+    /// for it.
+    ///
+    /// Buffers the unfiltered message for in-flight background snapshots and harvests the
+    /// finished ones, updates tracking from the message's TVL (removing components below the
+    /// threshold and spawning background snapshots for new ones), applies its DCI entry points,
+    /// and filters it to the tracked components and contracts. The caller sends the result and
+    /// then advances `last_synced_block`, which this reads to detect a new block in partial-block
+    /// mode.
+    fn handle_block(
+        &mut self,
+        mut deltas: BlockAggregatedChanges,
+    ) -> StateSyncMessage<BlockHeader> {
+        let header: BlockHeader = (&deltas).into();
+
+        // Buffer unfiltered delta while any snapshot task is in-flight.
+        if !self.snapshot_tasks.is_empty() {
+            self.buffered_deltas
+                .push(deltas.clone());
+        }
+
+        let background_snapshots = self.drain_completed_snapshots();
+
+        // Trim buffered_deltas: discard blocks no longer needed by any pending task.
+        if self.snapshot_tasks.is_empty() {
+            self.buffered_deltas.clear();
+        } else {
+            let oldest_pending_block = self
+                .snapshot_tasks
+                .iter()
+                .map(|p| p.snapshot_block)
+                .min()
+                .unwrap_or(u64::MAX);
+            self.buffered_deltas
+                .retain(|d| d.block.number > oldest_pending_block);
+        }
+
+        let (snapshots, removed_components) = {
+            let (to_add, to_remove) = self
+                .component_tracker
+                .filter_updated_components(&deltas);
+
+            // Harvest transient retries now so they feed into truly_new.
+            // TVL changes are not re-emitted, so without explicit re-queuing
+            // a transiently failed component would never be retried.
+            // Remove from the map first so the truly_new filter below treats
+            // them the same as brand-new components.
+            let retry_ids: Vec<String> = self
+                .snapshot_queue
+                .iter()
+                .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &retry_ids {
+                self.snapshot_queue.remove(id);
+            }
+
+            // Components not yet tracked and not in the staged state machine
+            // (not in-flight, not deferred, not blacklisted). Merges
+            // delta-triggered new components with transient retries; `seen`
+            // deduplicates the two sources.
+            let truly_new: Vec<String> = {
+                let mut seen = HashSet::new();
+                to_add
+                    .iter()
+                    .chain(retry_ids.iter())
+                    .filter(|id| {
+                        !self
+                            .component_tracker
+                            .components
+                            .contains_key(id.as_str()) &&
+                            !self
+                                .snapshot_queue
+                                .contains_key(id.as_str()) &&
+                            seen.insert(id.as_str())
+                    })
+                    .cloned()
+                    .collect()
+            };
+
+            if self.partial_blocks {
+                let is_new_block = self
+                    .last_synced_block
+                    .as_ref()
+                    .map(|b| header.number > b.number)
+                    .unwrap_or(true);
+
+                let has_deferred = self
+                    .snapshot_queue
+                    .values()
+                    .any(|s| matches!(s, SnapshotStatus::Deferred));
+                if is_new_block && has_deferred && header.number > 0 {
+                    // Block number incremented: the previous block is
+                    // complete. Fire deferred components at that block's
+                    // height.
+                    let to_fire: Vec<String> = self
+                        .snapshot_queue
+                        .iter()
+                        .filter(|(_, s)| matches!(s, SnapshotStatus::Deferred))
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in &to_fire {
+                        self.snapshot_queue.remove(id);
+                    }
+                    let snapshot_header = BlockHeader {
+                        number: header.number - 1,
+                        hash: header.parent_hash.clone(),
+                        ..Default::default()
+                    };
+                    debug!(
+                        components = ?to_fire,
+                        extractor = %self.extractor_id.name,
+                        snapshot_block = header.number - 1,
+                        "snapshot_deferred_to_background"
+                    );
+                    self.spawn_snapshot_task(to_fire, snapshot_header, &deltas);
+                }
+
+                // Accumulate truly_new into the deferred set for the current
+                // block; they will be fired when the next block arrives.
+                for id in truly_new {
+                    self.snapshot_queue
+                        .insert(id, SnapshotStatus::Deferred);
+                }
+            } else if !truly_new.is_empty() {
+                debug!(
+                    components = ?truly_new,
+                    extractor = %self.extractor_id.name,
+                    block_number = ?header.number,
+                    "snapshot_deferred_to_background"
+                );
+                let snapshot_header = BlockHeader { revert: false, ..header.clone() };
+                self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
+            }
+
+            let snapshots = background_snapshots;
+
+            let removed_components = if !to_remove.is_empty() {
+                self.component_tracker
+                    .stop_tracking(&to_remove)
+            } else {
+                Default::default()
+            };
+
+            (snapshots, removed_components)
+        };
+
+        // Update entrypoints on the tracker (affects which contracts are tracked for DCI).
+        self.component_tracker
+            .process_entrypoints(&deltas.dci_update);
+
+        // Filter deltas by currently tracked components / contracts.
+        self.filter_deltas(&mut deltas);
+
+        StateSyncMessage { header, snapshots, deltas: Some(deltas), removed_components }
     }
 
     /// Applies `self.buffered_deltas` to `snapshot`, updating attributes, balances, and contract
