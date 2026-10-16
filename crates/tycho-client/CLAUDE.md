@@ -77,6 +77,8 @@ TychoStreamBuilder (stream.rs)
    `synced_fingerprint`). Any failure is logged once with a `CatchUpSkipped` reason, at warn for an
    RPC error or an answer that is not a path to the target and at info otherwise, and takes the
    snapshot path, delay included.
+   `feed/synchronizer/test/catch_up_properties.rs` checks resubscriptions over random histories
+   against `catch_up_spec` and the model in `tycho-common`'s `testing::delta_history`.
    In full-block mode, a later live block whose parent is not the last synced block, or a revert
    to a block the client never had (above the last synced block, or at its height with another
    hash), shows that the subscription lost messages (e.g. on a full buffer; `WsDeltasClient`

@@ -47,6 +47,7 @@ zstd = "0.13"
 rand.workspace = true
 
 [dev-dependencies]
+tycho-common = { workspace = true, features = ["test-utils"] }
 pretty_assertions.workspace = true
 rstest.workspace = true
 mockall.workspace = true
