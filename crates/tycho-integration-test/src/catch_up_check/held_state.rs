@@ -390,8 +390,8 @@ pub enum Status {
     /// The server does not restore this field on reverts yet, or it is in a contract only DCI
     /// traces reach, so the client may differ.
     KnownGap,
-    /// The state held before the gap already differed from its snapshot in this entry, so the
-    /// difference does not come from the gap.
+    /// The state held when the gap was forced already differed from its snapshot in exactly this
+    /// way, so the difference does not come from the gap.
     PreExisting,
 }
 
@@ -413,28 +413,6 @@ pub struct Difference {
     /// The component id or contract address the difference is in.
     pub entity: String,
     pub kind: DifferenceKind,
-}
-
-impl Difference {
-    /// Where the difference is: its field, entity, and key or the side that holds the entity.
-    /// Two differences at the same entry may hold different values.
-    pub fn entry(&self) -> (Field, &str, Entry<'_>) {
-        let Self { field, entity, kind } = self;
-        let entry = match kind {
-            DifferenceKind::OnlyHeld => Entry::OnlyHeld,
-            DifferenceKind::OnlyInSnapshot => Entry::OnlyInSnapshot,
-            DifferenceKind::Value { key, held: _, snapshot: _ } => Entry::Value(key),
-        };
-        (*field, entity, entry)
-    }
-}
-
-/// The part of [`Difference::entry`] within an entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Entry<'a> {
-    OnlyHeld,
-    OnlyInSnapshot,
-    Value(&'a str),
 }
 
 /// How the client's state and the snapshot differ in one entry.

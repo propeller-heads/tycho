@@ -18,15 +18,17 @@ pub mod gap_injector;
 pub mod held_state;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use miette::{miette, IntoDiagnostic, WrapErr};
 use tokio::{
     sync::mpsc::{self, Receiver, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
+    time::timeout,
 };
 use tracing::{debug, error, info, warn};
 use tycho_client::{
@@ -64,6 +66,10 @@ pub const GAP_BLOCKS: usize = 10;
 /// How long the protocols get to resubscribe after a gap. Covers the client's snapshot delay of up
 /// to a minute when it cannot catch up.
 const RESYNC_DEADLINE: Duration = Duration::from_secs(300);
+
+/// How long a comparison may take. The RPC client has no request timeout, and a comparison keeps
+/// a copy of the protocol's state and its baseline alive.
+const COMPARISON_TIMEOUT: Duration = RESYNC_DEADLINE;
 
 /// Differences logged one by one per comparison; the rest are only counted.
 const MAX_LOGGED_DIFFERENCES: usize = 10;
@@ -187,9 +193,9 @@ async fn start(
     };
 
     let (comparisons, requests) = mpsc::unbounded_channel();
-    let comparator =
-        Comparator { chain, rpc: comparison_rpc, dci_protocols: Arc::new(dci_protocols) };
-    tokio::spawn(comparator.run(requests));
+    let snapshots =
+        RpcSnapshots { chain, rpc: comparison_rpc, dci_protocols: Arc::new(dci_protocols) };
+    tokio::spawn(run_comparisons(snapshots, requests));
     let check = CatchUpCheck::new(every_n_blocks, trigger, resubscriptions, comparisons);
     Ok((check, feed, ws_task))
 }
@@ -278,7 +284,7 @@ impl Resync {
 }
 
 /// The state held for a protocol and the block of the last message applied to it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Held {
     state: ExtractorState,
     header: BlockHeader,
@@ -424,6 +430,7 @@ impl CatchUpCheck {
                     .is_err()
                 {
                     error!(protocol, "The catch-up check's comparisons stopped; skipping one");
+                    metrics::record_catch_up_comparison(protocol, resync.label(), "error");
                 }
             }
             Resync::NothingTracked => {}
@@ -467,88 +474,32 @@ impl CatchUpCheck {
     }
 }
 
-/// Runs comparisons with snapshots, each in a task of its own.
+/// Where comparisons get snapshots from.
+#[async_trait]
+trait SnapshotSource {
+    /// The differences between `held` and a snapshot of its components at its block.
+    async fn differences(&self, protocol: &str, held: &Held) -> Result<Vec<Difference>, RPCError>;
+}
+
+/// Snapshots from the server's RPC.
 #[derive(Clone)]
-struct Comparator {
+struct RpcSnapshots {
     chain: Chain,
     rpc: HttpRPCClient,
     dci_protocols: Arc<HashSet<String>>,
 }
 
-impl Comparator {
-    async fn run(self, mut requests: UnboundedReceiver<Comparison>) {
-        while let Some(comparison) = requests.recv().await {
-            let comparator = self.clone();
-            tokio::spawn(async move { comparator.compare(comparison).await });
-        }
-    }
-
-    async fn compare(&self, comparison: Comparison) {
-        let Comparison { protocol, resync, held, baseline } = comparison;
-        if let Some(baseline) = &baseline {
-            if diff(&baseline.state, &held.state).is_empty() {
-                info!(
-                    protocol,
-                    block = held.header.number,
-                    "The gap changed none of the compared state, so its comparison can't catch a \
-                     catch-up bug"
-                );
-                metrics::record_catch_up_unchanged_recovery(&protocol);
-            }
-        }
-        let differences = match self
-            .snapshot_differences(&protocol, &held)
-            .await
-        {
-            Ok(differences) => differences,
-            Err(e) => {
-                warn!(
-                    protocol,
-                    block = held.header.number,
-                    resync = resync.label(),
-                    error = %e,
-                    "Failed to fetch a snapshot to compare the catch-up check's state with"
-                );
-                metrics::record_catch_up_comparison(&protocol, resync.label(), "error");
-                return;
-            }
-        };
-        let pre_existing = match &baseline {
-            Some(baseline) if !differences.is_empty() => {
-                match self
-                    .snapshot_differences(&protocol, baseline)
-                    .await
-                {
-                    Ok(differences) => differences,
-                    Err(e) => {
-                        warn!(
-                            protocol,
-                            block = baseline.header.number,
-                            error = %e,
-                            "Failed to fetch the snapshot at the gap; no difference counts as \
-                             pre-existing"
-                        );
-                        Vec::new()
-                    }
-                }
-            }
-            Some(_) | None => Vec::new(),
-        };
-        report(&protocol, &held.header, resync, &assess(&differences, &pre_existing));
-    }
-
-    /// The differences between `held` and a snapshot of its components at its block.
-    async fn snapshot_differences(
-        &self,
-        protocol: &str,
-        held: &Held,
-    ) -> Result<Vec<Difference>, RPCError> {
+#[async_trait]
+impl SnapshotSource for RpcSnapshots {
+    async fn differences(&self, protocol: &str, held: &Held) -> Result<Vec<Difference>, RPCError> {
         let snapshot = self
             .fetch_snapshot(protocol, &held.state, held.header.number)
             .await?;
         Ok(diff(&held.state, &snapshot))
     }
+}
 
+impl RpcSnapshots {
     /// Fetches the state at `block` of the components `held` holds, with the contracts they name
     /// and, for a DCI protocol, the contracts their traced entry points reach.
     async fn fetch_snapshot(
@@ -586,19 +537,119 @@ impl Comparator {
     }
 }
 
-/// Pairs each difference with its status: [`Status::PreExisting`] when `pre_existing` has a
-/// difference at the same entry, whatever its values, otherwise its field's status.
-fn assess<'a>(
-    differences: &'a [Difference],
-    pre_existing: &[Difference],
-) -> Vec<(&'a Difference, Status)> {
-    let pre_existing: HashSet<_> = pre_existing
-        .iter()
-        .map(Difference::entry)
-        .collect();
+/// Runs each comparison it receives in a task of its own, for at most [`COMPARISON_TIMEOUT`], and
+/// records what it found.
+async fn run_comparisons<S>(snapshots: S, mut requests: UnboundedReceiver<Comparison>)
+where
+    S: SnapshotSource + Clone + Send + Sync + 'static,
+{
+    while let Some(comparison) = requests.recv().await {
+        let snapshots = snapshots.clone();
+        tokio::spawn(async move {
+            let Comparison { protocol, resync, held, baseline: _ } = &comparison;
+            let block = held.header.number;
+            let resync_label = resync.label();
+            let findings = match timeout(COMPARISON_TIMEOUT, compare(&snapshots, &comparison)).await
+            {
+                Ok(Ok(findings)) => findings,
+                Ok(Err(e)) => {
+                    warn!(
+                        protocol,
+                        block,
+                        resync = resync_label,
+                        error = %e,
+                        "Failed to fetch a snapshot to compare the catch-up check's state with"
+                    );
+                    metrics::record_catch_up_comparison(protocol, resync_label, "error");
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        protocol,
+                        block,
+                        resync = resync_label,
+                        timeout = ?COMPARISON_TIMEOUT,
+                        "A catch-up check comparison timed out"
+                    );
+                    metrics::record_catch_up_comparison(protocol, resync_label, "error");
+                    return;
+                }
+            };
+            if findings.changed_nothing {
+                info!(
+                    protocol,
+                    block,
+                    "The state held changed nothing between the baseline and the recovery, so the \
+                     comparison can't catch a catch-up bug"
+                );
+                metrics::record_catch_up_unchanged_recovery(protocol);
+            }
+            report(protocol, &held.header, *resync, &findings.assessed);
+        });
+    }
+}
+
+/// What a comparison found.
+#[derive(Debug, PartialEq)]
+struct Findings {
+    /// Every difference from a snapshot at the recovery's block, with its status.
+    assessed: Vec<(Difference, Status)>,
+    /// Whether the state held is the same at the baseline and at the recovery, so the comparison
+    /// can't catch a catch-up bug. False without a baseline.
+    changed_nothing: bool,
+}
+
+/// Compares the state held after a recovery with a snapshot at its block. When they differ and the
+/// recovery has a baseline, compares the baseline with a snapshot at the baseline's block too, and
+/// counts the differences it shares exactly as pre-existing. A failed baseline fetch is logged and
+/// leaves every difference new.
+///
+/// # Errors
+///
+/// When the snapshot at the recovery's block cannot be fetched.
+async fn compare(
+    snapshots: &impl SnapshotSource,
+    comparison: &Comparison,
+) -> Result<Findings, RPCError> {
+    let Comparison { protocol, resync: _, held, baseline } = comparison;
+    let changed_nothing = baseline
+        .as_ref()
+        .is_some_and(|baseline| baseline.state == held.state);
+    let differences = snapshots
+        .differences(protocol, held)
+        .await?;
+    let pre_existing = match baseline {
+        Some(baseline) if !differences.is_empty() => {
+            match snapshots
+                .differences(protocol, baseline)
+                .await
+            {
+                Ok(differences) => differences,
+                Err(e) => {
+                    warn!(
+                        protocol,
+                        block = baseline.header.number,
+                        error = %e,
+                        "Failed to fetch the snapshot at the baseline; no difference counts as \
+                         pre-existing"
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        Some(_) | None => Vec::new(),
+    };
+    Ok(Findings { assessed: assess(differences, &pre_existing), changed_nothing })
+}
+
+/// Pairs each difference with its status: [`Status::PreExisting`] when `pre_existing` has an equal
+/// difference (same entry, same values on both sides), otherwise its field's status. A stale value
+/// the gap changed therefore counts as new.
+fn assess(differences: Vec<Difference>, pre_existing: &[Difference]) -> Vec<(Difference, Status)> {
+    let pre_existing: BTreeSet<&Difference> = pre_existing.iter().collect();
     let mut assessed = Vec::with_capacity(differences.len());
     for difference in differences {
-        let status = if pre_existing.contains(&difference.entry()) {
+        let status = if pre_existing.contains(&difference) {
             Status::PreExisting
         } else {
             difference.field.status()
@@ -618,7 +669,7 @@ enum ComparisonResult {
 }
 
 impl ComparisonResult {
-    fn of(assessed: &[(&Difference, Status)]) -> Self {
+    fn of(assessed: &[(Difference, Status)]) -> Self {
         let mut result = ComparisonResult::Equal;
         for (_, status) in assessed {
             match status {
@@ -642,12 +693,7 @@ impl ComparisonResult {
 /// Records a comparison's assessed differences in metrics and logs. Mismatches are logged with the
 /// hash of the block the state was held at: the snapshot is fetched by block number, so a reorg
 /// between the recovery and the request shows as a different hash at that number.
-fn report(
-    protocol: &str,
-    header: &BlockHeader,
-    resync: Resync,
-    assessed: &[(&Difference, Status)],
-) {
+fn report(protocol: &str, header: &BlockHeader, resync: Resync, assessed: &[(Difference, Status)]) {
     let mut counts: HashMap<(Field, Status), usize> = HashMap::new();
     for (difference, status) in assessed {
         *counts
@@ -721,6 +767,7 @@ fn report(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use tycho_client::feed::synchronizer::{ComponentWithState, Snapshot};
     use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
 
@@ -823,17 +870,27 @@ mod tests {
 
     #[test]
     fn test_the_first_gap_is_due_every_n_blocks_after_the_newest_first_block() {
-        let (_, trigger) = GapInjector::new((), GAP_BLOCKS, mpsc::unbounded_channel().0);
-        let mut check = CatchUpCheck::new(
-            EVERY_N_BLOCKS,
-            trigger,
-            mpsc::unbounded_channel().1,
-            mpsc::unbounded_channel().0,
-        );
+        // A feed message's protocols come in hash-map order, so the newest block must decide
+        // wherever it comes: one of six protocols has it, in each of eight fresh feed messages.
+        for _ in 0..8 {
+            let (_, trigger) = GapInjector::new((), GAP_BLOCKS, mpsc::unbounded_channel().0);
+            let mut check = CatchUpCheck::new(
+                EVERY_N_BLOCKS,
+                trigger,
+                mpsc::unbounded_channel().1,
+                mpsc::unbounded_channel().0,
+            );
+            let mut messages: Vec<(&str, StateSyncMessage<BlockHeader>)> =
+                ["a", "b", "c", "d", "e"]
+                    .into_iter()
+                    .map(|protocol| (protocol, message(10, &[])))
+                    .collect();
+            messages.push(("newest", message(12, &[])));
 
-        check.handle(feed(vec![("a", message(10, &[])), ("b", message(12, &[]))]));
+            check.handle(feed(messages));
 
-        assert_eq!(check.phase, Phase::Following { gap_at: 12 + EVERY_N_BLOCKS });
+            assert_eq!(check.phase, Phase::Following { gap_at: 12 + EVERY_N_BLOCKS });
+        }
     }
 
     #[test]
@@ -976,24 +1033,41 @@ mod tests {
         }
     }
 
+    fn statuses(assessed: &[(Difference, Status)]) -> Vec<Status> {
+        assessed
+            .iter()
+            .map(|(_, status)| *status)
+            .collect()
+    }
+
     #[test]
-    fn test_differences_at_an_entry_the_baseline_shares_are_pre_existing() {
+    fn test_differences_the_baseline_has_too_are_pre_existing() {
         let differences = vec![
             value_difference(Field::Attribute, "fee", 1),
             value_difference(Field::Attribute, "tick", 1),
             value_difference(Field::Code, "code", 1),
         ];
         let baseline = vec![
-            value_difference(Field::Attribute, "fee", 2),
+            value_difference(Field::Attribute, "fee", 1),
             value_difference(Field::ComponentBalance, "tick", 1),
         ];
 
-        let statuses: Vec<Status> = assess(&differences, &baseline)
-            .into_iter()
-            .map(|(_, status)| status)
-            .collect();
+        let assessed = assess(differences, &baseline);
 
-        assert_eq!(statuses, vec![Status::PreExisting, Status::Mismatch, Status::KnownGap]);
+        assert_eq!(
+            statuses(&assessed),
+            vec![Status::PreExisting, Status::Mismatch, Status::KnownGap]
+        );
+    }
+
+    #[test]
+    fn test_a_stale_value_the_gap_changed_counts_as_new() {
+        let differences = vec![value_difference(Field::Attribute, "fee", 2)];
+        let baseline = vec![value_difference(Field::Attribute, "fee", 1)];
+
+        let assessed = assess(differences, &baseline);
+
+        assert_eq!(statuses(&assessed), vec![Status::Mismatch]);
     }
 
     #[test]
@@ -1003,16 +1077,157 @@ mod tests {
 
         assert_eq!(ComparisonResult::of(&[]), ComparisonResult::Equal);
         assert_eq!(
-            ComparisonResult::of(&[(&attribute, Status::PreExisting)]),
+            ComparisonResult::of(&[(attribute.clone(), Status::PreExisting)]),
             ComparisonResult::Equal
         );
         assert_eq!(
-            ComparisonResult::of(&[(&attribute, Status::PreExisting), (&code, Status::KnownGap)]),
+            ComparisonResult::of(&[
+                (attribute.clone(), Status::PreExisting),
+                (code.clone(), Status::KnownGap)
+            ]),
             ComparisonResult::KnownGaps
         );
         assert_eq!(
-            ComparisonResult::of(&[(&code, Status::KnownGap), (&attribute, Status::Mismatch)]),
+            ComparisonResult::of(&[(code, Status::KnownGap), (attribute, Status::Mismatch)]),
             ComparisonResult::Mismatch
         );
+    }
+
+    /// Snapshots whose differences from the held state the test sets per block.
+    #[derive(Clone, Default)]
+    struct ScriptedSnapshots {
+        /// The differences the snapshot at each block shows; a block without an entry fails.
+        differences: Arc<HashMap<u64, Vec<Difference>>>,
+        /// The state and block of every request, in order.
+        requests: Arc<std::sync::Mutex<Vec<Held>>>,
+    }
+
+    impl ScriptedSnapshots {
+        fn new(differences: Vec<(u64, Vec<Difference>)>) -> Self {
+            Self { differences: Arc::new(differences.into_iter().collect()), ..Self::default() }
+        }
+
+        fn requests(&self) -> Vec<Held> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SnapshotSource for ScriptedSnapshots {
+        async fn differences(
+            &self,
+            _protocol: &str,
+            held: &Held,
+        ) -> Result<Vec<Difference>, RPCError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(held.clone());
+            self.differences
+                .get(&held.header.number)
+                .cloned()
+                .ok_or_else(|| RPCError::Fatal(format!("no snapshot at {}", held.header.number)))
+        }
+    }
+
+    fn held_at(number: u64, component_ids: &[&str]) -> Held {
+        let message = message(number, component_ids);
+        let mut state = ExtractorState::default();
+        state.apply(&message);
+        Held { state, header: message.header }
+    }
+
+    /// A comparison of a recovery at block 75 holding `pool` and `new`, after a gap forced at
+    /// block 60 holding only `pool`.
+    fn recovery_with_baseline() -> Comparison {
+        Comparison {
+            protocol: "a".to_string(),
+            resync: Resync::CaughtUp,
+            held: held_at(75, &["pool", "new"]),
+            baseline: Some(held_at(60, &["pool"])),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_the_baseline_is_compared_with_a_snapshot_at_its_own_block() {
+        let stale = value_difference(Field::Attribute, "fee", 1);
+        let new = value_difference(Field::Attribute, "tick", 1);
+        let snapshots = ScriptedSnapshots::new(vec![
+            (75, vec![stale.clone(), new.clone()]),
+            (60, vec![stale.clone()]),
+        ]);
+        let comparison = recovery_with_baseline();
+
+        let findings = compare(&snapshots, &comparison)
+            .await
+            .unwrap();
+
+        assert_eq!(findings.assessed, vec![(stale, Status::PreExisting), (new, Status::Mismatch)]);
+        assert_eq!(snapshots.requests(), vec![comparison.held, comparison.baseline.unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn test_a_recovery_without_differences_fetches_no_baseline_snapshot() {
+        let snapshots = ScriptedSnapshots::new(vec![(75, Vec::new()), (60, Vec::new())]);
+        let comparison = recovery_with_baseline();
+
+        let findings = compare(&snapshots, &comparison)
+            .await
+            .unwrap();
+
+        assert_eq!(findings.assessed, Vec::new());
+        assert_eq!(snapshots.requests(), vec![comparison.held]);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_baseline_fetch_counts_every_difference_as_new() {
+        let difference = value_difference(Field::Attribute, "fee", 1);
+        let snapshots = ScriptedSnapshots::new(vec![(75, vec![difference.clone()])]);
+
+        let findings = compare(&snapshots, &recovery_with_baseline())
+            .await
+            .unwrap();
+
+        assert_eq!(findings.assessed, vec![(difference, Status::Mismatch)]);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_recovery_fetch_fails_the_comparison() {
+        let snapshots = ScriptedSnapshots::new(Vec::new());
+
+        assert!(compare(&snapshots, &recovery_with_baseline())
+            .await
+            .is_err());
+    }
+
+    #[rstest]
+    #[case::same_state(&["pool"], true)]
+    #[case::changed_state(&["pool", "new"], false)]
+    #[tokio::test]
+    async fn test_a_recovery_that_changed_nothing_since_the_baseline_is_flagged(
+        #[case] held_components: &[&str],
+        #[case] expected: bool,
+    ) {
+        let snapshots = ScriptedSnapshots::new(vec![(75, Vec::new())]);
+        let comparison =
+            Comparison { held: held_at(75, held_components), ..recovery_with_baseline() };
+
+        let findings = compare(&snapshots, &comparison)
+            .await
+            .unwrap();
+
+        assert_eq!(findings.changed_nothing, expected);
+    }
+
+    #[tokio::test]
+    async fn test_a_recovery_without_baseline_is_never_flagged_unchanged() {
+        let snapshots = ScriptedSnapshots::new(vec![(75, Vec::new())]);
+        let comparison = Comparison { baseline: None, ..recovery_with_baseline() };
+
+        let findings = compare(&snapshots, &comparison)
+            .await
+            .unwrap();
+
+        assert!(!findings.changed_nothing);
     }
 }
