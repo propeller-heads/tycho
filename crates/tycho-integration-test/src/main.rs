@@ -1,3 +1,4 @@
+mod catch_up_check;
 mod fee_fetcher;
 mod metrics;
 mod oracle_overrides;
@@ -28,7 +29,7 @@ use rand::prelude::{IndexedRandom, SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use tycho_client::feed::SynchronizerState;
+use tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState};
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
@@ -49,7 +50,7 @@ use tycho_simulation::{
         },
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
-    utils::load_all_tokens,
+    utils::{default_blocklist, load_all_tokens},
 };
 use tycho_test::{
     execution::{
@@ -63,6 +64,7 @@ use tycho_test::{
 };
 
 use crate::{
+    catch_up_check::CatchUpCheckConfig,
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
     oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
     statistics::TestStatistics,
@@ -233,6 +235,13 @@ struct Cli {
     /// transaction. Leave off to keep the test failing when an executor was never activated.
     #[arg(long, default_value_t = false)]
     bypass_executor_timelock: bool,
+
+    /// Run the catch-up check: a separate stream of the same protocols whose subscriptions,
+    /// about every this many blocks, drop a few messages and end, so the client resubscribes
+    /// having missed blocks. The state it holds afterwards is compared with a snapshot at the same
+    /// block. At least 50, since every gap can cost a snapshot per protocol. Off by default.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(50..))]
+    force_catch_up_every_n_blocks: Option<u64>,
 }
 
 impl Debug for Cli {
@@ -245,6 +254,7 @@ impl Debug for Cli {
             .field("rpc_url", &self.rpc_url)
             .field("metrics_port", &self.metrics_port)
             .field("bypass_executor_timelock", &self.bypass_executor_timelock)
+            .field("force_catch_up_every_n_blocks", &self.force_catch_up_every_n_blocks)
             .finish()
     }
 }
@@ -470,6 +480,31 @@ async fn run(cli: Cli) -> miette::Result<()> {
     .map_err(|e| miette!("Failed to load tokens: {e:?}"))?;
     info!("Loaded {} tokens", all_tokens.len());
 
+    let mut catch_up_check_handle = match cli.force_catch_up_every_n_blocks {
+        Some(every_n_blocks) => {
+            info!(every_n_blocks, "Starting the catch-up check");
+            let config = CatchUpCheckConfig {
+                chain,
+                tycho_url: cli.tycho_url.clone(),
+                api_key: cli.tycho_api_key.clone(),
+                no_tls: cli.no_tls,
+                protocols: cli
+                    .protocols
+                    .clone()
+                    .unwrap_or_else(|| ProtocolStreamProcessor::default_protocols(chain)),
+                // The protocol stream's filter, blocklist included.
+                component_filter: ComponentFilter::with_tvl_range(
+                    tvl_threshold / cli.tvl_buffer_ratio,
+                    tvl_threshold,
+                )
+                .blocklist(default_blocklist()),
+                every_n_blocks,
+            };
+            Some(catch_up_check::spawn(config))
+        }
+        None => None,
+    };
+
     let initial_prices = load_token_prices(chain)
         .await
         .wrap_err("Failed to load token prices for input capping")?;
@@ -654,6 +689,20 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         warn!("Price level stream panicked: {:?}", e);
                     }
                 }
+            }
+
+            // Monitor the catch-up check, which only ends when it can't go on
+            result = async {
+                if let Some(handle) = catch_up_check_handle.as_mut() {
+                    handle.await
+                } else {
+                    std::future::pending().await
+                }
+            }, if catch_up_check_handle.is_some() => {
+                return Err(match result {
+                    Ok(reason) => reason.wrap_err("Catch-up check stopped, exiting application"),
+                    Err(e) => miette!("Catch-up check panicked, exiting application: {e:?}"),
+                });
             }
 
             // Staleness watchdog fires when no protocol update arrives within the threshold
@@ -2401,5 +2450,29 @@ mod tests {
         ])
         .expect("--test-every-n-blocks must stay accepted as an alias");
         assert_eq!(cli.test_every_n_updates, 10);
+    }
+
+    #[rstest]
+    #[case::below_the_minimum("49", None)]
+    #[case::at_the_minimum("50", Some(50))]
+    fn test_forced_catch_up_needs_at_least_50_blocks(
+        #[case] every_n_blocks: &str,
+        #[case] expected: Option<u64>,
+    ) {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--force-catch-up-every-n-blocks",
+            every_n_blocks,
+        ]);
+
+        assert_eq!(
+            cli.ok()
+                .and_then(|cli| cli.force_catch_up_every_n_blocks),
+            expected
+        );
     }
 }
