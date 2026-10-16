@@ -9906,6 +9906,7 @@ version = "0.476.0"
 dependencies = [
  "actix-web",
  "alloy",
+ "async-trait",
  "chrono",
  "clap",
  "dotenv",
@@ -9926,6 +9927,7 @@ dependencies = [
  "tycho-execution",
  "tycho-simulation",
  "tycho-test",
+ "uuid",
 ]
 
 [[package]]

@@ -52,6 +52,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--block-wait-time`        | `12`       | Time to wait (seconds) for block N+1 before executing debug_traceCall                                            |
 | `--always-test-components` | -          | Comma-separated list of component IDs to test every block                                                        |
 | `--max-blocks`             | `0`        | Maximum number of blocks to process before exiting (0 = run indefinitely). When set, prints a summary at the end |
+| `--force-catch-up-every-n-blocks` | -   | Run the [catch-up check](#catch-up-check), forcing a resubscription about every this many blocks. Off when not set |
 
 ## Running Locally
 
@@ -89,3 +90,56 @@ cargo run --package tycho-integration-test -- \
   --max-blocks 10 \
   --protocols uniswap_v2,uniswap_v3
 ```
+
+## Catch-up check
+
+`--force-catch-up-every-n-blocks N` checks `tycho-client`'s delta catch-up against the live server.
+It runs a second stream of the same protocols, with the same TVL filter, next to the tests. About
+every `N` blocks, each of its subscriptions drops its next 3 messages and ends, so the client
+resubscribes having missed those blocks. A server with the delta catch-up endpoint lets the client
+apply the missed blocks without a snapshot; otherwise the client falls back to a snapshot.
+
+When the client has recovered, the check compares the state it holds for each protocol with a
+snapshot of the same components at the same block: component attributes and balances, and the
+storage, native balance, code and token balances of their contracts. Every resubscription of the
+stream is checked, forced or not. TVL, tokens and DCI entry points are not compared.
+
+The stream is wired like `TychoStreamBuilder` builds it, with a `DeltasClient` wrapper that ends the
+subscriptions; the synchronizers and the catch-up itself are unchanged `tycho-client` code. It adds
+one subscription per protocol, and a snapshot per protocol after each resubscription, to the
+server's load.
+
+```bash
+cargo run --package tycho-integration-test -- \
+  --chain ethereum \
+  --protocols uniswap_v2,uniswap_v3 \
+  --disable-rfq \
+  --force-catch-up-every-n-blocks 300
+```
+
+### Reading the results
+
+| Metric | Labels | Counts |
+|--------|--------|--------|
+| `tycho_integration_catch_up_resyncs_total` | `protocol`, `outcome` | How the client recovered from each resubscription: `caught_up` (applied the missed blocks without a snapshot), `snapshot` (fell back to a snapshot), `resumed` (missed no block), `nothing_tracked` (tracks no component, so the two look the same), or `no_resubscription` (did not resubscribe within 5 minutes of a forced gap) |
+| `tycho_integration_catch_up_comparisons_total` | `protocol`, `resync`, `result` | Comparisons after a `caught_up` or `snapshot` recovery: `equal`, `known_gaps`, `mismatch`, or `error` (the snapshot could not be fetched) |
+| `tycho_integration_catch_up_differences_total` | `protocol`, `field`, `status` | Entries that differ from the snapshot, by field and status |
+
+- **The check proves nothing unless `outcome="caught_up"` grows.** If only `outcome="snapshot"`
+  grows, the client never catches up: the server or its gateway does not serve the catch-up endpoint,
+  or the server cannot serve the gap. `tycho-client` logs the reason at info or warn
+  (`Delta catch-up not possible` / `Delta catch-up failed`, target
+  `tycho_client::feed::synchronizer`), and the server counts `delta_catch_up_responses` by
+  extractor and outcome.
+- **`result="mismatch"` with `resync="caught_up"`** means the state after a catch-up differs from the
+  snapshot in a field reverts restore (`status="mismatch"`). The check logs it at error, with up to
+  10 of the differing entries.
+- **`status="known_gap"`** differences are in native balances, code, account token balances, and
+  contracts that only the DCI traces of tracked components reach. Reverts don't restore these yet,
+  so they are reported but are not mismatches; the result is then `known_gaps`.
+- Comparisons after a `snapshot` recovery are a control and should be `equal`.
+- A difference after a catch-up is not necessarily caused by it: the state also carries everything
+  the stream delivered before the gap.
+
+To see the check's own logs and the client's catch-up decisions, include
+`tycho_integration_test=info,tycho_client::feed::synchronizer=info` in `RUST_LOG`.

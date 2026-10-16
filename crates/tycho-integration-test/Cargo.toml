@@ -7,6 +7,7 @@ license-file.workspace = true
 [dependencies]
 actix-web = "4.11.0"
 alloy = { workspace = true, features = ["rpc-types-eth", "sol-types"] }
+async-trait = { workspace = true }
 clap = { version = "4.5.48", features = ["derive"] }
 dotenv = { workspace = true }
 futures = { workspace = true }
@@ -26,6 +27,7 @@ tycho-common = { workspace = true }
 tycho-execution = { workspace = true }
 tycho-simulation = { workspace = true, features = ["evm"] }
 tycho-test = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

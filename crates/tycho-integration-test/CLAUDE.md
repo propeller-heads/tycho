@@ -33,7 +33,7 @@ Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable
 each one must be enabled),
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
-`--test-every-n-updates 10`, `--bypass-executor-timelock`.
+`--test-every-n-updates 10`, `--bypass-executor-timelock`, `--force-catch-up-every-n-blocks 300`.
 
 `--bypass-executor-timelock` writes `executorsActivationTimestamp = 1` for every executor of the
 chain into the execution simulation's state overrides, so an executor that is unapproved or still
@@ -42,6 +42,10 @@ inside its activation timelock (`Dispatcher.DELAY_EXECUTOR_ACTIVATION`, 1 day) d
 router keeps its deployed bytecode, and only the read-only simulation call is affected. It cannot
 help an executor that has no bytecode deployed. Off by default so that a missing activation still
 shows up as a failure.
+
+`--force-catch-up-every-n-blocks N` (off by default) runs the catch-up check next to the tests:
+see `catch_up_check/` below. Not enabled in any deployment yet; it needs a server with the delta
+catch-up endpoint to prove anything.
 
 ## Module Structure
 
@@ -80,6 +84,24 @@ shows up as a failure.
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls
 - **`metrics.rs`**: Prometheus metrics (served on `--metrics-port`, default 9898)
+- **`catch_up_check/`**: The delta catch-up check (`--force-catch-up-every-n-blocks`). Runs its
+  own stream of the protocol stream's protocols and TVL filter: `ProtocolStateSynchronizer`s under
+  a `BlockSynchronizer`, wired like `TychoStreamBuilder::build` (`StreamTiming` copies its private
+  per-chain timing) but over a `GapInjector`
+  - `gap_injector.rs`: `GapInjector`, a `DeltasClient` wrapper that forwards each subscription
+    through a task. `GapTrigger::request_gap` makes every live subscription drop its next
+    `GAP_BLOCKS` (3) messages and end, so the synchronizer resubscribes having missed them. Reports
+    each `Resubscription` (forced or not) at its first message above the last block delivered
+  - `held_state.rs`: `ExtractorState`, the fold of one protocol's feed messages (components,
+    attributes, component balances, contract storage, native balance, code, token balances; empty
+    values and zero numbers count as absent), and `diff` against a snapshot. Differences in native
+    balance, code, account token balances and contracts reached only through DCI are
+    `Status::KnownGap` (reverts don't restore them yet); everything else is `Status::Mismatch`
+  - `mod.rs`: the loop. `Resync::classify` tells a catch-up from a snapshot fallback by whether
+    the protocol's first message after the resubscription re-sends held components. After a
+    catch-up or snapshot it compares the held state with `get_snapshots` at that block in a spawned
+    task. Metrics: `tycho_integration_catch_up_{resyncs,comparisons,differences}_total`. The task
+    only ends with an error, which stops the binary
 - **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed
   FeeCalculator, so the test backs the current fee out of the simulated amount instead of
   hard-coding it

@@ -100,6 +100,25 @@ pub fn initialize_metrics() {
         "Signed gas estimation error in absolute gas units: estimated - actual. \
          Positive = overestimate, negative = underestimate"
     );
+    describe_counter!(
+        "tycho_integration_catch_up_resyncs_total",
+        "Resubscriptions of the catch-up check's stream, by how the client recovered: resumed \
+         (missed no block), caught_up (applied the missed blocks without a snapshot), snapshot \
+         (fell back to a snapshot), nothing_tracked (tracks no component, so the two look the \
+         same) or no_resubscription (did not resubscribe within 5 minutes of a forced gap)"
+    );
+    describe_counter!(
+        "tycho_integration_catch_up_comparisons_total",
+        "Comparisons of the catch-up check's state after a catch-up or snapshot with a snapshot \
+         at the same block: equal, known_gaps (differs only where reverts don't restore state), \
+         mismatch, or error (the snapshot could not be fetched)"
+    );
+    describe_counter!(
+        "tycho_integration_catch_up_differences_total",
+        "Entries in which the catch-up check's state differs from a snapshot at the same block, \
+         by field and status: mismatch, or known_gap for native balances, code, account token \
+         balances and contracts reached only through DCI, which reverts don't restore"
+    );
 }
 
 /// Record the duration between block timestamp and component receipt.
@@ -337,6 +356,39 @@ pub fn record_validation_failure(protocol: &str) {
         "protocol" => protocol.to_string(),
     )
     .increment(1);
+}
+
+/// Record how a protocol of the catch-up check recovered after resubscribing, or that it did not
+/// resubscribe after a forced gap.
+pub fn record_catch_up_resync(protocol: &str, outcome: &str) {
+    counter!(
+        "tycho_integration_catch_up_resyncs_total",
+        "protocol" => protocol.to_string(),
+        "outcome" => outcome.to_string(),
+    )
+    .increment(1);
+}
+
+/// Record the result of comparing the catch-up check's state after a `resync` with a snapshot.
+pub fn record_catch_up_comparison(protocol: &str, resync: &str, result: &str) {
+    counter!(
+        "tycho_integration_catch_up_comparisons_total",
+        "protocol" => protocol.to_string(),
+        "resync" => resync.to_string(),
+        "result" => result.to_string(),
+    )
+    .increment(1);
+}
+
+/// Record `count` entries of `field` in which the catch-up check's state differs from a snapshot.
+pub fn record_catch_up_differences(protocol: &str, field: &str, status: &str, count: usize) {
+    counter!(
+        "tycho_integration_catch_up_differences_total",
+        "protocol" => protocol.to_string(),
+        "field" => field.to_string(),
+        "status" => status.to_string(),
+    )
+    .increment(count as u64);
 }
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
