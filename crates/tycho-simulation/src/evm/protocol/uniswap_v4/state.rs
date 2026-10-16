@@ -86,6 +86,9 @@ pub struct UniswapV4State {
     liquidity: u128,
     sqrt_price: U256,
     fees: UniswapV4Fees,
+    /// The LP fee a dynamic-fee pool stores in `slot0`. It applies when the hook returns no fee
+    /// override and is 0 until an `lp_fee` attribute sets it.
+    dynamic_lp_fee: u32,
     tick: PoolTick,
     /// The tick list, shared by this state, its clones and the states its swaps return, so a quote
     /// does not copy it. Change it only through `Arc::make_mut`, which copies the list while
@@ -229,6 +232,7 @@ impl UniswapV4State {
             liquidity,
             sqrt_price,
             fees,
+            dynamic_lp_fee: 0,
             tick: tick.into(),
             ticks: Arc::new(tick_list),
             tick_spacing,
@@ -236,6 +240,10 @@ impl UniswapV4State {
             pending_overrides: None,
             step_cache: SwapStepCache::default(),
         })
+    }
+
+    pub(super) fn set_dynamic_lp_fee(&mut self, lp_fee: u32) {
+        self.dynamic_lp_fee = lp_fee;
     }
 
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
@@ -293,6 +301,7 @@ impl UniswapV4State {
         }
 
         let exact_input = amount_specified < I256::ZERO;
+        let stored_lp_fee = is_dynamic(self.fees.lp_fee).then_some(self.dynamic_lp_fee);
 
         let mut state = SwapState {
             amount_remaining: amount_specified,
@@ -311,7 +320,7 @@ impl UniswapV4State {
         let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
             let fee_pips = self
                 .fees
-                .calculate_swap_fees_pips(zero_for_one, None);
+                .calculate_swap_fees_pips(zero_for_one, stored_lp_fee);
             StepCacheKey::new(
                 self.sqrt_price,
                 state.tick.value(),
@@ -369,7 +378,7 @@ impl UniswapV4State {
             };
             let fee_pips = self
                 .fees
-                .calculate_swap_fees_pips(zero_for_one, lp_fee_override);
+                .calculate_swap_fees_pips(zero_for_one, lp_fee_override.or(stored_lp_fee));
 
             let sqrt_price_start = state.sqrt_price;
             let SwapStepResult { sqrt_price, amount_in_with_fee, amount_out } =
@@ -1039,6 +1048,9 @@ impl ProtocolSim for UniswapV4State {
         if let Some(lp_fee) = delta.updated_attributes.get("fee") {
             self.fees.lp_fee = u32::from(lp_fee.clone());
         }
+        if let Some(lp_fee) = delta.updated_attributes.get("lp_fee") {
+            self.dynamic_lp_fee = u32::from(lp_fee.clone());
+        }
         if let Some(zero2one_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/zero2one")
@@ -1164,6 +1176,7 @@ impl ProtocolSim for UniswapV4State {
             self.liquidity == other_state.liquidity &&
                 self.sqrt_price == other_state.sqrt_price &&
                 self.fees == other_state.fees &&
+                self.dynamic_lp_fee == other_state.dynamic_lp_fee &&
                 self.tick == other_state.tick &&
                 self.ticks == other_state.ticks
         } else {

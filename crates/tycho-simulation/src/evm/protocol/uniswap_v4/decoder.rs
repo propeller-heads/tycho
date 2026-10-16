@@ -175,6 +175,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 InvalidSnapshotError::ValueError(err.to_string())
             })?;
 
+        if let Some(lp_fee) = snapshot.state.attributes.get("lp_fee") {
+            state.set_dynamic_lp_fee(u32::from(lp_fee.clone()));
+        }
+
         // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
         // about whether the pool has a hook: the zero address is what "no hook" looks like on the
         // wire, and the length check rejects a malformed value. A pool whose hook cannot take part
