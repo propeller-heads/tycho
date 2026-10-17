@@ -282,4 +282,6 @@ Frames are best effort, not complete snapshots: a venue or a pair can be absent 
 
 `with_known_pamms()` serves these venues: Bebop, FermiSwap, Kipseli, Metric, TaurusFi and Tempest. Titan does not stream every venue at all times, so the live set can be smaller.
 
+Each known venue reports one swap gas value for all its pairs, which Tycho calibrates from fills on the live venue. For most venues the gas barely varies by pair. Metric's does: it reports 280k, the p90 of its fills, while a USDC/USDT swap typically uses ~165k and a WBTC/USDC swap ~550k. Account for this if your router weighs gas against output on Metric's WBTC pairs.
+
 Components arrive as `fallback:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one: `tycho-execution` routes those swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback pool named in the swap's `user_data`. `without_fallback_router()` keeps every venue on the direct `pricelevelstream:{pamm}` path, where a stale quote reverts the route.
