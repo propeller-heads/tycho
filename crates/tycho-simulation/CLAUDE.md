@@ -27,7 +27,12 @@ for any protocol indexed by Tycho.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
-    Unichain, and Pons V2 is the native handler for Robinhood. The Uniswap v3 and v4 states and
+    Unichain, Pons V2 is the native handler for Robinhood, and PancakeSwap Infinity's
+    `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC. A registered handler is
+    instantiated whatever the hook address bits say, and decides which callbacks run through
+    `HookHandler::has_permission`, because Infinity keeps permissions in the pool key. Hooks whose
+    behavior depends on time get the execution block through `HookHandler::apply_block`, which
+    `UniswapV4State::apply_block` forwards. The Uniswap v3 and v4 states and
     the v3 forks (`ramses_v3/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`) cache the swap
     steps they already took (`utils/uniswap/swap_step_cache.rs`), shared by their clones: code
     that changes a state's price, tick, liquidity, fee or ticks must start an empty step cache,
