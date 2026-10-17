@@ -77,6 +77,9 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // the entries the deployment script deploys from. The compiler settings are the test
         // profile's (foundry.toml), not the deployment's, so the bytecode is not the deployed one.
         // Listed by fixture name.
+        // BaiBai's constructor reads quoteToken() from its entrypoint, deployed after the pinned
+        // Base block.
+        _executor("Baibai", "base", "baibai", 51_696_183);
         _executor("BalancerV2", "ethereum", "vm:balancer_v2");
         _executor("BalancerV3", "ethereum", "vm:balancer_v3");
         _executor("Curve", "ethereum", "vm:curve");
