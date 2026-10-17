@@ -63,14 +63,17 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
     address public immutable clPoolManager;
     address public immutable binPoolManager;
 
+    /// @dev A manager is zero on chains without it (Robinhood has no BinPoolManager); swaps
+    /// of that pool type then revert. At least one must be set.
     constructor(
         IPancakeswapInfinityVault vault_,
         address clPoolManager_,
         address binPoolManager_
     ) {
         if (
-            address(vault_) == address(0) || clPoolManager_ == address(0)
-                || binPoolManager_ == address(0)
+            address(vault_) == address(0)
+                || (clPoolManager_ == address(0)
+                    && binPoolManager_ == address(0))
         ) {
             revert PancakeswapInfinityExecutor__ZeroAddress();
         }
@@ -215,6 +218,9 @@ contract PancakeswapInfinityExecutor is IExecutor, ICallback {
 
         address manager =
             poolType == _POOL_TYPE_CL ? clPoolManager : binPoolManager;
+        if (manager == address(0)) {
+            revert PancakeswapInfinityExecutor__UnknownPoolType(poolType);
+        }
         // Order from the direction byte, never by re-comparing addresses: the encoder owns
         // direction (CANONICAL note above).
         (address currency0, address currency1) =

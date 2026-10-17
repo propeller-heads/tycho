@@ -325,6 +325,14 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
+    },
+    "pancakeswap_infinity_cl": {
+      "contract": "PancakeswapInfinityExecutor",
+      "args": [
+        "0x4F922d5B15e6691e0469663E4F5C4177f23c5FaF",
+        "0xeE04c68742e6Bf434bE8039580D2e89BBE55bc6f",
+        "0x0000000000000000000000000000000000000000"
+      ]
     }
   },
   "arc": {

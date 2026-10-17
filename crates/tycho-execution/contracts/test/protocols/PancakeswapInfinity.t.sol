@@ -14,6 +14,12 @@ address constant BASE_USDT = 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2;
 // The USDC/USDT pool has liquidity at this block.
 uint256 constant INFINITY_FORK_BLOCK = 51600000;
 
+// Robinhood has a Vault and CL pool manager but no BinPoolManager.
+address constant ROBINHOOD_WETH = 0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73;
+address constant ROBINHOOD_USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
+// The WETH/USDG CL pool (fee 90, tick spacing 1, no hooks) has liquidity at this block.
+uint256 constant ROBINHOOD_FORK_BLOCK = 91076200;
+
 // The 97 bytes `_decodeData` expects for the live USDC/USDT CL pool: fee 5, tick spacing 2 in
 // bits [16,40) of `parameters`, no hooks. Same field order as the Rust encoder.
 function usdcUsdtSwapData(address tokenIn, address tokenOut, bool zeroForOne)
@@ -32,11 +38,9 @@ function usdcUsdtSwapData(address tokenIn, address tokenOut, bool zeroForOne)
 }
 
 contract PancakeswapInfinityExecutorExposed is PancakeswapInfinityExecutor {
-    constructor()
+    constructor(address vault_, address clPoolManager_, address binPoolManager_)
         PancakeswapInfinityExecutor(
-            IPancakeswapInfinityVault(INFINITY_VAULT),
-            INFINITY_CL_POOL_MANAGER,
-            INFINITY_BIN_POOL_MANAGER
+            IPancakeswapInfinityVault(vault_), clPoolManager_, binPoolManager_
         )
     {}
 
@@ -79,7 +83,9 @@ contract PancakeswapInfinityExecutorTest is Constants, TestUtils {
     PancakeswapInfinityExecutorExposed executor;
 
     function setUp() public {
-        executor = new PancakeswapInfinityExecutorExposed();
+        executor = new PancakeswapInfinityExecutorExposed(
+            INFINITY_VAULT, INFINITY_CL_POOL_MANAGER, INFINITY_BIN_POOL_MANAGER
+        );
     }
 
     function testDecodeParams() public view {
@@ -268,7 +274,9 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
 
     function setUp() public {
         vm.createSelectFork(vm.rpcUrl("base"), INFINITY_FORK_BLOCK);
-        executor = new PancakeswapInfinityExecutorExposed();
+        executor = new PancakeswapInfinityExecutorExposed(
+            INFINITY_VAULT, INFINITY_CL_POOL_MANAGER, INFINITY_BIN_POOL_MANAGER
+        );
     }
 
     /// @dev Funds the executor with tokenIn, swaps all of it and checks it reached ALICE as
@@ -295,10 +303,73 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
         );
     }
 
+    function testConstructorRequiresAManager() public {
+        vm.expectRevert(PancakeswapInfinityExecutor__ZeroAddress.selector);
+        new PancakeswapInfinityExecutorExposed(
+            INFINITY_VAULT, address(0), address(0)
+        );
+    }
+
     function testSwapMatchesEncoderCalldata() public {
         bytes memory data =
             loadCallDataFromFile("test_encode_pancakeswap_infinity_cl_swap");
         assertEq(data.length, 97);
         _assertSwap(BASE_USDC, BASE_USDT, data);
+    }
+}
+
+/// Runs the executor as `executor_deployments.json` deploys it on Robinhood.
+contract PancakeswapInfinityRobinhoodForkTest is Constants, TestUtils {
+    PancakeswapInfinityExecutorExposed executor;
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("robinhood"), ROBINHOOD_FORK_BLOCK);
+        address[] memory args = vm.parseJsonAddressArray(
+            vm.readFile("../config/executor_deployments.json"),
+            ".robinhood.pancakeswap_infinity_cl.args"
+        );
+        executor =
+            new PancakeswapInfinityExecutorExposed(args[0], args[1], args[2]);
+    }
+
+    function testSwapWethToUsdg() public {
+        uint256 amountIn = 0.01 ether;
+        deal(ROBINHOOD_WETH, address(executor), amountIn);
+        executor.swap(
+            amountIn,
+            abi.encodePacked(
+                ROBINHOOD_WETH,
+                ROBINHOOD_USDG,
+                true, // zeroForOne
+                uint8(0), // CL
+                uint24(90), // fee
+                bytes32(uint256(1) << 16), // tick spacing 1
+                address(0) // no hooks
+            ),
+            ALICE
+        );
+        assertGt(IERC20(ROBINHOOD_USDG).balanceOf(ALICE), 0);
+        assertEq(IERC20(ROBINHOOD_WETH).balanceOf(address(executor)), 0);
+    }
+
+    function testBinSwapReverts() public {
+        uint256 amountIn = 0.01 ether;
+        deal(ROBINHOOD_WETH, address(executor), amountIn);
+        // Reverts before any pool is looked up, so fee and parameters are arbitrary.
+        bytes memory binData = abi.encodePacked(
+            ROBINHOOD_WETH,
+            ROBINHOOD_USDG,
+            true, // zeroForOne
+            uint8(1), // Bin
+            uint24(90), // fee
+            bytes32(uint256(10) << 16), // bin step 10
+            address(0) // no hooks
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PancakeswapInfinityExecutor__UnknownPoolType.selector, uint8(1)
+            )
+        );
+        executor.swap(amountIn, binData, ALICE);
     }
 }
