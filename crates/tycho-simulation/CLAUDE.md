@@ -52,8 +52,10 @@ for any protocol indexed by Tycho.
   states. `rfq::models::QuoteRule` says how often one route may quote
   the venue, carried as the `quote_rule` static attribute of an all-pairs component: Hashflow
   and Liquorice builders set it (`quote_rule`, every maker once by default); Bebop and Native
-  name no maker and always quote once. Metric stays one component per pool: its executor takes
-  the pool from the component id
+  name no maker and always quote once. Under every rule, a swap on a pair and direction the
+  route already filled continues that fill: the caller merges those swaps into one and asks for
+  one firm quote on the state before the first of them. Metric stays one component per pool: its
+  executor takes the pool from the component id
 - **`snapshot_feed/`**: the latest-value feed layer, both ends. `SnapshotFeed` is the contract a
   feed implements: `run(self, publisher)` drives it, and the `Publisher` it is handed — which
   nothing outside the crate can construct — owns the `watch` channel, so reading a feed is the only

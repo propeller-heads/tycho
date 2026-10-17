@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_client::feed::{BlockHeader, HeaderLike};
-use tycho_common::Bytes;
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 #[derive(Clone, Default, Debug)]
 pub struct TimestampHeader {
@@ -69,6 +71,27 @@ pub fn fill_levels(levels: &[PriceLevel], amount_in: f64) -> (f64, f64) {
     (amount_out, remaining_amount_in)
 }
 
+/// `amount` in whole units of a token with `decimals` decimals.
+pub(crate) fn to_whole_units(amount: &BigUint, decimals: u32) -> Result<f64, SimulationError> {
+    let amount = amount
+        .to_f64()
+        .ok_or_else(|| SimulationError::RecoverableError("Can't convert amount to f64".into()))?;
+    Ok(amount / 10f64.powi(decimals as i32))
+}
+
+/// The price of the next input unit after `filled` units went into `levels`. `None` when `filled`
+/// reaches the depth of `levels`.
+pub fn marginal_price(levels: &[PriceLevel], filled: f64) -> Option<f64> {
+    let mut depth = 0.0;
+    for level in levels {
+        depth += level.quantity;
+        if filled < depth {
+            return Some(level.price);
+        }
+    }
+    None
+}
+
 /// The components an RFQ client streams, and so the state type its stream decodes to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,14 +102,19 @@ pub enum ComponentLayout {
     #[default]
     PerPair,
     /// One component for all token pairs, decoded by the venue's all-pairs state, such as
-    /// `HashflowAllPairsState`. A swap marks what it used
+    /// `HashflowAllPairsState`. A swap records its fill
     /// in the state it returns, as the venue's [`QuoteRule`] says.
     AllPairs,
 }
 
 /// How often one route may take quotes from an RFQ venue.
 ///
-/// A swap records what it used in the state it returns, so the next swap on that state sees it.
+/// A swap returns a state that records its fill. Under every rule, a later swap on a pair and
+/// direction the route already filled continues that fill: it pays the output of the merged input
+/// less the output so far, at zero gas. The rule counts only the makers used on other pairs.
+///
+/// So the caller of an all-pairs `get_amount_out` merges all swaps on one pair and direction into
+/// one swap, and requests one firm quote on the state before the first of them.
 /// The rule travels with the venue's component as the `quote_rule` static attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,10 +155,10 @@ impl QuoteRule {
     }
 
     /// Whether `market_maker` may still quote after the makers in `used` did.
-    pub fn allows(self, used: &HashSet<String>, market_maker: &str) -> bool {
+    pub fn allows<'a>(self, mut used: impl Iterator<Item = &'a str>, market_maker: &str) -> bool {
         match self {
-            QuoteRule::OncePerMaker => !used.contains(market_maker),
-            QuoteRule::OncePerVenue => used.is_empty(),
+            QuoteRule::OncePerMaker => !used.any(|used| used == market_maker),
+            QuoteRule::OncePerVenue => used.next().is_none(),
         }
     }
 }
