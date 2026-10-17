@@ -38,6 +38,7 @@ members = [
     "polygon-ramses-v3",
     "ethereum-etherfi",
     "base-pancakeswap-infinity-cl",
+    "base-pancakeswap-infinity-bin",
 ]
 resolver = "2"
 

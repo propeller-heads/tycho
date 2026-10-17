@@ -1,0 +1,56 @@
+substreams_yaml_path: ./bsc-pancakeswap-infinity-bin.yaml
+protocol_system: "pancakeswap_infinity_bin"
+protocol_type_names:
+  - "pancakeswap_infinity_bin_pool"
+module_name: "map_protocol_changes"
+# Singleton design: every pool's funds sit in the Vault, and component ids are bytes32 pool ids
+# the balance check cannot resolve to an address.
+skip_balance_check: true
+# Native simulation reads no contract storage, so no account has to be snapshotted. This also keeps
+# the suite off debug_storageRangeAt, which not every archive RPC serves.
+initialized_accounts:
+tests:
+  # Two hookless static-fee pools on real tokens, created 168 blocks apart and both minted into in
+  # their creation transaction, so bin reserves are non-zero from the first block and simulation
+  # can quote immediately.
+  #
+  # CAKE/USDT swaps twice in 48194739, the block after it is created, visiting 15 and then 12 bins
+  # up to the top of the creation mint, then takes six more mints over overlapping ranges, each
+  # followed by swaps that walk up through bins already holding reserves.
+  #
+  # BNB/CAKE takes a second mint over its existing bins at 48194903, swaps within bin 8389189 at
+  # 48198297, then walks up to 8389199 and back down to 8389189, so the tree is walked in both
+  # directions over the same bins.
+  #
+  # The window ends on the two Burns. At 48229972 an LP burns all 59 bins it minted 13 blocks
+  # earlier: the edge bins only it held drop to MINIMUM_SHARE and leave the tree with dust still in
+  # them, so their attributes must be deleted. At 48231821 another mint puts dust bin 8389215 back
+  # into the tree, and the Burn at 48231835 takes it out again. No Donate or ProtocolFeeUpdated hits
+  # either pool in this range, and no burn empties the active bin.
+  - name: test_bnb_cake_and_cake_usdt_pools
+    start_block: 48194570
+    stop_block: 48231900
+    expected_components:
+      - id: "0xe5b2c5fa2851575d3d8963b41cd2b798f3647ef3d24b748bbcc2c216045c3139"
+        tokens:
+          - "0x0000000000000000000000000000000000000000" # BNB
+          - "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82" # CAKE
+        static_attributes:
+          key_lp_fee: "0x1a42"
+          bin_step: "0x0064"
+        creation_tx: "0xb55183f15af32801d97701429e83062cbfc9f7c6d2cdb0a6f4639a870b277f33"
+        skip_simulation: false
+        # Execution should work on paper: executor_deployments.json gives the same Vault and pool
+        # managers on BNB as on Base, and all of them, plus Permit2, have code at the start block.
+        # It has not been run on BNB yet, since execution validation needs debug_traceCall there.
+        skip_execution: true
+      - id: "0xd421a3cddb87ef1209ad84ab77fafdd53c0d7d7f5c6456bd7fef86beac302f73"
+        tokens:
+          - "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82" # CAKE
+          - "0x55d398326f99059ff775485246999027b3197955" # USDT
+        static_attributes:
+          key_lp_fee: "0x014f"
+          bin_step: "0x000a"
+        creation_tx: "0xbb09fcf4425eede80e3cb61f439870848f31db0c2514437702f6408ea324d3fa"
+        skip_simulation: false
+        skip_execution: true

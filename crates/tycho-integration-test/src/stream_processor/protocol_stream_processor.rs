@@ -31,6 +31,7 @@ use tycho_simulation::{
             fluid::FluidV1,
             lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
+            pancakeswap_infinity_bin::state::PancakeswapInfinityBinState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
             ring_swap_v2::state::RingSwapV2State,
@@ -244,6 +245,7 @@ impl ProtocolStreamProcessor {
                 "aerodrome_v1".to_string(),
                 "lunarbase".to_string(),
                 "pancakeswap_infinity_cl".to_string(),
+                "pancakeswap_infinity_bin".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -253,6 +255,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_v3".to_string(),
                 "ring_swap_v2".to_string(),
                 "pancakeswap_infinity_cl".to_string(),
+                "pancakeswap_infinity_bin".to_string(),
             ],
             Chain::Unichain => {
                 vec![
@@ -353,6 +356,13 @@ impl ProtocolStreamProcessor {
             "pancakeswap_infinity_cl" => {
                 stream = stream.exchange::<UniswapV4State>(
                     "pancakeswap_infinity_cl",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "pancakeswap_infinity_bin" => {
+                stream = stream.exchange::<PancakeswapInfinityBinState>(
+                    "pancakeswap_infinity_bin",
                     tvl_filter.clone(),
                     None,
                 );
