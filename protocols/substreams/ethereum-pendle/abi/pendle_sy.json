@@ -1,0 +1,102 @@
+[
+  {
+    "type": "function",
+    "name": "assetInfo",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      { "name": "assetType", "type": "uint8" },
+      { "name": "assetAddress", "type": "address" },
+      { "name": "assetDecimals", "type": "uint8" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "decimals",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint8" }]
+  },
+  {
+    "type": "function",
+    "name": "exchangeRate",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "res", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "getTokensIn",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "res", "type": "address[]" }]
+  },
+  {
+    "type": "function",
+    "name": "getTokensOut",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "res", "type": "address[]" }]
+  },
+  {
+    "type": "function",
+    "name": "previewDeposit",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "tokenIn", "type": "address" },
+      { "name": "amountTokenToDeposit", "type": "uint256" }
+    ],
+    "outputs": [{ "name": "amountSharesOut", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "previewRedeem",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "tokenOut", "type": "address" },
+      { "name": "amountSharesToRedeem", "type": "uint256" }
+    ],
+    "outputs": [{ "name": "amountTokenOut", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "paused",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "bool" }]
+  },
+  {
+    "type": "function",
+    "name": "yieldToken",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "getAbsoluteSupplyCap",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "getAbsoluteTotalSupply",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "supplyCap",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "event",
+    "name": "SupplyCapUpdated",
+    "anonymous": false,
+    "inputs": [{ "name": "newSupplyCap", "type": "uint256", "indexed": false }]
+  }
+]
