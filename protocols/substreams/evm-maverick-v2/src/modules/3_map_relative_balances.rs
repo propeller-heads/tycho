@@ -25,7 +25,7 @@ pub fn map_relative_balances(
             .filter(|call| !call.state_reverted)
             .flat_map(|call| &call.logs)
         {
-            if let Some(pool) = pools_store.get_last(format!("Pool:{}", &log.address.to_hex())) {
+            if let Some(pool) = pools_store.get_last(format!("Pool:{}", log.address.to_hex())) {
                 tx_deltas.extend(get_log_changed_balances(&tx, log, &pool));
             } else {
                 continue;

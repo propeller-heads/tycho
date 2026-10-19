@@ -28,7 +28,8 @@ pub fn map_cowpool_creations(params: String, block: Block) -> Result<CowPoolCrea
             let address = &log
                 .topics()
                 .get(1)
-                .map(|topic| topic.as_slice()[12..].to_vec())?; // we get the last 20 bytes which is BCowPool address
+                .map(|topic| topic.as_slice()[12..].to_vec())?; // we get the last 20 bytes which is
+                                                                // BCowPool address
             let tx_hash = log.receipt.transaction.hash.clone();
             Some(CowPoolCreation {
                 address: address.clone(),

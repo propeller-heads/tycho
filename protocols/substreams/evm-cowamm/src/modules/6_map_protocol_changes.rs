@@ -110,17 +110,18 @@ fn map_protocol_changes(
     //Remember that the lp_token_address is the same as the pool address (which is the
     // component_id)
     //we add the bind balance entity changes in the same txn as the lp token supply changes
-    let store_delta_vec = balance_store
-        .deltas
-        .into_iter()
-        .filter(|store_delta| {
-            let component_id = key::segment_at(&store_delta.key, 0).trim_start_matches("0x"); //key is component_id/pool_address + token
-            let token_address = key::segment_at(&store_delta.key, 1);
-            let formatted_token_address = token_address.to_string();
+    let store_delta_vec =
+        balance_store
+            .deltas
+            .into_iter()
+            .filter(|store_delta| {
+                let component_id = key::segment_at(&store_delta.key, 0).trim_start_matches("0x"); //key is component_id/pool_address + token
+                let token_address = key::segment_at(&store_delta.key, 1);
+                let formatted_token_address = token_address.to_string();
 
-            component_id != formatted_token_address
-        })
-        .collect::<Vec<StoreDelta>>();
+                component_id != formatted_token_address
+            })
+            .collect::<Vec<StoreDelta>>();
 
     let new_balance_store = StoreDeltas { deltas: store_delta_vec };
 

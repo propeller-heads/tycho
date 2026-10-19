@@ -67,7 +67,7 @@ pub fn decode_knockout_call(
                 .ok_or_else(|| {
                     anyhow!(
                         "Failed to convert base token to address for knockout call: {:?}",
-                        &mint_burn_inputs[1]
+                        mint_burn_inputs[1]
                     )
                 })?
                 .to_fixed_bytes()
@@ -78,7 +78,7 @@ pub fn decode_knockout_call(
                 .ok_or_else(|| {
                     anyhow!(
                         "Failed to convert quote token to address for knockout call: {:?}",
-                        &mint_burn_inputs[2]
+                        mint_burn_inputs[2]
                     )
                 })?
                 .to_fixed_bytes()
