@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     fmt,
     sync::Arc,
 };
 
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::{CheckedSub, FromPrimitive};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use tycho_client::feed::synchronizer::ComponentWithState;
@@ -20,8 +20,8 @@ use tycho_common::{
 
 use crate::rfq::{
     errors::RFQError,
-    models::{fill_levels, PriceLevel, QuoteRule},
-    protocols::component,
+    models::{fill_levels, marginal_price, to_whole_units, PriceLevel, QuoteRule},
+    protocols::{component, fill::PairFill},
 };
 
 /// One market maker's levels on one directed pair: the levels take `base_token` in and pay
@@ -62,27 +62,42 @@ pub struct MakerLevelsWithTvl<'a, L> {
 
 /// How a venue's makers price: the smallest amount a maker accepts, and the price a maker's
 /// levels quote as their spot price.
+///
+/// On a pair a route already filled, the spot price of both is the marginal price of a maker's
+/// levels at the filled amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MakerPricing {
-    /// A maker declines an amount below its first level's quantity. A maker's spot price is its
-    /// first level's price.
+    /// A maker declines an amount below its first level's quantity. Before a fill, a maker's spot
+    /// price is its first level's price.
     Hashflow,
-    /// A maker fills any amount up to its depth, as in the per-pair Liquorice state. A maker's
-    /// spot price is its volume-weighted average price, as in the per-pair Liquorice state.
+    /// A maker fills any amount up to its depth, as in the per-pair Liquorice state. Before a
+    /// fill, a maker's spot price is its volume-weighted average price, as in the per-pair
+    /// Liquorice state.
     Liquorice,
 }
 
-/// A venue's market makers' price levels on one chain, and the makers a route has taken quotes
-/// from.
+/// The input amount a route filled from one market maker on one directed pair.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct MakerFill {
+    market_maker: String,
+    fill: PairFill,
+    /// What the market maker paid for `fill.amount_in` in total, in atomic units.
+    amount_out: BigUint,
+}
+
+/// A venue's market makers' price levels on one chain, and what a route has filled from them.
 ///
-/// The price levels and tokens are shared between the states a route threads, so a swap copies only
-/// the used set.
+/// A swap on a filled pair continues that fill, whatever the quote rule: it picks the best allowed
+/// maker for the merged amount and pays the merged output less the output so far. The quote rule
+/// counts only the makers used on other pairs. A swap copies only `fills`: the rest is shared.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AllMakerPriceLevels {
     /// Sorted by [`MakerPriceLevels::sort_key`].
     price_levels: Arc<Vec<MakerPriceLevels>>,
     tokens: Arc<HashMap<Bytes, Token>>,
-    used_market_makers: HashSet<String>,
+    /// One per pair the route filled, sorted by token in, then token out, so that `eq` does not
+    /// depend on the order of the swaps.
+    fills: Vec<MakerFill>,
     pricing: MakerPricing,
     rule: QuoteRule,
 }
@@ -92,7 +107,7 @@ impl fmt::Debug for AllMakerPriceLevels {
         f.debug_struct("AllMakerPriceLevels")
             .field("price_levels", &self.price_levels.len())
             .field("tokens", &self.tokens.len())
-            .field("used_market_makers", &self.used_market_makers)
+            .field("fills", &self.fills)
             .field("pricing", &self.pricing)
             .field("rule", &self.rule)
             .finish()
@@ -102,7 +117,7 @@ impl fmt::Debug for AllMakerPriceLevels {
 impl PartialEq for AllMakerPriceLevels {
     fn eq(&self, other: &Self) -> bool {
         self.price_levels == other.price_levels &&
-            self.used_market_makers == other.used_market_makers &&
+            self.fills == other.fills &&
             self.pricing == other.pricing &&
             self.rule == other.rule
     }
@@ -111,12 +126,18 @@ impl PartialEq for AllMakerPriceLevels {
 /// What one market maker pays for an amount.
 pub struct Fill<'a> {
     pub maker_levels: &'a MakerPriceLevels,
-    /// In whole units.
+    /// The input of this swap, in whole units.
     pub amount_in: f64,
-    /// In atomic units.
+    /// What this swap pays, in atomic units.
     pub amount_out: BigUint,
-    /// The input the levels could not fill, in whole units.
+    /// The input of the merged swap that the levels could not fill, in whole units.
     pub remaining_amount_in: f64,
+    /// Whether this fill continues an earlier fill of the pair: it costs no gas.
+    pub continued: bool,
+    /// The input of this swap and the earlier fill of the pair.
+    merged_fill: PairFill,
+    /// What the maker pays for `merged_fill`, in atomic units.
+    merged_amount_out: BigUint,
 }
 
 impl Fill<'_> {
@@ -126,6 +147,7 @@ impl Fill<'_> {
         gas: u64,
         new_state: Box<dyn ProtocolSim>,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        let gas = if self.continued { 0 } else { gas };
         let res =
             GetAmountOutResult { amount: self.amount_out, gas: BigUint::from(gas), new_state };
         if self.remaining_amount_in > 0.0 {
@@ -133,7 +155,7 @@ impl Fill<'_> {
                 format!(
                     "Pool has not enough liquidity to support complete swap. Input amount: {}, consumed amount: {}",
                     self.amount_in,
-                    self.amount_in - self.remaining_amount_in
+                    (self.amount_in - self.remaining_amount_in).max(0.0)
                 ),
                 Some(res),
             ));
@@ -142,8 +164,8 @@ impl Fill<'_> {
     }
 
     fn beats(&self, other: &Fill<'_>) -> bool {
-        (self.remaining_amount_in == 0.0, &self.amount_out) >
-            (other.remaining_amount_in == 0.0, &other.amount_out)
+        (self.remaining_amount_in == 0.0, &self.merged_amount_out) >
+            (other.remaining_amount_in == 0.0, &other.merged_amount_out)
     }
 }
 
@@ -172,7 +194,7 @@ impl AllMakerPriceLevels {
         Self {
             price_levels: Arc::new(price_levels),
             tokens: Arc::new(tokens),
-            used_market_makers: HashSet::new(),
+            fills: Vec::new(),
             pricing,
             rule,
         }
@@ -237,9 +259,14 @@ impl AllMakerPriceLevels {
             if maker_levels.levels.is_empty() {
                 continue;
             }
+            let makers_on_other_pairs = self
+                .fills
+                .iter()
+                .filter(|fill| !fill.fill.is_pair(token_in, token_out))
+                .map(|fill| fill.market_maker.as_str());
             if self
                 .rule
-                .allows(&self.used_market_makers, &maker_levels.market_maker)
+                .allows(makers_on_other_pairs, &maker_levels.market_maker)
             {
                 price_levels.push(maker_levels);
             } else {
@@ -257,21 +284,48 @@ impl AllMakerPriceLevels {
         Ok(price_levels)
     }
 
+    /// The fill a route already made on the directed pair, if any.
+    fn pair_fill(&self, token_in: &Bytes, token_out: &Bytes) -> Option<&MakerFill> {
+        self.fills
+            .iter()
+            .find(|fill| fill.fill.is_pair(token_in, token_out))
+    }
+
+    /// The input a route already filled on the directed pair, in whole units.
+    fn filled_whole_units(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<Option<f64>, SimulationError> {
+        let Some(pair_fill) = self.pair_fill(token_in, token_out) else {
+            return Ok(None);
+        };
+        to_whole_units(&pair_fill.fill.amount_in, self.token(token_in)?.decimals).map(Some)
+    }
+
     /// The best spot price any quotable maker offers, read as the pricing reads a maker's price.
+    /// After a fill on the pair, it is the marginal price at the filled amount.
     pub fn spot_price(&self, base: &Bytes, quote: &Bytes) -> Result<f64, SimulationError> {
+        let filled = self.filled_whole_units(base, quote)?;
         let mut best = 0.0_f64;
         for maker_levels in self.quotable_price_levels(base, quote)? {
-            let price = match self.pricing {
-                MakerPricing::Hashflow => Some(maker_levels.levels[0].price),
-                MakerPricing::Liquorice => maker_levels.average_price(),
+            let price = match (filled, self.pricing) {
+                (Some(filled), _) => marginal_price(&maker_levels.levels, filled),
+                (None, MakerPricing::Hashflow) => Some(maker_levels.levels[0].price),
+                (None, MakerPricing::Liquorice) => maker_levels.average_price(),
             };
             best = best.max(price.unwrap_or_default());
+        }
+        if filled.is_some() && best == 0.0 {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
         Ok(best)
     }
 
     /// The fill from the market maker that pays most for `amount_in`. A maker that fills the
     /// whole amount beats one that fills part of it, whatever the two pay.
+    ///
+    /// On a filled pair, it prices the merged amount, and the minimum applies to that amount.
     pub fn best_fill(
         &self,
         amount_in: &BigUint,
@@ -280,23 +334,40 @@ impl AllMakerPriceLevels {
     ) -> Result<Fill<'_>, SimulationError> {
         let token_in = self.token(token_in)?;
         let token_out = self.token(token_out)?;
-        let amount_in = to_whole_units(amount_in, token_in.decimals)?;
+        let pair_fill = self.pair_fill(&token_in.address, &token_out.address);
+        let merged_fill = PairFill::after(
+            pair_fill.map(|pair_fill| &pair_fill.fill.amount_in),
+            &token_in.address,
+            &token_out.address,
+            amount_in,
+        );
+        let filled_out = pair_fill
+            .map(|pair_fill| pair_fill.amount_out.clone())
+            .unwrap_or_default();
+        let merged_amount_in = to_whole_units(&merged_fill.amount_in, token_in.decimals)?;
         let first_level_is_minimum = self.pricing == MakerPricing::Hashflow;
 
         let mut best: Option<Fill<'_>> = None;
         let mut smallest_minimum = f64::MAX;
         for maker_levels in self.quotable_price_levels(&token_in.address, &token_out.address)? {
             let minimum = maker_levels.levels[0].quantity;
-            if first_level_is_minimum && amount_in < minimum {
+            if first_level_is_minimum && merged_amount_in < minimum {
                 smallest_minimum = smallest_minimum.min(minimum);
                 continue;
             }
-            let (amount_out, remaining_amount_in) = fill_levels(&maker_levels.levels, amount_in);
+            let (merged_out, remaining_amount_in) =
+                fill_levels(&maker_levels.levels, merged_amount_in);
+            let merged_amount_out = to_atomic_units(merged_out, token_out.decimals)?;
             let fill = Fill {
                 maker_levels,
-                amount_in,
-                amount_out: to_atomic_units(amount_out, token_out.decimals)?,
+                amount_in: to_whole_units(amount_in, token_in.decimals)?,
+                amount_out: merged_amount_out
+                    .checked_sub(&filled_out)
+                    .unwrap_or_default(),
                 remaining_amount_in,
+                continued: pair_fill.is_some(),
+                merged_fill: merged_fill.clone(),
+                merged_amount_out,
             };
             if best
                 .as_ref()
@@ -307,13 +378,14 @@ impl AllMakerPriceLevels {
         }
         best.ok_or_else(|| {
             SimulationError::RecoverableError(format!(
-                "Amount below minimum. Input amount: {amount_in}, min amount: {smallest_minimum}"
+                "Amount below minimum. Input amount: {merged_amount_in}, min amount: \
+                 {smallest_minimum}"
             ))
         })
     }
 
     /// The limits of the quotable market maker that pays most in total: a swap fills from one
-    /// maker.
+    /// maker. After a fill on the pair, the limits less what the fill took.
     pub fn get_limits(
         &self,
         sell_token: &Bytes,
@@ -321,6 +393,7 @@ impl AllMakerPriceLevels {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let sell_decimals = self.token(sell_token)?.decimals;
         let buy_decimals = self.token(buy_token)?.decimals;
+        let filled = self.filled_whole_units(sell_token, buy_token)?;
         let mut best = (0.0, 0.0);
         for maker_levels in self.quotable_price_levels(sell_token, buy_token)? {
             let mut sell_total = 0.0;
@@ -329,6 +402,11 @@ impl AllMakerPriceLevels {
                 sell_total += level.quantity;
                 buy_total += level.quantity * level.price;
             }
+            if let Some(filled) = filled {
+                let (filled_out, _) = fill_levels(&maker_levels.levels, filled);
+                sell_total = (sell_total - filled).max(0.0);
+                buy_total = (buy_total - filled_out).max(0.0);
+            }
             if buy_total > best.1 {
                 best = (sell_total, buy_total);
             }
@@ -336,12 +414,29 @@ impl AllMakerPriceLevels {
         Ok((to_atomic_units(best.0, sell_decimals)?, to_atomic_units(best.1, buy_decimals)?))
     }
 
-    /// These price levels after a swap took `market_maker`'s quote.
-    pub fn with_used(&self, market_maker: &str) -> Self {
+    /// A copy that records `fill`. On a filled pair, it replaces the earlier fill with the merged
+    /// one, which may name another maker.
+    pub fn with_fill(&self, fill: &Fill<'_>) -> Self {
         let mut next = self.clone();
-        next.used_market_makers
-            .insert(market_maker.to_string());
+        next.insert_fill(MakerFill {
+            market_maker: fill.maker_levels.market_maker.clone(),
+            fill: fill.merged_fill.clone(),
+            amount_out: fill.merged_amount_out.clone(),
+        });
         next
+    }
+
+    /// Records `fill` in place of the fill of its pair.
+    fn insert_fill(&mut self, fill: MakerFill) {
+        self.fills.retain(|recorded| {
+            !recorded
+                .fill
+                .is_pair(&fill.fill.token_in, &fill.fill.token_out)
+        });
+        self.fills.push(fill);
+        self.fills.sort_by(|a, b| {
+            (&a.fill.token_in, &a.fill.token_out).cmp(&(&b.fill.token_in, &b.fill.token_out))
+        });
     }
 }
 
@@ -378,13 +473,6 @@ pub fn all_pairs_component(
         rule,
     )?;
     Ok(Some(component))
-}
-
-fn to_whole_units(amount: &BigUint, decimals: u32) -> Result<f64, SimulationError> {
-    let amount = amount
-        .to_f64()
-        .ok_or_else(|| SimulationError::RecoverableError("Can't convert amount to f64".into()))?;
-    Ok(amount / 10f64.powi(decimals as i32))
 }
 
 fn to_atomic_units(amount: f64, decimals: u32) -> Result<BigUint, SimulationError> {
@@ -436,6 +524,20 @@ mod tests {
         amount_in: BigUint,
     ) -> Result<Fill<'_>, SimulationError> {
         price_levels.best_fill(&amount_in, &weth().address, &usdc().address)
+    }
+
+    impl AllMakerPriceLevels {
+        /// These price levels after a swap on an unrelated pair took `market_maker`'s quote.
+        fn with_used(&self, market_maker: &str) -> Self {
+            let mut next = self.clone();
+            let pair = Bytes::from(market_maker.as_bytes());
+            next.insert_fill(MakerFill {
+                market_maker: market_maker.to_string(),
+                fill: PairFill::after(None, &pair, &pair, &BigUint::default()),
+                amount_out: BigUint::default(),
+            });
+            next
+        }
     }
 
     #[test]
@@ -554,6 +656,47 @@ mod tests {
             assert!(
                 matches!(result, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity")
             );
+        }
+    }
+
+    mod continued_fill {
+        use super::*;
+
+        #[test]
+        fn picks_the_maker_one_swap_of_the_merged_amount_picks() {
+            // 0.5 WETH yields 1505 USDC at test_mm_2 and 1500 at test_mm. 2 WETH yield 5990 at
+            // test_mm_2 and 6000 at test_mm.
+            let levels = per_maker();
+            let first = weth_usdc_fill(&levels, weth_amount(0.5)).unwrap();
+            let after_first = levels.with_fill(&first);
+
+            let second = weth_usdc_fill(&after_first, weth_amount(1.5)).unwrap();
+            let whole = weth_usdc_fill(&levels, weth_amount(2.0)).unwrap();
+
+            assert_eq!(first.maker_levels.market_maker, "test_mm_2");
+            assert_eq!(second.maker_levels.market_maker, "test_mm");
+            assert_eq!(whole.maker_levels.market_maker, "test_mm");
+            assert_eq!(second.amount_out, usdc_amount(4495.0));
+            assert_eq!(first.amount_out + second.amount_out, whole.amount_out);
+        }
+
+        #[test]
+        fn chunk_past_every_makers_depth_is_partial() {
+            // test_mm holds 7 WETH for 20995 USDC and test_mm_2 holds 2. The first swap took 1505.
+            let levels = per_maker();
+            let after_first = levels.with_fill(&weth_usdc_fill(&levels, weth_amount(0.5)).unwrap());
+            let fill = weth_usdc_fill(&after_first, weth_amount(7.5)).unwrap();
+            assert_eq!(fill.maker_levels.market_maker, "test_mm");
+            assert_eq!(fill.remaining_amount_in, 1.0);
+            assert_eq!(fill.amount_out, usdc_amount(19490.0));
+        }
+
+        #[test]
+        fn minimum_applies_to_the_merged_amount() {
+            let levels = price_levels(MakerPricing::Hashflow, QuoteRule::OncePerMaker);
+            let after_first = levels.with_fill(&weth_usdc_fill(&levels, weth_amount(0.5)).unwrap());
+            let fill = weth_usdc_fill(&after_first, weth_amount(0.1)).unwrap();
+            assert_eq!(fill.maker_levels.market_maker, "test_mm_2");
         }
     }
 

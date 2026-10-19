@@ -15,36 +15,39 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::protocols::native::{
-    client::NativeClient, models::NativePriceData, state::NativeState,
+use crate::rfq::{
+    models::{marginal_price, to_whole_units},
+    protocols::{
+        fill::{continued_amount_out, continued_limits, filled_on_pair, with_new_state, PairFill},
+        native::{client::NativeClient, models::NativePriceData, state::NativeState},
+    },
 };
 
-/// Native Relay's liquidity on one chain: one per-pair state per book.
-///
-/// Native names no market maker, so a swap marks the whole venue used and a later swap on that
-/// state finds no liquidity.
+/// Native Relay's liquidity on one chain: one per-pair state per book. A swap on another pair or
+/// direction than an earlier fill fails: Native already quoted in this route.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NativeAllPairsState {
     states: Arc<Vec<NativeState>>,
     /// Every direction a book quotes, sorted, with the index of its state in `states`. A book
     /// quoting the pair as given beats one quoting it the other way round.
     directions: Arc<Vec<((Bytes, Bytes), usize)>>,
-    /// Whether a swap on this state already took Native's quote.
-    used: bool,
+    /// The pair an earlier swap quoted through Native on this state.
+    fill: Option<PairFill>,
 }
 
 impl fmt::Debug for NativeAllPairsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeAllPairsState")
             .field("books", &self.states.len())
-            .field("used", &self.used)
+            .field("fill", &self.fill)
             .finish_non_exhaustive()
     }
 }
 
 impl NativeAllPairsState {
-    /// Skips a book with a token missing from `tokens` (`debug!`: the decoder logged the token)
-    /// and a book its per-pair state rejects (`warn!`).
+    /// Skips books with a token missing from `tokens` and logs each with `debug!`, as the stream
+    /// decoder already logged the token. Skips books their per-pair state rejects and logs each
+    /// with `warn!`.
     pub fn new(
         books: Vec<NativePriceData>,
         tokens: HashMap<Bytes, Token>,
@@ -83,7 +86,7 @@ impl NativeAllPairsState {
         }
         let mut directions: Vec<_> = directions.into_iter().collect();
         directions.sort();
-        Self { states: Arc::new(states), directions: Arc::new(directions), used: false }
+        Self { states: Arc::new(states), directions: Arc::new(directions), fill: None }
     }
 
     /// The per-pair state that trades `token_in` for `token_out`.
@@ -104,27 +107,28 @@ impl NativeAllPairsState {
         Ok(&self.states[self.directions[index].1])
     }
 
-    /// The per-pair state that trades `token_in` for `token_out`, on a state no swap used.
-    fn quotable_pair_state(
+    /// This state after a swap of `amount_in`. `filled` is what an earlier swap filled on the pair.
+    fn with_fill(
         &self,
         token_in: &Bytes,
         token_out: &Bytes,
-    ) -> Result<&NativeState, SimulationError> {
-        let state = self.pair_state(token_in, token_out)?;
-        if self.used {
-            return Err(SimulationError::RecoverableError(
-                "Native already quoted in this route".to_string(),
-            ));
-        }
-        Ok(state)
-    }
-
-    fn used_state(&self) -> Box<dyn ProtocolSim> {
+        filled: Option<&BigUint>,
+        amount_in: &BigUint,
+    ) -> Box<dyn ProtocolSim> {
         Box::new(Self {
             states: self.states.clone(),
             directions: self.directions.clone(),
-            used: true,
+            fill: Some(PairFill::after(filled, token_in, token_out, amount_in)),
         })
+    }
+}
+
+/// The book's own tokens in input/output order for a swap from `token_in`.
+fn pair_tokens<'a>(state: &'a NativeState, token_in: &Bytes) -> (&'a Token, &'a Token) {
+    if &state.base_token.address == token_in {
+        (&state.base_token, &state.quote_token)
+    } else {
+        (&state.quote_token, &state.base_token)
     }
 }
 
@@ -134,29 +138,34 @@ impl ProtocolSim for NativeAllPairsState {
         0.0
     }
 
+    /// After a fill on the pair, the marginal price at the filled amount.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        self.quotable_pair_state(&base.address, &quote.address)?
-            .spot_price(base, quote)
+        let state = self.pair_state(&base.address, &quote.address)?;
+        let Some(filled) = filled_on_pair(&self.fill, &base.address, &quote.address, "Native")?
+        else {
+            return state.spot_price(base, quote);
+        };
+        let filled = to_whole_units(filled, base.decimals)?;
+        marginal_price(&state.swap_levels(&base.address), filled)
+            .ok_or_else(|| SimulationError::RecoverableError("No liquidity".into()))
     }
 
+    /// See [`crate::rfq::models::QuoteRule`] for how a caller threads the returned states.
     fn get_amount_out(
         &self,
         amount_in: BigUint,
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let state = self.quotable_pair_state(&token_in.address, &token_out.address)?;
-        match state.get_amount_out(amount_in, token_in, token_out) {
-            Ok(mut res) => {
-                res.new_state = self.used_state();
-                Ok(res)
-            }
-            Err(SimulationError::InvalidInput(message, Some(mut res))) => {
-                res.new_state = self.used_state();
-                Err(SimulationError::InvalidInput(message, Some(res)))
-            }
-            Err(e) => Err(e),
-        }
+        let state = self.pair_state(&token_in.address, &token_out.address)?;
+        let filled = filled_on_pair(&self.fill, &token_in.address, &token_out.address, "Native")?;
+        let amount_out = |amount| state.get_amount_out(amount, token_in, token_out);
+        let result = match filled {
+            Some(filled) => continued_amount_out(amount_out, filled, &amount_in),
+            None => amount_out(amount_in.clone()),
+        };
+        let new_state = self.with_fill(&token_in.address, &token_out.address, filled, &amount_in);
+        with_new_state(result, new_state)
     }
 
     fn get_limits(
@@ -164,8 +173,15 @@ impl ProtocolSim for NativeAllPairsState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        self.quotable_pair_state(&sell_token, &buy_token)?
-            .get_limits(sell_token, buy_token)
+        let state = self.pair_state(&sell_token, &buy_token)?;
+        let filled = filled_on_pair(&self.fill, &sell_token, &buy_token, "Native")?;
+        let limits = state.get_limits(sell_token.clone(), buy_token.clone())?;
+        let Some(filled) = filled else {
+            return Ok(limits);
+        };
+        let (token_in, token_out) = pair_tokens(state, &sell_token);
+        let amount_out = |amount| state.get_amount_out(amount, token_in, token_out);
+        continued_limits(amount_out, limits, filled)
     }
 
     fn delta_transition(
@@ -196,7 +212,7 @@ impl ProtocolSim for NativeAllPairsState {
         else {
             return false;
         };
-        self.used == other.used &&
+        self.fill == other.fill &&
             self.states.len() == other.states.len() &&
             self.states
                 .iter()
@@ -284,17 +300,17 @@ mod tests {
             .as_any()
             .downcast_ref::<NativeAllPairsState>()
             .unwrap();
-        assert!(after_first.used);
+        assert!(after_first.fill.is_some());
         assert!(matches!(
             after_first.get_amount_out(BigUint::from(1_000_000_000u64), &usdc(), &weth()),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
-            after_first.spot_price(&weth(), &usdc()),
+            after_first.spot_price(&usdc(), &weth()),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
         assert!(matches!(
-            after_first.get_limits(weth().address, usdc().address),
+            after_first.get_limits(usdc().address, weth().address),
             Err(SimulationError::RecoverableError(message)) if message == "Native already quoted in this route"
         ));
     }
@@ -343,7 +359,7 @@ mod tests {
             .as_any()
             .downcast_ref::<NativeAllPairsState>()
             .unwrap();
-        assert!(new_state.used);
+        assert!(new_state.fill.is_some());
     }
 
     #[test]

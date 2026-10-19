@@ -17,6 +17,7 @@ use tycho_common::{
 
 use crate::rfq::{
     client::RFQClient,
+    models::{fill_levels, PriceLevel},
     protocols::native::{client::NativeClient, models::NativePriceData},
 };
 
@@ -55,6 +56,20 @@ impl NativeState {
         let state = NativeState { base_token, quote_token, book, client };
         state.validate_book()?;
         Ok(state)
+    }
+
+    /// The levels of a swap from `token_in`, as output per input unit: the bids when it sells
+    /// the base token, else the inverted asks.
+    pub fn swap_levels(&self, token_in: &Bytes) -> Vec<PriceLevel> {
+        let levels = if &self.base_token.address == token_in {
+            self.book.bids.clone()
+        } else {
+            NativePriceData::invert_price_levels(&self.book.asks)
+        };
+        levels
+            .into_iter()
+            .map(|level| PriceLevel { quantity: level.quantity, price: level.price })
+            .collect()
     }
 
     fn validate_book(&self) -> Result<(), SimulationError> {
@@ -217,18 +232,13 @@ impl ProtocolSim for NativeState {
             SimulationError::RecoverableError("Can't convert amount in to f64".into())
         })? / 10f64.powi(token_in.decimals as i32);
 
-        let levels = if is_sell_base {
-            self.book.bids.clone()
-        } else {
-            NativePriceData::invert_price_levels(&self.book.asks)
-        };
+        let levels = self.swap_levels(&token_in.address);
 
         if levels.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
 
-        let (amount_out_f64, remaining) =
-            NativePriceData::get_amount_out_from_levels(amount_in_f64, &levels);
+        let (amount_out_f64, remaining) = fill_levels(&levels, amount_in_f64);
 
         let res = GetAmountOutResult {
             amount: BigUint::from_f64(amount_out_f64 * 10f64.powi(token_out.decimals as i32))
@@ -268,11 +278,7 @@ impl ProtocolSim for NativeState {
             ));
         }
 
-        let levels = if is_sell_base {
-            self.book.bids.clone()
-        } else {
-            NativePriceData::invert_price_levels(&self.book.asks)
-        };
+        let levels = self.swap_levels(&sell_token);
 
         if levels.is_empty() {
             return Err(SimulationError::RecoverableError("No liquidity".into()));

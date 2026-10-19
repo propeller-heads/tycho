@@ -21,9 +21,9 @@ use crate::rfq::protocols::{
 
 /// Hashflow's liquidity on one chain: every market maker's levels on every pair it quotes.
 ///
-/// A swap takes its quote from one market maker and marks that maker used in the state it
-/// returns. A maker's second quote does not account for its first fill, so by default a later
-/// swap on that state goes to another maker.
+/// A swap takes its quote from one market maker and records its fill in the state it returns. A
+/// maker's second quote does not account for its first fill, so by default a swap on another pair
+/// goes to another maker.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HashflowAllPairsState {
     pub price_levels: AllMakerPriceLevels,
@@ -62,6 +62,7 @@ impl ProtocolSim for HashflowAllPairsState {
             .spot_price(&base.address, &quote.address)
     }
 
+    /// See [`crate::rfq::models::QuoteRule`] for how a caller threads the returned states.
     fn get_amount_out(
         &self,
         amount_in: BigUint,
@@ -71,12 +72,8 @@ impl ProtocolSim for HashflowAllPairsState {
         let fill =
             self.price_levels
                 .best_fill(&amount_in, &token_in.address, &token_out.address)?;
-        let new_state = Self {
-            price_levels: self
-                .price_levels
-                .with_used(&fill.maker_levels.market_maker),
-            client: self.client.clone(),
-        };
+        let new_state =
+            Self { price_levels: self.price_levels.with_fill(&fill), client: self.client.clone() };
         fill.result(151_000, Box::new(new_state))
     }
 
@@ -130,8 +127,8 @@ impl IndicativelyPriced for HashflowAllPairsState {
     /// Asks the market maker `get_amount_out` picks on this state for the same amount, and no
     /// other: a fallback maker could be one the route already fills against.
     ///
-    /// Call it on the state the swap was simulated on, with the simulated amount. On the state
-    /// that swap returned, its maker is used, so the request names another maker or fails.
+    /// Call it on the state before the first swap on the pair, with the merged amount of every
+    /// swap on it. It picks the maker that the last swap on the pair recorded.
     async fn request_signed_quote(
         &self,
         params: GetAmountOutParams,
@@ -209,12 +206,11 @@ mod tests {
             .as_any()
             .downcast_ref::<HashflowAllPairsState>()
             .unwrap();
-        assert_eq!(
-            new_state.price_levels,
-            state
-                .price_levels
-                .with_used("test_mm_2")
-        );
+        let fill = state
+            .price_levels
+            .best_fill(&weth_amount(0.5), &weth().address, &usdc().address)
+            .unwrap();
+        assert_eq!(new_state.price_levels, state.price_levels.with_fill(&fill));
     }
 
     #[tokio::test]
@@ -233,19 +229,8 @@ mod tests {
             .request_signed_quote(quote_params())
             .await
             .unwrap();
-        let after_first = HashflowAllPairsState {
-            price_levels: state
-                .price_levels
-                .with_used("test_mm_2"),
-            client: state.client.clone(),
-        };
-        after_first
-            .request_signed_quote(quote_params())
-            .await
-            .unwrap();
 
         let requests = request_log.lock().unwrap();
         assert!(requests[0].contains("\"marketMakers\":[\"test_mm_2\"]"), "{}", requests[0]);
-        assert!(requests[1].contains("\"marketMakers\":[\"test_mm\"]"), "{}", requests[1]);
     }
 }
