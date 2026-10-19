@@ -40,6 +40,7 @@ use tycho_simulation::{
     rfq::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
+            euclid::{client_builder::EuclidClientBuilder, state::EuclidState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
             liquorice::{client_builder::LiquoriceClientBuilder, state::LiquoriceState},
             metric::{client_builder::MetricClientBuilder, state::MetricState},
@@ -132,10 +133,16 @@ async fn main() {
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
     let native_key = env::var("NATIVE_API_KEY").ok();
+    // Euclid's levels stream is public; the firm endpoint takes an optional key.
+    let euclid_enabled = env::var("EUCLID_ENABLED")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let euclid_key = env::var("EUCLID_API_KEY").ok();
     if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none()) &&
-        native_key.is_none()
+        native_key.is_none() &&
+        !euclid_enabled
     {
         if cli.run_pamm_protocols {
             println!("No authenticated RFQ credentials found. Continuing with PAMM RFQ protocols only.\n");
@@ -245,6 +252,16 @@ async fn main() {
             .expect("Failed to create Native RFQ client");
         rfq_stream_builder =
             rfq_stream_builder.add_client::<NativeState>("native", Box::new(native_client))
+    }
+    if euclid_enabled {
+        println!("Setting up Euclid RFQ client...\n");
+        let euclid_client = EuclidClientBuilder::new(chain, euclid_key)
+            .tokens(rfq_tokens.clone())
+            .tvl_threshold(cli.tvl_threshold)
+            .build()
+            .expect("Failed to create Euclid RFQ client");
+        rfq_stream_builder =
+            rfq_stream_builder.add_client::<EuclidState>("euclid", Box::new(euclid_client))
     }
     if cli.run_pamm_protocols {
         println!("Setting up Metric RFQ client...\n");

@@ -6,6 +6,8 @@ use crate::rfq::errors::RFQError;
 
 pub const DEFAULT_METRIC_API_URL: &str = "https://api.metric.xyz";
 
+pub const DEFAULT_EUCLID_API_URL: &str = "https://rfq.liquideuclid.com/tycho";
+
 /// Hashflow authentication configuration
 pub struct HashflowAuth {
     pub user: String,
@@ -107,6 +109,27 @@ pub fn get_bebop_origins() -> Result<BebopOrigins, RFQError> {
         target: parse_address("BEBOP_ORIGIN_TARGET")?,
         source: env::var("BEBOP_ORIGIN_SOURCE").ok(),
     })
+}
+
+/// Euclid API configuration
+pub struct EuclidConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+/// Read Euclid API configuration from environment variables.
+/// EUCLID_API_URL defaults to the public Euclid RFQ endpoint; EUCLID_API_KEY is the optional
+/// x-api-key for the firm-quote endpoint (the levels stream is public).
+pub fn get_euclid_config() -> EuclidConfig {
+    let base_url = env::var("EUCLID_API_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EUCLID_API_URL.to_string());
+    let api_key = env::var("EUCLID_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+
+    EuclidConfig { base_url, api_key }
 }
 
 /// Read Metric API configuration from environment variables.

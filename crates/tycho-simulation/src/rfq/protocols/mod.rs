@@ -1,5 +1,6 @@
 pub mod bebop;
 pub mod component;
+pub mod euclid;
 pub mod hashflow;
 pub mod liquorice;
 pub mod maker_price_levels;
