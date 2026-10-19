@@ -65,7 +65,7 @@ impl PriceLevelStreamProcessor {
         // which reads as a quote mismatch rather than a stale quote — so every swap that lacks
         // them is counted, by `tycho_integration_price_level_oracle_override_misses_total` when
         // Titan published nothing for the venue at that block, and by
-        // `tycho_integration_price_level_oracle_override_unserved_total` for Metric, TaurusFi and
+        // `tycho_integration_price_level_oracle_override_unserved_total` for TaurusFi, Tempest and
         // auto-detected venues, which Titan's override stream does not serve at all.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()

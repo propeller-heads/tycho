@@ -65,7 +65,9 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
-    oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
+    oracle_overrides::{
+        override_channels, titan_providers, BlockOverrides, OracleOverrides, METRIC_ORACLE_CHANNELS,
+    },
     statistics::TestStatistics,
     stream_processor::{
         price_level_stream_processor::PriceLevelStreamProcessor,
@@ -1477,7 +1479,7 @@ async fn process_update(
             let Some(overrides) = oracle_overrides
                 .as_ref()
                 .and_then(|overrides| overrides.for_block(block.header.number))
-                .filter(|overrides| overrides.covers_metric())
+                .filter(|overrides| overrides.covers_all(METRIC_ORACLE_CHANNELS))
             else {
                 warn!(
                     block = block.number(),
@@ -2214,9 +2216,9 @@ fn record_oracle_override_misses(
         let Some(venue) = pamm_venue(&info.protocol_system) else {
             continue;
         };
-        match override_protocol(venue) {
-            Some(protocol) => {
-                if !overrides.is_some_and(|overrides| overrides.covers(protocol)) {
+        match override_channels(venue) {
+            Some(channels) => {
+                if !overrides.is_some_and(|overrides| overrides.covers_all(channels)) {
                     missing.insert(&info.protocol_system);
                 }
             }

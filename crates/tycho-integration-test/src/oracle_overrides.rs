@@ -16,29 +16,34 @@ use tycho_simulation::evm::override_stream::{
     OverrideSnapshot, StateOverrideProvider,
 };
 
-/// The pAMM protocol systems collected from the stream — every one Titan's state override stream
-/// serves. A price level stream venue outside this set (Metric, TaurusFi, auto-detected ones)
-/// simulates on the indexed state; see [`override_protocol`].
-const OVERRIDE_STREAM_PROTOCOLS: [&str; 3] = ["vm:fermiswap", "vm:kipseli", "vm:bopamm"];
+/// The channels of Metric's two Ethereum oracles. A Metric pool on Ethereum only fills after
+/// Metric's oracle update for its block, so a Metric swap needs both channels for that block,
+/// whether it reaches the pool through Titan's price level stream or through Metric's API.
+pub const METRIC_ORACLE_CHANNELS: &[&str] =
+    &[METRIC_PYTH_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_CHANNEL];
 
-/// The channels of Metric's two Ethereum oracles. An `rfq:metric` swap on Ethereum only executes
-/// after Metric's oracle update for its block, so it needs both channels for that block.
-const METRIC_ORACLE_CHANNELS: [&str; 2] =
-    [METRIC_PYTH_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_CHANNEL];
+/// The Titan state override channels each price level stream venue needs; every channel listed
+/// here is collected. A venue is covered at a block only when all of its channels published for
+/// it. A venue missing from this table (TaurusFi, Tempest, auto-detected ones) simulates on the
+/// indexed state.
+const VENUE_CHANNELS: [(&str, &[&str]); 4] = [
+    ("fermiswap", &["vm:fermiswap"]),
+    ("kipseli", &["vm:kipseli"]),
+    ("bebop", &["vm:bopamm"]),
+    ("metric", METRIC_ORACLE_CHANNELS),
+];
 
-/// The protocol system whose overrides a price level stream venue needs, or `None` when Titan's
-/// state override stream carries no channel for it.
+/// The override channels a price level stream venue needs, or `None` when Titan's state override
+/// stream carries none for it.
 ///
 /// `venue` is the bare name a pAMM component is served under (`fermiswap`, or a `0x…` address for
 /// an auto-detected venue). Auto-detected venues are never covered: the price level stream keys
 /// them by their router address, which is not the key the override stream publishes under.
-pub fn override_protocol(venue: &str) -> Option<&'static str> {
-    match venue {
-        "fermiswap" => Some("vm:fermiswap"),
-        "kipseli" => Some("vm:kipseli"),
-        "bebop" => Some("vm:bopamm"),
-        _ => None,
-    }
+pub fn override_channels(venue: &str) -> Option<&'static [&'static str]> {
+    VENUE_CHANNELS
+        .iter()
+        .find(|(name, _)| *name == venue)
+        .map(|(_, channels)| *channels)
 }
 
 /// How many quoted blocks are kept.
@@ -72,16 +77,11 @@ pub struct BlockOverrides {
 }
 
 impl BlockOverrides {
-    /// Whether `protocol` published overrides for this block.
-    pub fn covers(&self, protocol: &str) -> bool {
-        self.protocols.contains(protocol)
-    }
-
-    /// Whether both of Metric's oracles published overrides for this block.
-    pub fn covers_metric(&self) -> bool {
-        METRIC_ORACLE_CHANNELS
+    /// Whether every one of `channels` published overrides for this block.
+    pub fn covers_all(&self, channels: &[&str]) -> bool {
+        channels
             .iter()
-            .all(|channel| self.covers(channel))
+            .all(|channel| self.protocols.contains(channel))
     }
 
     /// The slots to apply, merged across every protocol that published.
@@ -102,9 +102,9 @@ pub fn titan_providers() -> HashMap<String, Arc<dyn StateOverrideProvider>> {
 
 /// Every channel collected from Titan's state override stream.
 fn subscribed_channels() -> impl Iterator<Item = &'static str> {
-    OVERRIDE_STREAM_PROTOCOLS
-        .into_iter()
-        .chain(METRIC_ORACLE_CHANNELS)
+    VENUE_CHANNELS
+        .iter()
+        .flat_map(|(_, channels)| channels.iter().copied())
 }
 
 impl OracleOverrides {
@@ -253,21 +253,16 @@ mod tests {
             .copied()
     }
 
-    /// Every protocol in [`OVERRIDE_STREAM_PROTOCOLS`] must be reachable from a venue name, or its
-    /// subscription collects overrides no swap ever claims.
     #[test]
-    fn every_subscribed_protocol_is_reachable_from_a_venue() {
-        let reachable: HashSet<&str> = ["fermiswap", "kipseli", "bebop"]
-            .iter()
-            .filter_map(|venue| override_protocol(venue))
-            .collect();
-        assert_eq!(reachable, HashSet::from_iter(OVERRIDE_STREAM_PROTOCOLS));
+    fn the_metric_venue_needs_both_metric_oracles() {
+        assert_eq!(override_channels("metric"), Some(METRIC_ORACLE_CHANNELS));
+        assert_eq!(override_channels("fermiswap"), Some(&["vm:fermiswap"][..]));
     }
 
     #[test]
-    fn a_venue_titan_does_not_serve_has_no_protocol() {
-        assert_eq!(override_protocol("metric"), None);
-        assert_eq!(override_protocol("0x5979458912f80b96d30d4220af8e2e4925a33320"), None);
+    fn a_venue_titan_does_not_serve_has_no_channels() {
+        assert_eq!(override_channels("tempest"), None);
+        assert_eq!(override_channels("0x5979458912f80b96d30d4220af8e2e4925a33320"), None);
     }
 
     #[test]
@@ -278,8 +273,8 @@ mod tests {
         let block = overrides
             .for_block(100)
             .expect("block 100 was recorded");
-        assert!(block.covers(FERMISWAP));
-        assert!(!block.covers(BOPAMM));
+        assert!(block.covers_all(&[FERMISWAP]));
+        assert!(!block.covers_all(&[BOPAMM]));
     }
 
     #[test]
@@ -289,7 +284,7 @@ mod tests {
         let one_oracle = overrides
             .for_block(100)
             .expect("block 100 was recorded");
-        assert!(!one_oracle.covers_metric());
+        assert!(!one_oracle.covers_all(METRIC_ORACLE_CHANNELS));
 
         record(
             &overrides.blocks,
@@ -300,7 +295,7 @@ mod tests {
         let both_oracles = overrides
             .for_block(100)
             .expect("block 100 was recorded");
-        assert!(both_oracles.covers_metric());
+        assert!(both_oracles.covers_all(METRIC_ORACLE_CHANNELS));
     }
 
     #[test]
