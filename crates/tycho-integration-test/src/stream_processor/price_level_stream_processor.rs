@@ -59,18 +59,23 @@ impl PriceLevelStreamProcessor {
         // The default venues are served under their names, auto-detection additionally serves
         // any newly streamed pAMM under its address.
         //
-        // Venues go through `TychoFallbackRouter`, as they do for consumers. The venue itself
-        // fills whenever execution overrides its registry slot (see `oracle_overrides`). Without
-        // those overrides the venue reverts and the router fills on the fallback pool instead,
-        // which reads as a quote mismatch rather than a stale quote — so every swap that lacks
-        // them is counted, by `tycho_integration_price_level_oracle_override_misses_total` when
-        // Titan published nothing for the venue at that block, and by
+        // Venues are called directly rather than through `TychoFallbackRouter`, the stream's
+        // default: the router needs `user_data` naming a fallback pool for the pair, which the
+        // test has no pool to name under `--disable-onchain`, and a fill on that pool would
+        // measure the pool rather than the venue's quote.
+        //
+        // The venue fills its quote whenever execution overrides its registry slot (see
+        // `oracle_overrides`). Without those overrides it reverts on its freshness guard, so every
+        // swap that lacks them is counted, by
+        // `tycho_integration_price_level_oracle_override_misses_total` when Titan published
+        // nothing for the venue at that block, and by
         // `tycho_integration_price_level_oracle_override_unserved_total` for TaurusFi, Tempest and
         // auto-detected venues, which Titan's override stream does not serve at all.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
+            .without_fallback_router()
             .build();
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);

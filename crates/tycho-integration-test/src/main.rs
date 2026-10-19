@@ -32,7 +32,7 @@ use tycho_client::feed::SynchronizerState;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-    utils::bytes_to_address, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX,
+    utils::bytes_to_address, PRICE_LEVEL_STREAM_PREFIX,
 };
 use tycho_simulation::{
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
@@ -2193,9 +2193,7 @@ const FEED_STALLED_SELECTOR: &str = "9a0423af";
 
 /// The bare venue name of a pAMM component, or `None` for any other protocol system.
 fn pamm_venue(protocol_system: &str) -> Option<&str> {
-    protocol_system
-        .strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
-        .or_else(|| protocol_system.strip_prefix(FALLBACK_PREFIX))
+    protocol_system.strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
 }
 
 /// Counts, per protocol system, the pAMM swaps about to be simulated without the overrides their
@@ -2203,8 +2201,8 @@ fn pamm_venue(protocol_system: &str) -> Option<&str> {
 ///
 /// Split in two so a gap Titan could close is not confused with a venue it never serves: a venue
 /// whose protocol published nothing for this block counts as a miss, one Titan's override stream
-/// carries no channel for counts as unserved. Both fill on the router's Uniswap V3 pool instead of
-/// the venue, so neither swap compares a venue's quote against its own fill.
+/// carries no channel for counts as unserved. Either swap runs against the venue's mined state,
+/// where its freshness guard may reject the quote as stale.
 fn record_oracle_override_misses(
     execution_info: &HashMap<String, TychoExecutionInput>,
     overrides: Option<&BlockOverrides>,
@@ -2381,14 +2379,13 @@ mod tests {
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
-    #[case::through_the_router("fallback:fermiswap", Some("fermiswap"))]
     #[case::auto_detected(
         "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
         Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
     )]
     #[case::indexed_pamm("vm:fermiswap", None)]
     #[case::other_protocol("uniswap_v3", None)]
-    fn the_venue_is_read_from_either_pamm_family(
+    fn the_venue_is_read_from_price_level_components(
         #[case] protocol_system: &str,
         #[case] expected: Option<&str>,
     ) {
