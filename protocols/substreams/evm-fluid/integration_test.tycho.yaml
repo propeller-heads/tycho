@@ -1,0 +1,82 @@
+# Name of the substreams config file in your substreams module. Usually "./ethereum-fluid.yaml"
+substreams_yaml_path: ./ethereum-fluid.yaml
+# Name of the adapter contract, usually: ProtocolSwapAdapter"
+adapter_contract: "FluidAdapter"
+# Constructor signature of the Adapter contract"
+adapter_build_signature: "constructor(address)"
+# A comma separated list of args to be passed to the contructor of the Adapter contract"
+adapter_build_args: "0xb387f9C2092cF7c4943F97842887eBff7AE96EB3"
+# Vault like structure
+skip_balance_check: true
+# A list of accounts that need to be indexed to run the tests properly.
+# Usually used when there is a global component required by all pools and created before the tested range of blocks. For example a factory or a vault.
+# Please note that this component needs to be indexed by your substreams module, this feature is only for testing purpose.
+# Also please always add a reason why this account is needed for your tests.
+# This will be applied to each test.
+initialized_accounts:
+  - "91716c4eda1fb55e84bf8b4c7085f84285c19085" # Factory
+  - "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497" # Liquidity Proxy
+  - "0xb387f9C2092cF7c4943F97842887eBff7AE96EB3" # Reserves Resolver 1
+  - "C93876C0EEd99645DD53937b25433e311881A27C" # Reserves Resolver 2
+# A list of protocol types names created by your Substreams module.
+protocol_type_names:
+  - "fluid_dex_pool"
+protocol_system: "fluid_v1"
+module_name: "map_protocol_changes"
+tests:
+  # Name of the test
+  - name: test_pool_creation_sUSD_USDT
+    start_block: 21609290
+    stop_block: 21717653
+    expected_components:
+      - id: "0x1DD125C32e4B5086c63CC13B3cA02C4A2a61Fa9b"
+        tokens:
+          - "0x9d39a5de30e57443bff2a8307a4256c8797a3497"
+          - "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        static_attributes:
+          reserves_resolver_address: "0xb387f9c2092cf7c4943f97842887ebff7ae96eb3"
+          deploy_tx: "0xd7a6a5848bf4764043324b48c7eb3e516d5c3fcc175abb9b913a9b3dc2e92436"
+        creation_tx: "0xa2ff68b9b094782d0e6183b55be8685a5df912591576a271efe223eb1158b7e6"
+        skip_execution: false
+  - name: test_pool_creation_deUSD_USDC
+    start_block: 21683612
+    stop_block: 21719613
+    expected_components:
+      - id: "0xe8C831687ce8C9D015eb10b430d1a54faA0cb4eD"
+        tokens:
+          - "0x15700B564Ca08D9439C58cA5053166E8317aa138"
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        static_attributes:
+          reserves_resolver_address: "0xb387f9c2092cf7c4943f97842887ebff7ae96eb3"
+          deploy_tx: "0x51f2575fb6392bb9d722b187a6826add6a9647f705a050c4d4f1d510e20a2e7f"
+        creation_tx: "0xe2f7e5d1dc0e1b42fa51f8245aaa6ee7f7abf5a933ccb43bc74452fa534ff5ee"
+        skip_execution: false
+  - name: test_pool_creation_syrupUSD_USDC
+    start_block: 23225106
+    stop_block: 23264106
+    expected_components:
+      - id: "0x79eEa4A1BE86c43a9A9C4384B0B28a07Af24ae29"
+        tokens:
+          - "0x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b"
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        static_attributes:
+          reserves_resolver_address: "0xc93876c0eed99645dd53937b25433e311881a27c"
+          deploy_tx: "0x87e331e2f5ca729c1c310c93197ad45cb62b0f53321cb43024301881b753fc1a"
+        creation_tx: "0xcac72776aa59e370c20db781a1b8c1be9799b189fee51fa9391a2a58df499e0e"
+        skip_execution: false
+  # This pools was deployed before the reserves resolver was deployed
+  # execution fails here for 10% of max with DexT1__TokenReservesTooLow, liquidity is
+  # very low at this point, so will ignore for now
+  - name: test_pool_creation_weETHs_ETH
+    start_block: 21402747
+    stop_block: 21596671
+    expected_components:
+      - id: "0x080574D224E960c272e005aA03EFbe793f317640"
+        tokens:
+          - "0x917ceE801a67f933F2e6b33fC0cD1ED2d5909D88"
+          - "0x0000000000000000000000000000000000000000"
+        static_attributes:
+          reserves_resolver_address: "0xb387f9c2092cf7c4943f97842887ebff7ae96eb3"
+          deploy_tx: "0x0141a82e1ef1f43c2e7837e11cd717f09d79ce57eb94d26440be59a4b1f19397"
+        creation_tx: "0xeb645a1cec04e843da6b268282d7002e3abaeb792cc380db11982b89dd52997a"
+        skip_execution: true

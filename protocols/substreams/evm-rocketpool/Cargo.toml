@@ -1,0 +1,24 @@
+[package]
+name = "evm-rocketpool"
+version = "0.2.1"
+edition = "2021"
+
+[lib]
+name = "evm_rocketpool"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tycho-substreams = "0.8.0"
+anyhow = "1.0.95"
+ethabi = "18.0.0"
+num-bigint = "0.4.6"
+itertools = "0.10.5"
+serde_json = "1.0"
+hex = "0.4"
+
+[build-dependencies]
+anyhow = "1"
+substreams-ethereum = "0.9.9"
+heck = "0.4"

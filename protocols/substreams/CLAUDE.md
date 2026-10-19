@@ -6,10 +6,10 @@ messages consumed by `tycho-indexer`. **Separate WASM workspace** — not in roo
 
 ## Layout
 
-One directory per package, named `{chain}-{protocol}` after the chain it was first written for
-(e.g. `ethereum-uniswap-v2`). A package is **not** one chain or one protocol: it ships **one
-manifest per (chain, fork)** and the manifest name — not the directory — names the published
-artifact. `ethereum-uniswap-v2/` alone carries `arbitrum-uniswap-v2.yaml`,
+One directory per package, named `evm-{protocol}` (e.g. `evm-uniswap-v2`). The directory is
+chain-agnostic and so is the Cargo package name. A package is **not** one chain or one protocol:
+it ships **one manifest per (chain, fork)** and the manifest name — not the directory — names the
+published artifact. `evm-uniswap-v2/` alone carries `arbitrum-uniswap-v2.yaml`,
 `base-pancakeswap-v2.yaml`, `bsc-uniswap-v2.yaml`, `robinhood-uniswap-v2.yaml` and more.
 
 Each package contains:
@@ -17,8 +17,10 @@ Each package contains:
 - `{chain}-{protocol}.yaml` — manifest: package metadata, protobuf imports, module graph, initial
   block. One per chain/fork served by the package
 - `src/` — Rust map/store modules emitting `BlockChanges` / `EntityChanges` protobufs
-- `integration_test.tycho.yaml` (plus `integration_test_{chain}_{protocol}.tycho.yaml` per extra
-  manifest) — block range + assertions for `protocols/testing`
+- `integration_test.tycho.yaml` for the Ethereum manifest, and
+  `integration_test_{chain}_{protocol}.tycho.yaml` for every other manifest — block range +
+  assertions for `protocols/testing`. A `{chain}-{protocol}` test name maps to its package in
+  `CLONE_TO_BASE_PROTOCOL` (`protocols/testing/src/test_runner.rs`)
 - `CHANGELOG.md` — **mandatory**; a release requires an entry
 - `rust-toolchain.toml` — exact toolchain pin (never `stable`); release builds use it for
   reproducible wasm output
@@ -28,7 +30,7 @@ package builds on) and `substreams-helper`.
 
 ## Adding a new protocol
 
-Copy `ethereum-template-factory` (pool-factory pattern) or `ethereum-template-singleton` (single
+Copy `evm-template-factory` (pool-factory pattern) or `evm-template-singleton` (single
 contract) as a starting point. Implement the map modules, update the manifest, add an
 `integration_test.tycho.yaml`, and register the package in `protocols/substreams/Cargo.toml`
 `members`.
@@ -44,12 +46,12 @@ Every PR that touches a package **must** bump that package's version in its `Car
 Releasing is manual and **tagging alone does nothing**:
 
 1. Merge the version bump + changelog entry to main.
-2. Tag the merge commit `{cargo-package-name}-{version}` (e.g. `ethereum-curve-0.3.3`). Nested
+2. Tag the merge commit `{cargo-package-name}-{version}` (e.g. `evm-curve-0.3.3`). Nested
    packages use their Cargo package name, so the tag has no slash:
-   `ethereum-uniswap-v4-with-hooks-0.8.0`.
+   `evm-uniswap-v4-with-hooks-0.8.0`.
 3. Dispatch the `release-substreams-package` job in
    `.github/workflows/release-substreams.yaml` with that tag as the ref, the `package` input
-   (either the Cargo package name or the package directory, e.g. `ethereum-uniswap-v4/with-hooks`),
+   (either the Cargo package name or the package directory, e.g. `evm-uniswap-v4/with-hooks`),
    and the `config_file` input naming the single manifest (without `.yaml`). Packages with several
    manifests need one dispatch per manifest.
 

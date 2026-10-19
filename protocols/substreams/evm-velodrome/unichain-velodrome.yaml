@@ -1,0 +1,91 @@
+specVersion: v0.1.0
+package:
+  name: "unichain_velodrome"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/unichain-velodrome"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - slipstreams.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_velodrome.wasm
+
+modules:
+  - name: map_tick_spacing_fee
+    kind: map
+    initialBlock: 9386540
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.velodrome.TickSpacingFees
+
+  - name: store_tick_spacing_fee
+    kind: store
+    initialBlock: 9386540
+    updatePolicy: set
+    valueType: proto:slipstreams.TickSpacingFees
+    inputs:
+      - map: map_tick_spacing_fee
+
+  - name: map_pools_created
+    kind: map
+    initialBlock: 9386540
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_tick_spacing_fee
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 9386540
+    updatePolicy: set_if_not_exists
+    valueType: proto:slipstreams.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: 9386540
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: 9386540
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 9386540
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_balance_changes
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_tick_spacing_fee: "factories[]=04625b046c69577efc40e6c0bb83cdbafab5a55f&custom_fee_modules[]=6812eefC19deB79D5191b52f4B763260d9F3C238"
+  map_pools_created: "factories[]=04625b046c69577efc40e6c0bb83cdbafab5a55f&custom_fee_modules[]=6812eefC19deB79D5191b52f4B763260d9F3C238"
+  map_protocol_changes: "factories[]=04625b046c69577efc40e6c0bb83cdbafab5a55f&custom_fee_modules[]=6812eefC19deB79D5191b52f4B763260d9F3C238"

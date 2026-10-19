@@ -1,0 +1,80 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_erc4626"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_erc4626.wasm
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 16428133
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_component_tokens
+    kind: store
+    initialBlock: 16428133
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_balances
+    kind: map
+    initialBlock: 16428133
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_component_tokens
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_component_balances
+    kind: store
+    initialBlock: 16428133
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_balances
+
+  - name: store_component_first_interaction
+    kind: store
+    initialBlock: 16428133
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_relative_balances
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 16428133
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_component_tokens
+      - store: store_component_balances
+        mode: deltas
+      - map: map_relative_balances
+      - store: store_component_first_interaction
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+network: mainnet
+
+params:
+  map_protocol_components: 'address=28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d&tx_hash=ebbeb171c33498b2ad47af8bb8bfcc17990db86dd0444b8e64754c250ae1a0b2&asset=a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&block=23484422&static_attribute_keys[]=name&static_attribute_vals[]=spUSDC#address=e2e7a17dff93280dec073c995595155283e3c372&tx_hash=4fe047d7749d8c1fbfcad10ebd54dd34adeb296356d9c5d8a77f0a60e4c8bab2&asset=dac17f958d2ee523a2206206994597c13d831ec7&block=23484439&static_attribute_keys[]=name&static_attribute_vals[]=spUSDT#address=fe6eb3b609a7c8352a241f7f3a21cea4e9209b8f&tx_hash=e8e324769d1e79969eb2febc30dc3371a96cb428094782a8488dbeb6541dfe7f&asset=c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2&block=23484474&static_attribute_keys[]=name&static_attribute_vals[]=spETH#address=a3931d71877c0e7a3148cb7eb4463524fec27fbd&tx_hash=e1be00c4ea3c21cf536b98ac082a5bba8485cf75d6b2b94f4d6e3edd06472c00&asset=dc035d45d973e3ec169d2276ddab16f1e407384f&block=20677434&static_attribute_keys[]=name&static_attribute_vals[]=sUSDS#address=bc65ad17c5c0a2a4d159fa5a503f4992c7b545fe&tx_hash=549d8f23f755f10ac453949f7ce76f19cfd3007ca8402588fe66b0e54ada627c&asset=a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48&block=21969024&static_attribute_keys[]=name&static_attribute_vals[]=sUSDC#address=83f20f44975d03b1b09e64809b757c47f942beea&tx_hash=a2f51048265f2fe9ffaf69b94cb5a2a4113be49bdecd2040d530dd6f68facc42&asset=6b175474e89094c44da98b954eedeac495271d0f&block=16428133&static_attribute_keys[]=name&static_attribute_vals[]=sDAI'

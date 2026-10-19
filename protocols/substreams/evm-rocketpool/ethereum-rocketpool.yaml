@@ -1,0 +1,61 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_rocketpool"
+  version: v0.2.1
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_rocketpool.wasm
+
+
+network: mainnet
+
+params:
+  map_protocol_components: &starting_block 24479994 # v1.4 (Saturn 1) upgrade block
+  # Rocket Pool state values at the starting block. Verified against on-chain state at block 24479994.
+  # To regenerate for a different starting block, run:
+  #   RPC_URL=<your-archive-rpc> ./scripts/compute_initial_state.sh <block_number>
+  map_protocol_changes: |
+    {
+      "deposit_contract_balance": "0x000000000000000000000000000000000000000000000009e0ca6a847e4987bb",
+      "reth_contract_liquidity": "0x0000000000000000000000000000000000000000000000074ab707a6a8367c04",
+      "deposits_enabled": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "deposit_assigning_enabled": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "deposit_assign_maximum": "0x000000000000000000000000000000000000000000000000000000000000005a",
+      "deposit_assign_socialised_maximum": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "min_deposit_amount": "0x000000000000000000000000000000000000000000000000002386f26fc10000",
+      "max_deposit_pool_size": "0x00000000000000000000000000000000000000000004f68ca6d8cd91c6000000",
+      "deposit_fee": "0x0000000000000000000000000000000000000000000000000001c6bf52634000",
+      "megapool_queue_requested_total": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_reth_collateral_rate": "0x000000000000000000000000000000000000000000000000002386f26fc10000",
+      "total_eth": "0x00000000000000000000000000000000000000000000540e645ee4119f4d8b9e",
+      "reth_supply": "0x00000000000000000000000000000000000000000000489a96a246a2e92bbbd1"
+    }
+
+modules:
+  - name: map_protocol_components
+    kind: map
+    initialBlock: *starting_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *starting_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

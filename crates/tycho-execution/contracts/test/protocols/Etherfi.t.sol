@@ -6,7 +6,7 @@ import "@src/executors/EtherfiExecutor.sol";
 import {Constants} from "../Constants.sol";
 import {Vm} from "forge-std/Vm.sol";
 
-// Match the `ethereum-etherfi` snapshot block so indexing and execution
+// Match the `evm-etherfi` snapshot block so indexing and execution
 // tests use the same contract implementations and state.
 uint256 constant ETHERFI_FORK_BLOCK = 25940000;
 

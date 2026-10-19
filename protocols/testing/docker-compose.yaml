@@ -50,7 +50,7 @@ services:
       ROBINHOOD_RPC_URL: "${ROBINHOOD_RPC_URL:-}"
       SUBSTREAMS_API_TOKEN: "${SUBSTREAMS_API_TOKEN}"
     # PROTOCOLS to test separated by space and with optional filter
-    # e.g. "ethereum-balancer-v2=weighted_legacy_creation ethereum-ekubo-v2"
+    # e.g. "evm-balancer-v2=weighted_legacy_creation evm-ekubo-v2"
     entrypoint: [ "/entrypoint.sh", "${PROTOCOLS}" ]
 
 volumes:

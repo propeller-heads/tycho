@@ -1,0 +1,182 @@
+substreams_yaml_path: ./ethereum-balancer-v2.yaml
+protocol_system: "vm:balancer_v2"
+protocol_type_names:
+  - "balancer_v2_pool"
+adapter_contract: "BalancerV2SwapAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+skip_balance_check: true
+initialized_accounts:
+  - "0xba12222222228d8ba445958a75a0704d566bf2c8"
+tests:
+  # WeightedPoolFactoryV4 - 0x897888115Ada5773E02aA29F775430BFB5F34c51
+  - name: test_weighted_pool_v4
+    start_block: 20128706
+    stop_block: 20128806
+    expected_components:
+      - id: "0xe96a45f66bdda121b24f0a861372a72e8889523d00020000000000000000069b"
+        tokens:
+          - "0x38C2a4a7330b22788374B8Ff70BBa513C8D848cA"
+          - "0x514910771AF9Ca656af840dff83E8264EcF986CA"
+        static_attributes:
+          rate_providers: "0x5b22307830303030303030303030303030303030303030303030303030303030303030303030303030303030222c22307830303030303030303030303030303030303030303030303030303030303030303030303030303030225d"
+          normalized_weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
+          manual_updates: "0x01"
+          pool_type: "0x5765696768746564506f6f6c466163746f72795634"
+        creation_tx: "0xa63c671046ad2075ec8ea83ac21199cf3e3a5f433e72ec4c117cbabfb9b18de2"
+        skip_execution: false
+
+  # WeightedPool2TokensFactory - 0xA5bf2ddF098bb0Ef6d120C98217dD6B141c74EE0
+  - name: weighted_legacy_creation
+    start_block: 13148365
+    stop_block: 13148465
+    expected_components:
+      - id: "0xbf96189eee9357a95c7719f4f5047f76bde804e5000200000000000000000087"
+        tokens:
+          - "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32"
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        static_attributes:
+          weights: "0x5b22307830623161326263326563353030303030222c22307830326336386166306262313430303030225d"
+          manual_updates: "0x01"
+          pool_type: "0x5765696768746564506f6f6c32546f6b656e73466163746f7279"
+        creation_tx: "0xdced662e41b1608c386551bbc89894a10321fd8bd58782e22077d1044cf99cb5"
+        skip_execution: true # the block is before the Shanghai upgrade and our router needs functionality introduced there
+
+  # ERC4626LinearPoolFactory - 0x813EE7a840CE909E7Fea2117A44a90b8063bd4fd
+  - name: test_erc4626_linear_pool_creation
+    start_block: 17480142
+    stop_block: 17480152
+    expected_components:
+      - id: "0x3fcb7085b8f2f473f80bf6d879cae99ea4de934400000000000000000000056d"
+        tokens:
+          - "0x39Dd7790e75C6F663731f7E1FdC0f35007D3879b"
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          # BPT tokens not supported - their balance handling is currently bugged
+          # - "0x3fcb7085b8f2f473f80bf6d879cae99ea4de9344"
+        static_attributes:
+          wrapped_token: "0x39dd7790e75c6f663731f7e1fdc0f35007d3879b"
+          manual_updates: "0x01"
+          pool_type: "0x455243343632364c696e656172506f6f6c466163746f7279"
+          upper_target: "0x108b2a2c28029094000000"
+          bpt: "0x3fcb7085b8f2f473f80bf6d879cae99ea4de9344"
+          main_token: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        skip_simulation: true # no liquidity added within more than 100k blocks
+        creation_tx: "0x5ff97870685370bab3876a4335d28c42e24659064fe78b486d6fb1b37b992877"
+
+  # WeightedPoolFactoryV1 - 0x8E9aa87E45e92bad84D5F8DD1bff34Fb92637dE9
+  - name: test_weighted_pool_v1
+    start_block: 13899835
+    stop_block: 13901090
+    expected_components:
+      - id: "0xcb0e14e96f2cefa8550ad8e4aea344f211e5061d00020000000000000000011a"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          - "0xcAfE001067cDEF266AfB7Eb5A286dCFD277f3dE5"
+        static_attributes:
+          manual_updates: "0x01"
+          normalized_weights: "0x5b22307830326336386166306262313430303030222c22307830623161326263326563353030303030225d"
+          pool_type: "0x5765696768746564506f6f6c466163746f72795631"
+        skip_simulation: false
+        skip_execution: true # the block is before the Shanghai upgrade and our router needs functionality introduced there
+        creation_tx: "0xc5c3b384644363aa15cf9a0c33dfebd22df351446bce92ee49ead7d5d896b4e9"
+
+  # WeightedPoolFactoryV2 - 0xcC508a455F5b0073973107Db6a878DdBDab957bC
+  - name: test_weighted_pool_v2
+    start_block: 15732922
+    stop_block: 15742922
+    initialized_accounts:
+    expected_components:
+      - id: "0xe340ebfcaa544da8bb1ee9005f1a346d50ec422e000200000000000000000396"
+        tokens:
+          - "0x3472A5A71965499acd81997a54BBA8D852C6E53d"
+          - "0xae78736Cd615f374D3085123A210448E74Fc6393"
+        static_attributes:
+          manual_updates: "0x01"
+          normalized_weights: "0x5b22307830366630356235396433623230303030222c22307830366630356235396433623230303030225d"
+          rate_providers: "0x5b22307830303030303030303030303030303030303030303030303030303030303030303030303030303030222c22307831613866383163323536616565396336343065313462623034353363653234376561306466653666225d"
+          pool_type: "0x5765696768746564506f6f6c466163746f72795632"
+        skip_simulation: false
+        creation_tx: "0x9a949a52e4179d0c57dcffd6884d5787febfb92f8f4b7e114ef8cfbda0292a79"
+        skip_execution: true # the block is before the Shanghai upgrade and our router needs functionality introduced there
+
+  # WeightedPoolFactoryV3 - 0x5Dd94Da3644DDD055fcf6B3E1aa310Bb7801EB8b
+  - name: test_weighted_pool_v3
+    start_block: 16985129
+    stop_block: 16990284
+    expected_components:
+      - id: "0x42fbd9f666aacc0026ca1b88c94259519e03dd67000200000000000000000507"
+        tokens:
+          - "0x823E1B82cE1Dc147Bbdb25a203f046aFab1CE918"
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        static_attributes:
+          manual_updates: "0x01"
+          normalized_weights: "0x5b22307830366630356235396433623230303030222c22307830366630356235396433623230303030225d"
+          rate_providers: "0x5b22307830303030303030303030303030303030303030303030303030303030303030303030303030303030222c22307830303030303030303030303030303030303030303030303030303030303030303030303030303030225d"
+          pool_type: "0x5765696768746564506f6f6c466163746f72795633"
+        skip_simulation: false
+        creation_tx: "0x628d8e5df9940f6c52844082b03160ef3fb7e06c17877a9a21c8188406e6a201"
+        skip_execution: true # the block is before the Shanghai upgrade and our router needs functionality introduced there
+
+  # #########################################################################################################################
+  # TEST BELOW ARE NOT RELEVANT BECAUSE THE FACTORIES ARE DISABLED AND NO ONE OF THE POOLS HAVE RELEVANT LIQUIDITY
+  # #########################################################################################################################
+
+  # # EulerLinearPoolFactory - 0x5F43FBa61f63Fa6bFF101a0A0458cEA917f6B347
+  # - name: test_euler_linear_pool_creation
+  #   start_block: 16588117
+  #   stop_block: 16588217
+  #   expected_components:
+  #     - id: "0xd4e7c1f3da1144c9e2cfd1b015eda7652b4a439900000000000000000000046a"
+  #       tokens:
+  #         # - "0xD4e7C1F3DA1144c9E2CfD1b015eDA7652b4a4399"
+  #         - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+  #         - "0xEb91861f8A4e1C12333F42DCE8fB0Ecdc28dA716"
+  #       static_attributes:
+  #         wrapped_token: "0xeb91861f8a4e1c12333f42dce8fb0ecdc28da716"
+  #         manual_updates: "0x01"
+  #         pool_type: "0x45756c65724c696e656172506f6f6c466163746f7279"
+  #         upper_target: "0x108b2a2c28029094000000"
+  #         bpt: "0xd4e7c1f3da1144c9e2cfd1b015eda7652b4a4399"
+  #         main_token: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+  #       skip_simulation: false
+  #       creation_tx: "0x4a9ea683052afefdae3d189862868c3a7dc8f431d1d9828b6bfd9451a8816426"
+
+  # # SiloLinearPoolFactory - 0x4E11AEec21baF1660b1a46472963cB3DA7811C89
+  # - name: test_silo_linear_pool_creation
+  #   start_block: 17173185
+  #   stop_block: 17173187
+  #   expected_components:
+  #     - id: "0x74cbfaf94a3577c539a9dcee9870a6349a33b34f000000000000000000000534"
+  #       tokens:
+  #         - "0x192E67544694a7bAA2DeA94f9B1Df58BB3395A12"
+  #         - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  #         - "0x74cbfaf94a3577c539a9dcee9870a6349a33b34f"
+  #       static_attributes:
+  #         wrapped_token: "0x192e67544694a7baa2dea94f9b1df58bb3395a12"
+  #         manual_updates: "0x01"
+  #         pool_type: "0x53696c6f4c696e656172506f6f6c466163746f7279"
+  #         upper_target: "0x00"
+  #         bpt: "0x74cbfaf94a3577c539a9dcee9870a6349a33b34f"
+  #         main_token: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+  #       skip_simulation: true
+  #       creation_tx: "0x215c9f4256ab450368132f4063611ae8cdd98e80bea7e44ecf0600ed1d757018"
+
+  # # YearnLinearPoolFactory - 0x5F5222Ffa40F2AEd6380D022184D6ea67C776eE0
+  # - name: test_yearn_linear_pool_creation
+  #   start_block: 17052601
+  #   stop_block: 17052605
+  #   expected_components:
+  #     - id: "0xac5b4ef7ede2f2843a704e96dcaa637f4ba3dc3f00000000000000000000051d"
+  #       tokens:
+  #         - "0x806E02Dea8d4a0882caD9fA3Fa75B212328692dE"
+  #         - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  #         - "0xac5b4ef7ede2f2843a704e96dcaa637f4ba3dc3f"
+  #       static_attributes:
+  #         wrapped_token: "0x806e02dea8d4a0882cad9fa3fa75b212328692de"
+  #         manual_updates: "0x01"
+  #         pool_type: "0x596561726e4c696e656172506f6f6c466163746f7279"
+  #         upper_target: "0x00"
+  #         bpt: "0xac5b4ef7ede2f2843a704e96dcaa637f4ba3dc3f"
+  #         main_token: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+  #       skip_simulation: true
+  #       creation_tx: "0x497aa03ce84d236c183204ddfc6762c8e4158da1ebc5e7e18e7f6cceaa497a2a"

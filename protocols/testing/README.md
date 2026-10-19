@@ -19,14 +19,14 @@ export SUBSTREAMS_API_TOKEN=..
 
 # Run the tests for a specific package, defined in their integration_test.tycho.yaml file
 # This type of tests are constrained to a specific block range defined
-cargo run -- range --package "ethereum-balancer-v2"
+cargo run -- range --package "evm-balancer-v2"
 
 # To run the full test, that will index from the protocol creation block to the latest:
-cargo run -- full --package "ethereum-balancer-v2"
+cargo run -- full --package "evm-balancer-v2"
 
 # Run tests on a specific chain. Default is Ethereum.
 # Make sure to set the RPC_URL environment variable to match the target network.
-cargo run -- range --package "base-aerodrome-slipstreams" --chain base
+cargo run -- range --package "evm-aerodrome-slipstreams" --chain base
 
 # Clean up
 docker compose down
@@ -46,7 +46,7 @@ DB_HOST_PORT=5433 docker compose up db -d
 export DATABASE_URL=postgres://postgres:mypassword@localhost:5433/tycho_indexer_0
 export TYCHO_SERVER_PORT=4243   # or pass --tycho-server-port 4243
 
-cargo run -- range --package "ethereum-balancer-v2"
+cargo run -- range --package "evm-balancer-v2"
 ```
 
 ## How to Run with Docker
@@ -55,7 +55,7 @@ cargo run -- range --package "ethereum-balancer-v2"
 # Export necessary env vars
 export RPC_URL=..
 export SUBSTREAMS_API_TOKEN=..
-export PROTOCOLS="ethereum-balancer-v2=weighted_legacy_creation ethereum-ekubo-v2"
+export PROTOCOLS="evm-balancer-v2=weighted_legacy_creation evm-ekubo-v2"
 
 # Build both images (test-runner + db) and run the tests. --abort-on-container-exit stops the
 # stack when the one-shot test-runner finishes.
@@ -72,7 +72,7 @@ manually:
 
 ```bash
 export MODE=full
-export PROTOCOLS="ethereum-balancer-v2=12345678"
+export PROTOCOLS="evm-balancer-v2=12345678"
 docker compose up --build
 ```
 

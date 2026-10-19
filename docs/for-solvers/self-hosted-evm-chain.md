@@ -152,16 +152,16 @@ chains:
 
 ### Building a Substreams package
 
-Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>ethereum-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one — from a logs-only module such as `ethereum-uniswap-v2` or `ethereum-uniswap-v3-logs-only` (see [Limitations](#limitations)).
+Tycho ships the Substreams module sources in <a href="https://github.com/propeller-heads/tycho/tree/main/protocols/substreams" target="_blank" rel="noopener noreferrer"><code>protocols/substreams/</code></a>. Each directory holds one WASM module plus a manifest per chain and fork that reuses it — for example <code>evm-uniswap-v2/</code> also carries the PancakeSwap manifests and the Arbitrum, BSC, Base, and Unichain variants. The WASM logic is chain-agnostic; each manifest pins the chain-specific factory address and start block. A chain Tycho has never indexed has no prebuilt `.spkg`, so you build one — from a logs-only module such as `evm-uniswap-v2` or `evm-uniswap-v3-logs-only` (see [Limitations](#limitations)).
 
-To index a Uniswap-V2-style DEX on a new chain, reuse the `ethereum-uniswap-v2` module and add a manifest for your chain:
+To index a Uniswap-V2-style DEX on a new chain, reuse the `evm-uniswap-v2` module and add a manifest for your chain:
 
-1. Copy an existing manifest, e.g. `protocols/substreams/ethereum-uniswap-v2/ethereum-uniswap-v2.yaml`, to `<chain>-<dex>.yaml` in the same directory.
+1. Copy an existing manifest, e.g. `protocols/substreams/evm-uniswap-v2/ethereum-uniswap-v2.yaml`, to `<chain>-<dex>.yaml` in the same directory.
 2. Edit the copy: set the package `name`/`version`, set every module's `initialBlock` to the DEX factory's deployment block, and set the `params` line to `factory_address=<your factory>&protocol_type_name=<your pool type>`.
 3. Build the WASM and pack the package (some protocols build with `--profile substreams` instead of `--release` — check that protocol's `Makefile` or `README`):
 
    ```bash
-   cd protocols/substreams/ethereum-uniswap-v2
+   cd protocols/substreams/evm-uniswap-v2
    cargo build --target wasm32-unknown-unknown --release
    substreams pack <chain>-<dex>.yaml
    ```
