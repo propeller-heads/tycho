@@ -12,13 +12,19 @@ use alloy::primitives::{
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use tycho_simulation::evm::override_stream::{
-    titan::default_providers, OverrideSnapshot, StateOverrideProvider,
+    titan::{default_providers, METRIC_COMPRESSED_ORACLE_CHANNEL, METRIC_PYTH_ORACLE_CHANNEL},
+    OverrideSnapshot, StateOverrideProvider,
 };
 
 /// The pAMM protocol systems collected from the stream — every one Titan's state override stream
 /// serves. A price level stream venue outside this set (Metric, TaurusFi, auto-detected ones)
 /// simulates on the indexed state; see [`override_protocol`].
 const OVERRIDE_STREAM_PROTOCOLS: [&str; 3] = ["vm:fermiswap", "vm:kipseli", "vm:bopamm"];
+
+/// The channels of Metric's two Ethereum oracles. An `rfq:metric` swap on Ethereum only executes
+/// after Metric's oracle update for its block, so it needs both channels for that block.
+const METRIC_ORACLE_CHANNELS: [&str; 2] =
+    [METRIC_PYTH_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_CHANNEL];
 
 /// The protocol system whose overrides a price level stream venue needs, or `None` when Titan's
 /// state override stream carries no channel for it.
@@ -71,6 +77,13 @@ impl BlockOverrides {
         self.protocols.contains(protocol)
     }
 
+    /// Whether both of Metric's oracles published overrides for this block.
+    pub fn covers_metric(&self) -> bool {
+        METRIC_ORACLE_CHANNELS
+            .iter()
+            .all(|channel| self.covers(channel))
+    }
+
     /// The slots to apply, merged across every protocol that published.
     pub fn into_storage(self) -> AddressHashMap<B256HashMap<B256>> {
         self.storage
@@ -84,11 +97,14 @@ impl BlockOverrides {
 /// `ProtocolStreamBuilder::with_override_provider`) and [`OracleOverrides`], so both read one
 /// socket and one parse loop instead of opening one each and disagreeing about the current frame.
 pub fn titan_providers() -> HashMap<String, Arc<dyn StateOverrideProvider>> {
-    default_providers(
-        OVERRIDE_STREAM_PROTOCOLS
-            .iter()
-            .map(|protocol| protocol.to_string()),
-    )
+    default_providers(subscribed_channels().map(|protocol| protocol.to_string()))
+}
+
+/// Every channel collected from Titan's state override stream.
+fn subscribed_channels() -> impl Iterator<Item = &'static str> {
+    OVERRIDE_STREAM_PROTOCOLS
+        .into_iter()
+        .chain(METRIC_ORACLE_CHANNELS)
 }
 
 impl OracleOverrides {
@@ -96,7 +112,7 @@ impl OracleOverrides {
     /// channel.
     pub fn spawn(providers: &HashMap<String, Arc<dyn StateOverrideProvider>>) -> Option<Self> {
         let mut receivers = Vec::new();
-        for protocol in OVERRIDE_STREAM_PROTOCOLS {
+        for protocol in subscribed_channels() {
             match providers
                 .get(protocol)
                 .and_then(|provider| provider.subscribe(protocol))
@@ -264,6 +280,27 @@ mod tests {
             .expect("block 100 was recorded");
         assert!(block.covers(FERMISWAP));
         assert!(!block.covers(BOPAMM));
+    }
+
+    #[test]
+    fn metric_needs_both_oracles_for_a_block() {
+        let overrides = overrides();
+        record(&overrides.blocks, METRIC_PYTH_ORACLE_CHANNEL, 100, storage(REGISTRY, &[(1, 11)]));
+        let one_oracle = overrides
+            .for_block(100)
+            .expect("block 100 was recorded");
+        assert!(!one_oracle.covers_metric());
+
+        record(
+            &overrides.blocks,
+            METRIC_COMPRESSED_ORACLE_CHANNEL,
+            100,
+            storage(VENUE, &[(1, 22)]),
+        );
+        let both_oracles = overrides
+            .for_block(100)
+            .expect("block 100 was recorded");
+        assert!(both_oracles.covers_metric());
     }
 
     #[test]

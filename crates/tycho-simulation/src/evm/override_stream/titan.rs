@@ -112,6 +112,12 @@ const FERMISWAP_PROTOCOL_SYSTEM: &str = "vm:fermiswap";
 const KIPSELI_PROTOCOL_SYSTEM: &str = "vm:kipseli";
 /// bopAMM protocol system identifier as indexed by Tycho.
 const BOPAMM_PROTOCOL_SYSTEM: &str = "vm:bopamm";
+/// Channel for Metric's Pyth oracle. Metric's Ethereum pools read two oracles, published under two
+/// different stream keys, so a Metric swap needs this channel and
+/// [`METRIC_COMPRESSED_ORACLE_CHANNEL`] together; neither is an alias of the other.
+pub const METRIC_PYTH_ORACLE_CHANNEL: &str = "metric:pyth_oracle";
+/// Channel for Metric's compressed oracle; see [`METRIC_PYTH_ORACLE_CHANNEL`].
+pub const METRIC_COMPRESSED_ORACLE_CHANNEL: &str = "metric:compressed_oracle";
 
 /// FermiSwap venue aliases on Titan's quote stream: the FermiSwap oracle and the FermiSwapper
 /// router. Both keys carry the same registry diffs; either serves the protocol.
@@ -124,6 +130,10 @@ const KIPSELI_VENUES: &[&str] =
 /// bopAMM (Bebop) venue on Titan's quote stream: a self-storage pAMM whose frames write the
 /// maker's signed quote into the venue's own storage.
 const BOPAMM_VENUES: &[&str] = &["0x160141a205f5ddcf096ba3f48b7ed21eb52c62ea"];
+/// Metric's Pyth oracle, the oracle of every anchored Metric pool on Ethereum.
+const METRIC_PYTH_ORACLE_VENUES: &[&str] = &["0x30a88bf894d1b806125a23ebf23d715496fd7102"];
+/// Metric's compressed oracle, which carries the reference feeds.
+const METRIC_COMPRESSED_ORACLE_VENUES: &[&str] = &["0xe844701934d9c6085b292e428f41b911cc0b3872"];
 
 /// Longest gap between Titan messages tolerated before the socket is treated as dead and
 /// re-established. Titan pushes several updates per second, so a multi-second silence means a
@@ -159,7 +169,13 @@ const MAX_LANE_TIMESTAMP_LEAD_SECS: u64 = 2 * SECONDS_PER_SLOT;
 
 /// Returns the pAMM `protocol_system`s this provider knows how to serve.
 fn known_pamm_protocols() -> &'static [&'static str] {
-    &[FERMISWAP_PROTOCOL_SYSTEM, KIPSELI_PROTOCOL_SYSTEM, BOPAMM_PROTOCOL_SYSTEM]
+    &[
+        FERMISWAP_PROTOCOL_SYSTEM,
+        KIPSELI_PROTOCOL_SYSTEM,
+        BOPAMM_PROTOCOL_SYSTEM,
+        METRIC_PYTH_ORACLE_CHANNEL,
+        METRIC_COMPRESSED_ORACLE_CHANNEL,
+    ]
 }
 
 /// Default override providers contributed by Titan, keyed by `protocol_system`.
@@ -375,6 +391,8 @@ impl TitanProvider {
             FERMISWAP_PROTOCOL_SYSTEM => FERMISWAP_VENUES,
             KIPSELI_PROTOCOL_SYSTEM => KIPSELI_VENUES,
             BOPAMM_PROTOCOL_SYSTEM => BOPAMM_VENUES,
+            METRIC_PYTH_ORACLE_CHANNEL => METRIC_PYTH_ORACLE_VENUES,
+            METRIC_COMPRESSED_ORACLE_CHANNEL => METRIC_COMPRESSED_ORACLE_VENUES,
             _ => return None,
         };
         let venues = raw
@@ -571,6 +589,8 @@ mod tests {
             (FERMISWAP_PROTOCOL_SYSTEM, FERMISWAP_VENUES),
             (KIPSELI_PROTOCOL_SYSTEM, KIPSELI_VENUES),
             (BOPAMM_PROTOCOL_SYSTEM, BOPAMM_VENUES),
+            (METRIC_PYTH_ORACLE_CHANNEL, METRIC_PYTH_ORACLE_VENUES),
+            (METRIC_COMPRESSED_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_VENUES),
         ];
         for (protocol, expected) in cases {
             let venues = TitanProvider::venues_for_protocol(protocol).expect("venues must resolve");

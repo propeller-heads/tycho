@@ -40,6 +40,12 @@ router keeps its deployed bytecode, and only the read-only simulation call is af
 help an executor that has no bytecode deployed. Off by default so that a missing activation still
 shows up as a failure.
 
+`rfq:metric` updates on Ethereum need Metric's oracle update, which Titan orders first in the block
+it builds. They are simulated at the block after the latest one, under the overrides Titan's state
+stream published for that block on both Metric oracle channels; a block without them is skipped.
+The simulation runs on that block's post-state, so a trade earlier in the same block that drained
+the pool shows up as slippage.
+
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
@@ -69,7 +75,8 @@ shows up as a failure.
     (`tycho_integration_execution_stale_quotes_total`)
 - **`oracle_overrides.rs`**: `OracleOverrides` — keeps the storage overrides Titan's
   `pamm_quote_stream` publishes, per quoted block, for the venues Titan serves (`vm:fermiswap`,
-  `vm:kipseli`, `vm:bopamm`). Each frame is a venue's whole override set, so a venue's newest
+  `vm:kipseli`, `vm:bopamm`) and for Metric's two Ethereum oracles (`covers_metric` checks both
+  published). Each frame is a venue's whole override set, so a venue's newest
   frame replaces its previous one for that block; venues are merged only on read
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls

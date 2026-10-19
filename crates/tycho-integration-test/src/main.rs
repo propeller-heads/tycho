@@ -46,6 +46,7 @@ use tycho_simulation::{
                 state::HashflowState,
             },
             liquorice::{client::LiquoriceClient, state::LiquoriceState},
+            metric::client::MetricClient,
         },
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Chain},
@@ -491,8 +492,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // One Titan connection serves both the indexed pAMM pools and the execution overrides. The
     // price level stream only runs on Ethereum, so off it the providers are only worth opening
     // for the pools.
-    let overrides_wanted =
+    let price_level_overrides_wanted =
         chain == Chain::Ethereum && !cli.disable_price_level_stream && !cli.disable_execution;
+    // Metric's Ethereum pools only quote after the oracle update Titan orders first in its block.
+    let metric_overrides_wanted = chain == Chain::Ethereum &&
+        !cli.disable_rfq &&
+        cli.run_pamm_protocols &&
+        !cli.disable_execution;
+    let overrides_wanted = price_level_overrides_wanted || metric_overrides_wanted;
     let override_providers =
         if !cli.disable_onchain || overrides_wanted { titan_providers() } else { HashMap::new() };
 
@@ -552,11 +559,12 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
 
     // Without the overrides the venue reverts `StaleUpdate()`.
-    let oracle_overrides = if price_level_handle.is_some() && !cli.disable_execution {
-        OracleOverrides::spawn(&override_providers).map(Arc::new)
-    } else {
-        None
-    };
+    let oracle_overrides =
+        if (price_level_handle.is_some() || metric_overrides_wanted) && !cli.disable_execution {
+            OracleOverrides::spawn(&override_providers).map(Arc::new)
+        } else {
+            None
+        };
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
     // Only collect statistics when max_blocks is set; avoids unbounded growth for indefinite runs
@@ -851,6 +859,20 @@ async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval:
             }
         }
     }
+}
+
+/// How long a Metric RFQ update on Ethereum waits for the block after the latest one, which its
+/// swaps are simulated at: one slot plus a margin for the RPC to serve the new block.
+const METRIC_TARGET_BLOCK_WAIT: Duration = Duration::from_secs(18);
+
+/// Whether `update` carries Metric pools on Ethereum, whose swaps need Metric's oracle update.
+fn is_metric_on_ethereum(chain: Chain, update: &StreamUpdate) -> bool {
+    chain == Chain::Ethereum &&
+        update
+            .update
+            .new_pairs
+            .values()
+            .any(|component| component.protocol_system == MetricClient::PROTOCOL_SYSTEM)
 }
 
 /// Waits until the RPC has reached `target_block` and returns exactly that block. `Ok(None)`
@@ -1218,7 +1240,7 @@ async fn process_update(
         }
         UpdateType::Rfq => {
             // RFQ updates: fetch latest block without alignment checks
-            match rpc_tools
+            let latest = match rpc_tools
                 .provider
                 .get_block_by_number(BlockNumberOrTag::Latest)
                 .await
@@ -1227,10 +1249,32 @@ async fn process_update(
                 .ok()
                 .flatten()
             {
-                Some(b) => Arc::new(b),
+                Some(b) => b,
                 None => {
                     warn!("Failed to retrieve latest block, continuing to next message...");
                     return Ok(());
+                }
+            };
+            if !is_metric_on_ethereum(chain, update) {
+                Arc::new(latest)
+            } else {
+                // A Metric pool on Ethereum only quotes after Metric's oracle update, which Titan
+                // orders first in the block it builds. Simulate at that next block, under the
+                // overrides Titan published for it.
+                let target_block = latest.header.number + 1;
+                let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms.max(1));
+                let attempts = (METRIC_TARGET_BLOCK_WAIT.as_millis() / poll_interval.as_millis())
+                    .try_into()
+                    .unwrap_or(u32::MAX)
+                    .max(1);
+                match await_target_block(&rpc_tools, target_block, attempts, poll_interval).await? {
+                    Some(b) => Arc::new(b),
+                    None => {
+                        warn!(
+                            "RPC did not reach block {target_block} for the Metric swaps; skipping"
+                        );
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1428,6 +1472,20 @@ async fn process_update(
                 block.number(),
             );
             overrides.map(BlockOverrides::into_storage)
+        }
+        UpdateType::Rfq if is_metric_on_ethereum(chain, update) => {
+            let Some(overrides) = oracle_overrides
+                .as_ref()
+                .and_then(|overrides| overrides.for_block(block.header.number))
+                .filter(|overrides| overrides.covers_metric())
+            else {
+                warn!(
+                    block = block.number(),
+                    "Titan published no Metric oracle overrides for the block; skipping its swaps"
+                );
+                return Ok(());
+            };
+            Some(overrides.into_storage())
         }
         UpdateType::Protocol | UpdateType::Rfq => None,
     };
