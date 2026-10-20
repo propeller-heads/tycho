@@ -32,7 +32,7 @@ RUN resolve_base() { \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3|arbitrum-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3|robinhood-swaphood-v3) echo "ethereum-pancakeswap-v3" ;; \
-            elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3|ethereum-communityv3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             elysium-aero-cl) echo "evm-aero-cl" ;; \
@@ -86,7 +86,7 @@ RUN resolve_base() { \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3|arbitrum-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3|robinhood-swaphood-v3) echo "ethereum-pancakeswap-v3" ;; \
-            elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            elysium-kleos-v3|elysium-elyspump-v3|elysium-stockiumswap-v3|ethereum-communityv3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             elysium-aero-cl) echo "evm-aero-cl" ;; \

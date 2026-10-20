@@ -1,0 +1,26 @@
+substreams_yaml_path: ./ethereum-communityv3.yaml
+protocol_system: "communityv3"
+protocol_type_names:
+  - "communityv3_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # USDC / TSLAon 0.6%, one of the deepest CommunityV3 pools.
+  - name: test_usdc_tslaon_pool
+    # PoolCreated, Initialize and the first Mint all land in the creation transaction.
+    start_block: 25901121
+    # Stop once the first Swaps and a second Mint have been emitted:
+    #   Swap: blocks 25901146, 25901292
+    #   Mint: block 25901596
+    stop_block: 25901596
+    expected_components:
+      - id: "0xbcd5a4823c3b3faf81eecefd3b37e1185419e9ee"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xf6b1117ec07684D3958caD8BEb1b302bfD21103f" # TSLAon
+        static_attributes:
+          fee: "0x1770"
+          tick_spacing: "0x78"
+        creation_tx: "0x97f665e458abc8597c496cb4bd2d124051b43730a7b283e99fdeee5f7123ba7e"
+        skip_simulation: false
