@@ -1,0 +1,208 @@
+{
+  "description": "Swaps executed on a mainnet fork through PendleExecutor and Router V4, each from the unmodified fork state, on the wstETH market expiring 30 Dec 2027. Read by the simulation's parity test and by the executor's fork test, so either side drifting fails its own test. Amounts are irregular on purpose: whole-unit inputs hide one-wei rounding differences.",
+  "block": 25800000,
+  "market": "0x34280882267ffa6383b363e278b027be083bbe3b",
+  "executed": [
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "1000003",
+      "amount_out": "21914"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "1000003",
+      "amount_out": "43520129"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "1000003",
+      "amount_out": "782103"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "1000003",
+      "amount_out": "1276865"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "123456789012345677",
+      "amount_out": "2703288105385623"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "123456789012345677",
+      "amount_out": "5208483711632458842"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "123456789012345677",
+      "amount_out": "96553572751240226"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "123456789012345677",
+      "amount_out": "157629900593855092"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "999999999999999999",
+      "amount_out": "21770141148458769"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "999999999999999999",
+      "amount_out": "36536075805370490827"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "999999999999999999",
+      "amount_out": "781959205515422197"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "999999999999999999",
+      "amount_out": "1276552648088633755"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "3141592653589793238",
+      "amount_out": "67405138389133308"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "3141592653589793238",
+      "amount_out": "96848851507347221012"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "3141592653589793238",
+      "amount_out": "2455655601278921170"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "3141592653589793238",
+      "amount_out": "4008252392973808731"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "2718281828459045235",
+      "amount_out": "58493312789323308"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "2718281828459045235",
+      "amount_out": "85895279972030534024"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "2718281828459045235",
+      "amount_out": "2124930243066260750"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "2718281828459045235",
+      "amount_out": "3468503534871788498"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "7777777777777777777",
+      "amount_out": "161367827323049332"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "7777777777777777777",
+      "amount_out": "202364425602726806635"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "7777777777777777777",
+      "amount_out": "6074705765947486258"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "7777777777777777777",
+      "amount_out": "9911758995650751965"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "12345678901234567891",
+      "amount_out": "247017906494229954"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "12345678901234567891",
+      "amount_out": "292490678495871391123"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "12345678901234567891",
+      "amount_out": "9635128072750843417"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "12345678901234567891",
+      "amount_out": "15713694610384744100"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "31415926535897932384",
+      "amount_out": "513645109115127862"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "31415926535897932384",
+      "amount_out": "607634309311793673175"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "31415926535897932384",
+      "amount_out": "24449216663889075029"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "31415926535897932384",
+      "amount_out": "39729719318131590744"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "42424242424242424243",
+      "amount_out": "577864840381007279"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "42424242424242424243",
+      "amount_out": "763838659317390163843"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "42424242424242424243",
+      "amount_out": "32968803208510748109"
+    },
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "42424242424242424243",
+      "amount_out": "53368023809931934869"
+    },
+    {
+      "edge": "yt_for_sy",
+      "amount_in": "60000000000000000007",
+      "amount_out": "446459024695113364"
+    },
+    {
+      "edge": "sy_for_yt",
+      "amount_in": "60000000000000000007",
+      "amount_out": "986515844760779650608"
+    },
+    {
+      "edge": "pt_for_sy",
+      "amount_in": "60000000000000000007",
+      "amount_out": "46530452264210778224"
+    }
+  ],
+  "rejected": [
+    {
+      "edge": "sy_for_pt",
+      "amount_in": "60000000000000000007"
+    }
+  ]
+}

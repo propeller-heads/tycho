@@ -1,0 +1,5 @@
+# Upstream Pendle sources, cloned by ./regenerate.sh. Never vendored into this tree — see
+# ../NOTICE.md.
+lib/
+out/
+cache/

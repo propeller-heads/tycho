@@ -1,0 +1,157 @@
+//! Failures the ported Pendle math can produce.
+//!
+//! Every variant corresponds to a `require` or a revert in the Solidity. The mapping onto
+//! `SimulationError` lives with the state, not here — this layer stays free of tycho types so the
+//! math can be tested on its own.
+
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendleError {
+    /// `LogExpMath.exp` outside `[-41e18, 130e18]`.
+    ExponentOutOfBounds { x: String },
+    /// `LogExpMath.ln` at or below zero, where the logarithm is undefined.
+    LogarithmOutOfBounds { a: String },
+    /// `PMath.subNoNeg`: a subtraction that would go negative where the contract forbids it.
+    NegativeResult { a: String, b: String },
+    /// A cast the contract guards with `require` — `PMath.Int` or `PMath.Uint`.
+    CastOutOfRange { value: String, target: &'static str },
+    /// Arithmetic that would exceed 256 bits. The Solidity runs `unchecked` and would wrap; in
+    /// the domain the contract accepts, neither happens, so reaching this means the input was
+    /// outside that domain.
+    Overflow { operation: &'static str },
+    /// Division by zero.
+    DivisionByZero { operation: &'static str },
+
+    // The market's own failure modes. Each mirrors a custom error in `Errors.sol`, and the names
+    // are kept so a reader can match a quote failure against the revert the contract would give.
+    /// `blockTime >= expiry`. The market no longer trades; PT redeems through the YT instead.
+    MarketExpired { expiry: u64, block_time: u64 },
+    /// More PT was asked of the market than it holds.
+    MarketInsufficientPtForTrade { total_pt: String, required: String },
+    /// The trade would push the PT proportion past 96%.
+    MarketProportionTooHigh { proportion: String, max: String },
+    /// The post-trade exchange rate would fall below par, which PT may never do.
+    MarketExchangeRateBelowOne { rate: String },
+    /// An empty market: nothing to price against.
+    MarketZeroTotalPtOrTotalAsset { total_pt: String, total_asset: String },
+    /// A proportion of exactly one, where the logit is undefined.
+    MarketProportionMustNotEqualOne,
+    /// The trade would leave so little PT that the proportion rounds to zero. Its logit is zero,
+    /// and the contract reverts in `LogExpMath.ln`, the same check `LogarithmOutOfBounds` mirrors;
+    /// it is its own variant because here the cause is the trade's size, not the state.
+    MarketProportionRoundsToZero { remaining_pt: String },
+    /// `rateScalar` at or below zero, which only happens past expiry.
+    MarketRateScalarBelowZero { rate_scalar: String },
+    /// The trade would leave the market with an implied rate of zero, which the next quote's
+    /// anchor cannot be built from.
+    MarketZeroLnImpliedRate,
+
+    // The router's approximation, which is what actually executes the exact-SY-in directions.
+    /// The search ran its whole budget without landing inside `eps`.
+    ApproxExhausted { iterations: usize },
+    /// The search walked down to its hard lower bound and still needed less.
+    ApproxRangeUnderflow,
+    /// The search walked up to its hard upper bound and still needed more — the trade is past
+    /// what the market can absorb.
+    ApproxRangeOverflow,
+    /// The search range inverted, which means the bounds were built wrong.
+    ApproxInvalidBounds { lower: String, upper: String },
+    /// Selling YT borrows PT from the market and repays it from the PY the YT redeems. Past the
+    /// edge's depth, buying that PT back costs more PY than the sale has, and the router's
+    /// callback reverts on the subtraction.
+    YtSaleCannotRepay { yt_in: String, py_to_repay: String },
+    /// `PendleMarketV7`'s `MarketZeroNetLPFee`: the LPs' share of the trade's fee converts to zero
+    /// asset units, so the market refuses the trade after computing it.
+    MarketZeroNetLpFee,
+}
+
+impl fmt::Display for PendleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PendleError::ExponentOutOfBounds { x } => write!(
+                f,
+                "exp({x}) is outside the supported domain [-41e18, 130e18]; the contract reverts \
+                 with \"Invalid exponent\""
+            ),
+            PendleError::LogarithmOutOfBounds { a } => {
+                write!(f, "ln({a}) is undefined; the argument must be strictly positive")
+            }
+            PendleError::MarketZeroNetLpFee => write!(
+                f,
+                "MarketZeroNetLPFee: the trade's fee to the LPs rounds to zero asset units"
+            ),
+            PendleError::YtSaleCannotRepay { yt_in, py_to_repay } => write!(
+                f,
+                "selling {yt_in} YT cannot repay the {py_to_repay} PY its borrowed PT costs; the \
+                 trade is past what the market can absorb"
+            ),
+            PendleError::NegativeResult { a, b } => {
+                write!(f, "{a} - {b} would be negative, which subNoNeg forbids")
+            }
+            PendleError::CastOutOfRange { value, target } => {
+                write!(f, "{value} does not fit in {target}")
+            }
+            PendleError::Overflow { operation } => {
+                write!(f, "{operation} overflowed 256 bits")
+            }
+            PendleError::DivisionByZero { operation } => {
+                write!(f, "{operation} divided by zero")
+            }
+            PendleError::MarketExpired { expiry, block_time } => write!(
+                f,
+                "market expired at {expiry} and the quote is for {block_time}; PT redeems through \
+                 the yield token from here, it does not trade"
+            ),
+            PendleError::MarketInsufficientPtForTrade { total_pt, required } => {
+                write!(f, "market holds {total_pt} PT but the trade needs {required}")
+            }
+            PendleError::MarketProportionTooHigh { proportion, max } => {
+                write!(f, "trade would take the PT proportion to {proportion}, past the {max} cap")
+            }
+            PendleError::MarketExchangeRateBelowOne { rate } => write!(
+                f,
+                "trade would put the exchange rate at {rate}, below par; PT cannot be priced above \
+                 its redemption value"
+            ),
+            PendleError::MarketZeroTotalPtOrTotalAsset { total_pt, total_asset } => {
+                write!(f, "market is empty: totalPt {total_pt}, totalAsset {total_asset}")
+            }
+            PendleError::MarketProportionMustNotEqualOne => {
+                write!(f, "a PT proportion of exactly one has no defined logit")
+            }
+            PendleError::MarketProportionRoundsToZero { remaining_pt } => write!(
+                f,
+                "trade would leave {remaining_pt} PT in the market, a proportion that rounds to                  zero; the contract reverts taking its logarithm"
+            ),
+            PendleError::MarketRateScalarBelowZero { rate_scalar } => {
+                write!(f, "rateScalar {rate_scalar} is not positive")
+            }
+            PendleError::MarketZeroLnImpliedRate => {
+                write!(f, "the trade would leave the market with a zero implied rate")
+            }
+            PendleError::ApproxExhausted { iterations } => write!(
+                f,
+                "the approximation did not converge within {iterations} iterations; the contract \
+                 reverts with \"Slippage: APPROX_EXHAUSTED\""
+            ),
+            PendleError::ApproxRangeUnderflow => write!(
+                f,
+                "the approximation ran below its lower bound; the trade is smaller than the market \
+                 can price"
+            ),
+            PendleError::ApproxRangeOverflow => write!(
+                f,
+                "the approximation ran past its upper bound; the trade is larger than the market \
+                 can absorb"
+            ),
+            PendleError::ApproxInvalidBounds { lower, upper } => {
+                write!(f, "approximation bounds are inverted: [{lower}, {upper}]")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PendleError {}
+
+pub type PendleResult<T> = Result<T, PendleError>;
