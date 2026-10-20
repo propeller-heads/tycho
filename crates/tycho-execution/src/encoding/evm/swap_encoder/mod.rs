@@ -5,6 +5,7 @@ mod balancer_v3;
 mod bebop;
 mod bebop_fallback;
 mod bopamm;
+mod camelot_v3;
 mod curve;
 mod ekubo;
 mod ekubo_v3;
