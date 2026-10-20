@@ -139,6 +139,7 @@ pub const UNISWAP_V3_FORKS: &[&str] = &[
     "kleos_v3",
     "elyspump_v3",
     "stockiumswap_v3",
+    "communityv3",
 ];
 
 /// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
