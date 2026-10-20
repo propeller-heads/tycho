@@ -1,10 +1,10 @@
-//! Titan pAMM price level stream wire format and connection handling.
+//! Titan pAMM price level stream stream format and connection handling.
 //!
-//! Connects to the Titan `pamm_price_levels` WebSocket (see
+//! Connects to the Titan `pamm_price_levels_v2` WebSocket (see
 //! <https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level>) and yields parsed frames.
-//! Each frame carries the quote ladders Titan simulated in one build round, targeting the block
-//! it is currently building. Consumers decide how fresh a component is from the frame
-//! `timestamp`, not from what a frame omits.
+//! Each frame carries the books Titan simulated in one build round, targeting the block it is
+//! currently building. Consumers decide how fresh a component is from the frame `ts`, not from
+//! what a frame omits.
 //!
 //! All Titan specifics (endpoint, JSON shape, reconnect policy) live in this module; the rest of
 //! the price level stream machinery is venue-agnostic.
@@ -13,8 +13,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use num_bigint::BigUint;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -25,7 +24,7 @@ use super::telemetry::{self, ReconnectReason, RejectReason};
 /// Default Titan pAMM price level WebSocket endpoint. Titan serves the same stream from other
 /// regions as well; see <https://docs.titanbuilder.xyz/propamms/takers>.
 pub(super) const TITAN_PRICE_LEVEL_URL: &str =
-    "wss://eu.data.titanbuilder.xyz/ws/pamm_price_levels";
+    "wss://eu.data.titanbuilder.xyz/ws/pamm_price_levels_v2";
 
 /// Environment variable that replaces [`TITAN_PRICE_LEVEL_URL`] when the builder is given no
 /// endpoint.
@@ -72,63 +71,82 @@ fn deadline_after(idle_timeout: Duration) -> Instant {
     Instant::now() + idle_timeout.min(Duration::from_secs(u32::MAX.into()))
 }
 
-/// A parsed price level stream frame: the quote ladders of every pAMM Titan simulated in one
-/// build round, targeting the block currently being built.
+/// A parsed price level stream frame: every book Titan simulated in one build round, targeting
+/// the block currently being built.
+///
+/// Books are quoted in human units, so a level is a decimal price and a cumulative volume rather
+/// than a pair of token amounts, and tokens arrive as addresses, with symbols alongside them as
+/// display labels: a consumer resolves the addresses against its own token metadata before it can
+/// price anything.
 ///
 /// Frames are best effort, not complete snapshots: a venue or pair can be absent from one frame
 /// and present in the next (observed on 7.7% of frames in a 15 minute capture), so absence must
 /// never be read as retirement.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct TitanPriceLevelMessage {
     /// The L1 block number the quotes target (the block currently being built).
-    pub block_number: u64,
+    pub block: u64,
+    /// The beacon slot the frame was built for, when Titan reports one. No freshness decision
+    /// rests on it, so a frame without it is still usable.
+    pub slot: Option<u64>,
     /// When Titan built this frame, in nanoseconds since the Unix epoch. Frames re-emitted
     /// within one build round share a timestamp, so it is a freshness marker, not an identity.
-    pub timestamp: u64,
-    /// Per-pAMM quote ladders.
-    pub pamms: Vec<TitanPammLevels>,
+    pub ts: u64,
+    /// One book per venue and pair; a venue appears once for every pair it quotes.
+    pub books: Vec<TitanBook>,
 }
 
-/// One pAMM's quote ladders within a frame. A frame can omit pairs the venue trades.
-#[derive(Debug, Deserialize)]
-pub(super) struct TitanPammLevels {
-    /// The pAMM venue address.
-    pub pamm: Bytes,
-    pub pairs: Vec<TitanPairLevels>,
-}
-
-/// The quote ladder of one trade direction of one pair.
+/// One venue's two-sided quote ladder for one pair, priced in `token2` per `token1`.
+///
+/// Ask prices sit above bid prices, and either side can be empty when the venue quotes only one
+/// direction of the pair.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TitanPairLevels {
-    pub token_in: Bytes,
-    pub token_out: Bytes,
-    pub order_book: Vec<TitanPriceLevel>,
+pub(super) struct TitanBook {
+    /// Titan's display name for the venue (e.g. `Fermi`), which the stream sometimes leaves
+    /// empty or omits. Venues are identified by `quote_address`, never by this label, and nothing
+    /// reads it: it is typed here to document what the stream carries and to pin the shapes the
+    /// parser accepts for it, not because any decision needs the value.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a display label, deliberately not part of any identity the stream records"
+        )
+    )]
+    pub maker: Option<String>,
+    /// The venue address Titan streams this book under — a join key across its streams, which is
+    /// not necessarily the venue's executable address (see
+    /// [`PAMM_ADDRESS_ALIASES`](super::config::PAMM_ADDRESS_ALIASES)).
+    pub quote_address: Bytes,
+    /// Base token symbol, the unit of `cum_volume`. A display label: the pair is identified by
+    /// [`token1_address`](Self::token1_address), never by this, so nothing resolves through it.
+    /// It is read for the DEBUG logs that accompany a skipped book.
+    pub token1: String,
+    /// Quote token symbol, the unit of `price`. A display label, like
+    /// [`token1`](Self::token1).
+    pub token2: String,
+    /// The address of the base token — the asset `cum_volume` is measured in.
+    pub token1_address: Bytes,
+    /// The address of the quote token — the asset `price` is measured in.
+    pub token2_address: Bytes,
+    pub asks: Vec<TitanLevel>,
+    pub bids: Vec<TitanLevel>,
 }
 
-/// A single quote: swapping exactly `amount_in` delivers `amount_out` in total.
+/// A single quote level: selling `cum_volume` of `token1` in total executes at an average of
+/// `price`.
+///
+/// An average, not a limit: `ladders_for_book` computes `amount_out = price · cum_volume`, which
+/// holds only under that reading.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct TitanPriceLevel {
-    #[serde(deserialize_with = "quantity")]
-    pub amount_in: BigUint,
-    #[serde(deserialize_with = "quantity")]
-    pub amount_out: BigUint,
-}
-
-/// Deserializes a JSON quantity into a `BigUint`, accepting only the documented wire format:
-/// `0x`-prefixed hex strings.
-fn quantity<'de, D>(deserializer: D) -> Result<BigUint, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let text = String::deserialize(deserializer)?;
-    let digits = text.strip_prefix("0x").ok_or_else(|| {
-        serde::de::Error::custom(format!("quantity must be a 0x-prefixed hex string: {text}"))
-    })?;
-    BigUint::parse_bytes(digits.as_bytes(), 16)
-        .ok_or_else(|| serde::de::Error::custom(format!("invalid quantity: {text}")))
+pub(super) struct TitanLevel {
+    /// `token2` per `token1`, in human units — both tokens' decimals are already applied.
+    pub price: f64,
+    /// Volume cumulated from the top of the book, in whole `token1`. Non-decreasing down a side,
+    /// but consecutive levels can repeat a volume.
+    pub cum_volume: f64,
 }
 
 /// Yields parsed price level frames from `url` for as long as the returned stream is polled.
@@ -246,7 +264,7 @@ pub(super) fn messages(
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::atomic::Ordering};
+    use std::{collections::HashSet, str::FromStr, sync::atomic::Ordering};
 
     use futures::SinkExt;
     use rstest::rstest;
@@ -257,136 +275,113 @@ mod tests {
                 recorded::{counter_value, record_async},
                 FRAMES_REJECTED, RECONNECTS,
             },
-            test_support::{frame_text, frame_then_repeat, wall_nanos_now, FakeTitan},
+            test_support::{
+                frame_text, frame_then_repeat, wall_nanos_now, FakeTitan, PAMM, USDC, WBTC,
+            },
         },
         *,
     };
 
-    /// Sample message from the Titan docs
-    /// (<https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level>), plus the undocumented
-    /// per-venue `maker` field observed on the live stream (2026-09-05), which the parser must
-    /// tolerate.
-    const SAMPLE_MESSAGE: &str = r#"{
-        "slot": 14581462,
-        "blockNumber": 25345763,
-        "timestamp": 1781801564588230787,
-        "pamms": [
-            {
-                "pamm": "0x5979458912f80b96d30d4220af8e2e4925a33320",
-                "maker": 12,
-                "pairs": [
-                    {
-                        "tokenIn": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-                        "tokenOut": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                        "orderBook": [
-                            {
-                                "amountIn": "0x989680",
-                                "amountOut": "0x174b67393",
-                                "variant": "Simulated"
-                            },
-                            {
-                                "amountIn": "0x1312d00",
-                                "amountOut": "0x2e968e726",
-                                "variant": "Interpolated"
-                            }
-                        ]
-                    }
-                ]
-            }
-        ]
-    }"#;
-
-    #[test]
-    fn parses_documented_sample_message() {
-        let message: TitanPriceLevelMessage = serde_json::from_str(SAMPLE_MESSAGE).unwrap();
-        assert_eq!(message.block_number, 25345763);
-        assert_eq!(message.timestamp, 1781801564588230787);
-        assert_eq!(message.pamms.len(), 1);
-
-        let pamm = &message.pamms[0];
-        assert_eq!(
-            pamm.pamm,
-            Bytes::from_str("0x5979458912f80b96d30d4220af8e2e4925a33320").unwrap()
-        );
-        assert_eq!(pamm.pairs.len(), 1);
-
-        let pair = &pamm.pairs[0];
-        assert_eq!(
-            pair.token_in,
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap()
-        );
-        assert_eq!(pair.order_book.len(), 2);
-        assert_eq!(pair.order_book[0].amount_in, BigUint::from(0x989680u64));
-        assert_eq!(pair.order_book[0].amount_out, BigUint::from(0x174b67393u64));
-    }
-
-    /// The wire `timestamp` is the only per-frame freshness signal, so a frame without it is
-    /// unusable and must not parse.
-    #[test]
-    fn rejects_frame_without_timestamp() {
-        let json = r#"{"slot": 1, "blockNumber": 2, "pamms": []}"#;
-        assert!(serde_json::from_str::<TitanPriceLevelMessage>(json).is_err());
-    }
-
-    #[test]
-    fn rejects_quantities_that_are_not_hex_strings() {
-        for json in [
-            r#"{"amountIn": "0xzz", "amountOut": "0x1"}"#,
-            r#"{"amountIn": "0x", "amountOut": "0x1"}"#,
-            r#"{"amountIn": "1000", "amountOut": "0x1"}"#,
-            r#"{"amountIn": 1000, "amountOut": "0x1"}"#,
-        ] {
-            assert!(serde_json::from_str::<TitanPriceLevel>(json).is_err(), "accepted: {json}");
-        }
-    }
-
-    /// A frame captured verbatim from the live stream (2026-07-15); the file name carries the
-    /// frame's `timestamp` field.
+    /// A frame captured verbatim from the live stream (2026-10-08); the file name carries the
+    /// frame's `ts` field.
     const CAPTURED_MESSAGE: &str =
-        include_str!("test_responses/pamm_price_levels_1784126589047308938.json");
+        include_str!("test_responses/pamm_price_levels_v2_1792115918290990905.json");
+
+    /// Nanoseconds since the epoch for 2023-11 and 2033-05. A `ts` in seconds or milliseconds
+    /// would fall far below the lower bound, so the window pins the scale rather than the date.
+    const NANOS_LOWER_BOUND: u64 = 1_700_000_000_000_000_000;
+    const NANOS_UPPER_BOUND: u64 = 2_000_000_000_000_000_000;
 
     #[test]
     fn parses_captured_live_message() {
         let message: TitanPriceLevelMessage =
             serde_json::from_str(CAPTURED_MESSAGE).expect("valid JSON");
 
-        assert_eq!(message.block_number, 25538727);
-        assert_eq!(message.timestamp, 1784126589047308938);
-        assert_eq!(message.pamms.len(), 2);
-
-        // FermiSwapper router and KipseliPropAMMWrapper router, the venue keys observed live.
-        let fermiswap = &message.pamms[0];
-        assert_eq!(
-            fermiswap.pamm,
-            Bytes::from_str("0x5979458912f80b96d30d4220af8e2e4925a33320").unwrap()
+        assert_eq!(message.block, 26_201_953);
+        assert_eq!(message.slot, Some(15_440_991));
+        assert!(
+            (NANOS_LOWER_BOUND..NANOS_UPPER_BOUND).contains(&message.ts),
+            "ts is not nanosecond-scale: {}",
+            message.ts
         );
-        assert_eq!(fermiswap.pairs.len(), 16);
-        let kipseli = &message.pamms[1];
-        assert_eq!(
-            kipseli.pamm,
-            Bytes::from_str("0x71e790dd841c8a9061487cb3e78c288e75ce0b3d").unwrap()
-        );
-        assert_eq!(kipseli.pairs.len(), 4);
 
-        // First level of the first ladder (WBTC -> USDC): 0xc350 -> 0x1f27427.
-        let first = &fermiswap.pairs[0];
-        assert_eq!(
-            first.token_in,
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap()
-        );
-        assert_eq!(first.order_book[0].amount_in, BigUint::from(0xc350u64));
-        assert_eq!(first.order_book[0].amount_out, BigUint::from(0x1f27427u64));
+        // Every venue Titan builds with arrives in one flat book list.
+        let venues: HashSet<&Bytes> = message
+            .books
+            .iter()
+            .map(|book| &book.quote_address)
+            .collect();
+        assert!(venues.len() >= 2, "expected several venues, got {}", venues.len());
 
-        // Every ladder is non-trivial and every quantity parsed to a positive amount.
-        for pamm in &message.pamms {
-            for pair in &pamm.pairs {
-                assert!(pair.order_book.len() >= 64, "unexpectedly short ladder");
-                for level in &pair.order_book {
-                    assert!(level.amount_in > BigUint::ZERO);
-                    assert!(level.amount_out > BigUint::ZERO);
-                }
+        let fermi = message
+            .books
+            .iter()
+            .find(|book| {
+                book.quote_address == Bytes::from_str(PAMM).unwrap() &&
+                    book.token1 == "WBTC" &&
+                    book.token2 == "USDC"
+            })
+            .expect("Fermi WBTC/USDC book");
+        assert_eq!(fermi.maker.as_deref(), Some("Fermi"));
+        assert!(!fermi.asks.is_empty());
+        assert!(!fermi.bids.is_empty());
+
+        // A level without volume carries no depth, so a zero would mean the ladder lost its
+        // quantities in parsing.
+        for book in &message.books {
+            for level in book.asks.iter().chain(&book.bids) {
+                assert!(level.cum_volume > 0.0, "non-positive cumVolume: {level:?}");
+                assert!(level.price > 0.0, "non-positive price: {level:?}");
             }
         }
+    }
+
+    /// `ts` is the only per-frame freshness signal, so a frame without it is unusable and must
+    /// not parse. `slot` carries no freshness decision, so a frame without it still parses.
+    #[test]
+    fn requires_ts_but_not_slot() {
+        let without_ts = r#"{"slot": 1, "block": 2, "books": []}"#;
+        assert!(serde_json::from_str::<TitanPriceLevelMessage>(without_ts).is_err());
+
+        let without_slot = r#"{"block": 2, "ts": 3, "books": []}"#;
+        let message: TitanPriceLevelMessage =
+            serde_json::from_str(without_slot).expect("valid JSON");
+        assert_eq!(message.slot, None);
+    }
+
+    /// `calculated_from` is a Titan-internal cursor that overflows `u64`, so the parser must
+    /// ignore it rather than type it; `maker` is a display label the stream sometimes leaves
+    /// empty or omits.
+    #[rstest]
+    #[case::named_maker(r#""maker": "Fermi","#, Some("Fermi"))]
+    #[case::empty_maker(r#""maker": "","#, Some(""))]
+    #[case::null_maker(r#""maker": null,"#, None)]
+    #[case::absent_maker("", None)]
+    fn tolerates_internal_fields_and_unlabelled_makers(
+        #[case] maker: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let json = format!(
+            r#"{{
+                {maker}
+                "quoteAddress": "{PAMM}",
+                "token1": "WBTC",
+                "token2": "USDC",
+                "token1Address": "{WBTC}",
+                "token2Address": "{USDC}",
+                "calculated_from": 283851543383726791766048878,
+                "asks": [{{"price": 80997.89405475458, "cumVolume": 0.00012346}}],
+                "bids": []
+            }}"#
+        );
+
+        let book: TitanBook = serde_json::from_str(&json).expect("valid book");
+        assert_eq!(book.maker.as_deref(), expected);
+        assert_eq!(book.quote_address, Bytes::from_str(PAMM).unwrap());
+        assert_eq!(book.asks.len(), 1);
+        assert_eq!(book.asks[0].price, 80997.89405475458);
+        assert_eq!(book.asks[0].cum_volume, 0.00012346);
+        assert!(book.bids.is_empty());
     }
 
     #[test]

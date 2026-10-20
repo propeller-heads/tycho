@@ -17,7 +17,7 @@ Two kinds share that shape, and the difference shows at execution:
 
 A feed runs wherever its venue prices, which is what the table lists. Settling a swap against one additionally needs a Tycho executor for that venue on that chain; `config/executor_addresses.json` in tycho-execution lists the deployments.
 
-On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
+On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level stream](price-level-stream.md).
 
 ## Quickstart
 
@@ -299,26 +299,4 @@ Because the RFQ will only let you swap up to the amount of tokens specified in t
 
 ## pAMM Price Level Stream
 
-Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of complete per-pair quote snapshots for a subset of the pAMMs Titan serves. It only serves Ethereum Mainnet.
-
-`PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream:
-
-```rust
-use tycho_simulation::price_level_stream::stream::PriceLevelStreamBuilder;
-
-let price_level_stream = PriceLevelStreamBuilder::new()
-    .with_known_pamms()       // serve the venues Tycho has measured
-    .auto_detect(true)        // also serve any other venue Titan streams
-    .with_tokens(all_tokens.clone())
-    .build();
-```
-
-Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. Each update carries the block its frame targets; that number only decreases after every component has been removed, when the stream re-anchors on the next frame. The stream never terminates — run it in its own task alongside your protocol stream.
-
-Frames are best effort, not complete snapshots: a venue or a pair can be absent from one frame and present in the next, so the stream never removes a component because a frame omits it. Instead it serves a component for `stale_after` (default 24 s) after the last frame that carried it, then lists the component in `removed_pairs`; the next frame that carries it adds it back in `new_pairs`. Every state also refuses to quote once its frame is 12 s old, so you cannot quote a ladder past the block it targeted even before the removal arrives. Treat a removal like any other: stop routing through the component until it reappears in `new_pairs`. If you quote states more than 12 s after they arrive by design (a batch simulator, a validation harness), `without_quote_guard()` emits states that never refuse; the 24 s removal still applies, and a quote from such a state may no longer be fillable.
-
-`with_known_pamms()` serves these venues: Bebop, FermiSwap, Kipseli, Metric, TaurusFi and Tempest. Titan does not stream every venue at all times, so the live set can be smaller.
-
-Each known venue reports one swap gas value for all its pairs, which Tycho calibrates from fills on the live venue. For most venues the gas barely varies by pair. Metric's does: it reports 280k, the p90 of its fills, while a USDC/USDT swap typically uses ~165k and a WBTC/USDC swap ~550k. Account for this if your router weighs gas against output on Metric's WBTC pairs.
-
-Components arrive as `fallback:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one: `tycho-execution` routes those swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback pool named in the swap's `user_data`. `without_fallback_router()` keeps every venue on the direct `pricelevelstream:{pamm}` path, where a stale quote reverts the route.
+Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.

@@ -1,3 +1,24 @@
+## [0.472.0](https://github.com/propeller-heads/tycho/compare/0.471.0...0.472.0) (2026-10-20)
+
+
+### Features
+
+* **simulation:** serve the Goliath, Stelaxis and ElZorro pAMMs ([994e789](https://github.com/propeller-heads/tycho/commit/994e789e6066947997e41c014749152fc968d264))
+* **simulation:** serve the Goliath, Stelaxis and ElZorro pAMMs ([#1648](https://github.com/propeller-heads/tycho/issues/1648)) ([8a4a3a2](https://github.com/propeller-heads/tycho/commit/8a4a3a2f42ccd5cd195017a15aabe03da0992dfa))
+
+## [0.471.0](https://github.com/propeller-heads/tycho/compare/0.470.1...0.471.0) (2026-10-20)
+
+
+### Features
+
+* **simulation:** migrate the price level stream to Titan V2 ([6d1ad78](https://github.com/propeller-heads/tycho/commit/6d1ad785a0f6738346e7a8e4db96503ca254d895))
+* **simulation:** migrate the price level stream to Titan V2 ([#1597](https://github.com/propeller-heads/tycho/issues/1597)) ([0ed0550](https://github.com/propeller-heads/tycho/commit/0ed0550ef0024f0a9d4d6f31bd9e619e4c409368))
+
+
+### Bug Fixes
+
+* **simulation:** point Metric and TaurusFi at their live routers ([95f67f6](https://github.com/propeller-heads/tycho/commit/95f67f6653df5dee34bc02391a1246635f87db33))
+
 ## [0.470.1](https://github.com/propeller-heads/tycho/compare/0.470.0...0.470.1) (2026-10-20)
 
 
