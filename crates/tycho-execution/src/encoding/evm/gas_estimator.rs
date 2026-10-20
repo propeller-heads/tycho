@@ -53,6 +53,7 @@ pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
     "sushiswap_v2",
     "pancakeswap_v2",
     "quickswap_v2",
+    "elfomofi",
 ];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
@@ -402,6 +403,26 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER, fee path adds it
         assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_elfomofi_direct_funding_has_no_approval_or_duplicate_input_transfer() {
+        let swap = make_swap("elfomofi");
+        assert!(!needs_approval("elfomofi"));
+        assert_eq!(
+            estimate_gas_usage(&make_solution(vec![swap.clone()]), Strategy::Single),
+            BigUint::from(200_000u64),
+        );
+        // Split routes stage input in Tycho first, then pay exactly one transfer to settlement.
+        assert_eq!(
+            estimate_transfer_overhead(
+                "elfomofi",
+                swap.token_in(),
+                swap.token_out(),
+                &Strategy::Split,
+            ),
+            transfer_token_gas(swap.token_in()),
+        );
     }
 
     #[test]
