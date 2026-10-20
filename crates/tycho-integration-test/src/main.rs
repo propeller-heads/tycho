@@ -2363,9 +2363,35 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, pamm_venue, sample_swap_directions,
-        should_fetch_block_by_number, Cli, TychoState,
+        book_swap_directions, is_metric_on_ethereum, is_oracle_stale_revert, pamm_venue,
+        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
     };
+    use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
+
+    fn book_update(protocol_system: &str) -> StreamUpdate {
+        StreamUpdate {
+            payload: StreamUpdatePayload::Book {
+                protocol_system: protocol_system.to_string(),
+                received_at: chrono::Utc::now(),
+                books: Default::default(),
+            },
+            is_first_update: false,
+            received_at: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Only Metric's own book on Ethereum waits for the next block and Titan's Metric overrides.
+    #[rstest]
+    #[case::metric_on_ethereum(Chain::Ethereum, "rfq:metric", true)]
+    #[case::metric_elsewhere(Chain::Base, "rfq:metric", false)]
+    #[case::another_book_on_ethereum(Chain::Ethereum, "rfq:bebop", false)]
+    fn only_metric_books_on_ethereum_need_the_metric_overrides(
+        #[case] chain: Chain,
+        #[case] protocol_system: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_metric_on_ethereum(chain, &book_update(protocol_system)), expected);
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
