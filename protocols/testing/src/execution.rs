@@ -31,6 +31,7 @@ const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
 const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
+const FLAMM_BYTECODE_JSON: &str = include_str!("../fixtures/FLAMM.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
 const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
@@ -63,6 +64,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("vm:fermiswap", FERMISWAP_BYTECODE_JSON);
     map.insert("vm:maverick_v2", MAVERICK_V2_BYTECODE_JSON);
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
+    map.insert("flamm", FLAMM_BYTECODE_JSON);
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
     map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
