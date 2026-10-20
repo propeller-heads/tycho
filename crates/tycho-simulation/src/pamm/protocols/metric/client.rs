@@ -37,8 +37,10 @@ const TVL_FIAT_CURRENCY: &str = "USD";
 const BID_ASK_BATCH_SIZE: usize = 100;
 
 /// Deadline for one batch bid/ask request. The pools of a batch that misses it are left out of
-/// the current book; the poll as a whole still succeeds with the other batches.
-const BID_ASK_TIMEOUT: Duration = Duration::from_secs(5);
+/// the current book; the poll as a whole still succeeds with the other batches. It is shorter
+/// than the feed's whole-poll `request_timeout`, so a hung batch fails here, after the metadata
+/// fetch, rather than taking the whole poll with it.
+const BID_ASK_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How many batch bid/ask requests are in flight at once unless the builder says otherwise.
 ///

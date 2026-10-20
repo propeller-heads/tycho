@@ -73,9 +73,11 @@ impl MetricFeedBuilder {
 
     /// The feed tuning a new builder starts from.
     ///
-    /// Measured live, Metric reprices every 2-3 s and a poll — a page of pool metadata, then a
-    /// batch of bid/asks — answers in under a second, so it is polled every 5 s. A poll is at
-    /// least two requests, so it is given more time to finish than the shared default.
+    /// Measured live, Metric's quotes change about every 2 s, and a poll — a page of pool
+    /// metadata, then a batch of bid/asks — answers in 0.6-1.5 s, so it is polled every second.
+    /// A poll that hangs gives up after 5 s, and a book is withdrawn once 15 s pass without a
+    /// refresh: longer than one hung poll and its retry, so a single slow poll does not blank
+    /// the book.
     ///
     /// Spread from it to change one field:
     ///
@@ -90,9 +92,9 @@ impl MetricFeedBuilder {
     /// ```
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
-            poll_interval: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(15),
-            max_snapshot_age: Some(Duration::from_secs(60)),
+            poll_interval: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(5),
+            max_snapshot_age: Some(Duration::from_secs(15)),
             ..default_http_feed_config()
         }
     }

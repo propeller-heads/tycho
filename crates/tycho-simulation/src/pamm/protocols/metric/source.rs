@@ -131,7 +131,7 @@ fn every_pool_failed(failures: Vec<FeedError>) -> FeedError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, str::FromStr, sync::Arc};
+    use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
     use num_bigint::BigUint;
     use rstest::rstest;
@@ -148,7 +148,7 @@ mod tests {
             client::DEFAULT_BID_ASK_CONCURRENCY, feed::MetricFeedBuilder, FALLBACK_PROTOCOL_SYSTEM,
             PROTOCOL_SYSTEM,
         },
-        snapshot_feed::http::test_support::{spawn_http_server, MockRequest},
+        snapshot_feed::http::test_support::{spawn_http_server, MockRequest, MockResponse},
     };
 
     const FIRST_POOL: &str = "0x1111111111111111111111111111111111111111";
@@ -490,6 +490,48 @@ mod tests {
         let mut batch_sizes = batch_sizes.lock().unwrap().clone();
         batch_sizes.sort_unstable();
         assert_eq!(batch_sizes, vec![50, 100]);
+    }
+
+    /// A batch that never answers fails on its own deadline, inside the poll's
+    /// `request_timeout`, so the feed loop sees a failed poll it can back off from instead of a
+    /// poll that hangs to the whole-poll deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_batch_fails_the_poll_within_the_request_timeout() {
+        let page = metadata_page(&[pool_json(FIRST_POOL, Some(1_000.0))], None);
+        let server = spawn_http_server(move |request| {
+            if request
+                .target
+                .starts_with("/public/v1/evm/1/metadata?")
+            {
+                return Some(MockResponse::from(("200 OK", page.clone())));
+            }
+            Some(MockResponse {
+                status: "200 OK",
+                body: batch_body(vec![]),
+                delay: Duration::from_secs(3600),
+            })
+        })
+        .await;
+        let mut source = source(Chain::Ethereum, &server.url(), "key");
+        source.book_config.tokens = Arc::new(test_token_map(&[
+            (&weth().address, "WETH", 18),
+            (&usdc().address, "USDC", 6),
+        ]));
+        let started = tokio::time::Instant::now();
+
+        let error = source
+            .fetch()
+            .await
+            .expect_err("a hung batch must fail the poll");
+
+        assert!(matches!(error, FeedError::Connection(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("batch bid/ask request timed out"),
+            "{error}"
+        );
+        assert!(started.elapsed() < MetricFeedBuilder::default_feed_config().request_timeout);
     }
 
     /// One poll fetches every pool's bid/ask and shares a single `request_timeout`, so the
