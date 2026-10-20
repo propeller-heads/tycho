@@ -14,6 +14,8 @@ on:
       - 'protocols/adapter-integration/evm/**'
       - 'crates/tycho-simulation/token-proxy-contracts/**'
       - 'protocols/testing/fixtures/**'
+      - 'crates/tycho-simulation/src/evm/protocol/pendle/tests/fixtures/executed_swaps.json'
+      - 'crates/tycho-simulation/src/evm/protocol/pendle/state.rs'
   workflow_dispatch:
 
 permissions:
@@ -40,7 +42,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # `executor_deployments.json` and `protocols/testing/fixtures` feed
-      # `RuntimeBytecodeFixtures.t.sol`, which forge test runs with the rest.
+      # `RuntimeBytecodeFixtures.t.sol`, which forge test runs with the rest, and
+      # `executed_swaps.json` and the gas constants in `pendle/state.rs` feed
+      # `Pendle.t.sol`.
       - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
         id: filter
         with:
@@ -50,6 +54,8 @@ jobs:
             protocols/adapter-integration/evm/**
             crates/tycho-simulation/token-proxy-contracts/**
             protocols/testing/fixtures/**
+            crates/tycho-simulation/src/evm/protocol/pendle/tests/fixtures/executed_swaps.json
+            crates/tycho-simulation/src/evm/protocol/pendle/state.rs
             .github/workflows/ci-foundry.yaml
 
   forge-test:

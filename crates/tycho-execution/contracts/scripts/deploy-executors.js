@@ -25,6 +25,7 @@ const deploy_protocols = {
         "rfq:hashflow",
         "fluid_v1",
         "erc4626",
+        "pendle",
         "rocketpool",
         "ekubo_v3",
         "native_wrapper",

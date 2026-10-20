@@ -17,6 +17,7 @@ const FEE_CALCULATOR_BYTECODE_JSON: &str = include_str!("../fixtures/FeeCalculat
 const UNISWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV2.runtime.json");
 const RING_SWAP_V2_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2.runtime.json");
 const RING_SWAP_V2_BSC_BYTECODE_JSON: &str = include_str!("../fixtures/RingSwapV2Bsc.runtime.json");
+const PENDLE_BYTECODE_JSON: &str = include_str!("../fixtures/Pendle.runtime.json");
 const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runtime.json");
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
@@ -71,6 +72,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
+    map.insert("pendle", PENDLE_BYTECODE_JSON);
     map
 });
 

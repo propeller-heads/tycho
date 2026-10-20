@@ -17,6 +17,10 @@ fs_permissions = [
     # with; the test checks the runtime bytecode fixtures protocol-testing plants and
     # `script/WriteRuntimeBytecodeFixtures.s.sol` writes them.
     { access = "read", path = "../config/executor_deployments.json" },
+    # `test/protocols/Pendle.t.sol` replays the swaps the simulation's parity test quotes.
+    { access = "read", path = "../../tycho-simulation/src/evm/protocol/pendle/tests/fixtures/executed_swaps.json" },
+    # It also reads the per-edge gas the simulation charges and checks it against the chain.
+    { access = "read", path = "../../tycho-simulation/src/evm/protocol/pendle/state.rs" },
     { access = "read-write", path = "../../../protocols/testing/fixtures" },
 ]
 

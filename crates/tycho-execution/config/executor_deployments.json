@@ -54,6 +54,10 @@
       "args": ["0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"]
     },
     "erc4626": { "contract": "ERC4626Executor", "args": [] },
+    "pendle": {
+      "contract": "PendleExecutor",
+      "args": ["0x888888888889758F76e7103c6CbF23ABbF58F946"]
+    },
     "rocketpool": {
       "contract": "RocketpoolExecutor",
       "args": ["0xCE15294273CFb9D9b628F4D61636623decDF4fdC"]

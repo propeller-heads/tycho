@@ -2,6 +2,7 @@
   "ethereum": {
     "uniswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
     "sushiswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+    "pendle": "0x8227724C33C1748A42d1C1cD06e21AB8Deb6eB0A",
     "ring_swap_v2": "0x796f2974e3C1af763252512dd6d521E9E984726C",
     "pancakeswap_v2": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
     "uniswap_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",

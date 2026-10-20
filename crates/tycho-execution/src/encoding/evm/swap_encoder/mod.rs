@@ -26,6 +26,7 @@ mod metric_fallback;
 mod native;
 mod native_wrap;
 mod pancakeswap_infinity;
+mod pendle;
 mod propamm;
 mod ring_swap_v2;
 mod rocketpool;

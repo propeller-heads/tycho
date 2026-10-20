@@ -4022,3 +4022,194 @@ fn test_sequential_encoding_strategy_sky() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
+
+/// The Pendle wstETH market expiring 30 Dec 2027, and the tokens `readTokens()` returns for it.
+const PENDLE_MARKET: &str = "0x34280882267ffa6383B363E278B027Be083bBe3b";
+const PENDLE_SY: &str = "0xcbC72d92b2dc8187414F6734718563898740C0BC";
+const PENDLE_PT: &str = "0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c";
+const PENDLE_YT: &str = "0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95";
+const WSTETH: &str = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0";
+
+fn pendle_market_component() -> ProtocolComponent {
+    ProtocolComponent {
+        id: String::from(PENDLE_MARKET),
+        protocol_system: String::from("pendle"),
+        static_attributes: HashMap::from([
+            ("sy_address".to_string(), Bytes::from_str(PENDLE_SY).unwrap()),
+            ("pt_address".to_string(), Bytes::from_str(PENDLE_PT).unwrap()),
+            ("yt_address".to_string(), Bytes::from_str(PENDLE_YT).unwrap()),
+        ]),
+        ..Default::default()
+    }
+}
+
+fn pendle_sy_component() -> ProtocolComponent {
+    ProtocolComponent {
+        id: String::from(PENDLE_SY),
+        protocol_system: String::from("pendle"),
+        ..Default::default()
+    }
+}
+
+/// Encodes one Pendle edge as a single swap of 1e18 and writes the calldata out for the
+/// Solidity fork test of the same name.
+fn write_pendle_calldata(
+    test_name: &str,
+    component: ProtocolComponent,
+    token_in: &str,
+    token_out: &str,
+    expected_amount_out: BigUint,
+) {
+    write_pendle_route_calldata(
+        test_name,
+        vec![(component, token_in, token_out)],
+        expected_amount_out,
+    );
+}
+
+/// Encodes Pendle edges, each feeding the next, as one route of 1e18 and writes the calldata
+/// out for the Solidity fork test of the same name.
+fn write_pendle_route_calldata(
+    test_name: &str,
+    hops: Vec<(ProtocolComponent, &str, &str)>,
+    expected_amount_out: BigUint,
+) {
+    let token_in = Bytes::from_str(hops[0].1).unwrap();
+    let token_out = Bytes::from_str(hops[hops.len() - 1].2).unwrap();
+    let swaps = hops
+        .into_iter()
+        .map(|(component, from, to)| {
+            Swap::new(
+                component,
+                default_token(Bytes::from_str(from).unwrap()),
+                default_token(Bytes::from_str(to).unwrap()),
+                BigUint::ZERO,
+            )
+        })
+        .collect();
+
+    // 2% below the quote, which is what leaves the router's slippage check able to fail.
+    let min_amount_out = &expected_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64);
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from(1_000_000_000_000_000_000_u128),
+        expected_amount_out,
+        min_amount_out,
+        swaps,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(test_name, encode(&calldata).as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_sy_for_pt() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_sy_for_pt",
+        pendle_market_component(),
+        PENDLE_SY,
+        PENDLE_PT,
+        BigUint::from(1_276_552_648_088_633_757_u128),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_pt_for_sy() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_pt_for_sy",
+        pendle_market_component(),
+        PENDLE_PT,
+        PENDLE_SY,
+        BigUint::from(781_959_205_515_422_198_u128),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_sy_for_yt() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_sy_for_yt",
+        pendle_market_component(),
+        PENDLE_SY,
+        PENDLE_YT,
+        BigUint::from(36_536_075_805_370_490_884_u128),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_yt_for_sy() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_yt_for_sy",
+        pendle_market_component(),
+        PENDLE_YT,
+        PENDLE_SY,
+        BigUint::from(21_770_141_148_458_769_u128),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_token_for_sy() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_token_for_sy",
+        pendle_sy_component(),
+        WSTETH,
+        PENDLE_SY,
+        BigUint::from(1_000_000_000_000_000_000_u128),
+    );
+}
+
+/// wstETH into the SY, then the SY into PT: a deposit feeding a market edge.
+#[test]
+fn test_sequential_encoding_strategy_pendle_token_sy_pt() {
+    write_pendle_route_calldata(
+        "test_sequential_encoding_strategy_pendle_token_sy_pt",
+        vec![
+            (pendle_sy_component(), WSTETH, PENDLE_SY),
+            (pendle_market_component(), PENDLE_SY, PENDLE_PT),
+        ],
+        BigUint::from(1_276_552_648_088_633_757_u128),
+    );
+}
+
+/// PT into the SY, then the SY out to wstETH: a redemption as a later hop, of SY the router
+/// already holds.
+#[test]
+fn test_sequential_encoding_strategy_pendle_pt_sy_token() {
+    write_pendle_route_calldata(
+        "test_sequential_encoding_strategy_pendle_pt_sy_token",
+        vec![
+            (pendle_market_component(), PENDLE_PT, PENDLE_SY),
+            (pendle_sy_component(), PENDLE_SY, WSTETH),
+        ],
+        BigUint::from(781_959_205_515_422_198_u128),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_pendle_sy_for_token() {
+    write_pendle_calldata(
+        "test_single_encoding_strategy_pendle_sy_for_token",
+        pendle_sy_component(),
+        PENDLE_SY,
+        WSTETH,
+        BigUint::from(1_000_000_000_000_000_000_u128),
+    );
+}

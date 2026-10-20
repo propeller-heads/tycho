@@ -24,11 +24,11 @@ use crate::encoding::{
             lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
             metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
             native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
-            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
-            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, pendle::PendleSwapEncoder,
+            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -158,6 +158,7 @@ impl SwapEncoderRegistry {
             p if UNISWAP_V2_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "pendle" => Ok(Box::new(PendleSwapEncoder::new(executor_address, self.chain, config)?)),
             "ring_swap_v2" => {
                 Ok(Box::new(RingSwapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }

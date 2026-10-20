@@ -265,6 +265,15 @@ contract Constants is
     // Rocketpool v1.4 (Saturn 1) deposit pool
     address ROCKET_DEPOSIT_POOL = 0xCE15294273CFb9D9b628F4D61636623decDF4fdC;
 
+    // Pendle Router V4, the periphery the market edges are executed through
+    address PENDLE_ROUTER_V4 = 0x888888888889758F76e7103c6CbF23ABbF58F946;
+
+    // Pendle wstETH market expiring 30 Dec 2027, and the tokens it reads back
+    address PENDLE_WSTETH_MARKET = 0x34280882267ffa6383B363E278B027Be083bBe3b;
+    address PENDLE_WSTETH_SY = 0xcbC72d92b2dc8187414F6734718563898740C0BC;
+    address PENDLE_WSTETH_PT = 0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c;
+    address PENDLE_WSTETH_YT = 0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95;
+
     /**
      * @dev Deploys a dummy contract with non-empty bytecode
      */

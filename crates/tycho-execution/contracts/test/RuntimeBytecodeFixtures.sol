@@ -94,6 +94,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
             "robinhood",
             "pancakeswap_infinity_cl"
         );
+        _executor("Pendle", "ethereum", "pendle");
         _executor("RingSwapV2", "ethereum", "ring_swap_v2");
         _executor("RingSwapV2Bsc", "bsc", "ring_swap_v2");
         _executor("Sky", "ethereum", "sky");

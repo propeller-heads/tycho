@@ -1,4 +1,7 @@
+use std::str::FromStr;
+
 use num_bigint::BigUint;
+use tycho_common::Bytes;
 
 use super::{
     constants::{
@@ -36,14 +39,23 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "vm:balancer_v3",
 ];
 
-/// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
-/// directly without an intermediate router hop). The input transfer cost is therefore not
-/// double-counted — it is only charged once, on the first hop or when the optimized path applies.
+/// Exact-name protocols whose input transfer the estimator does not charge separately: the funds
+/// reach the pool without a router-to-pool transfer of their own, or the pool pulls them inside
+/// the swap that `get_amount_out` already costs. Under the split strategy the input still passes
+/// through the router first, so the estimator adds that transfer back. The list affects only the
+/// gas estimate, not how a swap is encoded.
 ///
 /// This list is incomplete on its own: whole protocol families can qualify too. Use
 /// [`optimizable_transfer_in`] for the full classification.
-pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] =
-    &["erc4626", "maverick_v2", "uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
+    "erc4626",
+    "maverick_v2",
+    "pendle",
+    "uniswap_v2",
+    "sushiswap_v2",
+    "pancakeswap_v2",
+    "quickswap_v2",
+];
 
 /// Whether the router-to-pool input transfer is skipped for `protocol_system` (see
 /// [`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`]). Price-level-stream pAMMs are push-payment venues whose
@@ -110,6 +122,22 @@ fn lido_leg_needs_approval(
     protocol_system == "lido_v4" && token_in.address.as_ref() == LIDO_STETH_ADDRESS
 }
 
+/// Every Pendle leg except a redemption from an SY component, which is the leg whose input is the
+/// component itself. Router V4 and `SY.deposit` pull the input with `transferFrom`, so the router
+/// approves them, while `SY.redeem` burns the router's own shares.
+fn pendle_leg_needs_approval(
+    protocol_system: &str,
+    component_id: &str,
+    token_in: &tycho_common::models::token::Token,
+) -> bool {
+    if protocol_system != "pendle" {
+        return false;
+    }
+    let redeems_the_component =
+        Bytes::from_str(component_id).is_ok_and(|component| component == token_in.address);
+    !redeems_the_component
+}
+
 pub const ROUTER_FEES_ACTIVE: bool = true;
 
 /// Estimates the total gas cost for executing a `Solution`.
@@ -137,6 +165,7 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         let last_swap = &group.swaps[group.swaps.len() - 1];
         let group_transfer_overhead = estimate_transfer_overhead(
             &group.protocol_system,
+            &first_swap.component().id,
             first_swap.token_in(),
             last_swap.token_out(),
             &strategy,
@@ -231,6 +260,7 @@ fn transfer_token_gas(token: &tycho_common::models::token::Token) -> BigUint {
 ///   true`, or any protocol when the strategy is Split (output always routes through the router).
 fn estimate_transfer_overhead(
     protocol_system: &str,
+    component_id: &str,
     token_in: &tycho_common::models::token::Token,
     token_out: &tycho_common::models::token::Token,
     strategy: &Strategy,
@@ -247,7 +277,10 @@ fn estimate_transfer_overhead(
         overhead += transfer_token_gas(token_in);
     }
 
-    if needs_approval(protocol_system) || lido_leg_needs_approval(protocol_system, token_in) {
+    if needs_approval(protocol_system) ||
+        lido_leg_needs_approval(protocol_system, token_in) ||
+        pendle_leg_needs_approval(protocol_system, component_id, token_in)
+    {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
@@ -303,6 +336,7 @@ mod tests {
             let swap = lido_swap(token_in, token_out);
             estimate_transfer_overhead(
                 "lido_v4",
+                &swap.component().id,
                 swap.token_in(),
                 swap.token_out(),
                 &Strategy::Single,
@@ -317,6 +351,29 @@ mod tests {
         assert_eq!(overhead(eth, wsteth.clone()), input_and_output.clone());
         assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output.clone());
         assert_eq!(overhead(steth, wsteth), input_and_output + BigUint::from(TOKEN_APPROVAL_GAS));
+    }
+
+    /// A Pendle leg approves Router V4 or the SY it deposits into, except a redemption from the
+    /// SY component, whose input is the component itself and which burns the router's shares.
+    #[test]
+    fn pendle_charges_an_approval_on_every_leg_but_a_redemption() {
+        let sy = Bytes::from(vec![0xcbu8; 20]);
+        let market = Bytes::from(vec![0x34u8; 20]);
+        let wsteth = Bytes::from(vec![0x7fu8; 20]);
+        let pt = Bytes::from(vec![0xb2u8; 20]);
+        let approves = |component: &Bytes, token_in: &Bytes| {
+            pendle_leg_needs_approval(
+                "pendle",
+                &component.to_string(),
+                &default_token(token_in.clone()),
+            )
+        };
+
+        assert!(approves(&market, &sy), "SY -> PT is pulled by Router V4");
+        assert!(approves(&market, &pt), "PT -> SY is pulled by Router V4");
+        assert!(approves(&sy, &wsteth), "a deposit is pulled by the SY");
+        assert!(!approves(&sy, &sy), "a redemption burns the router's own shares");
+        assert!(!pendle_leg_needs_approval("lido_v4", &sy.to_string(), &default_token(wsteth)));
     }
 
     fn make_swap(protocol: &str) -> Swap {
