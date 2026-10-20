@@ -9,6 +9,7 @@ mod bopamm;
 mod curve;
 mod ekubo;
 mod ekubo_v3;
+mod elfomofi;
 mod erc_4626;
 mod etherfi;
 mod euclid;

@@ -34,6 +34,7 @@ use crate::encoding::{
             rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
             slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
             uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            elfomofi::ElfomofiSwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -266,6 +267,9 @@ impl SwapEncoderRegistry {
             }
             "rfq:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "elfomofi" => {
+                Ok(Box::new(ElfomofiSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "rfq:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
