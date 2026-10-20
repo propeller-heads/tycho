@@ -202,6 +202,19 @@ impl Pool {
         }
     }
 
+    /// True for a CryptoSwap pool without liquidity: D or a coin balance is zero.
+    ///
+    /// The CryptoSwap solvers divide by D and by the coin balances, so they must not run on such
+    /// a pool. The on-chain pool cannot swap either.
+    fn is_drained_crypto(&self) -> bool {
+        self.d().is_some_and(|d| {
+            d.is_zero() ||
+                self.balances()
+                    .iter()
+                    .any(U256::is_zero)
+        })
+    }
+
     /// Compute output amount for swapping `dx` of coin `i` into coin `j`.
     ///
     /// Returns `None` if the swap would fail (zero input, out of range, etc.).
@@ -212,6 +225,9 @@ impl Pool {
     /// * `j` — index of output coin
     /// * `dx` — amount of coin `i` to swap (in coin's native decimals)
     pub fn get_amount_out(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        if self.is_drained_crypto() {
+            return None;
+        }
         match self {
             Pool::StableSwapV0 { balances, rates, amp, fee } => {
                 swap::stableswap_v0::get_amount_out(balances, rates, *amp, *fee, i, j, dx)
@@ -380,6 +396,9 @@ impl Pool {
     /// Returns `None` if the swap is not feasible.
     /// Guaranteed: `get_amount_out(i, j, get_amount_in(i, j, dy)) >= dy`.
     pub fn get_amount_in(&self, i: usize, j: usize, desired_output: U256) -> Option<U256> {
+        if self.is_drained_crypto() {
+            return None;
+        }
         match self {
             Pool::StableSwapV0 { balances, rates, amp, fee } => swap::stableswap_v0::get_amount_in(
                 balances,
@@ -582,6 +601,9 @@ impl Pool {
     /// For a small swap of coin `i` → coin `j`, the price is approximately
     /// `numerator / denominator` in units of coin `j` per coin `i`.
     pub fn spot_price(&self, i: usize, j: usize) -> Option<(U256, U256)> {
+        if self.is_drained_crypto() {
+            return None;
+        }
         match self {
             Pool::StableSwapV0 { balances, rates, amp, fee } => {
                 swap::stableswap_v0::spot_price(balances, rates, *amp, *fee, i, j)
@@ -973,6 +995,203 @@ impl Pool {
                 Ok(())
             }
             _ => Err(PoolError::NotApplicable),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wad() -> U256 {
+        U256::from(10u64).pow(U256::from(18u64))
+    }
+
+    /// Every variant with all balances (and D, for CryptoSwap) at zero: a fully drained pool.
+    fn drained_pools() -> Vec<(&'static str, Pool)> {
+        let z = U256::ZERO;
+        let one = U256::from(1u64);
+        let wad = wad();
+        let ann = U256::from(400_000u64);
+        let gamma = U256::from(145_000_000_000_000u64);
+        let (mid_fee, out_fee, fee_gamma) = (
+            U256::from(26_000_000u64),
+            U256::from(45_000_000u64),
+            U256::from(230_000_000_000_000u64),
+        );
+        let stable = |balances: Vec<U256>| (balances.clone(), vec![wad; balances.len()]);
+        let (b2, r2) = stable(vec![z, z]);
+        vec![
+            (
+                "StableSwapV0",
+                Pool::StableSwapV0 {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(100u64),
+                    fee: U256::from(4_000_000u64),
+                },
+            ),
+            (
+                "StableSwapV1",
+                Pool::StableSwapV1 {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(100u64),
+                    fee: U256::from(4_000_000u64),
+                },
+            ),
+            (
+                "StableSwapV2",
+                Pool::StableSwapV2 {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(10_000u64),
+                    fee: U256::from(4_000_000u64),
+                },
+            ),
+            (
+                "StableSwapSTETH",
+                Pool::StableSwapSTETH {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(10_000u64),
+                    fee: U256::from(4_000_000u64),
+                },
+            ),
+            (
+                "StableSwapALend",
+                Pool::StableSwapALend {
+                    balances: b2.clone(),
+                    precision_mul: vec![one, one],
+                    amp: U256::from(10_000u64),
+                    fee: U256::from(4_000_000u64),
+                    offpeg_fee_multiplier: U256::from(20_000_000_000u64),
+                },
+            ),
+            (
+                "StableSwapNG",
+                Pool::StableSwapNG {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(10_000u64),
+                    fee: U256::from(4_000_000u64),
+                    offpeg_fee_multiplier: U256::from(20_000_000_000u64),
+                },
+            ),
+            (
+                "StableSwapMeta",
+                Pool::StableSwapMeta {
+                    balances: b2.clone(),
+                    rates: r2.clone(),
+                    amp: U256::from(10_000u64),
+                    fee: U256::from(4_000_000u64),
+                },
+            ),
+            (
+                "TwoCryptoV1",
+                Pool::TwoCryptoV1 {
+                    balances: [z, z],
+                    precisions: [U256::from(10u64).pow(U256::from(12u64)), one],
+                    price_scale: wad,
+                    d: z,
+                    ann,
+                    gamma,
+                    mid_fee,
+                    out_fee,
+                    fee_gamma,
+                    eth_variant: false,
+                },
+            ),
+            (
+                "TwoCryptoNG",
+                Pool::TwoCryptoNG {
+                    balances: [z, z],
+                    precisions: [U256::from(10u64).pow(U256::from(12u64)), one],
+                    price_scale: wad,
+                    d: z,
+                    ann,
+                    gamma,
+                    mid_fee,
+                    out_fee,
+                    fee_gamma,
+                },
+            ),
+            (
+                "TwoCryptoStable",
+                Pool::TwoCryptoStable {
+                    balances: [z, z],
+                    precisions: [U256::from(10u64).pow(U256::from(12u64)), one],
+                    price_scale: wad,
+                    d: z,
+                    ann,
+                    mid_fee,
+                    out_fee,
+                    fee_gamma,
+                },
+            ),
+            (
+                "TriCryptoV1",
+                Pool::TriCryptoV1 {
+                    balances: [z, z, z],
+                    precisions: [
+                        U256::from(10u64).pow(U256::from(12u64)),
+                        U256::from(10u64).pow(U256::from(10u64)),
+                        one,
+                    ],
+                    price_scale: [wad, wad],
+                    d: z,
+                    ann,
+                    gamma,
+                    mid_fee,
+                    out_fee,
+                    fee_gamma,
+                },
+            ),
+            (
+                "TriCryptoNG",
+                Pool::TriCryptoNG {
+                    balances: [z, z, z],
+                    precisions: [
+                        U256::from(10u64).pow(U256::from(12u64)),
+                        U256::from(10u64).pow(U256::from(10u64)),
+                        one,
+                    ],
+                    price_scale: [wad, wad],
+                    d: z,
+                    ann,
+                    gamma,
+                    mid_fee,
+                    out_fee,
+                    fee_gamma,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn drained_pool_returns_none() {
+        let dx = U256::from(10u64).pow(U256::from(15u64));
+        for (name, pool) in drained_pools() {
+            assert_eq!(pool.spot_price(0, 1), None, "{name} spot_price");
+            assert_eq!(pool.get_amount_out(0, 1, dx), None, "{name} get_amount_out");
+            assert_eq!(pool.get_amount_in(0, 1, dx), None, "{name} get_amount_in");
+        }
+    }
+
+    #[test]
+    fn crypto_pool_with_one_empty_coin_returns_none() {
+        let dx = U256::from(10u64).pow(U256::from(15u64));
+        for (name, mut pool) in drained_pools() {
+            if pool.d().is_none() {
+                continue;
+            }
+            // D and coin 0 are non-zero; coin 1 stays empty.
+            pool.set_d(U256::from(10u64).pow(U256::from(22u64)))
+                .unwrap();
+            pool.set_balance(0, U256::from(10u64).pow(U256::from(22u64)))
+                .unwrap();
+            assert_eq!(pool.spot_price(0, 1), None, "{name} spot_price");
+            assert_eq!(pool.get_amount_out(0, 1, dx), None, "{name} get_amount_out");
         }
     }
 }
