@@ -153,6 +153,10 @@
       "args": ["0x4200000000000000000000000000000000000006"]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "elfomofi": {
+      "contract": "ElfomofiExecutor",
+      "args": ["0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73", "299"]
+    },
     "fallback": {
       "contract": "PropAMMFallbackExecutor",
       "args": ["0xd38142E88f3d1011D8258737f257c709Dd0e2204"]
@@ -244,6 +248,10 @@
     }
   },
   "bsc": {
+    "elfomofi": {
+      "contract": "ElfomofiExecutor",
+      "args": ["0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73", "299"]
+    },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "ring_swap_v2": {
       "contract": "RingSwapV2Executor",
@@ -306,6 +314,10 @@
     }
   },
   "robinhood": {
+    "elfomofi": {
+      "contract": "ElfomofiExecutor",
+      "args": ["0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73", "299"]
+    },
     "uniswap_v2": { "contract": "UniswapV2Executor", "args": [30] },
     "ekubo_v3": {
       "contract": "EkuboV3RobinhoodExecutor",

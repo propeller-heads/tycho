@@ -205,6 +205,11 @@ impl SwapEncoderRegistry {
             "rfq:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "elfomofi" => Ok(Box::new(super::elfomofi::ElfomofiSwapEncoder::new(
+                executor_address,
+                self.chain,
+                config,
+            )?)),
             "rfq:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
