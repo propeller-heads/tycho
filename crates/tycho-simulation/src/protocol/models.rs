@@ -59,6 +59,9 @@ pub enum BlockPositionAssumption {
 pub struct DecoderContext {
     pub adapter_path: Option<String>,
     pub vm_traces: Option<bool>,
+    /// Immediate caller of the venue during execution (the router for delegatecall executors).
+    /// Caller-priced protocols may supply a default; set this to match a custom execution path.
+    pub caller: Option<Bytes>,
     /// What quotes may assume about the swap's position within its execution block.
     ///
     /// Only consumed by protocols that price the first swap of a block differently (currently
@@ -84,6 +87,7 @@ impl DecoderContext {
         Self {
             adapter_path: None,
             vm_traces: None,
+            caller: None,
             block_position: BlockPositionAssumption::default(),
             live_override: None,
             chain: None,
@@ -97,6 +101,11 @@ impl DecoderContext {
     /// set here with the decoder's own chain.
     pub fn chain(mut self, chain: Chain) -> Self {
         self.chain = Some(chain);
+        self
+    }
+
+    pub fn caller(mut self, caller: Bytes) -> Self {
+        self.caller = Some(caller);
         self
     }
 

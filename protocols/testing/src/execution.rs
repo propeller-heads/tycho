@@ -33,6 +33,7 @@ const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const BAIBAI_BYTECODE_JSON: &str = include_str!("../fixtures/Baibai.runtime.json");
 const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
@@ -83,6 +84,7 @@ static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'stati
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+            ((Chain::Base, "baibai"), BAIBAI_BYTECODE_JSON),
             (
                 (Chain::Robinhood, "pancakeswap_infinity_cl"),
                 PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON,
