@@ -269,6 +269,14 @@
       "contract": "NativeExecutor",
       "args": ["0x1fDED89D98CBeADd96a109D28689c2638025dad3"]
     },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x174ec4B11994b36AfCCA0d31b6c591594cDdA1FB"]
+    },
     "pancakeswap_infinity_cl": {
       "contract": "PancakeswapInfinityExecutor",
       "args": [
@@ -276,7 +284,8 @@
         "0xa0FfB9c1CE1Fe56963B0321B32E7A0302114058b",
         "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
       ]
-    }
+    },
+    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] }
   },
   "plasma": {
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
@@ -325,6 +334,14 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
+    },
+    "pancakeswap_infinity_cl": {
+      "contract": "PancakeswapInfinityRobinhoodExecutor",
+      "args": [
+        "0x4F922d5B15e6691e0469663E4F5C4177f23c5FaF",
+        "0xeE04c68742e6Bf434bE8039580D2e89BBE55bc6f",
+        "0x0000000000000000000000000000000000000000"
+      ]
     }
   },
   "arc": {

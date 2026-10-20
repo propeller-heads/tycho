@@ -426,7 +426,8 @@ flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
-e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
+e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (off-chain book feeds — the RFQ venues and Metric,
+e.g. `rfq:bebop`, `rfq:metric`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
 with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
@@ -469,8 +470,10 @@ and output forward.
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
-executor configs. A chain missing from the list has no router and supports nothing. Only Ethereum
-and Base are listed today.
+executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
+Base, Robinhood and BSC are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2 with
+`fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no static
+quoter.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same

@@ -19,7 +19,7 @@ use tycho_simulation::{
 
 use crate::{
     metrics,
-    stream_processor::{StreamUpdate, UpdateType},
+    stream_processor::{StreamUpdate, StreamUpdatePayload},
 };
 
 /// Streams Titan pAMM price level updates and forwards throttled, sampled [`StreamUpdate`]s.
@@ -228,8 +228,7 @@ impl SampledEmitter {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| miette!(e).wrap_err("Error getting current timestamp"))?;
         let stream_update = StreamUpdate {
-            update_type: UpdateType::PriceLevelStream,
-            update: emitted,
+            payload: StreamUpdatePayload::PriceLevelStream(emitted),
             is_first_update: self.is_first_update,
             received_at,
         };
@@ -291,8 +290,16 @@ mod tests {
         ))
     }
 
+    /// The emitted update's inner `Update` (always a `PriceLevelStream` payload here).
+    fn inner(emitted: &StreamUpdate) -> &Update {
+        match &emitted.payload {
+            StreamUpdatePayload::PriceLevelStream(update) => update,
+            other => panic!("expected a price level payload, got {other}"),
+        }
+    }
+
     fn marker(emitted: &StreamUpdate, id: &str) -> u64 {
-        let state = emitted.update.states[id]
+        let state = inner(emitted).states[id]
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .expect("price level state");
@@ -336,11 +343,10 @@ mod tests {
             .expect("emission expected")
             .unwrap();
         assert!(emitted.is_first_update);
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 100);
         assert_eq!(marker(&emitted, "a"), 2);
         // The component was announced two messages ago; the emitted update re-joins it.
-        assert!(emitted
-            .update
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("a"));
 
@@ -349,7 +355,7 @@ mod tests {
             .expect("emission expected")
             .unwrap();
         assert!(!emitted.is_first_update);
-        assert_eq!(emitted.update.block_number_or_timestamp, 101);
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 101);
         assert_eq!(marker(&emitted, "a"), 3);
     }
 
@@ -371,7 +377,7 @@ mod tests {
             .handle(update(101, &[("a", 2), ("b", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 100);
         assert_eq!(marker(&emitted, "a"), 1);
 
         // The stale message's announcement of pair b resolves this emission's component lookup.
@@ -379,8 +385,7 @@ mod tests {
             .handle(update(102, &[("a", 3)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted
-            .update
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("b"));
     }
@@ -394,7 +399,7 @@ mod tests {
             .handle(update(101, &[("a", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 100);
 
         // Block 101 fell into the throttle window, so its snapshot is never chosen: block 102's
         // arrival emits nothing, but is chosen itself.
@@ -405,7 +410,7 @@ mod tests {
             .handle(update(103, &[("a", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 102);
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 102);
         assert_eq!(marker(&emitted, "a"), 3);
     }
 
@@ -420,19 +425,18 @@ mod tests {
             .handle(update(101, &[("a", 3)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
-        assert!(emitted
-            .update
+        assert_eq!(inner(&emitted).block_number_or_timestamp, 100);
+        assert!(inner(&emitted)
             .removed_pairs
             .contains_key("b"));
-        assert!(!emitted.update.states.contains_key("b"));
+        assert!(!inner(&emitted).states.contains_key("b"));
 
         // Flushed removals do not linger into later emissions.
         let emitted = emitter
             .handle(update(102, &[("a", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted.update.removed_pairs.is_empty());
+        assert!(inner(&emitted).removed_pairs.is_empty());
     }
 
     #[test]
@@ -446,10 +450,9 @@ mod tests {
             .handle(update(101, &[("a", 4), ("b", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted.update.removed_pairs.is_empty());
-        assert!(emitted.update.states.contains_key("b"));
-        assert!(emitted
-            .update
+        assert!(inner(&emitted).removed_pairs.is_empty());
+        assert!(inner(&emitted).states.contains_key("b"));
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("b"));
     }
@@ -463,16 +466,14 @@ mod tests {
             .handle(update(101, &[("a", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.states.len(), 2);
+        assert_eq!(inner(&emitted).states.len(), 2);
         // Exactly the sampled pairs carry their component.
         assert_eq!(
-            emitted
-                .update
+            inner(&emitted)
                 .new_pairs
                 .keys()
                 .collect::<HashSet<_>>(),
-            emitted
-                .update
+            inner(&emitted)
                 .states
                 .keys()
                 .collect::<HashSet<_>>()

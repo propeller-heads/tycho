@@ -26,8 +26,11 @@ cargo run -p tycho-integration-test -- \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
-`--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
+Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
+`--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--protocols uniswap_v2,curve`,
+`--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
+each one must be enabled),
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
 `--test-every-n-updates 10`, `--bypass-executor-timelock`.
@@ -40,7 +43,7 @@ router keeps its deployed bytecode, and only the read-only simulation call is af
 help an executor that has no bytecode deployed. Off by default so that a missing activation still
 shows up as a failure.
 
-`rfq:metric` updates on Ethereum need Metric's oracle update, which Titan orders first in the block
+Metric book updates (`rfq:metric`) on Ethereum need Metric's oracle update, which Titan orders first in the block
 it builds. They are simulated at the block after the latest one, under the overrides Titan's state
 stream published for that block on both Metric oracle channels; a block without them is skipped.
 The simulation runs on that block's post-state, so a trade earlier in the same block that drained
@@ -57,8 +60,8 @@ the pool shows up as slippage.
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
-  - `rfq_stream_processor.rs`: Handles RFQ protocol updates — fetches live quotes, compares
-    against simulation
+  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
+    fetches live quotes, compares against simulation
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
     only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a
     chosen block's latest snapshot back until the stream moves to the next block (least drift to

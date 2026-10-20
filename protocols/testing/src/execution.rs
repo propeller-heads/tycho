@@ -39,6 +39,8 @@ const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.ru
 const LIDO_V4_BYTECODE_JSON: &str = include_str!("../fixtures/LidoV4.runtime.json");
 const PANCAKESWAP_INFINITY_CL_BYTECODE_JSON: &str =
     include_str!("../fixtures/PancakeswapInfinity.runtime.json");
+const PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON: &str =
+    include_str!("../fixtures/PancakeswapInfinityRobinhood.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
 static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -81,6 +83,10 @@ static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'stati
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+            (
+                (Chain::Robinhood, "pancakeswap_infinity_cl"),
+                PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON,
+            ),
         ])
     });
 

@@ -1,153 +1,262 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     str::FromStr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
 
-use alloy::primitives::utils::keccak256;
-use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use futures::stream::BoxStream;
 use num_bigint::BigUint;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
-use tokio::time::{interval, timeout, Duration};
-use tracing::{debug, error, info, warn};
+use tokio::time::{timeout, Duration};
+use tracing::{debug, instrument, warn};
 use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
+    models::protocol::GetAmountOutParams, simulation::indicatively_priced::SignedQuote, Bytes,
 };
 
 use crate::{
     evm::protocol::u256_num::biguint_to_u256,
     rfq::{
-        client::RFQClient,
         errors::RFQError,
-        models::{ComponentLayout, QuoteRule, TimestampHeader},
-        protocols::{
-            component,
-            liquorice::models::{
-                LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
-                LiquoriceTokenPairPrice,
-            },
-            maker_price_levels::{self, MakerLevelsWithTvl, MakerPriceLevels},
+        protocols::liquorice::models::{
+            LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
+            LiquoriceTokenPairPrice,
         },
     },
-    tycho_client::feed::synchronizer::{ComponentWithState, StateSyncMessage},
-    tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+    snapshot_feed::{errors::FeedError, http::read_json},
 };
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Whether Liquorice refused the request because it does not price the chain. It rejects the
+/// query parameter in plain text, naming the field and then the chain ids it does take.
+fn refuses_the_chain(body: &str) -> bool {
+    body.contains("chainId: invalid value")
+}
+
+/// Liquorice's public solver API, where a client talks unless it is given another.
+const LIQUORICE_API_URL: &str = "https://api.liquorice.tech";
+
+/// Requests binding Liquorice quotes. One instance is shared (via `Arc`) by every state a
+/// [`LiquoriceFeed`](super::feed::LiquoriceFeed) emits, so all of them reuse the same HTTP
+/// connection pool.
+///
+/// It is also how the feed reads the venue's price levels, so every request to Liquorice —
+/// quotes and books alike — goes through this one type and its one connection pool.
+#[derive(derive_more::Debug)]
 pub struct LiquoriceClient {
-    chain: Chain,
-    price_levels_endpoint: String,
+    chain_id: u64,
     quote_endpoint: String,
-    // Tokens that we want prices for
-    tokens: HashSet<Bytes>,
-    // Min tvl value in the quote token.
-    tvl: f64,
+    price_levels_endpoint: String,
     // solver header for authentication
-    #[serde(skip_serializing, default)]
+    #[debug(skip)]
     auth_solver: String,
     // key header for authentication
-    #[serde(skip_serializing, default)]
+    #[debug(skip)]
     auth_key: String,
-    quote_tokens: HashSet<Bytes>,
-    poll_time: Duration,
     quote_timeout: Duration,
     quote_expiry_secs: u64,
-    #[serde(default)]
-    component_layout: ComponentLayout,
-    /// How often one route may take quotes from Liquorice. Read only by the all-pairs layout.
-    #[serde(default = "LiquoriceClient::default_quote_rule")]
-    quote_rule: QuoteRule,
-    /// Liquorice issues credentials under two schemes: newer accounts use
-    /// `Authorization: Basic base64(solver:key)`, legacy accounts use the
-    /// separate `solver` + `authorization` headers. We start with Basic and
-    /// permanently fall back to the legacy scheme if it returns 401.
-    #[serde(skip)]
-    use_legacy_auth: Arc<AtomicBool>,
+    http: Client,
+    /// Liquorice issues credentials under two schemes: newer accounts authenticate with
+    /// `Authorization: Basic base64(solver:key)`, older ones with a separate `solver` header
+    /// beside `authorization`. Every client starts on Basic and switches to the legacy pair for
+    /// good once the venue answers 401.
+    use_legacy_auth: AtomicBool,
 }
 
 impl LiquoriceClient {
-    pub const PROTOCOL_SYSTEM: &'static str = "rfq:liquorice";
-    pub const DEFAULT_QUOTE_RULE: QuoteRule = QuoteRule::OncePerMaker;
-
-    #[allow(clippy::too_many_arguments)]
+    /// A client for Liquorice's solver API, whose quote and price-level endpoints share the
+    /// version's own path. `base_url` points it somewhere else than the venue, which is how a
+    /// test reaches a server of its own.
     pub fn new(
-        chain: Chain,
-        tokens: HashSet<Bytes>,
-        tvl: f64,
-        quote_tokens: HashSet<Bytes>,
+        base_url: Option<&str>,
+        chain_id: u64,
         auth_solver: String,
         auth_key: String,
-        poll_time: Duration,
         quote_timeout: Duration,
         quote_expiry_secs: u64,
-    ) -> Result<Self, RFQError> {
-        Ok(Self {
-            chain,
-            price_levels_endpoint: "https://api.liquorice.tech/v1/solver/price-levels".to_string(),
-            quote_endpoint: "https://api.liquorice.tech/v1/solver/rfq".to_string(),
-            tokens,
-            tvl,
+    ) -> Self {
+        let base_url = base_url.unwrap_or(LIQUORICE_API_URL);
+        let solver = format!("{}/v1/solver", base_url.trim_end_matches('/'));
+        LiquoriceClient {
+            chain_id,
+            quote_endpoint: format!("{solver}/rfq"),
+            price_levels_endpoint: format!("{solver}/price-levels"),
             auth_solver,
             auth_key,
-            quote_tokens,
-            poll_time,
             quote_timeout,
             quote_expiry_secs,
-            component_layout: ComponentLayout::PerPair,
-            quote_rule: Self::DEFAULT_QUOTE_RULE,
-            use_legacy_auth: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    fn default_quote_rule() -> QuoteRule {
-        Self::DEFAULT_QUOTE_RULE
-    }
-
-    pub(crate) fn with_component_layout(mut self, component_layout: ComponentLayout) -> Self {
-        self.component_layout = component_layout;
-        self
-    }
-
-    pub(crate) fn with_quote_rule(mut self, quote_rule: QuoteRule) -> Self {
-        self.quote_rule = quote_rule;
-        self
-    }
-
-    /// The name the client's stream tags its messages with. The two layouts use different names,
-    /// so one stream builder can carry a client of each.
-    fn stream_name(&self) -> &'static str {
-        match self.component_layout {
-            ComponentLayout::PerPair => "liquorice",
-            ComponentLayout::AllPairs => "liquorice_all_pairs",
+            http: Client::new(),
+            use_legacy_auth: AtomicBool::new(false),
         }
     }
 
-    pub fn quote_rule(&self) -> QuoteRule {
-        self.quote_rule
+    /// Every maker's current price levels, keyed by maker name.
+    pub async fn fetch_price_levels(
+        &self,
+    ) -> Result<HashMap<String, Vec<LiquoriceTokenPairPrice>>, FeedError> {
+        let response = self
+            .send_authed(|| {
+                self.http
+                    .get(&self.price_levels_endpoint)
+                    .query(&[("chainId", self.chain_id.to_string())])
+                    .header("accept", "application/json")
+            })
+            .await
+            .map_err(|e| {
+                FeedError::Connection(format!("Failed to fetch Liquorice price levels: {e}"))
+            })?;
+        let price_response: LiquoricePriceLevelsResponse =
+            read_json(response, "Liquorice price levels", refuses_the_chain).await?;
+        Ok(price_response.prices)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_quote_endpoint(mut self, quote_endpoint: String) -> Self {
-        self.quote_endpoint = quote_endpoint;
-        self
+    #[instrument(
+        name = "quote_request",
+        level = "error",
+        skip_all,
+        fields(token_in = %params.token_in, token_out = %params.token_out, amount_in = %params.amount_in)
+    )]
+    /// Requests a signed quote from `market_maker` alone, the maker whose ladder the state
+    /// priced the swap against, so the quote commits to the trade that was simulated.
+    pub async fn request_binding_quote(
+        &self,
+        params: &GetAmountOutParams,
+        market_maker: &str,
+    ) -> Result<SignedQuote, RFQError> {
+        let expiry = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into()))?
+            .as_secs() +
+            self.quote_expiry_secs;
+
+        let rfq_id = uuid::Uuid::new_v4().to_string();
+
+        let quote_request = LiquoriceQuoteRequest {
+            chain_id: self.chain_id,
+            rfq_id: rfq_id.clone(),
+            expiry,
+            base_token: params.token_in.to_string(),
+            quote_token: params.token_out.to_string(),
+            trader: params.receiver.to_string(),
+            effective_trader: Some(params.sender.to_string()),
+            base_token_amount: Some(params.amount_in.to_string()),
+            quote_token_amount: None,
+        };
+
+        let url = self.quote_endpoint.clone();
+
+        let start_time = std::time::Instant::now();
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            let elapsed = start_time.elapsed();
+            if elapsed >= self.quote_timeout {
+                return Err(last_error.unwrap_or_else(|| {
+                    RFQError::ConnectionError(format!(
+                        "Liquorice quote request timed out after {:?}",
+                        self.quote_timeout
+                    ))
+                }));
+            }
+
+            let remaining_time = self.quote_timeout - elapsed;
+
+            let send = self.send_authed(|| {
+                self.http
+                    .post(&url)
+                    .json(&quote_request)
+                    .header("accept", "application/json")
+            });
+
+            let response = match timeout(remaining_time, send).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote request failed");
+                    last_error = Some(RFQError::ConnectionError(format!(
+                        "Failed to send Liquorice quote request: {e}"
+                    )));
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap());
+                    }
+                }
+                Err(_) => {
+                    return Err(RFQError::ConnectionError(format!(
+                        "Liquorice quote request timed out after {:?}",
+                        self.quote_timeout
+                    )));
+                }
+            };
+
+            let status = response.status();
+            if status != 200 {
+                let err_msg = match response.text().await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "error response parsing failed");
+                        last_error = Some(RFQError::ParsingError(format!(
+                            "Failed to read response text from Liquorice failed request: {e}"
+                        )));
+                        if attempt < MAX_RETRIES - 1 {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        } else {
+                            return Err(last_error.unwrap());
+                        }
+                    }
+                };
+                // The venue answering a quote request at all means the request reached it,
+                // so a status it refuses with is about this attempt: a rate limit, a gateway
+                // between us and it, or a key to be fixed at the venue while the feed runs on.
+                last_error = Some(RFQError::ConnectionError(format!(
+                    "Liquorice quote request failed with {status}: {err_msg}",
+                )));
+                if attempt < MAX_RETRIES - 1 {
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                } else {
+                    return Err(last_error.unwrap());
+                }
+            }
+
+            let quote_response = match response
+                .json::<LiquoriceQuoteResponse>()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote response parsing failed");
+                    last_error = Some(RFQError::ParsingError(format!(
+                        "Failed to parse Liquorice quote response: {e}"
+                    )));
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap());
+                    }
+                }
+            };
+
+            return Self::process_quote_response(quote_response, params, market_maker);
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            RFQError::ConnectionError("Liquorice quote request failed after retries".to_string())
+        }))
     }
 
-    /// Build the `Authorization: Basic <base64(solver:token)>` header value
-    /// required by the Liquorice REST API.
+    /// The `Authorization: Basic <base64(solver:key)>` value the venue expects from an account
+    /// on the current credential scheme.
     fn basic_auth_header(&self) -> String {
         let credentials = format!("{}:{}", self.auth_solver, self.auth_key);
         format!("Basic {}", BASE64_STANDARD.encode(credentials.as_bytes()))
     }
 
-    /// Applies whichever auth scheme is currently active to the request.
+    /// Puts whichever credential scheme is currently in use on `request`.
     fn apply_auth(&self, request: RequestBuilder) -> RequestBuilder {
         if self
             .use_legacy_auth
@@ -161,9 +270,9 @@ impl LiquoriceClient {
         }
     }
 
-    /// Sends a request, retrying once with the legacy auth scheme if the
-    /// server rejects Basic auth. The working scheme is remembered for the
-    /// lifetime of the client.
+    /// Sends `build()` under the current credential scheme, retrying once under the legacy one
+    /// when the venue answers 401. The scheme that is accepted is kept for the client's lifetime,
+    /// so an account on legacy credentials pays the rejected attempt only on its first request.
     async fn send_authed(
         &self,
         build: impl Fn() -> RequestBuilder,
@@ -174,218 +283,43 @@ impl LiquoriceClient {
                 .use_legacy_auth
                 .swap(true, Ordering::Relaxed)
         {
-            warn!("Liquorice Basic auth rejected (401); retrying with legacy solver/authorization headers");
+            warn!("Basic auth rejected, retrying with the legacy solver and authorization headers");
             return self.apply_auth(build()).send().await;
         }
         Ok(response)
     }
 
-    fn normalize_tvl(
-        &self,
-        raw_tvl: f64,
-        quote_token: Bytes,
-        prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
-    ) -> Result<f64, RFQError> {
-        if self.quote_tokens.contains(&quote_token) {
-            return Ok(raw_tvl);
-        }
-
-        for approved_quote_token in &self.quote_tokens {
-            for token_prices in prices_by_mm.values() {
-                for token_price in token_prices {
-                    if token_price.base_token == quote_token &&
-                        token_price.quote_token == *approved_quote_token
-                    {
-                        if let Some(price) = token_price.get_price_for_amount(1.0) {
-                            return Ok(raw_tvl * price);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(0.0)
-    }
-
-    fn create_component_with_state(
-        &self,
-        component_id: String,
-        tokens: Vec<Bytes>,
-        prices_by_mm: &HashMap<String, LiquoriceTokenPairPrice>,
-        tvl: f64,
-    ) -> ComponentWithState {
-        let protocol_component = ProtocolComponent {
-            id: component_id.clone(),
-            protocol_system: Self::PROTOCOL_SYSTEM.to_string(),
-            protocol_type_name: "liquorice_pool".to_string(),
-            chain: self.chain,
-            tokens,
-            contract_addresses: vec![],
-            ..Default::default()
-        };
-
-        let mut attributes = HashMap::new();
-
-        let prices_json = serde_json::to_string(&prices_by_mm).unwrap_or_default();
-        attributes.insert("prices".to_string(), prices_json.as_bytes().to_vec().into());
-
-        ComponentWithState {
-            state: ProtocolComponentState::new(&component_id, attributes, HashMap::new()),
-            component: protocol_component,
-            component_tvl: Some(tvl),
-            entrypoints: vec![],
-        }
-    }
-
-    /// Every market maker's prices on a pair whose tokens the client requested and whose TVL
-    /// clears the threshold, each with its normalized TVL.
-    fn levels_above_tvl_threshold<'a>(
-        &self,
-        prices_by_mm: &'a HashMap<String, Vec<LiquoriceTokenPairPrice>>,
-    ) -> Result<Vec<MakerLevelsWithTvl<'a, LiquoriceTokenPairPrice>>, RFQError> {
-        let mut kept = Vec::new();
-        for (mm_name, token_pair_prices) in prices_by_mm.iter() {
-            for token_pair_price in token_pair_prices {
-                let base_token = &token_pair_price.base_token;
-                let quote_token = &token_pair_price.quote_token;
-
-                if !self.tokens.contains(base_token) || !self.tokens.contains(quote_token) {
-                    continue;
-                }
-
-                let normalized_tvl = self.normalize_tvl(
-                    token_pair_price.calculate_tvl(),
-                    token_pair_price.quote_token.clone(),
-                    prices_by_mm,
-                )?;
-
-                if normalized_tvl < self.tvl {
-                    info!(
-                        "Filtering out MM {} for pair {}/{} due to low TVL: {:.2} < {:.2}",
-                        mm_name,
-                        hex::encode(base_token),
-                        hex::encode(quote_token),
-                        normalized_tvl,
-                        self.tvl
-                    );
-                    continue;
-                }
-                kept.push(MakerLevelsWithTvl {
-                    market_maker: mm_name,
-                    levels: token_pair_price,
-                    tvl: normalized_tvl,
-                });
-            }
-        }
-        Ok(kept)
-    }
-
-    /// One component per pair in `levels_above_tvl_threshold`, holding every market maker on the
-    /// pair. The component's TVL is the largest maker's.
-    fn pair_components(
-        &self,
-        prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
-    ) -> Result<HashMap<String, ComponentWithState>, RFQError> {
-        struct PricesWithTvl {
-            // MM name -> price levels for the token pair
-            mm_prices: HashMap<String, LiquoriceTokenPairPrice>,
-            // The highest TVL among MMs for this token pair, used as the component's TVL
-            tvl: f64,
-        }
-        let mut pair_mm_prices: HashMap<(Bytes, Bytes), PricesWithTvl> = HashMap::new();
-        for MakerLevelsWithTvl {
-            market_maker: mm_name,
-            levels: token_pair_price,
-            tvl: normalized_tvl,
-        } in self.levels_above_tvl_threshold(prices_by_mm)?
-        {
-            let entry = pair_mm_prices
-                .entry((token_pair_price.base_token.clone(), token_pair_price.quote_token.clone()))
-                .or_insert_with(|| PricesWithTvl {
-                    mm_prices: HashMap::new(),
-                    tvl: f64::NEG_INFINITY,
-                });
-            entry.tvl = entry.tvl.max(normalized_tvl);
-            entry
-                .mm_prices
-                .insert(mm_name.to_string(), token_pair_price.clone());
-        }
-
-        let mut new_components = HashMap::new();
-        for ((base_token, quote_token), PricesWithTvl { mm_prices, tvl }) in pair_mm_prices {
-            let pair_str =
-                format!("liquorice_{}/{}", hex::encode(&base_token), hex::encode(&quote_token));
-            let component_id = format!("{}", keccak256(pair_str.as_bytes()));
-            let component_with_state = self.create_component_with_state(
-                component_id.clone(),
-                vec![base_token, quote_token],
-                &mm_prices,
-                tvl,
-            );
-            new_components.insert(component_id, component_with_state);
-        }
-        Ok(new_components)
-    }
-
-    /// The all-pairs component for one poll: every maker's price levels in
-    /// `levels_above_tvl_threshold`. `None` when there is none.
-    fn all_pairs_component(
-        &self,
-        prices_by_mm: &HashMap<String, Vec<LiquoriceTokenPairPrice>>,
-    ) -> Result<Option<ComponentWithState>, RFQError> {
-        let mut price_levels = Vec::new();
-        for MakerLevelsWithTvl { market_maker: mm_name, levels: token_pair_price, tvl } in
-            self.levels_above_tvl_threshold(prices_by_mm)?
-        {
-            let maker_levels = MakerPriceLevels {
-                market_maker: mm_name.to_string(),
-                base_token: token_pair_price.base_token.clone(),
-                quote_token: token_pair_price.quote_token.clone(),
-                levels: token_pair_price.levels.clone(),
-            };
-            price_levels.push((maker_levels, tvl));
-        }
-        maker_price_levels::all_pairs_component(
-            Self::PROTOCOL_SYSTEM,
-            "liquorice_pool",
-            self.chain,
-            price_levels,
-            self.quote_rule,
-        )
-    }
-
-    /// The best valid level of the response, from `market_maker` alone when one is named.
     fn process_quote_response(
         quote_response: LiquoriceQuoteResponse,
         params: &GetAmountOutParams,
-        market_maker: Option<&str>,
+        market_maker: &str,
     ) -> Result<SignedQuote, RFQError> {
         if !quote_response.liquidity_available {
-            debug!(quote_response = ?quote_response, "Liquorice quote response indicates no liquidity");
+            debug!(?quote_response, "quote response indicates no liquidity");
             return Err(RFQError::QuoteNotFound(format!(
                 "Liquorice quote not found for {} {} ->{}",
                 params.amount_in, params.token_in, params.token_out,
             )));
         }
 
-        info!("Received Liquorice quote response with {} levels", quote_response.levels.len());
+        debug!(levels = quote_response.levels.len(), "received quote response");
 
-        // Find the valid level with the largest quote_token_amount
+        // The best valid level the maker that priced the swap offers.
         let best_level = quote_response
             .levels
             .iter()
-            .filter(|level| level.validate(params).is_ok())
-            .filter(|level| market_maker.is_none_or(|maker| level.maker == maker))
             .filter_map(|level| {
-                BigUint::from_str(&level.quote_token_amount)
-                    .ok()
-                    .map(|amount| (level, amount))
+                if level.maker != market_maker || level.validate(params).is_err() {
+                    return None;
+                }
+                let amount = BigUint::from_str(&level.quote_token_amount).ok()?;
+                Some((level, amount))
             })
-            .max_by(|(_, a), (_, b)| a.cmp(b));
+            .max_by_key(|(_, amount)| amount.clone());
 
         let (quote_level, _) = best_level.ok_or_else(|| {
             RFQError::QuoteNotFound(format!(
-                "No valid Liquorice quote levels for {} {} ->{}",
+                "No valid Liquorice quote levels from {market_maker} for {} {} ->{}",
                 params.amount_in, params.token_in, params.token_out,
             ))
         })?;
@@ -464,363 +398,87 @@ impl LiquoriceClient {
             quote_attributes,
         })
     }
-
-    async fn fetch_price_levels(
-        &self,
-    ) -> Result<HashMap<String, Vec<LiquoriceTokenPairPrice>>, RFQError> {
-        let query_params = vec![("chainId", self.chain.id().to_string())];
-
-        let http_client = Client::new();
-        let response = self
-            .send_authed(|| {
-                http_client
-                    .get(&self.price_levels_endpoint)
-                    .query(&query_params)
-                    .header("accept", "application/json")
-            })
-            .await
-            .map_err(|e| RFQError::ConnectionError(format!("Failed to fetch price levels: {e}")))?;
-
-        if !response.status().is_success() {
-            return Err(RFQError::ConnectionError(format!(
-                "HTTP error {}: {}",
-                response.status(),
-                response
-                    .text()
-                    .await
-                    .unwrap_or_default()
-            )));
-        }
-
-        let price_response: LiquoricePriceLevelsResponse = response.json().await.map_err(|e| {
-            RFQError::ParsingError(format!("Failed to parse price levels response: {e}"))
-        })?;
-
-        Ok(price_response.prices)
-    }
-
-    /// Requests a firm quote. With `market_maker`, takes that maker's level alone.
-    pub(crate) async fn request_quote(
-        &self,
-        params: &GetAmountOutParams,
-        market_maker: Option<&str>,
-    ) -> Result<SignedQuote, RFQError> {
-        let expiry = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into()))?
-            .as_secs() +
-            self.quote_expiry_secs;
-
-        let rfq_id = uuid::Uuid::new_v4().to_string();
-
-        let quote_request = LiquoriceQuoteRequest {
-            chain_id: self.chain.id(),
-            rfq_id: rfq_id.clone(),
-            expiry,
-            base_token: params.token_in.to_string(),
-            quote_token: params.token_out.to_string(),
-            trader: params.receiver.to_string(),
-            effective_trader: Some(params.sender.to_string()),
-            base_token_amount: Some(params.amount_in.to_string()),
-            quote_token_amount: None,
-        };
-
-        debug!(quote_request = ?quote_request, "Sending Liquorice quote request");
-
-        let url = self.quote_endpoint.clone();
-
-        let start_time = std::time::Instant::now();
-        const MAX_RETRIES: u32 = 3;
-        let mut last_error = None;
-
-        for attempt in 0..MAX_RETRIES {
-            let elapsed = start_time.elapsed();
-            if elapsed >= self.quote_timeout {
-                return Err(last_error.unwrap_or_else(|| {
-                    RFQError::ConnectionError(format!(
-                        "Liquorice quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
-                    ))
-                }));
-            }
-
-            let remaining_time = self.quote_timeout - elapsed;
-
-            let http_client = Client::new();
-            let response = match timeout(
-                remaining_time,
-                self.send_authed(|| {
-                    http_client
-                        .post(&url)
-                        .json(&quote_request)
-                        .header("accept", "application/json")
-                }),
-            )
-            .await
-            {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => {
-                    warn!(
-                        "Liquorice quote request failed (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        e
-                    );
-                    last_error = Some(RFQError::ConnectionError(format!(
-                        "Failed to send Liquorice quote request: {e}"
-                    )));
-                    if attempt < MAX_RETRIES - 1 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    } else {
-                        return Err(last_error.unwrap());
-                    }
-                }
-                Err(_) => {
-                    return Err(RFQError::ConnectionError(format!(
-                        "Liquorice quote request timed out after {} seconds",
-                        self.quote_timeout.as_secs()
-                    )));
-                }
-            };
-
-            if response.status() != 200 {
-                let err_msg = match response.text().await {
-                    Ok(text) => text,
-                    Err(e) => {
-                        warn!(
-                            "Liquorice error response parsing failed (attempt {}/{}): {}",
-                            attempt + 1,
-                            MAX_RETRIES,
-                            e
-                        );
-                        last_error = Some(RFQError::ParsingError(format!(
-                            "Failed to read response text from Liquorice failed request: {e}"
-                        )));
-                        if attempt < MAX_RETRIES - 1 {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        } else {
-                            return Err(last_error.unwrap());
-                        }
-                    }
-                };
-                last_error = Some(RFQError::FatalError(format!(
-                    "Failed to send Liquorice quote request: {err_msg}",
-                )));
-                if attempt < MAX_RETRIES - 1 {
-                    warn!(
-                        "Liquorice returned non-200 status (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        err_msg
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                } else {
-                    return Err(last_error.unwrap());
-                }
-            }
-
-            let quote_response = match response
-                .json::<LiquoriceQuoteResponse>()
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    warn!(
-                        "Liquorice quote response parsing failed (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        e
-                    );
-                    last_error = Some(RFQError::ParsingError(format!(
-                        "Failed to parse Liquorice quote response: {e}"
-                    )));
-                    if attempt < MAX_RETRIES - 1 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    } else {
-                        return Err(last_error.unwrap());
-                    }
-                }
-            };
-
-            return Self::process_quote_response(quote_response, params, market_maker);
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            RFQError::ConnectionError("Liquorice quote request failed after retries".to_string())
-        }))
-    }
-}
-
-#[async_trait]
-impl RFQClient for LiquoriceClient {
-    fn component_layout(&self) -> ComponentLayout {
-        self.component_layout
-    }
-
-    fn stream(
-        &self,
-    ) -> BoxStream<'static, Result<(String, StateSyncMessage<TimestampHeader>), RFQError>> {
-        let client = self.clone();
-
-        Box::pin(async_stream::stream! {
-            let mut current_components: HashMap<String, ComponentWithState> = HashMap::new();
-            let mut ticker = interval(client.poll_time);
-
-            info!("Starting Liquorice price levels polling every {} seconds", client.poll_time.as_secs());
-            info!("TVL threshold: {:.2}", client.tvl);
-
-            loop {
-                ticker.tick().await;
-
-                let prices_by_mm = match client.fetch_price_levels().await {
-                    Ok(prices_by_mm) => prices_by_mm,
-                    Err(e) => {
-                        error!("Failed to fetch price levels from Liquorice API: {}", e);
-                        continue;
-                    }
-                };
-                info!("Fetched price levels from {} market makers", prices_by_mm.len());
-                let components = match client.component_layout {
-                    ComponentLayout::PerPair => client.pair_components(&prices_by_mm)?,
-                    ComponentLayout::AllPairs => match client.all_pairs_component(&prices_by_mm) {
-                        Ok(component) => component
-                            .into_iter()
-                            .map(|component| (component.component.id.clone(), component))
-                            .collect(),
-                        Err(e) => {
-                            error!("Failed to build the Liquorice component: {}", e);
-                            continue;
-                        }
-                    },
-                };
-                let timestamp = component::unix_timestamp()?;
-                let msg = component::poll_message(&mut current_components, components, timestamp);
-                yield Ok((client.stream_name().to_string(), msg));
-            }
-        })
-    }
-
-    async fn request_binding_quote(
-        &self,
-        params: &GetAmountOutParams,
-    ) -> Result<SignedQuote, RFQError> {
-        self.request_quote(params, None).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, time::Duration};
-
-    use super::*;
-    use crate::rfq::{
-        models::PriceLevel,
-        protocols::{
-            component::{BOOKS_ATTRIBUTE, SWAP_DIRECTIONS_ATTRIBUTE},
-            liquorice::models::{
-                LiquoricePartialFill, LiquoriceQuoteLevel, LiquoriceQuoteResponse,
-                LiquoriceTokenPairPrice, LiquoriceTx,
-            },
-            maker_price_levels::MakerPriceLevels,
-            test_utils::{mock_quote_server, quote_params, LIQUORICE_QUOTE_RESPONSE},
-        },
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     };
 
-    #[test]
-    fn test_normalize_tvl_same_quote_token() {
-        let client = create_test_client();
-        let prices = HashMap::new();
+    use dotenv::dotenv;
+    use rstest::rstest;
+    use tycho_common::models::Chain;
 
-        let result = client.normalize_tvl(
-            1000.0,
-            Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            &prices,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 1000.0);
-    }
+    use super::*;
+    use crate::snapshot_feed::http::test_support::{spawn_http_server, MockResponse};
 
-    #[test]
-    fn test_normalize_tvl_different_quote_token() {
-        let client = create_test_client();
-        let mut prices = HashMap::new();
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+    /// A binding quote as Liquorice answers one, recorded from its API.
+    const BINDING_QUOTE: &str = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
 
-        let eth_usdc_price = LiquoriceTokenPairPrice {
-            base_token: weth.clone(),
-            quote_token: usdc,
-            levels: vec![PriceLevel { quantity: 1.0, price: 3000.0 }],
-            updated_at: None,
-        };
-
-        prices.insert("test_mm".to_string(), vec![eth_usdc_price]);
-
-        let result = client.normalize_tvl(2.0, weth, &prices);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 6000.0);
-    }
-
-    #[test]
-    fn test_normalize_tvl_no_conversion_available() {
-        let client = create_test_client();
-        let prices = HashMap::new();
-        let result = client.normalize_tvl(
-            1000.0,
-            Bytes::from_str("0x1234567890123456789012345678901234567890").unwrap(),
-            &prices,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0.0);
-    }
-
-    fn create_test_client() -> LiquoriceClient {
-        let quote_tokens = HashSet::from([
-            Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
-            Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(), // USDT
-        ]);
-
+    fn create_test_client(base_url: String, quote_timeout: Duration) -> LiquoriceClient {
         LiquoriceClient::new(
-            Chain::Ethereum,
-            HashSet::new(),
-            1.0,
-            quote_tokens,
+            Some(&base_url),
+            Chain::Ethereum.id(),
             "test_solver".to_string(),
             "test_key".to_string(),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
+            quote_timeout,
             300,
         )
-        .unwrap()
     }
 
-    fn create_test_liquorice_client(
-        quote_endpoint: String,
-        quote_timeout: Duration,
-    ) -> LiquoriceClient {
-        let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+    /// Liquorice rejects Basic auth for an account issued legacy credentials, so the client has
+    /// to answer a 401 by re-sending the same request under the legacy headers — and then stay
+    /// there, rather than spending a rejected attempt on every later request.
+    #[tokio::test]
+    async fn a_rejected_basic_auth_falls_back_to_the_legacy_headers() {
+        use std::sync::atomic::AtomicUsize;
 
-        LiquoriceClient {
-            chain: Chain::Ethereum,
-            price_levels_endpoint: "http://unused/price-levels".to_string(),
-            quote_endpoint,
-            tokens: HashSet::from([token_in, token_out]),
-            tvl: 10.0,
-            auth_solver: "test_solver".to_string(),
-            auth_key: "test_key".to_string(),
-            quote_tokens: HashSet::new(),
-            poll_time: Duration::from_secs(0),
-            quote_timeout,
-            quote_expiry_secs: 300,
-            component_layout: ComponentLayout::PerPair,
-            quote_rule: QuoteRule::OncePerMaker,
-            use_legacy_auth: Arc::new(AtomicBool::new(false)),
-        }
+        use crate::snapshot_feed::http::test_support::spawn_http_server;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&attempts);
+        let server = spawn_http_server(move |_| {
+            let attempt = served.fetch_add(1, Ordering::SeqCst);
+            Some(if attempt == 0 {
+                ("401 Unauthorized", r#"{"message":"unauthorized"}"#.to_string())
+            } else {
+                ("200 OK", r#"{"prices":{}}"#.to_string())
+            })
+        })
+        .await;
+        let client = LiquoriceClient::new(
+            Some(&server.url()),
+            Chain::Ethereum.id(),
+            "test_solver".to_string(),
+            "test_key".to_string(),
+            Duration::from_secs(1),
+            300,
+        );
+
+        client
+            .fetch_price_levels()
+            .await
+            .expect("the retry under the legacy headers is served");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        client
+            .fetch_price_levels()
+            .await
+            .expect("the second poll is served too");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "the rejected scheme is not tried again");
+    }
+
+    #[test]
+    fn debug_output_omits_credentials() {
+        let client =
+            create_test_client("https://liquorice.example".to_string(), Duration::from_secs(1));
+        let rendered = format!("{client:?}");
+
+        assert!(!rendered.contains("test_solver"));
+        assert!(!rendered.contains("test_key"));
+        assert!(rendered.contains("liquorice.example"));
     }
 
     fn make_quote_level(
@@ -828,8 +486,9 @@ mod tests {
         quote_token: &str,
         base_token_amount: &str,
         quote_token_amount: &str,
-        partial_fill: Option<LiquoricePartialFill>,
-    ) -> LiquoriceQuoteLevel {
+        partial_fill: Option<crate::rfq::protocols::liquorice::models::LiquoricePartialFill>,
+    ) -> crate::rfq::protocols::liquorice::models::LiquoriceQuoteLevel {
+        use crate::rfq::protocols::liquorice::models::{LiquoriceQuoteLevel, LiquoriceTx};
         LiquoriceQuoteLevel {
             maker_rfq_id: "maker-1".to_string(),
             maker: "test-maker".to_string(),
@@ -858,7 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn test_process_quote_response_no_liquidity() {
+    fn process_quote_response_no_liquidity() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+
         let response = LiquoriceQuoteResponse {
             rfq_id: "r1".to_string(),
             liquidity_available: false,
@@ -869,7 +530,7 @@ mod tests {
             "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
             1_000_000_000_000_000_000,
         );
-        let result = LiquoriceClient::process_quote_response(response, &params, None);
+        let result = LiquoriceClient::process_quote_response(response, &params, "test-maker");
         assert!(
             matches!(result, Err(RFQError::QuoteNotFound(_))),
             "expected QuoteNotFound, got {:?}",
@@ -878,7 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn test_process_quote_response_partial_fill_attributes() {
+    fn process_quote_response_partial_fill_attributes() {
+        use crate::rfq::protocols::liquorice::models::{
+            LiquoricePartialFill, LiquoriceQuoteResponse,
+        };
+
         let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
         let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
         let amount_in = 1_000_000_000_000_000_000u64;
@@ -900,7 +565,8 @@ mod tests {
         };
         let params = make_params(token_in, token_out, amount_in);
 
-        let quote = LiquoriceClient::process_quote_response(response, &params, None).unwrap();
+        let quote =
+            LiquoriceClient::process_quote_response(response, &params, "test-maker").unwrap();
 
         // partial_fill_offset: 4-byte big-endian encoding of 68
         let offset_bytes = quote.quote_attributes["partial_fill_offset"].clone();
@@ -914,8 +580,49 @@ mod tests {
         assert_eq!(actual_min, expected_min);
     }
 
+    /// The quote is the level of the maker whose ladder priced the swap, which is the trade the
+    /// route was built on, even where another maker's level in the same response pays more.
     #[test]
-    fn test_process_quote_response_selects_best_valid_level() {
+    fn a_level_from_another_maker_is_not_the_quote() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+
+        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+        let amount_in = 1_000_000_000_000_000_000u64;
+        let ours = make_quote_level(token_in, token_out, &amount_in.to_string(), "3000000", None);
+        let mut theirs =
+            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
+        theirs.maker = "other-maker".to_string();
+        let params = make_params(token_in, token_out, amount_in);
+
+        let quote = LiquoriceClient::process_quote_response(
+            LiquoriceQuoteResponse {
+                rfq_id: "r1".to_string(),
+                liquidity_available: true,
+                levels: vec![ours, theirs.clone()],
+            },
+            &params,
+            "test-maker",
+        )
+        .unwrap();
+        assert_eq!(quote.amount_out, BigUint::from(3_000_000u64));
+
+        let only_theirs = LiquoriceClient::process_quote_response(
+            LiquoriceQuoteResponse {
+                rfq_id: "r1".to_string(),
+                liquidity_available: true,
+                levels: vec![theirs],
+            },
+            &params,
+            "test-maker",
+        );
+        assert!(matches!(only_theirs, Err(RFQError::QuoteNotFound(_))), "{only_theirs:?}");
+    }
+
+    #[test]
+    fn process_quote_response_selects_best_valid_level() {
+        use crate::rfq::protocols::liquorice::models::LiquoriceQuoteResponse;
+
         let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
         let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
         let amount_in = 1_000_000_000_000_000_000u64;
@@ -936,153 +643,62 @@ mod tests {
         };
         let params = make_params(token_in, token_out, amount_in);
 
-        let quote = LiquoriceClient::process_quote_response(response, &params, None).unwrap();
+        let quote =
+            LiquoriceClient::process_quote_response(response, &params, "test-maker").unwrap();
         assert_eq!(quote.amount_out, BigUint::from(3_500_000u64));
     }
 
-    /// A level from `test-maker` paying 3000000 and one from `other-maker` paying 3500000.
-    fn two_maker_response() -> (LiquoriceQuoteResponse, GetAmountOutParams) {
-        let token_in = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-        let token_out = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
-        let amount_in = 1_000_000_000_000_000_000u64;
-        let mut other_maker =
-            make_quote_level(token_in, token_out, &amount_in.to_string(), "3500000", None);
-        other_maker.maker = "other-maker".to_string();
-        let named_maker =
-            make_quote_level(token_in, token_out, &amount_in.to_string(), "3000000", None);
-        let response = LiquoriceQuoteResponse {
-            rfq_id: "r1".to_string(),
-            liquidity_available: true,
-            levels: vec![other_maker, named_maker],
-        };
-        (response, make_params(token_in, token_out, amount_in))
+    /// A status the venue refuses a quote with says the request reached it and this attempt
+    /// failed — a rate limit, a gateway in between, a key to be fixed at the venue — so the
+    /// state asks again instead of being retired.
+    #[tokio::test]
+    async fn a_refused_status_leaves_the_component_quotable() {
+        let server =
+            spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
+        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+
+        let error = client
+            .request_binding_quote(&create_test_quote_params(), "test-maker")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RFQError::ConnectionError(_)), "{error}");
+        assert!(error.to_string().contains("429"), "{error}");
     }
 
-    #[test]
-    fn test_process_quote_response_named_maker() {
-        let (response, params) = two_maker_response();
-        let quote =
-            LiquoriceClient::process_quote_response(response, &params, Some("test-maker")).unwrap();
-        assert_eq!(quote.amount_out, BigUint::from(3_000_000u64), "the named maker's level wins");
-    }
+    fn create_test_quote_params() -> GetAmountOutParams {
+        let token_in = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let token_out = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
 
-    #[test]
-    fn test_process_quote_response_named_maker_absent() {
-        let (response, params) = two_maker_response();
-        let missing = LiquoriceClient::process_quote_response(response, &params, Some("absent"));
-        assert!(matches!(missing, Err(RFQError::QuoteNotFound(_))));
-    }
-
-    fn levels(base: &Bytes, quote: &Bytes, levels: &[(f64, f64)]) -> LiquoriceTokenPairPrice {
-        LiquoriceTokenPairPrice {
-            base_token: base.clone(),
-            quote_token: quote.clone(),
-            levels: levels
-                .iter()
-                .map(|&(quantity, price)| PriceLevel { quantity, price })
-                .collect(),
-            updated_at: None,
+        GetAmountOutParams {
+            amount_in: BigUint::from(1_000000000000000000u64),
+            token_in,
+            token_out,
+            sender: router.clone(),
+            receiver: router,
+            origin: None,
         }
     }
 
-    #[test]
-    fn test_all_pairs_component_keeps_books_above_tvl_threshold() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-        let mut client =
-            create_test_liquorice_client("http://unused/rfq".to_string(), Duration::from_secs(1));
-        client.tokens = HashSet::from([weth.clone(), wbtc.clone(), usdc.clone()]);
-        client.quote_tokens = HashSet::from([usdc.clone()]);
-        client.tvl = 100.0;
-        let prices_by_mm = HashMap::from([
-            (
-                "mm_b".to_string(),
-                vec![
-                    levels(&weth, &usdc, &[(1.0, 3000.0)]),
-                    levels(&wbtc, &usdc, &[(0.001, 65.0)]),
-                ],
-            ),
-            ("mm_a".to_string(), vec![levels(&weth, &usdc, &[(2.0, 3000.0)])]),
-        ]);
-
-        let component = client
-            .all_pairs_component(&prices_by_mm)
-            .unwrap()
-            .expect("two makers' price levels clear the threshold");
-
-        assert_eq!(
-            component.component.id,
-            component::component_id(LiquoriceClient::PROTOCOL_SYSTEM, client.chain)
-        );
-        assert_eq!(
-            component.component_tvl,
-            Some(9000.0),
-            "the WBTC price levels are below the threshold"
-        );
-        let mut expected_tokens = vec![weth.clone(), usdc.clone()];
-        expected_tokens.sort();
-        assert_eq!(component.component.tokens, expected_tokens);
-        let mut expected_directions = weth.to_vec();
-        expected_directions.extend_from_slice(&usdc);
-        assert_eq!(
-            component.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE].to_vec(),
-            expected_directions
-        );
-        assert_eq!(
-            component.component.static_attributes[QuoteRule::ATTRIBUTE].as_ref(),
-            b"once_per_maker"
-        );
-        let price_levels: Vec<MakerPriceLevels> =
-            serde_json::from_slice(&component.state.attributes[BOOKS_ATTRIBUTE]).unwrap();
-        assert_eq!(price_levels.len(), 2);
-        assert_eq!(price_levels[0].market_maker, "mm_a", "price levels are sorted by maker");
-        assert_eq!(price_levels[0].levels[0].quantity, 2.0);
-        assert_eq!(price_levels[1].market_maker, "mm_b");
-    }
-
-    /// Each component carries the id and attributes the per-pair state decodes.
-    #[test]
-    fn test_pair_components_keep_pairs_above_tvl_threshold() {
-        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
-        let usdc = Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
-        let mut client =
-            create_test_liquorice_client("http://unused/rfq".to_string(), Duration::from_secs(1));
-        client.tokens = HashSet::from([weth.clone(), usdc.clone()]);
-        client.quote_tokens = HashSet::from([usdc.clone()]);
-        client.tvl = 100.0;
-        let prices_by_mm = HashMap::from([
-            ("mm_a".to_string(), vec![levels(&weth, &usdc, &[(2.0, 3000.0)])]),
-            ("mm_b".to_string(), vec![levels(&weth, &usdc, &[(1.0, 3000.0)])]),
-        ]);
-
-        let components = client
-            .pair_components(&prices_by_mm)
-            .unwrap();
-
-        let pair_str = format!("liquorice_{}/{}", hex::encode(&weth), hex::encode(&usdc));
-        let component = &components[&keccak256(pair_str.as_bytes()).to_string()];
-        assert_eq!(components.len(), 1);
-        assert_eq!(component.component.tokens, vec![weth, usdc]);
-        assert_eq!(component.component_tvl, Some(6000.0), "the largest maker's TVL");
-        let prices: HashMap<String, LiquoriceTokenPairPrice> =
-            serde_json::from_slice(&component.state.attributes["prices"]).unwrap();
-        assert_eq!(prices.len(), 2);
-    }
-
     #[tokio::test]
-    async fn test_liquorice_quote_timeout() {
-        let (addr, _) = mock_quote_server(500, LIQUORICE_QUOTE_RESPONSE).await;
+    async fn liquorice_quote_timeout() {
+        let server = spawn_http_server(|_| {
+            Some(MockResponse {
+                status: "200 OK",
+                body: BINDING_QUOTE.to_string(),
+                delay: Duration::from_millis(500),
+            })
+        })
+        .await;
 
-        let client_short_timeout = create_test_liquorice_client(
-            format!("http://127.0.0.1:{}/rfq", addr.port()),
-            Duration::from_millis(200),
-        );
-        let params = quote_params();
+        let client_short_timeout =
+            create_test_client(format!("{}/rfq", server.url()), Duration::from_millis(200));
+        let params = create_test_quote_params();
 
         let start = std::time::Instant::now();
         let result = client_short_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "test-maker")
             .await;
         let elapsed = start.elapsed();
 
@@ -1100,78 +716,34 @@ mod tests {
             elapsed
         );
 
-        let client_long_timeout = create_test_liquorice_client(
-            format!("http://127.0.0.1:{}/rfq", addr.port()),
-            Duration::from_secs(1),
-        );
+        let client_long_timeout =
+            create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(1));
 
         let result = client_long_timeout
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "test-maker")
             .await;
         assert!(result.is_ok(), "Expected success, got: {:?}", result);
     }
 
-    async fn create_retry_server() -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<u32>>)
-    {
-        use std::sync::{Arc, Mutex};
-
-        use tokio::{io::AsyncWriteExt, net::TcpListener};
-
-        let request_count = Arc::new(Mutex::new(0u32));
-        let request_count_clone = request_count.clone();
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let json_response = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
-
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let count_clone = request_count_clone.clone();
-                let json_response_clone = json_response.to_owned();
-                tokio::spawn(async move {
-                    *count_clone.lock().unwrap() += 1;
-                    let count = *count_clone.lock().unwrap();
-                    println!("Mock server: Received request #{count}");
-
-                    if count <= 2 {
-                        let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error";
-                        let _ = stream
-                            .write_all(response.as_bytes())
-                            .await;
-                    } else {
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            json_response_clone.len(),
-                            json_response_clone
-                        );
-                        let _ = stream
-                            .write_all(response.as_bytes())
-                            .await;
-                    }
-                    let _ = stream.flush().await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        (addr, request_count)
-    }
-
     #[tokio::test]
-    async fn test_liquorice_quote_retry_on_bad_response() {
-        let (addr, request_count) = create_retry_server().await;
+    async fn liquorice_quote_retry_on_bad_response() {
+        // The venue answers the first two attempts with a server error and the third with a
+        // quote.
+        // The route counts its own attempts, so one test's retries never reach another's.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server = spawn_http_server(move |_| {
+            Some(if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                ("500 Internal Server Error", "Internal Server Error".to_string())
+            } else {
+                ("200 OK", BINDING_QUOTE.to_string())
+            })
+        })
+        .await;
 
-        let client = create_test_liquorice_client(
-            format!("http://127.0.0.1:{}/rfq", addr.port()),
-            Duration::from_secs(5),
-        );
-        let params = quote_params();
+        let client = create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(5));
+        let params = create_test_quote_params();
         let result = client
-            .request_binding_quote(&params)
+            .request_binding_quote(&params, "test-maker")
             .await;
 
         assert!(result.is_ok(), "Expected success after retries, got: {:?}", result);
@@ -1180,7 +752,92 @@ mod tests {
         assert_eq!(quote.amount_in, BigUint::from(1_000000000000000000u64));
         assert_eq!(quote.amount_out, BigUint::from(3329502u64));
 
-        let final_count = *request_count.lock().unwrap();
-        assert_eq!(final_count, 3, "Expected 3 requests, got {}", final_count);
+        assert_eq!(server.request_count(), 3);
+    }
+
+    /// The book request asks about the chain under the parameter Liquorice reads it from.
+    #[tokio::test]
+    async fn the_book_request_carries_the_chain_id() {
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&targets);
+        let server = spawn_http_server(move |request| {
+            recorded
+                .lock()
+                .unwrap()
+                .push(request.target.to_string());
+            Some(("200 OK", r#"{"prices":{}}"#.to_string()))
+        })
+        .await;
+        let chain_id = Chain::Arbitrum.id();
+        let client = LiquoriceClient::new(
+            Some(&server.url()),
+            chain_id,
+            "solver".to_string(),
+            "key".to_string(),
+            Duration::from_secs(5),
+            60,
+        );
+
+        client
+            .fetch_price_levels()
+            .await
+            .unwrap();
+
+        let targets = targets.lock().unwrap();
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert!(targets[0].contains(&format!("chainId={chain_id}")), "{targets:?}");
+    }
+
+    /// Optimism (10) is a chain Liquorice does not price, and the words it refuses one with are
+    /// what this client reads to stop the feed instead of polling on.
+    #[tokio::test]
+    #[ignore = "hits Liquorice's live API; requires LIQUORICE_USER and LIQUORICE_KEY"]
+    async fn live_liquorice_api_refuses_a_chain_it_does_not_price() {
+        dotenv().ok();
+        let auth_solver = std::env::var("LIQUORICE_USER").expect("LIQUORICE_USER not set");
+        let auth_key = std::env::var("LIQUORICE_KEY").expect("LIQUORICE_KEY not set");
+        let client =
+            LiquoriceClient::new(None, 10, auth_solver, auth_key, Duration::from_secs(10), 60);
+
+        let error = client
+            .fetch_price_levels()
+            .await
+            .unwrap_err();
+
+        assert!(error.is_fatal(), "{error}");
+    }
+
+    /// A bad request is ordinarily worth another poll, so only the refusal that names the chain
+    /// ends the feed.
+    #[rstest]
+    #[case::an_unserved_chain(
+        "Failed to deserialize query string: chainId: invalid value: 10, expected one of: 1, 11155111, 42161",
+        true
+    )]
+    #[case::a_missing_parameter(
+        "Failed to deserialize query string: missing field `chainId`",
+        false
+    )]
+    #[tokio::test]
+    async fn only_the_refusal_naming_the_chain_is_fatal(
+        #[case] body: &'static str,
+        #[case] fatal: bool,
+    ) {
+        let server = spawn_http_server(move |_| Some(("400 Bad Request", body.to_string()))).await;
+        let client = LiquoriceClient::new(
+            Some(&server.url()),
+            10,
+            "solver".to_string(),
+            "key".to_string(),
+            Duration::from_secs(5),
+            60,
+        );
+
+        let error = client
+            .fetch_price_levels()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.is_fatal(), fatal, "{error}");
     }
 }

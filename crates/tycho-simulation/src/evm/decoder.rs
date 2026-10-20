@@ -1381,6 +1381,9 @@ mock! {
         ) -> Result<(), TransitionError>;
         pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
         pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
+        pub fn base_token(&self) -> &Token;
+        pub fn quote_token(&self) -> &Token;
+        pub fn directions(&self) -> Vec<(Bytes, Bytes)>;
     }
 }
 
@@ -1446,6 +1449,23 @@ impl ProtocolSim for MockProtocolSim {
 
     fn typetag_deserialize(&self) {
         unreachable!()
+    }
+}
+
+/// Lets the mock stand in for a book's state wherever one pair's tokens and directions are
+/// what the code under test reads.
+#[cfg(test)]
+impl crate::book::component::PairState for MockProtocolSim {
+    fn base_token(&self) -> &Token {
+        self.base_token()
+    }
+
+    fn quote_token(&self) -> &Token {
+        self.quote_token()
+    }
+
+    fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        self.directions()
     }
 }
 

@@ -9,6 +9,10 @@
 # RUSTSEC-2026-0346, RUSTSEC-2026-0349: rustls session secrets in Debug, ServerHello downgrade
 # Only patched in rustls >= 0.23.46 (which we use). The 0.21.x line has no fix and is pulled in
 # by tonic 0.9 (tokio-rustls 0.24) and aws-sdk-s3's legacy rustls feature.
+# RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369: zip extraction (SUID/SGID bits,
+# symlink targets, permissions through symlinks). Only patched in zip >= 9.0.0. zip 0.6.6 is a
+# build-dependency of utoipa-swagger-ui 6.0.0, whose build script extracts the Swagger UI archive
+# bundled in the crate itself. The latest utoipa-swagger-ui (10.0.1) still requires zip ^8.6.
 ignore = [
     "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
@@ -18,4 +22,7 @@ ignore = [
     "RUSTSEC-2026-0258",
     "RUSTSEC-2026-0346",
     "RUSTSEC-2026-0349",
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]

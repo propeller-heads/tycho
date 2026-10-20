@@ -1,8 +1,7 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, Pow, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -15,36 +14,78 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::{
-    client::RFQClient,
-    protocols::bebop::{client::BebopClient, models::BebopPriceData},
+use crate::{
+    book::{
+        all_pairs::{all_pairs_state, RefusesQuote, SignedByVenue},
+        component::PairState,
+        levels::Levels,
+        sim::{self, SwapDirection},
+    },
+    rfq::protocols::bebop::{client::BebopClient, models::BebopBook},
 };
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct BebopState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub price_data: BebopPriceData,
-    pub client: BebopClient,
-}
+/// Rough gas estimate for one Bebop settlement.
+const BEBOP_SWAP_GAS: u64 = 70_000;
 
-impl fmt::Debug for BebopState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BebopState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
-            .finish_non_exhaustive()
-    }
+/// What Bebop's quote endpoint refuses below, measured against the live API on Ethereum and
+/// Base in both directions: a trade worth less than one US dollar on the side being sold, the
+/// same figure for every pair. The venue says so in the refusal — `MinSize: Request quotes over
+/// $1.` — and publishes no per-token minimum, so this constant and a price are the whole rule.
+const MIN_TRADE_USD: f64 = 1.0;
+
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
+pub struct BebopState {
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
+    #[debug(skip)]
+    pub(super) book: BebopBook,
+    /// What one quote token is worth in US dollars, from the pair that prices it in a USD quote
+    /// token at the moment this book was published. It is what turns the venue's dollar floor
+    /// into an amount of a token.
+    pub(super) usd_per_quote_token: f64,
+    #[serde(skip)]
+    #[debug(skip)]
+    client: Option<Arc<BebopClient>>,
 }
 
 impl BebopState {
-    pub fn new(
+    /// A book this venue prices, with the client its binding quotes go to.
+    pub(super) fn new(
         base_token: Token,
         quote_token: Token,
-        price_data: BebopPriceData,
-        client: BebopClient,
+        book: BebopBook,
+        usd_per_quote_token: f64,
+        client: Arc<BebopClient>,
     ) -> Self {
-        BebopState { base_token, quote_token, price_data, client }
+        BebopState { base_token, quote_token, book, usd_per_quote_token, client: Some(client) }
+    }
+
+    /// The ladder a swap in `direction` consumes, in the units of the token sold: the bids as
+    /// published for selling base, the asks re-expressed per quote unit for selling quote.
+    fn ladder(&self, direction: SwapDirection) -> Cow<'_, Levels> {
+        match direction {
+            SwapDirection::BaseToQuote => Cow::Borrowed(&self.book.bids),
+            SwapDirection::QuoteToBase => Cow::Owned(self.book.asks.invert()),
+        }
+    }
+}
+
+impl PairState for BebopState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
+    }
+
+    fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        sim::directions(
+            &self.base_token,
+            &self.quote_token,
+            !self.book.bids.is_empty(),
+            !self.book.asks.is_empty(),
+        )
     }
 }
 
@@ -55,19 +96,24 @@ impl ProtocolSim for BebopState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let direction = SwapDirection::require(
+            &self.base_token,
+            &self.quote_token,
+            &base.address,
+            &quote.address,
+        )?;
         // Since this method does not care about sell direction, we average the price of the best
         // bid and ask
         let best_bid = self
-            .price_data
-            .get_bids()
+            .book
+            .bids
             .first()
-            .map(|(price, _)| *price);
+            .map(|level| level.price);
         let best_ask = self
-            .price_data
-            .get_asks()
+            .book
+            .asks
             .first()
-            .map(|(price, _)| *price);
-
+            .map(|level| level.price);
         // If just one is available, only consider that one
         let average_price = match (best_bid, best_ask) {
             (Some(best_bid), Some(best_ask)) => (best_bid + best_ask) / 2.0,
@@ -77,20 +123,9 @@ impl ProtocolSim for BebopState {
                 return Err(SimulationError::RecoverableError("No liquidity available".to_string()))
             }
         };
-
-        // If the base/quote token addresses are the opposite of the pool tokens, we need to invert
-        // the price
-        if base.address == self.quote_token.address && quote.address == self.base_token.address {
-            Ok(1.0 / average_price)
-        } else if quote.address == self.quote_token.address &&
-            base.address == self.base_token.address
-        {
-            Ok(average_price)
-        } else {
-            Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                base.address, quote.address
-            )))
+        match direction {
+            SwapDirection::BaseToQuote => Ok(average_price),
+            SwapDirection::QuoteToBase => Ok(1.0 / average_price),
         }
     }
 
@@ -100,55 +135,36 @@ impl ProtocolSim for BebopState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let sell_base = if token_in == &self.base_token && token_out == &self.quote_token {
-            true
-        } else if token_in == &self.quote_token && token_out == &self.base_token {
-            false
-        } else {
+        // Bebop refuses a zero amount with `101 InvalidApiRequest: Sell amounts must be
+        // higher than 0.`, before the dollar floor below has anything to say.
+        sim::require_positive_amount(&amount_in)?;
+
+        let direction = SwapDirection::require(
+            &self.base_token,
+            &self.quote_token,
+            &token_in.address,
+            &token_out.address,
+        )?;
+        let ladder = self.ladder(direction);
+        let amount_in = sim::to_human(&amount_in, token_in.decimals);
+        let fill = ladder.fill(amount_in);
+        // The trade's worth is read on the quote side, which the swap already expresses: the
+        // amount sold when the quote token is sold, and what the ladder pays otherwise. The
+        // floor speaks for a book that took something: a side with no levels takes none of any
+        // amount and so is worth nothing, which the fill below reports as the absence of
+        // liquidity it is, the same answer at every size.
+        let quote_amount = match direction {
+            SwapDirection::QuoteToBase => amount_in,
+            SwapDirection::BaseToQuote => fill.amount_out,
+        };
+        let worth_usd = quote_amount * self.usd_per_quote_token;
+        if fill.remaining_in < amount_in && worth_usd < MIN_TRADE_USD {
             return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {}, {}",
-                token_in.address, token_out.address
+                "Trade is worth {worth_usd} USD, below the {MIN_TRADE_USD} USD Bebop quotes"
             )));
-        };
-        // if sell base is true -> use bids
-        // if sell base is false -> use asks AND amount is in quote token so the levels need to be
-        // adjusted
-        let price_levels = if sell_base {
-            self.price_data.get_bids()
-        } else {
-            self.price_data
-                .get_asks()
-                .iter()
-                .map(|(price, size)| (1.0 / price, price * size))
-                .collect()
-        };
-
-        if price_levels.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
-
-        let amount_in = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })? / 10f64.powi(token_in.decimals as i32);
-        let (amount_out, remaining_amount_in) = self
-            .price_data
-            .get_amount_out_from_levels(amount_in, price_levels);
-        let res = GetAmountOutResult {
-            amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
-                .ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
-                })?,
-            gas: BigUint::from(70_000u64), // Rough gas estimation
-            new_state: self.clone_box(),   // The state doesn't change after a swap
-        };
-
-        if remaining_amount_in > 0.0 {
-            return Err(SimulationError::InvalidInput(
-                format!("Pool has not enough liquidity to support complete swap. input amount: {amount_in}, consumed amount: {}", amount_in-remaining_amount_in),
-                Some(res)));
-        }
-
-        Ok(res)
+        // The state doesn't change after a swap.
+        sim::fill_result(fill, amount_in, token_out.decimals, BEBOP_SWAP_GAS, self)
     }
 
     fn get_limits(
@@ -156,46 +172,15 @@ impl ProtocolSim for BebopState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        // If selling BASE for QUOTE, we need to look at [BASE/QUOTE].bids
-        // If buying BASE with QUOTE, we need to look at [BASE/QUOTE].asks
-        let (sell_decimals, buy_decimals, price_levels) = if sell_token == self.base_token.address &&
-            buy_token == self.quote_token.address
-        {
-            (self.base_token.decimals, self.quote_token.decimals, self.price_data.get_bids())
-        } else if buy_token == self.base_token.address && sell_token == self.quote_token.address {
-            (self.quote_token.decimals, self.base_token.decimals, self.price_data.get_asks())
-        } else {
-            return Err(SimulationError::RecoverableError(format!(
-                "Invalid token addresses: {sell_token}, {buy_token}"
-            )));
-        };
-
-        // If there are no price levels, return 0 for both limits
-        if price_levels.is_empty() {
-            return Ok((BigUint::from(0u64), BigUint::from(0u64)));
+        let direction =
+            SwapDirection::require(&self.base_token, &self.quote_token, &sell_token, &buy_token)?;
+        let ladder = self.ladder(direction);
+        // Nothing on this side is no swap at any size, so there is no limit to report.
+        if ladder.is_empty() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
         }
-
-        let total_base_amount: f64 = price_levels
-            .iter()
-            .map(|(_, amount)| amount)
-            .sum();
-        let total_quote_amount: f64 = price_levels
-            .iter()
-            .map(|(price, amount)| price * amount)
-            .sum();
-
-        let (total_sell_amount, total_buy_amount) =
-            if sell_token == self.base_token.address && buy_token == self.quote_token.address {
-                (total_base_amount, total_quote_amount)
-            } else {
-                (total_quote_amount, total_base_amount)
-            };
-
-        let sell_limit =
-            BigUint::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
-        let buy_limit = BigUint::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
-
-        Ok((sell_limit, buy_limit))
+        let (sell_decimals, buy_decimals) = direction.decimals(&self.base_token, &self.quote_token);
+        sim::limits(&ladder, sell_decimals, buy_decimals)
     }
 
     fn delta_transition(
@@ -226,7 +211,7 @@ impl ProtocolSim for BebopState {
         {
             self.base_token == other_state.base_token &&
                 self.quote_token == other_state.quote_token &&
-                self.price_data == other_state.price_data
+                self.book == other_state.book
         } else {
             false
         }
@@ -243,21 +228,36 @@ impl IndicativelyPriced for BebopState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
-        Ok(self
-            .client
+        Ok(sim::quoting_client(self.client.as_ref(), "Bebop")?
             .request_binding_quote(&params)
             .await?)
     }
 }
 
+all_pairs_state! {
+    /// Bebop's books on one chain behind one component.
+    ///
+    /// Bebop signs its quotes itself and names no market maker, so all of its books share one
+    /// turn: a route takes one quote from the venue, and the swap that takes it spends every
+    /// book behind the component.
+    BebopAllPairsState(BebopState, SignedByVenue);
+}
+
+impl RefusesQuote for BebopAllPairsState {}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::str::FromStr;
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::rfq::protocols::bebop::{
+        client::QuoteOrigin,
+        models::{BebopPriceData, BebopSupportedChain},
+    };
 
     fn wbtc() -> Token {
         Token::new(
@@ -299,38 +299,111 @@ mod tests {
         )
     }
 
-    fn empty_bebop_client() -> BebopClient {
-        BebopClient::new(
-            Chain::Ethereum,
-            HashSet::new(),
-            0.0,
-            "".to_string(),
-            HashSet::new(),
+    fn empty_client() -> Arc<BebopClient> {
+        Arc::new(BebopClient::new(
+            BebopSupportedChain::Ethereum,
+            String::new(),
             Duration::from_secs(30),
-            None,
-            None,
-            None,
-        )
-        .unwrap()
+            QuoteOrigin::default(),
+        ))
+    }
+
+    /// Bebop will not sign a trade worth less than a dollar, so simulating one advertises a
+    /// quote that cannot be had. This book quotes WBTC in USDC — a dollar is one USDC going in,
+    /// and 1539 satoshi coming out at the 65 000 USDC best bid.
+    #[rstest]
+    #[case::half_a_dollar_of_usdc("500000", true, false)]
+    #[case::two_dollars_of_usdc("2000000", true, true)]
+    #[case::sixty_five_cents_of_wbtc("1000", false, false)]
+    #[case::six_dollars_of_wbtc("10000", false, true)]
+    fn a_trade_worth_less_than_a_dollar_is_refused(
+        #[case] amount_in: &str,
+        #[case] sell_quote: bool,
+        #[case] quotable: bool,
+    ) {
+        let state = create_test_bebop_state();
+        let (token_in, token_out) = if sell_quote { (usdc(), wbtc()) } else { (wbtc(), usdc()) };
+
+        let result =
+            state.get_amount_out(BigUint::from_str(amount_in).unwrap(), &token_in, &token_out);
+
+        assert_eq!(result.is_ok(), quotable, "{result:?}");
+        if !quotable {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("below the 1 USD Bebop quotes"), "{error}");
+        }
+    }
+
+    /// Nobody bidding is the absence of liquidity, not a trade too small to quote: the amount
+    /// is irrelevant, so both a trade well over the dollar floor and one under it get the same
+    /// answer.
+    #[rstest]
+    #[case::six_dollars_of_wbtc("10000")]
+    #[case::sixty_five_cents_of_wbtc("1000")]
+    fn selling_into_a_side_with_no_bids_reports_no_liquidity(#[case] amount_in: &str) {
+        let mut state = create_test_bebop_state();
+        state.book.bids = Levels::default();
+
+        let error = state
+            .get_amount_out(BigUint::from_str(amount_in).unwrap(), &wbtc(), &usdc())
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, SimulationError::InvalidInput(message, None)
+                if message.contains("no liquidity on this side")),
+            "{error:?}"
+        );
+    }
+
+    /// A state read back from a recording carries no client: the venue's credentials are not
+    /// part of what is serialized, so a replayed book still prices but has nothing to ask for a
+    /// firm quote through.
+    #[tokio::test]
+    async fn a_replayed_state_prices_but_cannot_quote() {
+        let state = create_test_bebop_state();
+        let replayed: BebopState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+
+        let priced = replayed.get_amount_out(BigUint::from(10_000u64), &wbtc(), &usdc());
+        let quoted = replayed
+            .request_signed_quote(GetAmountOutParams {
+                amount_in: BigUint::from(10_000u64),
+                token_in: wbtc().address,
+                token_out: usdc().address,
+                sender: Bytes::zero(20),
+                receiver: Bytes::zero(20),
+                origin: None,
+            })
+            .await;
+
+        assert!(priced.is_ok(), "{priced:?}");
+        assert!(
+            matches!(&quoted, Err(SimulationError::FatalError(message))
+                if message.contains("carries no client")),
+            "{quoted:?}"
+        );
     }
 
     fn create_test_bebop_state() -> BebopState {
+        let price_data = BebopPriceData {
+            base: hex::decode("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(), // WBTC
+            quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
+            last_update_ts: 1703097600,
+            bids: vec![65000.0f32, 1.5f32, 64950.0f32, 2.0f32, 64900.0f32, 0.5f32],
+            asks: vec![65100.0f32, 1.0f32, 65150.0f32, 2.5f32, 65200.0f32, 1.5f32],
+        };
         BebopState {
             base_token: wbtc(),
             quote_token: usdc(),
-            price_data: BebopPriceData {
-                base: hex::decode("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap(), // WBTC
-                quote: hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
-                last_update_ts: 1703097600,
-                bids: vec![65000.0f32, 1.5f32, 64950.0f32, 2.0f32, 64900.0f32, 0.5f32],
-                asks: vec![65100.0f32, 1.0f32, 65150.0f32, 2.5f32, 65200.0f32, 1.5f32],
-            },
-            client: empty_bebop_client(),
+            book: BebopBook::try_from(price_data).unwrap(),
+            // The pair's quote token is USDC.
+            usd_per_quote_token: 1.0,
+            client: Some(empty_client()),
         }
     }
 
     #[test]
-    fn test_spot_price_matching_base_and_quote() {
+    fn spot_price_matching_base_and_quote() {
         let state = create_test_bebop_state();
 
         // Test WBTC/USDC (base/quote) - should use average of best bid and ask
@@ -341,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spot_price_inverted_base_and_quote() {
+    fn spot_price_inverted_base_and_quote() {
         let state = create_test_bebop_state();
 
         // Test USDC/WBTC (quote/base) - should use average of best bid and ask, then invert
@@ -353,9 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn test_spot_price_empty_asks() {
+    fn spot_price_empty_asks() {
         let mut state = create_test_bebop_state();
-        state.price_data.asks = vec![]; // Remove all asks
+        state.book.asks = Levels::default();
 
         // Test WBTC/USDC with no asks - should use only best bid
         let price = state
@@ -365,10 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn test_spot_price_empty_bids() {
+    fn spot_price_empty_bids() {
         let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-                                        // Test WBTC/USDC with no bids - should use only best ask
+        state.book.bids = Levels::default();
+        // Test WBTC/USDC with no bids - should use only best ask
         let price = state
             .spot_price(&wbtc(), &usdc())
             .unwrap();
@@ -376,17 +449,17 @@ mod tests {
     }
 
     #[test]
-    fn test_spot_price_no_liquidity() {
+    fn spot_price_no_liquidity() {
         let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-        state.price_data.asks = vec![]; // Remove all asks
-                                        // Test with no liquidity at all - should return error
+        state.book.bids = Levels::default();
+        state.book.asks = Levels::default();
+        // Test with no liquidity at all - should return error
         let result = state.spot_price(&wbtc(), &usdc());
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_get_limits_sell_base_for_quote() {
+    fn get_limits_sell_base_for_quote() {
         let state = create_test_bebop_state();
 
         // Test selling WBTC for USDC (should use bids)
@@ -408,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_limits_buy_base_with_quote() {
+    fn get_limits_buy_base_with_quote() {
         let state = create_test_bebop_state();
 
         // Test buying WBTC with USDC (should use asks)
@@ -429,64 +502,53 @@ mod tests {
         assert_eq!(wbtc_limit, expected_wbtc_limit);
     }
 
+    /// Bebop's book prices both directions, so what it cannot answer is a token that is not in
+    /// the pair — whichever of the three questions it is asked.
     #[test]
-    fn test_get_limits_no_bids() {
-        let mut state = create_test_bebop_state();
-        state.price_data.bids = vec![]; // Remove all bids
-
-        // Test selling WBTC for USDC with no bids - should return 0
-        let (token_limit, quote_limit) = state
-            .get_limits(wbtc().address.clone(), usdc().address.clone())
-            .unwrap();
-
-        assert_eq!(token_limit, BigUint::from(0u64));
-        assert_eq!(quote_limit, BigUint::from(0u64));
-    }
-
-    #[test]
-    fn test_get_limits_no_asks() {
-        let mut state = create_test_bebop_state();
-        state.price_data.asks = vec![]; // Remove all asks
-
-        // Test buying WBTC with USDC with no asks - should return 0
-        let (token_limit, quote_limit) = state
-            .get_limits(usdc().address.clone(), wbtc().address.clone())
-            .unwrap();
-
-        assert_eq!(token_limit, BigUint::from(0u64));
-        assert_eq!(quote_limit, BigUint::from(0u64));
-    }
-
-    #[test]
-    fn test_get_limits_invalid_token_pair() {
+    fn rejects_tokens_outside_the_pair() {
         let state = create_test_bebop_state();
+        let amount = BigUint::from_str("1000000000000000000").unwrap();
+        let results = [
+            state
+                .spot_price(&weth(), &usdc())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount.clone(), &weth(), &usdc())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount, &wbtc(), &weth())
+                .map(|_| ()),
+            state
+                .get_limits(weth().address.clone(), usdc().address.clone())
+                .map(|_| ()),
+        ];
 
-        // Create a different token (not WBTC or USDC)
-        let eth = Token::new(
-            &hex::decode("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
-                .unwrap()
-                .into(),
-            "ETH",
-            18,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        );
-
-        // Test with invalid token pair (ETH not in WBTC/USDC pool) - should return error
-        let result = state.get_limits(eth.address.clone(), usdc().address.clone());
-        assert!(result.is_err());
-
-        if let Err(SimulationError::RecoverableError(msg)) = result {
-            assert!(msg.contains("Invalid token addresses"));
-        } else {
-            panic!("Expected RecoverableError with invalid token addresses message");
+        for result in results {
+            assert!(
+                matches!(&result, Err(SimulationError::InvalidInput(msg, None)) if msg.contains("Invalid token addresses")),
+                "{result:?}"
+            );
         }
     }
 
+    /// A side the venue is not quoting has no depth to report and no swap to price.
     #[test]
-    fn test_get_amount_out() {
+    fn a_side_with_no_levels_has_nothing_to_offer() {
+        let mut state = create_test_bebop_state();
+        state.book.asks = Levels::default();
+
+        assert!(matches!(
+            state.get_amount_out(BigUint::from(2_000_000u64), &usdc(), &wbtc()),
+            Err(SimulationError::InvalidInput(_, None))
+        ));
+        assert!(matches!(
+            state.get_limits(usdc().address.clone(), wbtc().address.clone()),
+            Err(SimulationError::RecoverableError(_))
+        ));
+    }
+
+    #[test]
+    fn get_amount_out_walks_the_ladder_on_both_sides() {
         // WETH/USDC
         let price_data = BebopPriceData {
             base: hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(), // WETH
@@ -498,7 +560,14 @@ mod tests {
 
         let weth = weth();
         let usdc = usdc();
-        let state = BebopState::new(weth.clone(), usdc.clone(), price_data, empty_bebop_client());
+        let state = BebopState {
+            base_token: weth.clone(),
+            quote_token: usdc.clone(),
+            book: BebopBook::try_from(price_data).unwrap(),
+            // The pair's quote token is USDC.
+            usd_per_quote_token: 1.0,
+            client: Some(empty_client()),
+        };
 
         // swap 3 WETH -> USDC
         let amount_out_result = state
@@ -515,5 +584,15 @@ mod tests {
 
         // 1.5 from level 1 + 0.78333 from level 2 = 2.283333 WETH
         assert_eq!(amount_out_result.amount, BigUint::from_str("2_283333333333333248").unwrap());
+    }
+
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = create_test_bebop_state();
+
+        let result = state.get_amount_out(BigUint::ZERO, &wbtc(), &usdc());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }
