@@ -19,7 +19,6 @@ use crate::encoding::{
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
             bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            elfomofi::ElfomofiSwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
@@ -251,9 +250,11 @@ impl SwapEncoderRegistry {
             "rfq:liquorice" => {
                 Ok(Box::new(LiquoriceSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "elfomofi" => {
-                Ok(Box::new(ElfomofiSwapEncoder::new(executor_address, self.chain, config)?))
-            }
+            "elfomofi" => Ok(Box::new(super::elfomofi::ElfomofiSwapEncoder::new(
+                executor_address,
+                self.chain,
+                config,
+            )?)),
             "rfq:metric" => {
                 Ok(Box::new(MetricSwapEncoder::new(executor_address, self.chain, config)?))
             }
