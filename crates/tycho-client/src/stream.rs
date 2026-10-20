@@ -159,7 +159,6 @@ impl TychoStreamBuilder {
             Chain::Ethereum => (12, 36, 50),
             Chain::Starknet => (2, 8, 50),
             Chain::ZkSync => (3, 12, 50),
-            // The timeout outlasts a substreams reconnect.
             Chain::Arbitrum => (1, 9, 100), // Typically closer to 0.25s
             Chain::Base => (2, 12, 50),
             Chain::Bsc => (1, 12, 50),
