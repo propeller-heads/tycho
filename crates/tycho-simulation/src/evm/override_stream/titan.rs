@@ -53,6 +53,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use alloy::primitives::{Address, U256};
 use futures::StreamExt;
 use serde::Deserialize;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 use tokio::{
     sync::watch,
     time::{sleep, timeout},
@@ -106,34 +108,89 @@ const TITAN_URL: &str = "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream";
 /// Environment variable that overrides the default endpoint when no custom URL is passed.
 const TITAN_URL_ENV: &str = "TITAN_PAMM_STREAM_URL";
 
-/// FermiSwap protocol system identifier as indexed by Tycho.
-const FERMISWAP_PROTOCOL_SYSTEM: &str = "vm:fermiswap";
-/// Kipseli protocol system identifier as indexed by Tycho.
-const KIPSELI_PROTOCOL_SYSTEM: &str = "vm:kipseli";
-/// bopAMM protocol system identifier as indexed by Tycho.
-const BOPAMM_PROTOCOL_SYSTEM: &str = "vm:bopamm";
-/// Channel for Metric's Pyth oracle. Metric's Ethereum pools read two oracles, published under two
-/// different stream keys, so a Metric swap needs this channel and
-/// [`METRIC_COMPRESSED_ORACLE_CHANNEL`] together; neither is an alias of the other.
-pub const METRIC_PYTH_ORACLE_CHANNEL: &str = "metric:pyth_oracle";
-/// Channel for Metric's compressed oracle; see [`METRIC_PYTH_ORACLE_CHANNEL`].
-pub const METRIC_COMPRESSED_ORACLE_CHANNEL: &str = "metric:compressed_oracle";
+/// A channel of Titan's quote stream: the overrides published under one venue's keys, served
+/// under one key ([`key`](Self::key)) that a pool subscribes to.
+///
+/// Both [`key`](Self::key) and [`venue_aliases`](Self::venue_aliases) match every variant, so a new
+/// channel does not compile until it has a key and its stream addresses, and
+/// [`default_providers`] then serves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, EnumIter)]
+pub enum TitanChannel {
+    /// FermiSwap's oracle prices, written to the priority-update-registry.
+    FermiSwap,
+    /// Kipseli's oracle prices, written to the priority-update-registry.
+    Kipseli,
+    /// bopAMM (Bebop)'s signed maker quote, written to the venue's own storage.
+    BopAmm,
+    /// Metric's Pyth oracle. Metric's Ethereum pools read two oracles, published under two
+    /// different stream keys, so a Metric swap needs this channel and
+    /// [`MetricCompressedOracle`](Self::MetricCompressedOracle) together; neither is an alias of
+    /// the other.
+    MetricPythOracle,
+    /// Metric's compressed oracle; see [`MetricPythOracle`](Self::MetricPythOracle).
+    MetricCompressedOracle,
+}
 
-/// FermiSwap venue aliases on Titan's quote stream: the FermiSwap oracle and the FermiSwapper
-/// router. Both keys carry the same registry diffs; either serves the protocol.
-const FERMISWAP_VENUES: &[&str] =
-    &["0xb1076fe3ab5e28005c7c323bac5ac06a680d452e", "0x5979458912f80b96d30d4220af8e2e4925a33320"];
-/// Kipseli venue aliases on Titan's quote stream: the Kipseli oracle and the KipseliPropAMMWrapper
-/// router, both carrying the same registry diffs.
-const KIPSELI_VENUES: &[&str] =
-    &["0x5cdbe59400cc2efdcc2b54acca4a99fe00dd588c", "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d"];
-/// bopAMM (Bebop) venue on Titan's quote stream: a self-storage pAMM whose frames write the
-/// maker's signed quote into the venue's own storage.
-const BOPAMM_VENUES: &[&str] = &["0x160141a205f5ddcf096ba3f48b7ed21eb52c62ea"];
-/// Metric's Pyth oracle, the oracle of every anchored Metric pool on Ethereum.
-const METRIC_PYTH_ORACLE_VENUES: &[&str] = &["0x30a88bf894d1b806125a23ebf23d715496fd7102"];
-/// Metric's compressed oracle, which carries the reference feeds.
-const METRIC_COMPRESSED_ORACLE_VENUES: &[&str] = &["0xe844701934d9c6085b292e428f41b911cc0b3872"];
+impl TitanChannel {
+    /// The key the channel is registered and subscribed under. For a pAMM Tycho indexes it is the
+    /// pAMM's `protocol_system`; Metric's oracles are no indexed protocol, so their keys are
+    /// `metric:*` names of their own.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::FermiSwap => "vm:fermiswap",
+            Self::Kipseli => "vm:kipseli",
+            Self::BopAmm => "vm:bopamm",
+            Self::MetricPythOracle => "metric:pyth_oracle",
+            Self::MetricCompressedOracle => "metric:compressed_oracle",
+        }
+    }
+
+    /// The channel registered under `key`, or `None` when Titan serves no such channel.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::iter().find(|channel| channel.key() == key)
+    }
+
+    /// The venue keys the channel's frames arrive under on Titan's quote stream.
+    ///
+    /// Every alias of a channel streams the same maker feed (e.g. its oracle and router
+    /// addresses); subscribing to all of them keeps the channel served when one key disappears
+    /// from the stream, which venue deployments have been observed doing within hours.
+    const fn venue_aliases(self) -> &'static [&'static str] {
+        match self {
+            // The FermiSwap oracle and the FermiSwapper router. Both keys carry the same
+            // registry diffs; either serves the protocol.
+            Self::FermiSwap => &[
+                "0xb1076fe3ab5e28005c7c323bac5ac06a680d452e",
+                "0x5979458912f80b96d30d4220af8e2e4925a33320",
+            ],
+            // The Kipseli oracle and the KipseliPropAMMWrapper router, both carrying the same
+            // registry diffs.
+            Self::Kipseli => &[
+                "0x5cdbe59400cc2efdcc2b54acca4a99fe00dd588c",
+                "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d",
+            ],
+            // A self-storage pAMM whose frames write the maker's signed quote into the venue's
+            // own storage.
+            Self::BopAmm => &["0x160141a205f5ddcf096ba3f48b7ed21eb52c62ea"],
+            // The oracle of every anchored Metric pool on Ethereum.
+            Self::MetricPythOracle => &["0x30a88bf894d1b806125a23ebf23d715496fd7102"],
+            // Carries the reference feeds.
+            Self::MetricCompressedOracle => &["0xe844701934d9c6085b292e428f41b911cc0b3872"],
+        }
+    }
+
+    /// [`venue_aliases`](Self::venue_aliases), parsed.
+    fn venues(self) -> Vec<Address> {
+        self.venue_aliases()
+            .iter()
+            .map(|venue| {
+                venue
+                    .parse()
+                    .unwrap_or_else(|e| panic!("hardcoded venue address {venue} must parse: {e}"))
+            })
+            .collect()
+    }
+}
 
 /// Longest gap between Titan messages tolerated before the socket is treated as dead and
 /// re-established. Titan pushes several updates per second, so a multi-second silence means a
@@ -167,20 +224,9 @@ const SECONDS_PER_SLOT: u64 = 12;
 /// timestamp.
 const MAX_LANE_TIMESTAMP_LEAD_SECS: u64 = 2 * SECONDS_PER_SLOT;
 
-/// Returns the pAMM `protocol_system`s this provider knows how to serve.
-fn known_pamm_protocols() -> &'static [&'static str] {
-    &[
-        FERMISWAP_PROTOCOL_SYSTEM,
-        KIPSELI_PROTOCOL_SYSTEM,
-        BOPAMM_PROTOCOL_SYSTEM,
-        METRIC_PYTH_ORACLE_CHANNEL,
-        METRIC_COMPRESSED_ORACLE_CHANNEL,
-    ]
-}
-
 /// Default override providers contributed by Titan, keyed by `protocol_system`.
 ///
-/// Returns one shared [`TitanProvider`] mapped under every known pAMM `protocol_system` yielded by
+/// Returns one shared [`TitanProvider`] mapped under every [`TitanChannel::key`] yielded by
 /// `protocols` (the ones the caller wants a built-in default for). Takes an owned iterator so the
 /// caller can forward its strings without cloning. The provider is spawned only when at least one
 /// such venue needs serving — so an empty or fully-overridden `protocols` opens no connection. The
@@ -188,26 +234,21 @@ fn known_pamm_protocols() -> &'static [&'static str] {
 pub fn default_providers(
     protocols: impl IntoIterator<Item = String>,
 ) -> HashMap<String, Arc<dyn StateOverrideProvider>> {
-    let needed: Vec<&'static str> = protocols
+    let needed: Vec<TitanChannel> = protocols
         .into_iter()
-        .filter_map(|protocol| {
-            known_pamm_protocols()
-                .iter()
-                .copied()
-                .find(|&known| known == protocol.as_str())
-        })
+        .filter_map(|protocol| TitanChannel::from_key(&protocol))
         .collect();
     if needed.is_empty() {
         return HashMap::new();
     }
     // Auto-registration endpoint: the `TITAN_PAMM_STREAM_URL` env override if set, else the
     // built-in default. Consumers needing a different endpoint can register their own
-    // `TitanProvider::spawn(url, protocols)` via `with_override_provider` instead.
+    // `TitanProvider::spawn(url, channels)` via `with_override_provider` instead.
     let url = std::env::var(TITAN_URL_ENV).unwrap_or_else(|_| TITAN_URL.to_string());
     let provider: Arc<dyn StateOverrideProvider> = Arc::new(TitanProvider::spawn(url, &needed));
     needed
         .into_iter()
-        .map(|protocol| (protocol.to_string(), provider.clone()))
+        .map(|channel| (channel.key().to_string(), provider.clone()))
         .collect()
 }
 
@@ -221,9 +262,9 @@ pub struct TitanProvider {
 }
 
 impl TitanProvider {
-    /// Opens ONE WebSocket connection to `url` serving the given `protocols` and spawns the
-    /// background reconnect/parse task that keeps their per-protocol snapshots up to date. Only the
-    /// requested protocols get a channel, and the task only parses their venues.
+    /// Opens ONE WebSocket connection to `url` serving the given `channels` and spawns the
+    /// background reconnect/parse task that keeps their snapshots up to date. Each channel is
+    /// subscribed under its [`TitanChannel::key`], and the task only parses their venues.
     ///
     /// Public so a consumer can point a provider at a custom endpoint and register it via
     /// [`ProtocolStreamBuilder::with_override_provider`](crate::evm::stream::ProtocolStreamBuilder::with_override_provider),
@@ -231,17 +272,13 @@ impl TitanProvider {
     ///
     /// Returns immediately; the connection is established and maintained in the background, so a
     /// transient WebSocket failure never blocks or crashes the caller.
-    pub fn spawn(url: String, protocols: &[&str]) -> Self {
+    pub fn spawn(url: String, channels: &[TitanChannel]) -> Self {
         let mut receivers = HashMap::new();
         let mut senders = Vec::new();
-        for &protocol in protocols {
-            let Some(venues) = Self::venues_for_protocol(protocol) else {
-                warn!("Unknown protocol: {protocol}");
-                continue;
-            };
+        for &channel in channels {
             let (tx, rx) = watch::channel(OverrideSnapshot::default());
-            receivers.insert(protocol.to_string(), rx);
-            senders.push((venues, tx));
+            receivers.insert(channel.key().to_string(), rx);
+            senders.push((channel.venues(), tx));
         }
         tokio::spawn(Self::run(url, senders));
         Self { receivers }
@@ -378,32 +415,6 @@ impl TitanProvider {
             warn!(seconds = backoff.as_secs(), attempt, "Backing off before reconnecting to Titan");
             sleep(backoff).await;
         }
-    }
-
-    /// Maps a known pAMM `protocol_system` to its Titan venue aliases, or `None` if unknown.
-    ///
-    /// Every alias of a protocol streams the same maker feed (e.g. its oracle and router
-    /// addresses); subscribing to all of them keeps the protocol served when one key disappears
-    /// from the stream, which venue deployments have been observed doing within hours.
-    /// Titan/venue specifics (the address mapping) live only here.
-    fn venues_for_protocol(protocol_system: &str) -> Option<Vec<Address>> {
-        let raw = match protocol_system {
-            FERMISWAP_PROTOCOL_SYSTEM => FERMISWAP_VENUES,
-            KIPSELI_PROTOCOL_SYSTEM => KIPSELI_VENUES,
-            BOPAMM_PROTOCOL_SYSTEM => BOPAMM_VENUES,
-            METRIC_PYTH_ORACLE_CHANNEL => METRIC_PYTH_ORACLE_VENUES,
-            METRIC_COMPRESSED_ORACLE_CHANNEL => METRIC_COMPRESSED_ORACLE_VENUES,
-            _ => return None,
-        };
-        let venues = raw
-            .iter()
-            .map(|venue| {
-                venue
-                    .parse()
-                    .unwrap_or_else(|e| panic!("hardcoded venue address {venue} must parse: {e}"))
-            })
-            .collect();
-        Some(venues)
     }
 
     /// Extracts the snapshot of the first alias in `venues` present in the frame, or `Ok(None)`
@@ -576,36 +587,28 @@ impl StateOverrideProvider for TitanProvider {
 mod tests {
     use super::*;
 
-    /// The known-protocols list must contain the FermiSwap protocol so the builder auto-registers
-    /// the provider.
+    /// The builder registers the provider for an indexed pAMM by its `protocol_system`, so that is
+    /// the key its channel must answer to.
     #[test]
-    fn known_pamm_protocols_contains_fermiswap() {
-        assert!(known_pamm_protocols().contains(&FERMISWAP_PROTOCOL_SYSTEM));
+    fn indexed_pamm_channels_are_keyed_by_protocol_system() {
+        assert_eq!(TitanChannel::from_key("vm:fermiswap"), Some(TitanChannel::FermiSwap));
+        assert_eq!(TitanChannel::from_key("vm:kipseli"), Some(TitanChannel::Kipseli));
+        assert_eq!(TitanChannel::from_key("vm:bopamm"), Some(TitanChannel::BopAmm));
     }
 
     #[test]
-    fn venues_for_protocol_resolves_all_known_aliases() {
-        let cases = [
-            (FERMISWAP_PROTOCOL_SYSTEM, FERMISWAP_VENUES),
-            (KIPSELI_PROTOCOL_SYSTEM, KIPSELI_VENUES),
-            (BOPAMM_PROTOCOL_SYSTEM, BOPAMM_VENUES),
-            (METRIC_PYTH_ORACLE_CHANNEL, METRIC_PYTH_ORACLE_VENUES),
-            (METRIC_COMPRESSED_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_VENUES),
-        ];
-        for (protocol, expected) in cases {
-            let venues = TitanProvider::venues_for_protocol(protocol).expect("venues must resolve");
-            let expected: Vec<Address> = expected
-                .iter()
-                .map(|raw| raw.parse().unwrap())
-                .collect();
-            assert_eq!(venues, expected, "venue mismatch for {protocol}");
-            assert!(!venues.is_empty(), "every protocol needs at least one venue");
+    fn every_channel_has_a_distinct_key_and_parsable_venues() {
+        let mut keys = std::collections::HashSet::new();
+        for channel in TitanChannel::iter() {
+            assert!(keys.insert(channel.key()), "duplicate key {}", channel.key());
+            assert_eq!(TitanChannel::from_key(channel.key()), Some(channel));
+            assert!(!channel.venues().is_empty(), "{channel:?} needs at least one venue");
         }
     }
 
     #[test]
-    fn venues_for_protocol_returns_none_for_unknown() {
-        assert!(TitanProvider::venues_for_protocol("vm:unknown").is_none());
+    fn an_unknown_key_has_no_channel() {
+        assert_eq!(TitanChannel::from_key("vm:unknown"), None);
     }
 
     /// Sample message from the Titan docs (<https://docs.titanbuilder.xyz/propamms/takers>).
@@ -628,9 +631,7 @@ mod tests {
 
     #[test]
     fn extract_venue_reads_state_diff() {
-        let venue = FERMISWAP_VENUES[0]
-            .parse::<Address>()
-            .unwrap();
+        let venue = TitanChannel::FermiSwap.venues()[0];
         let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
         let snapshot = TitanProvider::extract_venue(&message, &venue)
             .expect("extract must succeed")
@@ -664,28 +665,20 @@ mod tests {
 
     #[test]
     fn extract_venue_returns_none_for_absent_venue() {
-        let venue = KIPSELI_VENUES[0]
-            .parse::<Address>()
-            .unwrap();
+        let venue = TitanChannel::Kipseli.venues()[0];
         let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
         assert!(TitanProvider::extract_venue(&message, &venue)
             .unwrap()
             .is_none());
     }
 
-    /// The sample message is keyed by the FermiSwap oracle (`FERMISWAP_VENUES[0]`), so listing the
-    /// router alias first must fall through to the oracle rather than give up.
+    /// The sample message is keyed by the FermiSwap oracle (its first alias), so listing the router
+    /// alias first must fall through to the oracle rather than give up.
     #[test]
     fn extract_any_venue_falls_back_to_a_later_alias() {
         let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        let aliases = [
-            FERMISWAP_VENUES[1]
-                .parse::<Address>()
-                .unwrap(),
-            FERMISWAP_VENUES[0]
-                .parse::<Address>()
-                .unwrap(),
-        ];
+        let venues = TitanChannel::FermiSwap.venues();
+        let aliases = [venues[1], venues[0]];
         let snapshot = TitanProvider::extract_any_venue(&message, &aliases)
             .expect("extract must succeed")
             .expect("oracle alias is present in the frame");
@@ -695,10 +688,7 @@ mod tests {
     #[test]
     fn extract_any_venue_returns_none_when_no_alias_matches() {
         let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        let aliases: Vec<Address> = KIPSELI_VENUES
-            .iter()
-            .map(|raw| raw.parse().unwrap())
-            .collect();
+        let aliases = TitanChannel::Kipseli.venues();
         assert!(TitanProvider::extract_any_venue(&message, &aliases)
             .unwrap()
             .is_none());

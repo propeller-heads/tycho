@@ -57,6 +57,7 @@ num-traits = { workspace = true }
 alloy-primitives = { version = "1.5", features = ["serde"], optional = true }
 
 # Enum utilities
+strum = { workspace = true }
 strum_macros = { workspace = true }
 
 # Tycho dependencies

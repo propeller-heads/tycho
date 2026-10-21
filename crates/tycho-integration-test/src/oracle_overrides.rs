@@ -12,24 +12,24 @@ use alloy::primitives::{
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use tycho_simulation::evm::override_stream::{
-    titan::{default_providers, METRIC_COMPRESSED_ORACLE_CHANNEL, METRIC_PYTH_ORACLE_CHANNEL},
+    titan::{default_providers, TitanChannel},
     OverrideSnapshot, StateOverrideProvider,
 };
 
 /// The channels of Metric's two Ethereum oracles. A Metric pool on Ethereum only fills after
 /// Metric's oracle update for its block, so a Metric swap needs both channels for that block,
 /// whether it reaches the pool through Titan's price level stream or through Metric's API.
-pub const METRIC_ORACLE_CHANNELS: &[&str] =
-    &[METRIC_PYTH_ORACLE_CHANNEL, METRIC_COMPRESSED_ORACLE_CHANNEL];
+pub const METRIC_ORACLE_CHANNELS: &[TitanChannel] =
+    &[TitanChannel::MetricPythOracle, TitanChannel::MetricCompressedOracle];
 
 /// The Titan state override channels each price level stream venue needs; every channel listed
 /// here is collected. A venue is covered at a block only when all of its channels published for
-/// it. A venue missing from this table (TaurusFi, Tempest, auto-detected ones) simulates on the
-/// indexed state.
-const VENUE_CHANNELS: [(&str, &[&str]); 4] = [
-    ("fermiswap", &["vm:fermiswap"]),
-    ("kipseli", &["vm:kipseli"]),
-    ("bebop", &["vm:bopamm"]),
+/// it. A venue missing from this table (auto-detected ones, and the named venues in the tests'
+/// `VENUES_WITHOUT_CHANNELS`) simulates on the indexed state.
+const VENUE_CHANNELS: [(&str, &[TitanChannel]); 4] = [
+    ("fermiswap", &[TitanChannel::FermiSwap]),
+    ("kipseli", &[TitanChannel::Kipseli]),
+    ("bebop", &[TitanChannel::BopAmm]),
     ("metric", METRIC_ORACLE_CHANNELS),
 ];
 
@@ -39,7 +39,7 @@ const VENUE_CHANNELS: [(&str, &[&str]); 4] = [
 /// `venue` is the bare name a pAMM component is served under (`fermiswap`, or a `0x…` address for
 /// an auto-detected venue). Auto-detected venues are never covered: the price level stream keys
 /// them by their router address, which is not the key the override stream publishes under.
-pub fn override_channels(venue: &str) -> Option<&'static [&'static str]> {
+pub fn override_channels(venue: &str) -> Option<&'static [TitanChannel]> {
     VENUE_CHANNELS
         .iter()
         .find(|(name, _)| *name == venue)
@@ -52,12 +52,12 @@ const RETAINED_BLOCKS: usize = 8;
 /// Storage overrides keyed by contract address, then by storage slot.
 type Storage = HashMap<Address, HashMap<U256, U256>>;
 
-/// The latest snapshot of every protocol that published for one block.
+/// The latest snapshot of every channel that published for one block.
 ///
-/// A Titan frame carries a venue's whole `stateOverride` for the block it targets, so a protocol's
-/// newest snapshot replaces its previous one rather than accumulating with it. Protocols are kept
+/// A Titan frame carries a venue's whole `stateOverride` for the block it targets, so a channel's
+/// newest snapshot replaces its previous one rather than accumulating with it. Channels are kept
 /// apart because they publish independently, and are merged only when the block is read.
-type BlockEntry = HashMap<&'static str, Arc<Storage>>;
+type BlockEntry = HashMap<TitanChannel, Arc<Storage>>;
 
 /// The overrides of the most recent quoted blocks, newest at the back.
 type Blocks = Arc<RwLock<VecDeque<(u64, BlockEntry)>>>;
@@ -69,39 +69,39 @@ pub struct OracleOverrides {
 
 /// What was collected for one quoted block.
 ///
-/// Carries the protocols that published alongside their merged slots, because a swap is only
-/// priced by its own venue when that venue's protocol is among them.
+/// Carries the channels that published alongside their merged slots, because a swap is only
+/// priced by its own venue when that venue's channels are among them.
 pub struct BlockOverrides {
-    protocols: HashSet<&'static str>,
+    channels: HashSet<TitanChannel>,
     storage: AddressHashMap<B256HashMap<B256>>,
 }
 
 impl BlockOverrides {
     /// Whether every one of `channels` published overrides for this block.
-    pub fn covers_all(&self, channels: &[&str]) -> bool {
+    pub fn covers_all(&self, channels: &[TitanChannel]) -> bool {
         channels
             .iter()
-            .all(|channel| self.protocols.contains(channel))
+            .all(|channel| self.channels.contains(channel))
     }
 
-    /// The slots to apply, merged across every protocol that published.
+    /// The slots to apply, merged across every channel that published.
     pub fn into_storage(self) -> AddressHashMap<B256HashMap<B256>> {
         self.storage
     }
 }
 
-/// Opens the one Titan state override connection this process uses, mapped under every protocol
-/// system it serves.
+/// Opens the one Titan state override connection this process uses, mapped under the key of every
+/// channel it serves.
 ///
 /// The same providers back the indexed pAMM pools (through
 /// `ProtocolStreamBuilder::with_override_provider`) and [`OracleOverrides`], so both read one
 /// socket and one parse loop instead of opening one each and disagreeing about the current frame.
 pub fn titan_providers() -> HashMap<String, Arc<dyn StateOverrideProvider>> {
-    default_providers(subscribed_channels().map(|protocol| protocol.to_string()))
+    default_providers(subscribed_channels().map(|channel| channel.key().to_string()))
 }
 
 /// Every channel collected from Titan's state override stream.
-fn subscribed_channels() -> impl Iterator<Item = &'static str> {
+fn subscribed_channels() -> impl Iterator<Item = TitanChannel> {
     VENUE_CHANNELS
         .iter()
         .flat_map(|(_, channels)| channels.iter().copied())
@@ -112,13 +112,14 @@ impl OracleOverrides {
     /// channel.
     pub fn spawn(providers: &HashMap<String, Arc<dyn StateOverrideProvider>>) -> Option<Self> {
         let mut receivers = Vec::new();
-        for protocol in subscribed_channels() {
+        for channel in subscribed_channels() {
+            let key = channel.key();
             match providers
-                .get(protocol)
-                .and_then(|provider| provider.subscribe(protocol))
+                .get(key)
+                .and_then(|provider| provider.subscribe(key))
             {
-                Some(receiver) => receivers.push((protocol, receiver)),
-                None => warn!(protocol, "Titan's state override stream serves no channel"),
+                Some(receiver) => receivers.push((channel, receiver)),
+                None => warn!(channel = key, "Titan's state override stream serves no channel"),
             }
         }
         if receivers.is_empty() {
@@ -126,8 +127,8 @@ impl OracleOverrides {
         }
 
         let blocks: Blocks = Arc::new(RwLock::new(VecDeque::new()));
-        for (protocol, receiver) in receivers {
-            tokio::spawn(collect(protocol, receiver, blocks.clone()));
+        for (channel, receiver) in receivers {
+            tokio::spawn(collect(channel, receiver, blocks.clone()));
         }
         info!("Collecting pAMM oracle overrides from Titan's state override stream");
         Some(Self { blocks })
@@ -135,8 +136,8 @@ impl OracleOverrides {
 
     /// The overrides Titan published for `block`, or `None` when none were collected for it.
     ///
-    /// Every protocol that published for the block contributes its latest snapshot; a slot written
-    /// by two protocols takes an arbitrary one of the two values.
+    /// Every channel that published for the block contributes its latest snapshot; a slot written
+    /// by two channels takes an arbitrary one of the two values.
     pub fn for_block(&self, block: u64) -> Option<BlockOverrides> {
         let blocks = match self.blocks.read() {
             Ok(blocks) => blocks,
@@ -149,21 +150,24 @@ impl OracleOverrides {
             .iter()
             .find(|(number, _)| *number == block)
             .map(|(_, entry)| BlockOverrides {
-                protocols: entry.keys().copied().collect(),
+                channels: entry.keys().copied().collect(),
                 storage: slot_overrides(entry),
             })
     }
 }
 
-/// Records every snapshot of one protocol's channel.
+/// Records every snapshot of one channel.
 async fn collect(
-    protocol: &'static str,
+    channel: TitanChannel,
     mut receiver: watch::Receiver<OverrideSnapshot>,
     blocks: Blocks,
 ) {
     loop {
         if receiver.changed().await.is_err() {
-            warn!(protocol, "Titan override channel closed; stopping oracle override collection");
+            warn!(
+                channel = channel.key(),
+                "Titan override channel closed; stopping oracle override collection"
+            );
             return;
         }
         let (block_number, storage) = {
@@ -171,19 +175,22 @@ async fn collect(
             (snapshot.block_number, snapshot.storage.clone())
         };
         let Some(block_number) = block_number else {
-            debug!(protocol, "Titan override snapshot carries no block number; skipping");
+            debug!(
+                channel = channel.key(),
+                "Titan override snapshot carries no block number; skipping"
+            );
             continue;
         };
         if storage.is_empty() {
             continue;
         }
-        record(&blocks, protocol, block_number, storage);
+        record(&blocks, channel, block_number, storage);
     }
 }
 
-/// Stores `storage` as `protocol`'s snapshot of `block`, replacing the one it published before and
+/// Stores `storage` as `channel`'s snapshot of `block`, replacing the one it published before and
 /// evicting the oldest block past [`RETAINED_BLOCKS`].
-fn record(blocks: &Blocks, protocol: &'static str, block: u64, storage: Arc<Storage>) {
+fn record(blocks: &Blocks, channel: TitanChannel, block: u64, storage: Arc<Storage>) {
     let mut blocks = match blocks.write() {
         Ok(blocks) => blocks,
         Err(e) => {
@@ -195,17 +202,17 @@ fn record(blocks: &Blocks, protocol: &'static str, block: u64, storage: Arc<Stor
         .iter_mut()
         .find(|(number, _)| *number == block)
     {
-        entry.insert(protocol, storage);
+        entry.insert(channel, storage);
         return;
     }
-    blocks.push_back((block, BlockEntry::from([(protocol, storage)])));
+    blocks.push_back((block, BlockEntry::from([(channel, storage)])));
     while blocks.len() > RETAINED_BLOCKS {
         blocks.pop_front();
     }
 }
 
 /// Converts one block's collected storage into the `B256` slots the execution simulation takes,
-/// merged across the protocols that published for it.
+/// merged across the channels that published for it.
 fn slot_overrides(entry: &BlockEntry) -> AddressHashMap<B256HashMap<B256>> {
     let mut overrides: AddressHashMap<B256HashMap<B256>> = AddressHashMap::default();
     for storage in entry.values() {
@@ -224,10 +231,15 @@ fn slot_overrides(entry: &BlockEntry) -> AddressHashMap<B256HashMap<B256>> {
 
 #[cfg(test)]
 mod tests {
+    use tycho_simulation::price_level_stream::config::default_served_pamms;
+
     use super::*;
 
-    const FERMISWAP: &str = "vm:fermiswap";
-    const BOPAMM: &str = "vm:bopamm";
+    const FERMISWAP: TitanChannel = TitanChannel::FermiSwap;
+    const BOPAMM: TitanChannel = TitanChannel::BopAmm;
+
+    /// The named price level stream venues Titan's state override stream carries no channel for.
+    const VENUES_WITHOUT_CHANNELS: [&str; 2] = ["taurusfi", "tempest"];
 
     const REGISTRY: Address =
         alloy::primitives::address!("da7afeed01fe625cf15d187a19f94b45f00b8c5f");
@@ -256,7 +268,36 @@ mod tests {
     #[test]
     fn the_metric_venue_needs_both_metric_oracles() {
         assert_eq!(override_channels("metric"), Some(METRIC_ORACLE_CHANNELS));
-        assert_eq!(override_channels("fermiswap"), Some(&["vm:fermiswap"][..]));
+        assert_eq!(override_channels("fermiswap"), Some(&[TitanChannel::FermiSwap][..]));
+    }
+
+    /// A venue the price level stream starts serving has to be placed in [`VENUE_CHANNELS`] or in
+    /// [`VENUES_WITHOUT_CHANNELS`], so it cannot fall back to the indexed state unnoticed; and
+    /// neither list may name a venue the stream does not serve.
+    #[test]
+    fn every_served_venue_is_classified_once() {
+        let served: HashSet<String> = default_served_pamms()
+            .into_iter()
+            .map(|pamm| pamm.protocol)
+            .collect();
+        for venue in &served {
+            let with_channels = override_channels(venue).is_some();
+            let without_channels = VENUES_WITHOUT_CHANNELS.contains(&venue.as_str());
+            assert!(
+                with_channels != without_channels,
+                "venue {venue} must be in exactly one of VENUE_CHANNELS and VENUES_WITHOUT_CHANNELS"
+            );
+        }
+        let classified = VENUE_CHANNELS
+            .iter()
+            .map(|(venue, _)| *venue)
+            .chain(VENUES_WITHOUT_CHANNELS);
+        for venue in classified {
+            assert!(
+                served.contains(venue),
+                "venue {venue} is not served by the price level stream"
+            );
+        }
     }
 
     #[test]
@@ -280,7 +321,12 @@ mod tests {
     #[test]
     fn metric_needs_both_oracles_for_a_block() {
         let overrides = overrides();
-        record(&overrides.blocks, METRIC_PYTH_ORACLE_CHANNEL, 100, storage(REGISTRY, &[(1, 11)]));
+        record(
+            &overrides.blocks,
+            TitanChannel::MetricPythOracle,
+            100,
+            storage(REGISTRY, &[(1, 11)]),
+        );
         let one_oracle = overrides
             .for_block(100)
             .expect("block 100 was recorded");
@@ -288,7 +334,7 @@ mod tests {
 
         record(
             &overrides.blocks,
-            METRIC_COMPRESSED_ORACLE_CHANNEL,
+            TitanChannel::MetricCompressedOracle,
             100,
             storage(VENUE, &[(1, 22)]),
         );
