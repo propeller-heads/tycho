@@ -239,7 +239,8 @@ mod tests {
     const BOPAMM: TitanChannel = TitanChannel::BopAmm;
 
     /// The named price level stream venues Titan's state override stream carries no channel for.
-    const VENUES_WITHOUT_CHANNELS: [&str; 2] = ["taurusfi", "tempest"];
+    const VENUES_WITHOUT_CHANNELS: [&str; 5] =
+        ["taurusfi", "tempest", "goliath", "stelaxis", "elzorro"];
 
     const REGISTRY: Address =
         alloy::primitives::address!("da7afeed01fe625cf15d187a19f94b45f00b8c5f");
