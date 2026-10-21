@@ -82,6 +82,11 @@ interface ITesseraPair {
 /// here is the zero-priority-fee price.
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
+    /// Raw output units the price step buys. The view rounds output down, so
+    /// the measured price is low by under one unit in this many. Fixed rather
+    /// than derived from decimals(), which reads 0 in the Tycho VM.
+    uint256 internal constant PRICE_STEP_OUTPUT = 1e6;
+
     ITesseraSwap public immutable tesseraSwap;
     /// TesseraSwap exposes no Engine getter, so the Engine is fixed per
     /// deployment, like the Substreams configuration.
@@ -184,11 +189,7 @@ contract TesseraSwapAdapter is ISwapAdapter {
         view
         returns (Fraction memory)
     {
-        // The step must buy at least 1,000 raw output units, so low-decimal
-        // outputs such as cbBTC do not round to zero.
-        uint256 target = 10 ** IERC20Metadata(buy).decimals() / 1e6;
-        if (target < 1000) target = 1000;
-        (uint256 step,) = _quoteInput(sell, buy, target);
+        (uint256 step,) = _quoteInput(sell, buy, PRICE_STEP_OUTPUT);
         if (step == 0) return Fraction(0, 1);
         uint256 beforeOut = amount == 0 ? 0 : _quote(sell, buy, amount);
         uint256 afterOut = _quote(sell, buy, amount + step);
@@ -205,6 +206,9 @@ contract TesseraSwapAdapter is ISwapAdapter {
         prices = new Fraction[](amounts.length);
         for (uint256 i; i < amounts.length; ++i) {
             prices[i] = _price(sell, buy, amounts[i]);
+            // A Pair that cannot quote (stale or dead ladder) has no price; a
+            // zero price would read as a free token.
+            if (prices[i].numerator == 0) revert Unavailable("No price");
         }
     }
 

@@ -73,8 +73,11 @@ runs two exact-input bisection probes, keeping each call under 3M gas. The resul
 conservative hint: up to 25% of the initial interval is left unresolved, so remaining
 liquidity can be underestimated. `HardLimits` is not advertised.
 
-`price` is a finite difference of view quotes, with an input step large enough to buy at
-least 1,000 raw output units.
+`price` is a marginal price: a finite difference of view quotes whose step buys 10^6 raw output
+units. The view rounds output down by under one unit, so the price is low by less than 10^-6. The
+step is fixed in raw units because `decimals()` reads 0 for the VM's token proxies, and it stays
+inside the top ladder level on the indexed pairs. A Pair that cannot quote, such as one past its
+staleness cutoff or with a dead ladder, makes `price` revert, so it has no spot price instead of 0.
 
 Quotes depend on the transaction's priority fee. Once `tx.gasprice` exceeds `block.basefee`
 by more than an operator-set threshold (0.002 gwei at block 50,548,423, 0.01 gwei at

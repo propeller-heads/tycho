@@ -3,7 +3,8 @@ pragma solidity ^0.8.27;
 import "forge-std/Test.sol";
 import {
     TesseraSwapAdapter,
-    ITesseraSwap
+    ITesseraSwap,
+    ITesseraPair
 } from "src/tessera/TesseraSwapAdapter.sol";
 import {ISwapAdapterTypes} from "src/interfaces/ISwapAdapterTypes.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -58,6 +59,8 @@ contract TesseraSwapAdapterTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant ENGINE = 0x31e99E05fee3DCE580af777C3fD63eE1B3B40c17;
+    address constant EURC = 0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42;
+    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     // keccak256(abi.encode(keccak256(abi.encode(WETH, USDC)), 8)): the Engine
     // registry entry for the sorted WETH/USDC pair.
     bytes32 constant WETH_USDC_REGISTRY_SLOT =
@@ -135,7 +138,11 @@ contract TesseraSwapAdapterTest is Test {
         uint256[] memory amounts = new uint256[](1);
         assertGt(adapter.price(poolId, WETH, USDC, amounts)[0].numerator, 0);
         vm.roll(block.number + 100);
-        assertEq(adapter.price(poolId, WETH, USDC, amounts)[0].numerator, 0);
+        // A stale Pair quotes zero; a zero price would read as a free token.
+        vm.expectRevert(
+            abi.encodeWithSignature("Unavailable(string)", "No price")
+        );
+        adapter.price(poolId, WETH, USDC, amounts);
     }
 
     function testLimitsPreserveSmallRemainingLiquidity() public {
@@ -200,6 +207,45 @@ contract TesseraSwapAdapterTest is Test {
     function testDeregisteredPairStopsQuoting() public {
         vm.store(ENGINE, WETH_USDC_REGISTRY_SLOT, bytes32(0));
         _assertPairUnavailable();
+    }
+
+    /// Spot price against a quote of a tenth of the top ladder level: large
+    /// enough that its own rounding is negligible, small enough to stay at the
+    /// top level's price.
+    function _assertSpotPriceMatchesTopLevel(
+        address pair,
+        address sell,
+        address buy
+    ) internal view {
+        ITesseraPair.State memory state = ITesseraPair(pair).poolState();
+        ITesseraPair.Order[20] memory orders = sell
+            == ITesseraPair(pair).baseToken()
+            ? state.curve.baseToQuoteOrders
+            : state.curve.quoteToBaseOrders;
+        uint256 referenceIn = orders[0].amount / 10;
+        (, uint256 referenceOut) = ITesseraSwap(VENUE)
+            .tesseraSwapViewAmounts(sell, buy, int256(referenceIn));
+        uint256[] memory amounts = new uint256[](1);
+        ISwapAdapterTypes.Fraction memory spot =
+            adapter.price(bytes32(bytes20(pair)), sell, buy, amounts)[0];
+        uint256 measured = spot.numerator * referenceIn;
+        uint256 expected = referenceOut * spot.denominator;
+        uint256 diff =
+            measured > expected ? measured - expected : expected - measured;
+        assertLe(diff * 1e5, expected, "spot price within 0.001% of top level");
+    }
+
+    function testSpotPriceStepDoesNotRoundLow() public {
+        // At this block a 1,000-unit step priced EURC up to 0.08% low and
+        // cbBTC 0.02% low: the view rounds a 1,000-unit output down.
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_590_300);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE);
+        address eurcPair = 0x4B963fB4A26f082D94f964FA3c2764821Cc06Bd4;
+        address btcPair = 0xED57BacDc2a990B631F8817853935791C122c356;
+        _assertSpotPriceMatchesTopLevel(eurcPair, EURC, USDC);
+        _assertSpotPriceMatchesTopLevel(eurcPair, USDC, EURC);
+        _assertSpotPriceMatchesTopLevel(btcPair, CBBTC, USDC);
+        _assertSpotPriceMatchesTopLevel(btcPair, USDC, CBBTC);
     }
 
     function testRejectsWrongTokens() public {
