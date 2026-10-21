@@ -861,6 +861,16 @@ async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval:
 /// swaps are simulated at: one slot plus a margin for the RPC to serve the new block.
 const METRIC_TARGET_BLOCK_WAIT: Duration = Duration::from_secs(18);
 
+/// How many polls `poll_interval` apart span [`METRIC_TARGET_BLOCK_WAIT`]. Always at least one,
+/// and at most one per millisecond of the wait: an interval below 1 ms counts as 1 ms.
+fn metric_target_block_attempts(poll_interval: Duration) -> u32 {
+    let wait_ms = METRIC_TARGET_BLOCK_WAIT.as_millis();
+    let interval_ms = poll_interval
+        .as_millis()
+        .clamp(1, wait_ms);
+    u32::try_from(wait_ms / interval_ms).expect("METRIC_TARGET_BLOCK_WAIT in ms fits in a u32")
+}
+
 /// Whether `update` is Metric's book on Ethereum, whose swaps need Metric's oracle update.
 fn is_metric_on_ethereum(chain: Chain, update: &StreamUpdate) -> bool {
     let StreamUpdatePayload::Book { protocol_system, .. } = &update.payload else {
@@ -1270,11 +1280,8 @@ async fn process_update(
                 // orders first in the block it builds. Simulate at that next block, under the
                 // overrides Titan published for it.
                 let target_block = latest.header.number + 1;
-                let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms.max(1));
-                let attempts = (METRIC_TARGET_BLOCK_WAIT.as_millis() / poll_interval.as_millis())
-                    .try_into()
-                    .unwrap_or(u32::MAX)
-                    .max(1);
+                let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+                let attempts = metric_target_block_attempts(poll_interval);
                 match await_target_block(&rpc_tools, target_block, attempts, poll_interval).await? {
                     Some(b) => Arc::new(b),
                     None => {
@@ -2363,8 +2370,9 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_metric_on_ethereum, is_oracle_stale_revert, pamm_venue,
-        sample_swap_directions, should_fetch_block_by_number, Cli, TychoState,
+        book_swap_directions, is_metric_on_ethereum, is_oracle_stale_revert,
+        metric_target_block_attempts, pamm_venue, sample_swap_directions,
+        should_fetch_block_by_number, Cli, TychoState,
     };
     use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
@@ -2391,6 +2399,21 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(is_metric_on_ethereum(chain, &book_update(protocol_system)), expected);
+    }
+
+    /// The wait for the next block is bounded whatever the poll interval: a zero interval counts
+    /// as 1 ms, and an interval longer than the wait still polls once.
+    #[rstest]
+    #[case::default_interval(500, 36)]
+    #[case::zero_interval(0, 18_000)]
+    #[case::interval_longer_than_the_wait(60_000, 1)]
+    #[case::interval_beyond_u32_ms(u64::MAX, 1)]
+    fn the_metric_block_wait_polls_a_bounded_number_of_times(
+        #[case] poll_interval_ms: u64,
+        #[case] expected: u32,
+    ) {
+        let poll_interval = std::time::Duration::from_millis(poll_interval_ms);
+        assert_eq!(metric_target_block_attempts(poll_interval), expected);
     }
 
     #[rstest]
