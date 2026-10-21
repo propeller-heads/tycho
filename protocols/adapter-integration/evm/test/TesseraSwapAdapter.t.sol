@@ -26,6 +26,10 @@ contract LimitedTesseraEngine {
         return (true, pair);
     }
 
+    function fastPullBlock() external pure returns (uint256) {
+        return 0;
+    }
+
     function swapAmountView(address, address, int256 amount, address)
         external
         pure
@@ -45,8 +49,23 @@ contract LimitedTesseraEngine {
 // Synthetic venue: the view quote is pre-fee, but settlement deducts 10%.
 // This isolates the adapter's accounting from the real venue's currently zero
 // tag-0 fee.
+/// It also stands in for the Engine, whose view quote the adapter prices with.
 contract DiscountedTesseraSettlement {
-    function tesseraSwapViewAmounts(address, address, int256 amount)
+    address immutable pair;
+
+    constructor(address pair_) {
+        pair = pair_;
+    }
+
+    function getTesseraPool(address, address)
+        external
+        view
+        returns (bool, address)
+    {
+        return (true, pair);
+    }
+
+    function swapAmountView(address, address, int256 amount, address)
         external
         pure
         returns (uint256, uint256)
@@ -213,6 +232,38 @@ contract TesseraSwapAdapterTest is Test {
         assertEq(buyBtc[1], 196_210_709);
     }
 
+    function testLimitsSkipFastPulledLevels() public {
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_890_608);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
+        // While block.number <= fastPullBlock the venue skips each ladder's
+        // first fastPullLevel orders: two orders of 12,038,253 sats here.
+        vm.mockCall(
+            ENGINE,
+            abi.encodeWithSignature("fastPullBlock()"),
+            abi.encode(block.number)
+        );
+        uint256[] memory limits =
+            adapter.getLimits(bytes32(bytes20(BTC_PAIR)), CBBTC, USDC);
+        assertEq(limits[0], 501_275_927 - 2 * 12_038_253);
+    }
+
+    function testLimitsNetOppositeFillsOnlyWithReduceAccumulator() public {
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_515_061);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
+        ITesseraPair.State memory state = ITesseraPair(BTC_PAIR).poolState();
+        state.reduceAccumulator = false;
+        vm.mockCall(
+            BTC_PAIR,
+            abi.encodeWithSelector(ITesseraPair.poolState.selector),
+            abi.encode(state)
+        );
+        // The whole own-side accumulator, 11,537.106141 USDC, comes off the
+        // live ladder; opposite fills give nothing back.
+        uint256[] memory limits =
+            adapter.getLimits(bytes32(bytes20(BTC_PAIR)), USDC, CBBTC);
+        assertEq(limits[0], 162_243_010_211 - 11_537_106_141);
+    }
+
     function testLimitsNetOwnFillsAndCapByTreasury() public {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_890_608);
         adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
@@ -295,8 +346,8 @@ contract TesseraSwapAdapterTest is Test {
         ITesseraPair.State memory state = ITesseraPair(pair).poolState();
         ITesseraPair.Order[20] memory orders = sell
             == ITesseraPair(pair).baseToken()
-            ? state.curve.baseToQuoteOrders
-            : state.curve.quoteToBaseOrders;
+            ? state.curveState.baseToQuoteOrders
+            : state.curveState.quoteToBaseOrders;
         uint256 referenceIn = orders[0].amount / 10;
         (, uint256 referenceOut) = ITesseraSwap(VENUE)
             .tesseraSwapViewAmounts(sell, buy, int256(referenceIn));
@@ -329,9 +380,10 @@ contract TesseraSwapAdapterTest is Test {
     }
 
     function testSellReportsSettledOutputInsteadOfViewQuote() public {
-        DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
+        DiscountedTesseraSettlement venue =
+            new DiscountedTesseraSettlement(PAIR);
         TesseraSwapAdapter localAdapter =
-            new TesseraSwapAdapter(address(venue), ENGINE, TREASURY);
+            new TesseraSwapAdapter(address(venue), address(venue), TREASURY);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);
@@ -344,9 +396,10 @@ contract TesseraSwapAdapterTest is Test {
     }
 
     function testBuyRejectsUnderfilledExactOutput() public {
-        DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
+        DiscountedTesseraSettlement venue =
+            new DiscountedTesseraSettlement(PAIR);
         TesseraSwapAdapter localAdapter =
-            new TesseraSwapAdapter(address(venue), ENGINE, TREASURY);
+            new TesseraSwapAdapter(address(venue), address(venue), TREASURY);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);

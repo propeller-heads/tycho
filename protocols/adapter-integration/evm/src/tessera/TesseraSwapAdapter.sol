@@ -22,10 +22,10 @@ interface ITesseraSwap {
     ) external;
 }
 
-/// Engine registry getter. The contracts are unverified; the name comes from
-/// matching selector 0x15f09335. It returns `(true, pair)` for a registered
-/// token pair in either order.
+/// The Engine and Pair contracts are unverified. Their interfaces and field
+/// names follow the ABI in the SDK Tessera provides to integrators.
 interface ITesseraEngine {
+    /// `(true, pair)` for a registered token pair, in either order.
     function getTesseraPool(address tokenA, address tokenB)
         external
         view
@@ -40,6 +40,9 @@ interface ITesseraEngine {
         int256 amountSpecified,
         address sender
     ) external view returns (uint256 amountIn, uint256 amountOut);
+    /// While block.number <= fastPullBlock, every Pair skips its first
+    /// fastPullLevel orders.
+    function fastPullBlock() external view returns (uint256);
 }
 
 interface ITesseraPair {
@@ -49,45 +52,57 @@ interface ITesseraPair {
         bool isDead;
     }
 
-    struct Staleness {
+    struct StalenessWidenParams {
         uint64 cutoffBlock;
         uint64 widenStartBlock;
         uint32 widenCoeff;
         uint32 maxWidenPpm;
     }
 
-    struct Curve {
+    struct CurveState {
         Order[20] baseToQuoteOrders;
         Order[20] quoteToBaseOrders;
     }
 
+    /// The venue fills a side's orders from the first, or from fastPullLevel
+    /// while fast pull is active, up to the first dead one. Fills since the
+    /// last ladder post, in input units, are deducted from that ladder; with
+    /// reduceAccumulator set, opposite-side fills converted at the mid price
+    /// are added back.
     struct State {
-        uint256 cumulativeQuote;
-        uint256 cumulativeBase;
+        uint256 cumulativeQuoteAmountInSinceUpd;
+        uint256 cumulativeBaseAmountInSinceUpd;
         uint32 widenPpm;
-        uint32 accumulatorMultiplier;
+        uint32 cumulativeSwapAmountMultiplierPpm;
         uint8 fastPullLevel;
         bool reduceAccumulator;
-        Staleness staleness;
+        StalenessWidenParams stalenessWidenParams;
         uint32 widenlistedPpm;
         bool enforceWhitelist;
-        uint32 priorityFactor;
-        uint32 priorityWiden;
-        Curve curve;
+        uint32 prioFeeThresholdFactor;
+        uint32 widenPrioFeePpm;
+        CurveState curveState;
     }
     function baseToken() external view returns (address);
     function quoteToken() external view returns (address);
     function poolState() external view returns (State memory);
 }
 
-/// Prices and limits come from the Engine's view quote, and swaps settle
-/// through TesseraSwap itself, so post-swap storage is the venue's own.
+/// Prices, limits and the quote before settlement come from the Engine's view
+/// quote; swaps settle through TesseraSwap itself, so post-swap storage is the
+/// venue's own.
 ///
-/// TesseraSwap applies a fixed per-pair haircut (4 bps on WETH and cbBTC,
-/// up to 10 bps) when tx.gasprice exceeds block.basefee by more than an
-/// operator-set threshold (0.01 gwei at block 51,977,873). The Tycho VM
-/// simulates with zero gas price and base fee, so every quote and limit
-/// here is the zero-priority-fee price.
+/// Tessera prices by caller. A caller its code screen flags pays the Pair's
+/// widenlistedPpm on top of the spread, the Engine can reject a sender or
+/// tx.origin by category, and with enforceWhitelist set only whitelisted
+/// callers trade. Quotes here assume an unflagged, permitted caller, as
+/// today's TychoRouter is; simulation does not show a flagged or rejected
+/// caller, and caller-aware quoting is left as a follow-up.
+///
+/// Settlement also widens the price by the Pair's widenPrioFeePpm once the
+/// priority fee reaches the Engine's global threshold scaled by the Pair's
+/// prioFeeThresholdFactor. The Tycho VM simulates at zero priority fee, so
+/// every quote and limit here is the unwidened price.
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
     /// Raw output units the price step buys. The view rounds output down, so
@@ -270,20 +285,31 @@ contract TesseraSwapAdapter is ISwapAdapter {
         ITesseraPair.State memory state = pair.poolState();
         bool sellBase = sell == pair.baseToken();
         ITesseraPair.Order[20] memory orders = sellBase
-            ? state.curve.baseToQuoteOrders
-            : state.curve.quoteToBaseOrders;
-        for (uint256 i; i < 20 && !orders[i].isDead; ++i) {
+            ? state.curveState.baseToQuoteOrders
+            : state.curveState.quoteToBaseOrders;
+        uint256 first =
+            block.number <= engine.fastPullBlock() ? state.fastPullLevel : 0;
+        if (first >= 20) return 0;
+        for (uint256 i; i < first; ++i) {
+            if (orders[i].isDead) return 0;
+        }
+        for (uint256 i = first; i < 20 && !orders[i].isDead; ++i) {
             bound += orders[i].amount;
         }
-        // Both accumulators count fills since the last ladder post, own in sell
-        // units and opposite in buy units; selling the opposite back converts
-        // it at the venue's price without reading the packed mid price.
-        uint256 own = sellBase ? state.cumulativeBase : state.cumulativeQuote;
-        uint256 opposite =
-            sellBase ? state.cumulativeQuote : state.cumulativeBase;
-        uint256 returned = opposite == 0 ? 0 : _quote(buy, sell, opposite);
-        uint256 netFilled = own > returned ? own - returned : 0;
-        bound = bound > netFilled ? bound - netFilled : 0;
+        uint256 filled = sellBase
+            ? state.cumulativeBaseAmountInSinceUpd
+            : state.cumulativeQuoteAmountInSinceUpd;
+        if (state.reduceAccumulator) {
+            uint256 opposite = sellBase
+                ? state.cumulativeQuoteAmountInSinceUpd
+                : state.cumulativeBaseAmountInSinceUpd;
+            // The venue converts at the mid price. Selling the opposite fills
+            // back pays the spread, so this returns slightly less and the limit
+            // stays on the safe side, without decoding the packed mid price.
+            uint256 returned = opposite == 0 ? 0 : _quote(buy, sell, opposite);
+            filled = filled > returned ? filled - returned : 0;
+        }
+        bound = bound > filled ? bound - filled : 0;
     }
 
     /// The largest amount found by bisection between a one-step quote and
@@ -322,7 +348,7 @@ contract TesseraSwapAdapter is ISwapAdapter {
         int256 signedAmount =
             side == OrderSide.Sell ? int256(specified) : -int256(specified);
         (uint256 amountIn, uint256 amountOut) =
-            tesseraSwap.tesseraSwapViewAmounts(sell, buy, signedAmount);
+            engine.swapAmountView(sell, buy, signedAmount, address(0));
         if (amountIn == 0 || amountOut == 0) {
             revert Unavailable("Unquotable amount");
         }

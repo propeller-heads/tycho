@@ -47,7 +47,7 @@ changes.
 | Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
 | Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
 | Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge; adapter constructor argument | Standard ERC20 and canonical WETH events; a rotation needs a new adapter runtime, or limits are capped by the old treasury |
-| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool` and `swapAmountView` | Static ABI; inferred `isDead` and accumulator meanings set the limits; the Engine is a constructor argument |
+| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool`, `swapAmountView` and `fastPullBlock` | ABI and fill rules from the SDK Tessera provides; the contracts are unverified; the Engine and treasury are constructor arguments |
 
 A component is marked `paused` when its write helper's tag-0 fee is nonzero (the VM loads the
 helper's code but not its storage, so it would read that fee as zero), and every component is
@@ -68,11 +68,14 @@ indexed: the old component stops quoting and the new one is missing.
 
 ## Limits and price
 
-`getLimits` computes the largest sell amount that fills in full from the Pair's `poolState()`:
-the sell side's orders up to the first dead one (the venue fills nothing past it), minus fills
-since the operator last posted the ladder net of fills in the opposite direction (converted by
-selling them back), then capped so the output fits the treasury's balance of the buy token,
-which the view quote ignores but settlement needs. `limits[1]` is the quote at that amount. If
+`getLimits` computes the largest sell amount that fills in full from the Pair's `poolState()`,
+following the venue's own fill rules: the sell side's orders up to the first dead one, skipping
+the first `fastPullLevel` orders while the Engine's `fastPullBlock` is not yet passed, minus fills
+since the operator last posted the ladder. With `reduceAccumulator` set, fills in the opposite
+direction give capacity back; the venue converts them at the mid price, the adapter by selling
+them back, which pays the spread and keeps the limit on the safe side. The result is capped so
+the output fits the treasury's balance of the buy token, which the view quote ignores but
+settlement needs. `limits[1]` is the quote at that amount. If
 the computed amount does not quote (a stale price, or a `poolState()` layout that no longer
 means what the adapter assumes), it falls back to an eight-probe search below it. Quotes go
 through `Engine.swapAmountView(..., address(0))`, which matches what today's TychoRouter gets at
