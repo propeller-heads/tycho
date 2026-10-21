@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use substreams::{
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetString},
+    store::{StoreGet, StoreGetProto, StoreGetString},
 };
 use substreams_ethereum::pb::eth;
 use tycho_substreams::{
@@ -30,6 +30,8 @@ struct PairView {
     known: HashSet<String>,
     owner: Vec<u8>,
     safety: Safety,
+    /// Engine registry slot of each known pair's token pair, keyed by pair id.
+    registry: HashMap<String, Vec<u8>>,
 }
 
 /// This module's upstream map and store inputs.
@@ -57,6 +59,7 @@ pub fn map_protocol_changes(
     pair_store: StoreGetString,
     treasury_store: StoreGetString,
     safety_store: StoreGetString,
+    component_store: StoreGetProto<ProtocolComponent>,
     balance_store: StoreDeltas,
 ) -> Result<BlockChanges> {
     let config = DeploymentConfig::parse(&params)?;
@@ -69,7 +72,8 @@ pub fn map_protocol_changes(
         .transpose()?
         .unwrap_or(config.treasury.clone());
     let safety = read_safety(&safety_store, &known);
-    let view = PairView { known, owner, safety };
+    let registry = registry_slots(&config, &component_store, &known);
+    let view = PairView { known, owner, safety, registry };
     protocol_changes_from_storage(
         &config,
         &block,
@@ -78,6 +82,23 @@ pub fn map_protocol_changes(
         &view,
         &RpcCode,
     )
+}
+
+/// Engine registry slot of each known pair's token pair.
+fn registry_slots(
+    config: &DeploymentConfig,
+    store: &StoreGetProto<ProtocolComponent>,
+    known: &HashSet<String>,
+) -> HashMap<String, Vec<u8>> {
+    let mut slots = HashMap::new();
+    for pair in known {
+        if let Some(component) = store.get_last(pair) {
+            if let [a, b] = component.tokens.as_slice() {
+                slots.insert(pair.clone(), registry_slot(a, b, config.pair_map_slot));
+            }
+        }
+    }
+    slots
 }
 
 /// Closing-block engine, helper assignments and tag-0 fees for `known` pairs.
@@ -106,7 +127,9 @@ fn read_safety(store: &StoreGetString, known: &HashSet<String>) -> Safety {
 /// A pair write to the implementation, pricing-library or write-helper slot publishes that
 /// address as `stateless_contract_addr_0`, `_1` or `_2` and its closing-block code as
 /// `stateless_contract_code_0`, `_1` or `_2`; a zero address is not published.
-/// TesseraSwap writes publish `engine` and `balance_owner` on every pair. A pair is never touched
+/// TesseraSwap writes publish `engine` and `balance_owner` on every pair. An Engine registry write
+/// that moves a pair's token pair away from it pauses that pair, since TesseraSwap routes by token
+/// pair and the old pair would otherwise quote its successor. A pair is never touched
 /// by a transaction ordered before its creation. Every emitted transaction pauses a pair whose
 /// helper charges a nonzero tag-0 fee, and pauses every pair once the recorded Engine differs from
 /// the configured one.
@@ -159,7 +182,7 @@ fn protocol_changes_from_storage(
         |addr| addr == config.tesseraswap || addr == config.engine || known.contains(&id(addr)),
         &mut changes,
     );
-    record_pair_writes(config, storage, known, &created, code, &mut changes)?;
+    record_pair_writes(config, storage, view, &created, code, &mut changes)?;
     enforce_pauses(config, storage, view, &created, &mut changes)?;
     let mut changes: Vec<_> = changes.into_iter().collect();
     changes.sort_by_key(|(index, _)| *index);
@@ -177,7 +200,7 @@ fn protocol_changes_from_storage(
 fn record_pair_writes(
     config: &DeploymentConfig,
     storage: &BlockStorageChanges,
-    known: &HashSet<String>,
+    view: &PairView,
     created: &HashMap<String, u64>,
     code: &impl CodeSource,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
@@ -193,6 +216,7 @@ fn record_pair_writes(
         slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
         slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
     ];
+    let known = &view.known;
     // (transaction index, pair, attribute index, dependency address), published once code is in.
     let mut dependencies = vec![];
     for group in &storage.transactions {
@@ -212,6 +236,14 @@ fn record_pair_writes(
             let builder = changes
                 .entry(transaction.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(transaction));
+            if w.address == config.engine {
+                let replaced = id(&address(&w.old_value));
+                if view.registry.get(&replaced) == Some(&w.key) &&
+                    address(&w.new_value) != address(&w.old_value)
+                {
+                    builder.change_component_pause_state(&replaced, true);
+                }
+            }
             for pair in targets {
                 // known includes end-block discoveries; never attach changes to a Pair
                 // in a transaction earlier than the one that created it.
@@ -441,7 +473,57 @@ mod tests {
     }
 
     fn view(pairs: &[&[u8]], safety: Safety) -> PairView {
-        PairView { known: pairs.iter().map(|p| id(p)).collect(), owner: TREASURY.to_vec(), safety }
+        PairView {
+            known: pairs.iter().map(|p| id(p)).collect(),
+            owner: TREASURY.to_vec(),
+            safety,
+            registry: HashMap::new(),
+        }
+    }
+
+    const PAIR_REGISTRY_SLOT: [u8; 32] = [0x99; 32];
+
+    /// A view where PAIR's token pair sits at `PAIR_REGISTRY_SLOT` in the Engine registry.
+    fn registered_view() -> PairView {
+        let mut view = view(&[&PAIR, &OTHER_PAIR], safe());
+        view.registry
+            .insert(id(&PAIR), PAIR_REGISTRY_SLOT.to_vec());
+        view
+    }
+
+    #[test]
+    fn pauses_pair_moved_out_of_registry() {
+        let engine = config().engine;
+        let block = block(vec![tx(
+            0,
+            vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), word(&OTHER_PAIR))],
+        )]);
+        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+
+        assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
+        assert!(!attrs_in(&out, 0, &OTHER_PAIR).contains_key("paused"));
+    }
+
+    #[test]
+    fn pauses_pair_removed_from_registry() {
+        let engine = config().engine;
+        let block = block(vec![tx(
+            0,
+            vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), vec![0; 32])],
+        )]);
+        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+
+        assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
+    }
+
+    #[test]
+    fn pair_address_outside_its_registry_slot_does_not_pause() {
+        let engine = config().engine;
+        let block =
+            block(vec![tx(0, vec![write(&engine, slot(77), word(&PAIR), word(&OTHER_PAIR))])]);
+        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+
+        assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
     }
 
     /// Attributes emitted for `component` in the transaction at `tx_index`.

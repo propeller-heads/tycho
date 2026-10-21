@@ -125,6 +125,7 @@ modules:
       - store: store_pairs
       - store: store_treasury
       - store: store_safety
+      - store: store_components
       - store: store_balances
         mode: deltas
     output:

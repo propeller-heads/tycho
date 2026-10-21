@@ -47,13 +47,24 @@ changes.
 | Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
 | Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
 | Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge | Standard ERC20 and canonical WETH events |
-| Adapter | Pair `poolState()` and token getters | Static ABI; the 20-order ladder only bounds the limit search |
+| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool` | Static ABI; the 20-order ladder only bounds the limit search; the Engine is a constructor argument |
 
 A component is marked `paused` when its write helper's tag-0 fee is nonzero (the VM loads the
 helper's code but not its storage, so it would read that fee as zero), and every component is
-paused once TesseraSwap points to a different Engine. The safety store records the tag-0 fee
-slot at every address from genesis, so a helper that was configured before assignment is
-still caught. `paused` is never cleared. Consumers do not act on `paused` yet.
+paused once TesseraSwap points to a different Engine. A Pair is also paused when an Engine
+registry write moves its token pair to another Pair or clears it. The safety store records the
+tag-0 fee slot at every address from genesis, so a helper that was configured before assignment
+is still caught. `paused` is never cleared. Consumers do not act on `paused` yet.
+
+TesseraSwap routes by token pair, not by Pair address, so a Pair the registry no longer points at
+would quote and settle against its successor. The adapter therefore checks
+`getTesseraPool(sell, buy)` on every quote, limit and swap and reverts with
+`Unavailable("Pair not registered")` unless it returns that Pair. That check, not `paused`, is
+what stops a replaced Pair today, and it lifts again if the registry points back.
+
+A Pair the registry points at is discovered only when it is initialized and registered in the
+same transaction. If the Engine is re-pointed to a Pair initialized earlier, that Pair is not
+indexed: the old component stops quoting and the new one is missing.
 
 ## Limits and price
 

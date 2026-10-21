@@ -19,4 +19,6 @@ against the previous treasury and the difference between the two treasuries' clo
 is applied at the rotation.
 
 A component is marked `paused` when its write helper charges a nonzero tag-0 fee, and every
-component is paused once TesseraSwap points to a different Engine.
+component is paused once TesseraSwap points to a different Engine. A Pair is also paused when
+the Engine registry moves its token pair to another Pair or clears it, and the adapter refuses to
+quote a Pair the registry does not point at.
