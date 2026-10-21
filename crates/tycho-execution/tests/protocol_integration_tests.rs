@@ -4022,3 +4022,152 @@ fn test_sequential_encoding_strategy_sky() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
+
+/// Infinity static attributes: LP fee and the `parameters` word with the tick spacing or bin step
+/// at byte 29 and no hook bits.
+fn pancakeswap_infinity_attributes(lp_fee: u32, key_byte: u8) -> HashMap<String, Bytes> {
+    let mut parameters = vec![0u8; 32];
+    parameters[29] = key_byte;
+    HashMap::from([
+        ("key_lp_fee".to_string(), Bytes::from(BigInt::from(lp_fee).to_signed_bytes_be())),
+        ("parameters".to_string(), Bytes::from(parameters)),
+    ])
+}
+
+#[test]
+fn test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in() {
+    // Note: This test does not assert anything. It is only used to obtain integration
+    // test data for our router solidity test.
+    //
+    //   ETH ──(Infinity Bin)──> USDC
+    //
+    // Native input settles by value in the Vault callback. The Forge test runs a USDC -> ETH leg
+    // first, since only the USDC it leaves in the pool lets ETH -> USDC fill at the fork block.
+    let usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+
+    // Live Base ETH/USDC Bin pool: LP fee 201, bin step 10.
+    let swap = Swap::new(
+        ProtocolComponent {
+            id: "pancakeswap_infinity_bin_eth_usdc".to_string(),
+            protocol_system: "pancakeswap_infinity_bin".to_string(),
+            static_attributes: pancakeswap_infinity_attributes(201, 10),
+            ..Default::default()
+        },
+        default_token(eth()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        bob_address(),
+        bob_address(),
+        eth(),
+        usdc,
+        BigUint::from(15_208_480_279_872u64),
+        // The swap's output after the Forge test's first leg, so the replay must match it exactly.
+        BigUint::from(49_999u64),
+        BigUint::from(49_999u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
+    // Note: This test does not assert anything. It is only used to obtain integration
+    // test data for our router solidity test.
+    //
+    //   USDT ──(Infinity CL)──> USDC ──(Infinity Bin)──> ETH
+    //
+    // Two Infinity hops, so two vault locks back to back, ending in native ETH. The encoder
+    // rebuilds each PoolKey from the static attributes; the component ids are not encoded.
+    let usdt = Bytes::from("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2");
+    let usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+
+    // Live Base USDC/USDT CL pool: LP fee 5, tick spacing 2.
+    let cl_swap = Swap::new(
+        ProtocolComponent {
+            id: "pancakeswap_infinity_cl_usdc_usdt".to_string(),
+            protocol_system: "pancakeswap_infinity_cl".to_string(),
+            static_attributes: pancakeswap_infinity_attributes(5, 2),
+            ..Default::default()
+        },
+        default_token(usdt.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+    // Live Base ETH/USDC Bin pool: LP fee 201, bin step 10.
+    let bin_swap = Swap::new(
+        ProtocolComponent {
+            id: "pancakeswap_infinity_bin_eth_usdc".to_string(),
+            protocol_system: "pancakeswap_infinity_bin".to_string(),
+            static_attributes: pancakeswap_infinity_attributes(201, 10),
+            ..Default::default()
+        },
+        default_token(usdc.clone()),
+        default_token(eth()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    // ETH goes to BOB: ALICE holds a forwarding contract on Base, which hides an ETH balance diff.
+    let solution = Solution::new(
+        alice_address(),
+        bob_address(),
+        usdt,
+        eth(),
+        BigUint::from(100_000u64),
+        // The route's output at the Forge test's fork block, so the replay must match it exactly.
+        BigUint::from(30_412_401_940_077u64),
+        BigUint::from(30_412_401_940_077u64),
+        vec![cl_swap, bin_swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin",
+        hex_calldata.as_str(),
+    );
+}
