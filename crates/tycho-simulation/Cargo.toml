@@ -22,11 +22,13 @@ ignored = ["ruint"]
 [dependencies]
 base64 = { workspace = true }
 # Serialization/Deserialization
+bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
-derive_more = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` lets `book::wire` set an entry aside before it is read.
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_with = { workspace = true, optional = true }
 toml = { workspace = true }
 typetag = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
@@ -35,9 +37,10 @@ uuid = { workspace = true, features = ["v4", "fast-rng"] }
 thiserror = { workspace = true }
 
 # Async & concurrency
+async-stream = { workspace = true, optional = true }
 futures = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1.16"
+tokio-stream = { workspace = true }
 
 # Logging & Tracing
 tracing = { workspace = true }
@@ -86,11 +89,10 @@ evm_ekubo_sdk = { version = "0.6.5", features = ["serde"] }
 # Balancer V3 — Balancer's own reference maths (MIT), used by the native decoder.
 balancer-maths-rust = "0.5.0"
 
-# book feeds
+# rfq
 alloy-chains = "0.2.39"
-bytes = { workspace = true, optional = true }
-async-stream = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+derive_more = { workspace = true }
 metrics = { version = "0.24", optional = true }
 hex-literal = { workspace = true }
 http = { version = "1.0", optional = true }
@@ -123,7 +125,7 @@ dialoguer = "0.10.4"
 criterion = "0.8.2"
 
 [features]
-default = ["evm", "rfq", "book-feeds", "price-level-stream"]
+default = ["evm", "book-feeds", "price-level-stream"]
 network_tests = []
 price-level-stream = ["dep:async-stream", "dep:metrics", "dep:tokio-tungstenite"]
 evm = [
@@ -135,22 +137,20 @@ evm = [
     "dep:alloy-primitives",
     "dep:tokio-tungstenite",
 ]
+# The off-chain book feeds and everything they are built from: the transport loops in
+# `snapshot_feed`, the shared `book` layer, and the `rfq` and `pamm` provider families. The
+# `SnapshotFeed` trait itself is unconditional — it is the contract, not a feed.
 book-feeds = [
     # `bytes_to_address` and the providers' `alloy` address types.
     "evm",
     "dep:async-stream",
     "dep:bytes",
-    "dep:http",
-    "dep:reqwest",
-    "dep:tokio-tungstenite",
-]
-rfq = [
     "dep:reqwest",
     "dep:async-trait",
     "dep:tokio-tungstenite",
-    "dep:async-stream",
     "dep:http",
     "dep:prost",
+    "dep:serde_with",
 ]
 
 [[bench]]

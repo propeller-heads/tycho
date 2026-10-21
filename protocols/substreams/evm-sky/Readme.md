@@ -27,10 +27,8 @@ subDAO) share one ecosystem, and their venues are split across Tycho protocols b
   share-appreciating ERC-4626:
   - sUSDS `0xa3931d71877c0e7a3148cb7eb4463524fec27fbd` — Sky core contract (`SUSDS` in
     the chainlog, yield = Sky Savings Rate) but *marketed* as "Spark Savings". Live.
-  - sDAI `0x83f20f44975d03b1b09e64809b757c47f942beea` — Sky core (DSR). Configured but
-    excluded client-side in tycho-simulation's `erc4626_filter`: `maxDeposit` returns
-    `type(uint256).max` while the real deposit limit is not traceable on-chain (see the
-    filter's comment).
+  - sDAI `0x83f20f44975d03b1b09e64809b757c47f942beea` — Sky core (DSR). Live. Its rate
+    reads only `pot`, which DCI indexes in full.
   - spUSDC/spUSDT/spETH — Spark's own vaults backed by its Liquidity Layer. Configured;
     intended to be filtered client-side.
   - stUSDS `0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9` — Sky core (Lockstake engine).

@@ -13,6 +13,9 @@
 # symlink targets, permissions through symlinks). Only patched in zip >= 9.0.0. zip 0.6.6 is a
 # build-dependency of utoipa-swagger-ui 6.0.0, whose build script extracts the Swagger UI archive
 # bundled in the crate itself. The latest utoipa-swagger-ui (10.0.1) still requires zip ^8.6.
+# RUSTSEC-2026-0382: rustls-webpki may accept distrusted intermediates. Only patched in
+# rustls-webpki >= 0.103.16 (which we use). The 0.101.x line has no fix and is pulled in by
+# rustls 0.21 (tonic 0.9 and aws-sdk-s3's legacy rustls feature).
 ignore = [
     "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
@@ -25,4 +28,5 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0382",
 ]

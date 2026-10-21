@@ -1,16 +1,13 @@
-use std::{collections::HashMap, fmt, str::FromStr};
+use std::{collections::HashMap, fmt};
 
-use alloy::primitives::Address;
 use serde::{Deserialize, Serialize};
-use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    Bytes,
-};
+use serde_with::{serde_as, skip_serializing_none};
+use tycho_common::{models::protocol::GetAmountOutParams, Bytes};
 
-pub use crate::rfq::models::PriceLevel as HashflowPriceLevel;
-use crate::rfq::{
-    errors::RFQError,
-    models::{fill_levels, PriceLevel},
+use crate::{
+    book::{levels::Levels, wire::SkipInvalidEntries},
+    rfq::errors::RFQError,
+    serde_helpers::evm_address,
 };
 
 /// The error Hashflow reports on a rejected request, sent as an object alongside HTTP 200.
@@ -20,15 +17,62 @@ pub struct HashflowError {
     pub message: String,
 }
 
+/// The codes below are the ones Hashflow has been seen to answer with. The venue publishes no
+/// catalogue of them — the numbered vocabulary in its documentation belongs to the market-maker
+/// WebSocket API, not to the taker endpoints these reach — and one code covers several
+/// conditions, so what a code not listed here means is unknown, and telling two of them apart
+/// can need the message.
+impl HashflowError {
+    /// No maker quotes the request: the one it was addressed to declined it, or is unknown to
+    /// the API.
+    const NO_MAKER_SUPPORTS_REQUEST: u64 = 82;
+
+    /// The amount asked for is above what the maker quotes.
+    const EXCEEDS_SUPPORTED_AMOUNTS: u64 = 76;
+
+    /// The amount asked for is below the maker's first level.
+    const BELOW_MINIMUM_AMOUNT: u64 = 79;
+
+    /// Whether this is a maker declining the trade rather than the request being wrong: nobody
+    /// quotes it, or the amount is outside the range the maker it went to supports. All three are
+    /// answers about one trade at one moment, which the same ladder quotes at another size.
+    pub fn declines_the_trade(&self) -> bool {
+        matches!(
+            self.code,
+            Self::NO_MAKER_SUPPORTS_REQUEST |
+                Self::EXCEEDS_SUPPORTED_AMOUNTS |
+                Self::BELOW_MINIMUM_AMOUNT
+        )
+    }
+
+    /// Whether this is Hashflow stating it does not price the chain it was asked about.
+    ///
+    /// The code it answers here with covers an unknown market maker and an unknown chain type
+    /// too, so what it refused is in the message alone.
+    pub fn refuses_the_chain(&self) -> bool {
+        self.message
+            .starts_with("Invalid chainId")
+    }
+}
+
+/// The envelope Hashflow answers a request it would not serve with, on either book endpoint.
+/// A body it does serve carries no `error` at all, so parsing one is what tells the two apart.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HashflowFailure {
+    pub error: HashflowError,
+}
+
 impl fmt::Display for HashflowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} (code {})", self.message, self.code)
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashflowPriceLevelsResponse {
     pub status: String, // "success" or "fail"
+    #[serde_as(deserialize_as = "Option<SkipInvalidEntries>")]
     pub levels: Option<HashMap<String, Vec<HashflowMarketMakerLevels>>>,
     pub error: Option<HashflowError>,
 }
@@ -36,142 +80,126 @@ pub struct HashflowPriceLevelsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashflowMarketMakerLevels {
     pub pair: HashflowPair,
-    pub levels: Vec<PriceLevel>,
+    #[serde(with = "hashflow_levels")]
+    pub levels: Levels,
+}
+
+/// Hashflow's wire form of a ladder: `{"q": "<quantity>", "p": "<price>"}` objects with decimal
+/// strings.
+mod hashflow_levels {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_with::{serde_as, DisplayFromStr};
+
+    use crate::book::levels::{Levels, PriceLevel};
+
+    #[serde_as]
+    #[derive(Serialize, Deserialize)]
+    struct WireLevel {
+        #[serde_as(as = "DisplayFromStr")]
+        q: f64,
+        #[serde_as(as = "DisplayFromStr")]
+        p: f64,
+    }
+
+    pub fn serialize<S: Serializer>(levels: &Levels, serializer: S) -> Result<S::Ok, S::Error> {
+        levels
+            .iter()
+            .map(|level| WireLevel { q: level.quantity, p: level.price })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Levels, D::Error> {
+        let levels = Vec::<WireLevel>::deserialize(deserializer)?
+            .into_iter()
+            .map(|level| PriceLevel { price: level.p, quantity: level.q })
+            .collect();
+        Levels::new(levels).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowPair {
-    #[serde(rename = "baseToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
+    #[serde(deserialize_with = "evm_address::deserialize")]
     pub base_token: Bytes,
-    #[serde(rename = "quoteToken", deserialize_with = "deserialize_string_to_checksummed_bytes")]
+    #[serde(deserialize_with = "evm_address::deserialize")]
     pub quote_token: Bytes,
 }
 
-fn deserialize_string_to_checksummed_bytes<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    let address = Address::from_str(&s).map_err(serde::de::Error::custom)?;
-    let checksum = address.to_checksum(None);
-    let checksum_bytes = Bytes::from_str(&checksum).map_err(serde::de::Error::custom)?;
-    Ok(checksum_bytes)
-}
-
-impl HashflowMarketMakerLevels {
-    /// Calculate Total Value Locked (TVL) for this market maker level
-    pub fn calculate_tvl(&self) -> f64 {
-        self.levels
-            .iter()
-            .map(|level| level.quantity * level.price)
-            .sum()
-    }
-
-    /// Calculate quote token amount for trading base tokens using price levels
-    ///
-    /// NOTE: This method is meant just to be used as an estimate - as it does not
-    /// error or return None if there is not enough liquidity to cover base token amount.
-    /// This method will only return None if there are absolutely no price levels.
-    ///
-    /// # Parameters
-    /// - `base_token_amount`: The amount of tokens to trade
-    ///
-    /// # Returns
-    /// Estimated price based on available liquidity
-    pub fn get_price(&self, base_token_amount: f64) -> Option<f64> {
-        // We treat all levels as available liquidity regardless of sell/buy direction
-        if self.levels.is_empty() {
-            return None;
-        }
-
-        let (total_quote_token, remaining_base_token) =
-            fill_levels(&self.levels, base_token_amount);
-
-        // If we can't fill the whole order (ran out of liquidity), calculate the price based on
-        // the amount that we could fill, in order to have at least some price estimate
-        Some(total_quote_token / (base_token_amount - remaining_base_token))
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowMarketMakersResponse {
-    #[serde(rename = "marketMakers")]
     pub market_makers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowQuoteRequest {
     pub source: String,
-    #[serde(rename = "baseChain")]
     pub base_chain: HashflowChain,
-    #[serde(rename = "quoteChain")]
     pub quote_chain: HashflowChain,
     pub rfqs: Vec<HashflowRFQ>,
     pub calldata: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowChain {
-    #[serde(rename = "chainType")]
     chain_type: String,
-    #[serde(rename = "chainId")]
     chain_id: u64,
 }
 
-impl From<Chain> for HashflowChain {
-    fn from(value: Chain) -> Self {
-        HashflowChain { chain_type: "evm".to_string(), chain_id: value.id() }
+impl HashflowChain {
+    /// The chain as Hashflow's quote requests name it: an EVM chain id.
+    pub fn evm(chain_id: u64) -> Self {
+        HashflowChain { chain_type: "evm".to_string(), chain_id }
     }
 }
 
+/// Optional fields are left out of the request rather than sent as `null`.
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowRFQ {
-    #[serde(rename = "baseToken")]
     pub base_token: String,
-    #[serde(rename = "quoteToken")]
     pub quote_token: String,
     // Decimal amount (e.g. "1000000" for 1 USDT)
-    #[serde(rename = "baseTokenAmount")]
     pub base_token_amount: Option<String>,
     // Decimal amount (e.g. "1000000" for 1 USDT)
-    #[serde(rename = "quoteTokenAmount", skip_serializing_if = "Option::is_none")]
     pub quote_token_amount: Option<String>,
     pub trader: String,
-    #[serde(rename = "effectiveTrader")]
     pub effective_trader: Option<String>,
-    /// The only market makers Hashflow asks. `None` asks every maker.
-    #[serde(rename = "marketMakers", skip_serializing_if = "Option::is_none")]
-    pub market_makers: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<HashflowRFQOptions>,
+    /// The makers the RFQ goes to; a quote from any other is only possible as the API's
+    /// fallback, which `options` disables.
+    pub market_makers: Vec<String>,
+    pub options: HashflowRFQOptions,
 }
 
-/// Options of one quote request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowRFQOptions {
-    /// When true, a request the named makers decline fails instead of being answered by another
-    /// maker.
-    #[serde(rename = "doNotRetryWithOtherMakers")]
+    /// Without it, the API answers a failed maker with the next best one. That maker's liquidity
+    /// is a component of its own, which the same route may already be filling, so its quote could
+    /// draw on the same depth twice, at a price the requesting state did not simulate.
     pub do_not_retry_with_other_makers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowQuoteResponse {
     pub status: String,
     pub error: Option<HashflowError>,
-    #[serde(rename = "rfqId")]
     rfq_id: String,
-    #[serde(rename = "internalRfqIds")]
     internal_rfq_ids: Option<Vec<String>>,
     pub quotes: Option<Vec<HashflowQuote>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowQuote {
-    #[serde(rename = "quoteData")]
     pub quote_data: HashflowQuoteData,
     pub signature: Bytes,
-    #[serde(rename = "targetContract")]
     pub target_contract: Option<Bytes>,
     pub value: Option<String>,
 }
@@ -221,51 +249,60 @@ impl HashflowQuote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashflowQuoteData {
-    #[serde(rename = "baseToken")]
     pub base_token: Bytes,
-    #[serde(rename = "quoteToken")]
     pub quote_token: Bytes,
     // Decimal amount (e.g. "1000000" for 1 USDT)
-    #[serde(rename = "baseTokenAmount")]
     pub base_token_amount: String,
     // Decimal amount (e.g. "1000000" for 1 USDT)
-    #[serde(rename = "quoteTokenAmount")]
     pub quote_token_amount: String,
     pub trader: Bytes,
-    #[serde(rename = "effectiveTrader")]
     pub effective_trader: Option<Bytes>,
     #[serde(rename = "txid")]
     pub tx_id: Bytes,
     pub pool: Bytes,
-    #[serde(rename = "quoteExpiry")]
     pub quote_expiry: u64,
     pub nonce: u64,
-    #[serde(rename = "externalAccount")]
     pub external_account: Option<Bytes>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::str::FromStr;
 
-    fn hashflow_level() -> HashflowMarketMakerLevels {
-        HashflowMarketMakerLevels {
-            pair: HashflowPair {
-                base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-                quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            },
-            levels: vec![
-                PriceLevel { quantity: 1.0, price: 3000.0 },
-                PriceLevel { quantity: 2.0, price: 2999.0 },
-            ],
-        }
+    use super::*;
+    use crate::book::levels::PriceLevel;
+
+    /// A maker quoting a ladder Hashflow got wrong goes quiet for the poll; the makers that
+    /// priced their pairs correctly still publish.
+    #[test]
+    fn a_maker_with_a_malformed_ladder_does_not_cost_the_others() {
+        let json = r#"{"status":"success","levels":{
+                "mm1":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"0"}]}],
+                "mm2":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"3000"}]}]
+            }}"#;
+
+        let response: HashflowPriceLevelsResponse = serde_json::from_str(json).unwrap();
+
+        let levels = response.levels.unwrap();
+        assert!(levels["mm1"].is_empty());
+        assert_eq!(levels["mm2"].len(), 1);
+    }
+
+    /// Nothing readable in the response is a parsing failure, not an empty book: a published
+    /// snapshot is complete, so an empty one withdraws every pair the venue had.
+    #[test]
+    fn a_response_with_no_readable_maker_is_an_error() {
+        let json = r#"{"status":"success","levels":{"mm1":[{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"0"}]}]}}"#;
+
+        assert!(serde_json::from_str::<HashflowPriceLevelsResponse>(json).is_err());
     }
 
     /// Hashflow answers a rejected RFQ with HTTP 200 and an `error` object, so the quote response
     /// has to deserialize that shape rather than only the successful one.
     #[test]
-    fn test_deserialize_rejected_quote_response() {
+    fn deserialize_rejected_quote_response() {
         let body = r#"{"status":"fail","rfqId":"0x2250000000000000000000000000000f",
             "error":{"code":82,"message":"No maker supports this request"}}"#;
 
@@ -276,37 +313,28 @@ mod tests {
     }
 
     #[test]
-    fn test_market_maker_level_tvl() {
-        let mm_level = hashflow_level();
+    fn levels_round_trip_through_the_wire_form() {
+        let json = r#"{"pair":{"baseToken":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","quoteToken":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"levels":[{"q":"1","p":"3000"},{"q":"2.5","p":"2999"}]}"#;
 
-        let tvl = mm_level.calculate_tvl();
-        // 1.0 * 3000.0 + 2.0 * 2999.0 = 3000.0 + 5998.0 = 8998.0
-        assert_eq!(tvl, 8998.0);
-    }
+        let mm_levels: HashflowMarketMakerLevels = serde_json::from_str(json).unwrap();
 
-    #[test]
-    fn test_get_price() {
-        let mm_level = hashflow_level();
+        assert_eq!(
+            &*mm_levels.levels,
+            &[
+                PriceLevel { quantity: 1.0, price: 3000.0 },
+                PriceLevel { quantity: 2.5, price: 2999.0 },
+            ]
+        );
+        assert_eq!(
+            mm_levels.pair.base_token,
+            Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap()
+        );
+        let json = serde_json::to_string(&mm_levels).unwrap();
+        assert!(json.contains(r#"{"q":"1","p":"3000"}"#), "{json}");
 
-        // Test single-level price
-        let price = mm_level.get_price(1.0);
-        assert_eq!(price, Some(3000.0));
-
-        // Test larger amount spanning multiple levels
-        let multi_level_price = mm_level.get_price(2.0);
-        // 1.0 * 3000.0 + 1.0 * 2999.0 = 5999.0 total
-        // 5999.0 / 2.0 = 2999.5
-        assert_eq!(multi_level_price, Some(2999.5));
-
-        // Test empty levels
-        let empty_mm_level = HashflowMarketMakerLevels {
-            pair: HashflowPair {
-                base_token: Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
-                quote_token: Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
-            },
-            levels: vec![],
-        };
-        assert_eq!(empty_mm_level.get_price(1.0), None);
+        // The adapter hands the decoded levels to `Levels::new`, so its validation applies.
+        let invalid = json.replace(r#""p":"3000""#, r#""p":"0""#);
+        assert!(serde_json::from_str::<HashflowMarketMakerLevels>(&invalid).is_err());
     }
 
     #[cfg(test)]
@@ -361,7 +389,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_success() {
+        fn validate_success() {
             let quote = quote();
             let params = params();
             assert!(quote
@@ -370,7 +398,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_base_token_mismatch() {
+        fn validate_base_token_mismatch() {
             let mut quote = quote();
             quote.quote_data.base_token =
                 hex_to_bytes("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
@@ -382,7 +410,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_quote_token_mismatch() {
+        fn validate_quote_token_mismatch() {
             let mut quote = quote();
             quote.quote_data.quote_token =
                 hex_to_bytes("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
@@ -394,7 +422,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_trader_mismatch() {
+        fn validate_trader_mismatch() {
             let mut quote = quote();
             quote.quote_data.trader = hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
             let params = params();
@@ -405,7 +433,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_effective_trader_mismatch() {
+        fn validate_effective_trader_mismatch() {
             let mut quote = quote();
             quote.quote_data.effective_trader =
                 Some(hex_to_bytes("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"));
@@ -417,7 +445,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_effective_trader_absent() {
+        fn validate_effective_trader_absent() {
             // An answer without an effectiveTrader is not tied to the address we requested
             // (Hashflow ties it to the trader instead), so validation must reject it.
             let mut quote = quote();
@@ -430,7 +458,7 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_base_token_amount_mismatch() {
+        fn validate_base_token_amount_mismatch() {
             let mut quote = quote();
             quote.quote_data.base_token_amount = "9999".to_string();
             let params = params();

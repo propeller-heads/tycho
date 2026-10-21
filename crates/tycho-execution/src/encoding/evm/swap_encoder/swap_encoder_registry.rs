@@ -7,9 +7,11 @@ use crate::encoding::{
     evm::{
         constants::{
             BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
-            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
             PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS,
+            UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -21,9 +23,10 @@ use crate::encoding::{
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
-            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
+            liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
+            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
+            native_fallback::NativeFallbackSwapEncoder, native_wrap::WrapSwapEncoder,
             pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
             ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
             sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
@@ -129,8 +132,7 @@ impl SwapEncoderRegistry {
         }
         if protocol_system.starts_with(FALLBACK_PREFIX) &&
             protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != BEBOP_FALLBACK_PROTOCOL_SYSTEM &&
-            protocol_system != HASHFLOW_FALLBACK_PROTOCOL_SYSTEM
+            !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
         {
             return self.encoders.get(FALLBACK_KEY);
         }
@@ -262,6 +264,14 @@ impl SwapEncoderRegistry {
                 self.chain,
                 config,
             )?)),
+            NATIVE_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(NativeFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM => Ok(Box::new(LiquoriceFallbackSwapEncoder::new(
+                executor_address,
+                self.chain,
+                config,
+            )?)),
             // The PropAMMFallbackRouter path carries the fallback protocol in the swap data, so it
             // needs its own encoder; the family resolves like the price-level-stream one.
             f if f == FALLBACK_KEY || f.starts_with(FALLBACK_PREFIX) => {
@@ -359,6 +369,12 @@ mod tests {
             .is_none());
         assert!(registry
             .get_encoder(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(registry
+            .get_encoder(NATIVE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(registry
+            .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
     }
 

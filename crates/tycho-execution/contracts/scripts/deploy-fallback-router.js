@@ -3,7 +3,7 @@ const hre = require("hardhat");
 const {deployCreate2} = require("./utils");
 
 // Deploys the fallback router named by FALLBACK_ROUTER: `propamm` (the default),
-// `metric`, `bebop` or `hashflow`.
+// `metric`, `bebop`, `hashflow`, `native` or `liquorice`.
 //
 // Every fallback router takes three per-chain singletons: Uniswap V4's PoolManager,
 // Fluid's liquidity layer and the Uniswap V3 static quoter. The first two come
@@ -15,14 +15,19 @@ const {deployCreate2} = require("./utils");
 //
 // BebopFallbackRouter also takes the Bebop settlement and router, from the chain's
 // `rfq:bebop` entry. HashflowFallbackRouter also takes the Hashflow router, from the
-// chain's `rfq:hashflow` entry.
+// chain's `rfq:hashflow` entry. NativeFallbackRouter also takes the Native router, from
+// the chain's `rfq:native` entry. LiquoriceFallbackRouter also takes the Liquorice
+// settlement and balance manager, from the chain's `rfq:liquorice` entry; Liquorice
+// must then allow the router as a solver.
 //
 // Then deploy the matching executor with deploy-executors.js: add an entry with
 // the printed router address to executor_deployments.json (`fallback` for
 // PropAMMFallbackExecutor, `fallback:rfq:metric` for MetricFallbackExecutor,
 // `fallback:rfq:bebop` for BebopFallbackExecutor, `fallback:rfq:hashflow` for
-// HashflowFallbackExecutor). A Bebop or Hashflow router also needs its address as
-// `fallback_router` under its protocol in protocol_specific_addresses.json.
+// HashflowFallbackExecutor, `fallback:rfq:native` for NativeFallbackExecutor,
+// `fallback:rfq:liquorice` for LiquoriceFallbackExecutor). A Bebop, Hashflow, Native or
+// Liquorice router also needs its address as `fallback_router` under its protocol in
+// protocol_specific_addresses.json; Native also needs `router_v6` there.
 const executorDeployments = require("../../config/executor_deployments.json");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -32,6 +37,8 @@ const ROUTERS = {
     metric: "MetricFallbackRouter",
     bebop: "BebopFallbackRouter",
     hashflow: "HashflowFallbackRouter",
+    native: "NativeFallbackRouter",
+    liquorice: "LiquoriceFallbackRouter",
 };
 
 // Eden Network's Uniswap V3 static quoter, per chain:
@@ -86,6 +93,27 @@ async function main() {
         }
         args.push(hashflowRouter);
     }
+    if (kind === "native") {
+        const nativeRouter = deployments["rfq:native"]?.args?.[0];
+        if (!nativeRouter) {
+            throw new Error(
+                `No rfq:native entry for network '${base}' in ` +
+                "executor_deployments.json: the Native router is needed"
+            );
+        }
+        args.push(nativeRouter);
+    }
+    if (kind === "liquorice") {
+        const liquoriceArgs = deployments["rfq:liquorice"]?.args;
+        if (!liquoriceArgs) {
+            throw new Error(
+                `No rfq:liquorice entry for network '${base}' in ` +
+                "executor_deployments.json: the Liquorice settlement and balance " +
+                "manager are needed"
+            );
+        }
+        args.push(...liquoriceArgs);
+    }
 
     console.log(`Deploying ${contractName} to ${network} with:`);
     console.log(
@@ -107,6 +135,13 @@ async function main() {
     }
     if (kind === "hashflow") {
         console.log(`- hashflowRouter: ${args[3]}`);
+    }
+    if (kind === "native") {
+        console.log(`- nativeRouterV6: ${args[3]}`);
+    }
+    if (kind === "liquorice") {
+        console.log(`- liquoriceSettlement: ${args[3]}`);
+        console.log(`- liquoriceBalanceManager: ${args[4]}`);
     }
 
     await deployCreate2({

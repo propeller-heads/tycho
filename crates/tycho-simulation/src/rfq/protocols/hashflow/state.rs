@@ -1,8 +1,8 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::{FromPrimitive, Pow, ToPrimitive};
+use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -15,65 +15,91 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::rfq::{
-    client::RFQClient,
-    models::fill_levels,
-    protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
+use crate::{
+    book::{
+        all_pairs::{all_pairs_state, RefusesQuote, SignedByMakers},
+        component::PairState,
+        sim::{self, SwapDirection},
+    },
+    rfq::protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
 };
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct HashflowState {
-    pub base_token: Token,
-    pub quote_token: Token,
-    pub levels: HashflowMarketMakerLevels,
-    pub market_maker: String,
-    pub client: HashflowClient,
-}
+/// Rough gas estimate for one Hashflow settlement.
+/// A quote's fresh effective trader writes a cold nonce storage slot (~22k) rather than updating
+/// a reused one (~5k), which this includes.
+const HASHFLOW_SWAP_GAS: u64 = 151_000;
 
-impl fmt::Debug for HashflowState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HashflowState")
-            .field("base_token", &self.base_token)
-            .field("quote_token", &self.quote_token)
-            .field("market_maker", &self.market_maker)
-            .finish_non_exhaustive()
-    }
+#[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
+pub struct HashflowState {
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
+    #[debug(skip)]
+    pub(super) levels: HashflowMarketMakerLevels,
+    pub(super) market_maker: String,
+    #[serde(skip)]
+    #[debug(skip)]
+    client: Option<Arc<HashflowClient>>,
 }
 
 impl HashflowState {
-    pub fn new(
+    /// A book this venue prices, with the client its binding quotes go to.
+    pub(super) fn new(
         base_token: Token,
         quote_token: Token,
         levels: HashflowMarketMakerLevels,
         market_maker: String,
-        client: HashflowClient,
+        client: Arc<HashflowClient>,
     ) -> Self {
-        Self { base_token, quote_token, levels, market_maker, client }
+        HashflowState { base_token, quote_token, levels, market_maker, client: Some(client) }
     }
 
+    /// Smallest `base_token` amount, in atomic units, that Hashflow accepts for a firm quote:
+    /// the first price level's quantity, which the ladder holds in whole units of the token,
+    /// scaled and rounded down. `get_amount_out` fills smaller amounts partially against that
+    /// level, but the quote API answers them with code 79, `Below minimum amount`, so callers
+    /// size requests at or above this.
+    ///
+    /// Rounding down is what the venue signs at: measured against a live maker, it quoted ten
+    /// and ninety atomic units below its published level and refused half of it. Rounding up
+    /// would name an amount a book of a single level does not reach.
+    pub fn min_amount_in(&self) -> BigUint {
+        let first_level_quantity = self
+            .levels
+            .levels
+            .first()
+            .map_or(0.0, |level| level.quantity);
+        let scaled = first_level_quantity * 10f64.powi(self.base_token.decimals as i32);
+        // `BigUint::from_f64` truncates, which is the rounding this wants.
+        BigUint::from_f64(scaled).unwrap_or_default()
+    }
+    /// The levels price one direction only: selling base for quote.
     fn valid_direction_guard(
         &self,
         token_address_in: &Bytes,
         token_address_out: &Bytes,
     ) -> Result<(), SimulationError> {
-        // The current levels are only valid for the base/quote pair.
-        if !(token_address_in == &self.base_token.address &&
-            token_address_out == &self.quote_token.address)
-        {
-            Err(SimulationError::InvalidInput(
-                format!("Invalid token addresses. Got in={token_address_in}, out={token_address_out}, expected in={}, out={}", self.base_token.address, self.quote_token.address),
-                None,
-            ))
-        } else {
-            Ok(())
-        }
+        SwapDirection::require_base_to_quote(
+            &self.base_token,
+            &self.quote_token,
+            token_address_in,
+            token_address_out,
+        )
+    }
+}
+
+impl PairState for HashflowState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
     }
 
-    fn valid_levels_guard(&self) -> Result<(), SimulationError> {
-        if self.levels.levels.is_empty() {
-            return Err(SimulationError::RecoverableError("No liquidity".into()));
-        }
-        Ok(())
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
+    }
+
+    /// A maker's ladder prices the pair one way — a taker sells the base token it was published
+    /// under — and the venue publishes the other way round as its own book.
+    fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        sim::directions(&self.base_token, &self.quote_token, !self.levels.levels.is_empty(), false)
     }
 }
 
@@ -85,7 +111,6 @@ impl ProtocolSim for HashflowState {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.valid_direction_guard(&base.address, &quote.address)?;
-
         // Hashflow's levels are sorted by price, so the first level represents the best price.
         self.levels
             .levels
@@ -100,40 +125,23 @@ impl ProtocolSim for HashflowState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        // Hashflow refuses a zero amount with `79 Below minimum amount`, the same code it
+        // declines any amount under its maker's first level with. The minimum below answers for
+        // a maker that is quoting; one that is not has a first level of nothing.
+        sim::require_positive_amount(&amount_in)?;
+
         self.valid_direction_guard(&token_in.address, &token_out.address)?;
-        self.valid_levels_guard()?;
-
-        let amount_in = amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".into())
-        })? / 10f64.powi(token_in.decimals as i32);
-
-        // First level represents the minimum amount that can be traded
-        let min_amount = self.levels.levels[0].quantity;
-        if amount_in < min_amount {
+        let min_amount_in = self.min_amount_in();
+        if amount_in < min_amount_in {
             return Err(SimulationError::RecoverableError(format!(
-                "Amount below minimum. Input amount: {amount_in}, min amount: {min_amount}"
+                "Amount below minimum. Input amount: {amount_in}, min amount: {min_amount_in} \
+                 (both in base units)"
             )));
         }
-
-        // Calculate amount out
-        let (amount_out, remaining_amount_in) = fill_levels(&self.levels.levels, amount_in);
-
-        let res = GetAmountOutResult {
-            amount: BigUint::from_f64(amount_out * 10f64.powi(token_out.decimals as i32))
-                .ok_or_else(|| {
-                    SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
-                })?,
-            gas: BigUint::from(151_000u64), // Rough gas estimation
-            new_state: self.clone_box(),    // The state doesn't change after a swap
-        };
-
-        if remaining_amount_in > 0.0 {
-            return Err(SimulationError::InvalidInput(
-                format!("Pool has not enough liquidity to support complete swap. Input amount: {amount_in}, consumed amount: {}", amount_in-remaining_amount_in),
-                Some(res)));
-        }
-
-        Ok(res)
+        let amount_in = sim::to_human(&amount_in, token_in.decimals);
+        let fill = self.levels.levels.fill(amount_in);
+        // The state doesn't change after a swap.
+        sim::fill_result(fill, amount_in, token_out.decimals, HASHFLOW_SWAP_GAS, self)
     }
 
     fn get_limits(
@@ -142,23 +150,11 @@ impl ProtocolSim for HashflowState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.valid_direction_guard(&sell_token, &buy_token)?;
-        self.valid_levels_guard()?;
-
-        let sell_decimals = self.base_token.decimals;
-        let buy_decimals = self.quote_token.decimals;
-        let (total_sell_amount, total_buy_amount) =
-            self.levels
-                .levels
-                .iter()
-                .fold((0.0, 0.0), |(sell_sum, buy_sum), level| {
-                    (sell_sum + level.quantity, buy_sum + level.quantity * level.price)
-                });
-
-        let sell_limit =
-            BigUint::from((total_sell_amount * 10_f64.pow(sell_decimals as f64)) as u128);
-        let buy_limit = BigUint::from((total_buy_amount * 10_f64.pow(buy_decimals as f64)) as u128);
-
-        Ok((sell_limit, buy_limit))
+        // Nothing on this side is no swap at any size, so there is no limit to report.
+        if self.levels.levels.is_empty() {
+            return Err(SimulationError::RecoverableError("No liquidity".into()));
+        }
+        sim::limits(&self.levels.levels, self.base_token.decimals, self.quote_token.decimals)
     }
 
     fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
@@ -206,22 +202,63 @@ impl IndicativelyPriced for HashflowState {
         &self,
         params: GetAmountOutParams,
     ) -> Result<SignedQuote, SimulationError> {
-        Ok(self
-            .client
-            .request_binding_quote(&params)
+        Ok(sim::quoting_client(self.client.as_ref(), "Hashflow")?
+            .request_binding_quote(&params, self.market_maker.clone())
             .await?)
+    }
+}
+
+all_pairs_state! {
+    /// Hashflow's books on one chain behind one component: every market maker's levels on every
+    /// pair it quotes.
+    HashflowAllPairsState(HashflowState, SignedByMakers);
+}
+
+impl RefusesQuote for HashflowAllPairsState {
+    /// Every maker declines an amount below its first level, so an amount under the smallest
+    /// of their floors is one no maker here fills, and that floor is what to raise it to.
+    fn check_amount(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<(), SimulationError> {
+        match self.min_amount_in(token_in, token_out) {
+            Some(minimum) if amount_in < &minimum => {
+                Err(SimulationError::RecoverableError(format!(
+                    "Amount below minimum. Input amount: {amount_in}, min amount: {minimum} \
+                     (both in base units)"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl HashflowAllPairsState {
+    /// The smallest first-level minimum among the books pricing this direction, spent or not,
+    /// in atomic units, or `None` where the venue prices nothing in it. A swap goes to one
+    /// maker, and a maker declines an amount below its first level.
+    pub fn min_amount_in(&self, token_in: &Bytes, token_out: &Bytes) -> Option<BigUint> {
+        self.0
+            .books_pricing(token_in, token_out)
+            .map(|book| book.state.min_amount_in())
+            .min()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::str::FromStr;
 
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
-    use crate::rfq::protocols::hashflow::models::{HashflowPair, HashflowPriceLevel};
+    use crate::{
+        book::levels::{Levels, PriceLevel},
+        rfq::protocols::hashflow::models::HashflowPair,
+    };
 
     fn wbtc() -> Token {
         Token::new(
@@ -263,18 +300,14 @@ mod tests {
         )
     }
 
-    fn empty_hashflow_client() -> HashflowClient {
-        HashflowClient::new(
-            Chain::Ethereum,
-            HashSet::new(),
-            0.0,
-            HashSet::new(),
-            "".to_string(),
-            "".to_string(),
-            Duration::from_secs(0),
+    fn empty_client() -> Arc<HashflowClient> {
+        Arc::new(HashflowClient::new(
+            None,
+            1,
+            String::new(),
+            String::new(),
             Duration::from_secs(30),
-        )
-        .unwrap()
+        ))
     }
 
     fn create_test_hashflow_state() -> HashflowState {
@@ -288,54 +321,125 @@ mod tests {
                     quote_token: Bytes::from_str("0xa0b86991c6218a76c1d19d4a2e9eb0ce3606eb48")
                         .unwrap(),
                 },
-                levels: vec![
-                    HashflowPriceLevel { quantity: 0.5, price: 3000.0 },
-                    HashflowPriceLevel { quantity: 1.5, price: 3000.0 },
-                    HashflowPriceLevel { quantity: 5.0, price: 2999.0 },
-                ],
+                levels: Levels::new(vec![
+                    PriceLevel { quantity: 0.5, price: 3000.0 },
+                    PriceLevel { quantity: 1.5, price: 3000.0 },
+                    PriceLevel { quantity: 5.0, price: 2999.0 },
+                ])
+                .unwrap(),
             },
             market_maker: "test_mm".to_string(),
-            client: empty_hashflow_client(),
+            client: Some(empty_client()),
         }
     }
 
-    mod spot_price {
-        use super::*;
+    /// A book of one level advertises that level as both its minimum and its depth, so the
+    /// amount named by the minimum has to be one the same book can fill.
+    ///
+    /// How much of a unit the rounding adds is what decides whether `fill` notices. Here, four
+    /// thousand tokens of a six-decimal one, it adds 0.07 of a unit, which is 80 000 ulps of the
+    /// amount against the four a fill forgives. The same rounding on an eighteen-decimal token
+    /// adds a wei, a millionth of one ulp, and disappears.
+    #[test]
+    fn the_minimum_of_a_single_level_book_is_within_its_depth() {
+        let state = HashflowState {
+            base_token: usdc(),
+            quote_token: weth(),
+            levels: HashflowMarketMakerLevels {
+                pair: HashflowPair { base_token: usdc().address, quote_token: weth().address },
+                levels: Levels::new(vec![PriceLevel {
+                    quantity: 4327.8578109263835,
+                    price: 0.000_25,
+                }])
+                .unwrap(),
+            },
+            market_maker: "test_mm".to_string(),
+            client: Some(empty_client()),
+        };
 
-        #[test]
-        fn returns_best_price() {
-            let state = create_test_hashflow_state();
-            let price = state
-                .spot_price(&state.base_token, &state.quote_token)
-                .unwrap();
-            // The best price is the first level's price (3000.0)
-            assert_eq!(price, 3000.0);
-        }
+        let minimum = state.min_amount_in();
+        let (limit, _) = state
+            .get_limits(usdc().address, weth().address)
+            .unwrap();
 
-        #[test]
-        fn returns_invalid_input_error() {
-            let state = create_test_hashflow_state();
-            let result = state.spot_price(&wbtc(), &usdc());
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, _)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
+        assert!(minimum <= limit, "minimum {minimum} is past the book's own limit {limit}");
+        let result = state.get_amount_out(minimum, &usdc(), &weth());
+        assert!(result.is_ok(), "{result:?}");
+    }
 
-        #[test]
-        fn returns_no_liquidity_error() {
-            let mut state = create_test_hashflow_state();
-            state.levels.levels.clear();
-            let result = state.spot_price(&state.base_token, &state.quote_token);
-            assert!(result.is_err());
-            if let Err(SimulationError::RecoverableError(msg)) = result {
-                assert_eq!(msg, "No liquidity");
-            } else {
-                panic!("Expected RecoverableError");
-            }
+    /// `min_amount_in` is documented as the amount a caller sizes its request at, so quoting
+    /// exactly that amount has to work. It is the first level's quantity scaled into base
+    /// units, and for roughly 5% of 18-decimal quantities scaling it back down lands an ulp
+    /// short: 31374.751353434924 WETH comes back as 31374.75135343492.
+    #[test]
+    fn the_advertised_minimum_is_quotable() {
+        let mut state = create_test_hashflow_state();
+        state.levels.levels =
+            Levels::new(vec![PriceLevel { quantity: 31374.751353434924, price: 3000.0 }]).unwrap();
+
+        let result = state.get_amount_out(state.min_amount_in(), &weth(), &usdc());
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn rejects_tokens_outside_the_pair_and_the_reverse_direction() {
+        // Hashflow's levels price one direction only and cannot be inverted, so the reverse
+        // pair is as foreign to the state as a token outside it.
+        let state = create_test_hashflow_state();
+        let amount = BigUint::from_str("1000000000000000000").unwrap();
+        let results = [
+            state
+                .spot_price(&wbtc(), &usdc())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount.clone(), &usdc(), &weth())
+                .map(|_| ()),
+            state
+                .get_amount_out(amount, &wbtc(), &usdc())
+                .map(|_| ()),
+            state
+                .get_limits(wbtc().address.clone(), usdc().address.clone())
+                .map(|_| ()),
+        ];
+
+        for result in results {
+            assert!(
+                matches!(&result, Err(SimulationError::InvalidInput(msg, None)) if msg.contains("Invalid token addresses")),
+                "{result:?}"
+            );
         }
+    }
+
+    #[test]
+    /// A maker quoting nothing has no price and no swap to offer, and no depth to report.
+    fn an_empty_ladder_has_nothing_to_offer() {
+        let mut state = create_test_hashflow_state();
+        state.levels.levels = Levels::default();
+        let price = state.spot_price(&weth(), &usdc());
+        assert!(
+            matches!(&price, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
+            "{price:?}"
+        );
+        let swap = state.get_amount_out(
+            BigUint::from_str("1000000000000000000").unwrap(),
+            &weth(),
+            &usdc(),
+        );
+        assert!(matches!(swap, Err(SimulationError::InvalidInput(_, None))), "{swap:?}");
+        assert!(matches!(
+            state.get_limits(weth().address.clone(), usdc().address.clone()),
+            Err(SimulationError::RecoverableError(_))
+        ));
+    }
+
+    #[test]
+    fn spot_price_is_the_first_level() {
+        let state = create_test_hashflow_state();
+        let price = state
+            .spot_price(&state.base_token, &state.quote_token)
+            .unwrap();
+        assert_eq!(price, 3000.0);
     }
 
     mod get_amount_out {
@@ -359,28 +463,6 @@ mod tests {
             // Expected: (0.5 * 3000) + (1.0 * 3000) = 1500 + 3000 = 4500 USDC
             assert_eq!(amount_out_result.amount, BigUint::from_str("4500000000").unwrap()); // 6 decimals
             assert_eq!(amount_out_result.gas, BigUint::from(151_000u64));
-        }
-
-        #[test]
-        fn usdc_to_wbtc() {
-            let state = create_test_hashflow_state();
-
-            // Test swapping 10000 USDC -> WETH
-            // The price levels returned by Hashflow are only valid for the requested pair,
-            // and they can't be inverted to derive the reverse swap.
-            // In that case, we should return an error.
-            let result = state.get_amount_out(
-                BigUint::from_str("10000000000").unwrap(), // 10000 USDC (6 decimals)
-                &usdc(),
-                &weth(),
-            );
-
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, ..)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
         }
 
         #[test]
@@ -420,87 +502,28 @@ mod tests {
                 panic!("Expected InvalidInput");
             }
         }
-
-        #[test]
-        fn invalid_token_pair() {
-            let state = create_test_hashflow_state();
-
-            // Test with invalid token pair (WBTC not in WETH/USDC pool)
-            let result = state.get_amount_out(
-                BigUint::from_str("100000000").unwrap(), // 1 WBTC
-                &wbtc(),
-                &usdc(),
-            );
-
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, ..)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
-
-        #[test]
-        fn no_liquidity() {
-            let mut state = create_test_hashflow_state();
-            state.levels.levels = vec![]; // Remove all levels
-
-            let result = state.get_amount_out(
-                BigUint::from_str("1000000000000000000").unwrap(), // 1.0 WETH
-                &weth(),
-                &usdc(),
-            );
-
-            assert!(result.is_err());
-            if let Err(SimulationError::RecoverableError(msg)) = result {
-                assert_eq!(msg, "No liquidity");
-            } else {
-                panic!("Expected RecoverableError");
-            }
-        }
     }
 
-    mod get_limits {
-        use super::*;
+    #[test]
+    fn limits_are_the_ladder_totals() {
+        let state = create_test_hashflow_state();
+        let (sell_limit, buy_limit) = state
+            .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
+            .unwrap();
 
-        #[test]
-        fn valid_limits() {
-            let state = create_test_hashflow_state();
-            let (sell_limit, buy_limit) = state
-                .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
-                .unwrap();
+        // Total sell: 0.5 + 1.5 + 5.0 = 7.0 WETH (18 decimals)
+        // Total buy: (0.5+1.5)*3000 + 5.0*2999 = 20995 USDC (6 decimals)
+        assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
+        assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+    }
 
-            // Total sell: 0.5 + 1.5 + 5.0 = 7.0 WETH (18 decimals)
-            // Total buy: (0.5+1.5)*3000 + 5.0*2999 = 20995 USDC (6 decimals)
-            assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-            assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
-        }
+    /// The venue refuses a swap of nothing, so simulating one must not report a fill.
+    #[test]
+    fn rejects_a_zero_amount() {
+        let state = create_test_hashflow_state();
 
-        #[test]
-        fn invalid_token_pair() {
-            let state = create_test_hashflow_state();
-            let result =
-                state.get_limits(wbtc().address.clone(), state.quote_token.address.clone());
-            assert!(result.is_err());
-            if let Err(SimulationError::InvalidInput(msg, _)) = result {
-                assert!(msg.contains("Invalid token addresses"));
-            } else {
-                panic!("Expected InvalidInput");
-            }
-        }
+        let result = state.get_amount_out(BigUint::ZERO, &weth(), &usdc());
 
-        #[test]
-        fn no_liquidity() {
-            let mut state = create_test_hashflow_state();
-            state.levels.levels = vec![];
-            let result = state
-                .get_limits(state.base_token.address.clone(), state.quote_token.address.clone());
-            assert!(result.is_err());
-            if let Err(SimulationError::RecoverableError(msg)) = result {
-                assert_eq!(msg, "No liquidity");
-            } else {
-                panic!("Expected RecoverableError");
-            }
-        }
+        assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
     }
 }
