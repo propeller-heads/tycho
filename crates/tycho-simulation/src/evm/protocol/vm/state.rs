@@ -11,7 +11,7 @@ use std::{
 use alloy::primitives::{Address, U256};
 use itertools::Itertools;
 use num_bigint::BigUint;
-use revm::DatabaseRef;
+use revm::{state::Bytecode, DatabaseRef};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -31,6 +31,7 @@ use super::{
     erc20_token::{Overwrites, TokenProxyOverwriteFactory},
     models::Capability,
     tycho_simulation_contract::TychoSimulationContract,
+    utils::{insert_code, is_loaded, resolve_stateless_address},
 };
 use crate::evm::{
     engine_db::{engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB},
@@ -308,6 +309,68 @@ where
             spot_price_caller: self.spot_price_caller,
             live_overrides: self.live_overrides.clone(),
         }
+    }
+
+    /// Applies `stateless_contract_addr_{index}` updates without network access.
+    ///
+    /// The new dependency's code comes inline as `stateless_contract_code_{index}`, or the engine
+    /// database already holds it; otherwise the update is rejected. A delta for a block the engine
+    /// database has not reached yet (a pending block) is skipped: the storage pointing at the new
+    /// dependency is not in the database, and the pending path must not write to it.
+    fn update_dependencies(&mut self, delta: &ProtocolStateDelta) -> Result<(), SimulationError> {
+        if !self.engine_has_block_of(delta) {
+            return Ok(());
+        }
+        // Deltas are sparse: an upgrade can update only index 1 or 2, so do not
+        // use the snapshot loader's contiguous enumeration here.
+        for (key, encoded) in &delta.updated_attributes {
+            let Some(index) = key
+                .strip_prefix("stateless_contract_addr_")
+                .and_then(|index| index.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let db = &self.adapter_contract.engine.state;
+            let address = resolve_stateless_address(&self.adapter_contract.engine, encoded)?;
+            match delta
+                .updated_attributes
+                .get(&format!("stateless_contract_code_{index}"))
+            {
+                Some(code) => insert_code(db, address, Bytecode::new_raw(code.to_vec().into()))?,
+                None if is_loaded(db, address) => {}
+                None => {
+                    return Err(SimulationError::FatalError(format!(
+                        "pool {}: dependency {address} (stateless_contract_addr_{index}) is not \
+                         loaded and the delta has no stateless_contract_code_{index}",
+                        self.id
+                    )))
+                }
+            }
+            self.caches.invalidate();
+        }
+        Ok(())
+    }
+
+    /// Whether the engine database holds the block `delta` belongs to. A delta without block
+    /// information, or a database without a block, counts as current.
+    fn engine_has_block_of(&self, delta: &ProtocolStateDelta) -> bool {
+        let Some(number) = delta
+            .updated_attributes
+            .get("block_number")
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_ref()).ok())
+            .map(u64::from_be_bytes)
+        else {
+            return true;
+        };
+        let Some(current) = self
+            .adapter_contract
+            .engine
+            .state
+            .get_current_block()
+        else {
+            return true;
+        };
+        number <= current.number
     }
 
     /// `(number, timestamp, partial_block_index)` of the engine DB's current block, used to
@@ -1181,22 +1244,7 @@ where
             self.balance_owner = Some(bytes_to_address(owner)?);
             self.caches.invalidate();
         }
-        // Deltas are sparse: an upgrade can update only index 1 or 2, so do not
-        // use the snapshot loader's contiguous enumeration here.
-        for (key, address) in &delta.updated_attributes {
-            if let Some(index) = key.strip_prefix("stateless_contract_addr_") {
-                if index.parse::<usize>().is_ok() {
-                    super::utils::init_stateless_contract(
-                        &self.adapter_contract.engine,
-                        address,
-                        delta
-                            .updated_attributes
-                            .get(&format!("stateless_contract_code_{index}")),
-                    )?;
-                    self.caches.invalidate();
-                }
-            }
-        }
+        self.update_dependencies(&delta)?;
 
         if let Some(block_number) = delta
             .updated_attributes
@@ -1313,7 +1361,7 @@ mod tests {
             state_builder::EVMPoolStateBuilder,
         },
         simulation::SimulationEngine,
-        tycho_models::AccountUpdate,
+        tycho_models::{AccountUpdate, ChangeType},
     };
 
     fn dai() -> Token {
@@ -1610,6 +1658,66 @@ mod tests {
                 .is_err(),
             "stale quotes must use advanced indexed block"
         );
+    }
+
+    #[tokio::test]
+    async fn test_tessera_upgrade_loads_inline_dependency_code() {
+        let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
+        let amount_in = BigUint::from(100_000_000u64);
+        let before = pool
+            .get_amount_out(amount_in.clone(), &usdc, &weth)
+            .unwrap()
+            .amount;
+        let pair = Address::from_str(&pool.id).unwrap();
+        let old_implementation =
+            Address::from_str("0x6d9dd143e42b6338f4f6a7c0c26d124658f641cb").unwrap();
+        let new_implementation = Address::repeat_byte(0x76);
+        let eip1967_slot =
+            U256::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc")
+                .unwrap();
+        // The decoder writes the block's storage before it applies the state deltas.
+        db.update(
+            vec![AccountUpdate::new(
+                pair,
+                Chain::Base,
+                HashMap::from([(eip1967_slot, U256::from_be_slice(new_implementation.as_slice()))]),
+                None,
+                None,
+                ChangeType::Update,
+            )],
+            db.get_current_block(),
+        )
+        .unwrap();
+        let code = db
+            .basic_ref(old_implementation)
+            .unwrap()
+            .unwrap()
+            .code
+            .unwrap();
+        let delta = ProtocolStateDelta {
+            component_id: pool.id.clone(),
+            updated_attributes: HashMap::from([
+                (
+                    "stateless_contract_addr_0".into(),
+                    Bytes::from(format!("{new_implementation:#x}").into_bytes()),
+                ),
+                ("stateless_contract_code_0".into(), Bytes::from(code.original_bytes().to_vec())),
+            ]),
+            deleted_attributes: HashSet::new(),
+        };
+        let tokens = HashMap::from([
+            (weth.address.clone(), weth.clone()),
+            (usdc.address.clone(), usdc.clone()),
+        ]);
+
+        pool.delta_transition(delta, &tokens, &Balances::default())
+            .unwrap();
+
+        let after = pool
+            .get_amount_out(amount_in, &usdc, &weth)
+            .unwrap()
+            .amount;
+        assert_eq!(after, before, "the Pair runs the same code from its new address");
     }
 
     #[tokio::test]
@@ -2179,6 +2287,87 @@ mod tests {
                 .as_ref(),
             code.as_slice()
         );
+    }
+
+    fn dependency_delta(
+        state: &EVMPoolState<PreCachedDB>,
+        dependency: Address,
+        code: Option<Vec<u8>>,
+        block_number: Option<u64>,
+    ) -> ProtocolStateDelta {
+        let mut updated_attributes = HashMap::from([(
+            "stateless_contract_addr_0".to_string(),
+            Bytes::from(format!("{dependency:#x}").into_bytes()),
+        )]);
+        if let Some(code) = code {
+            updated_attributes.insert("stateless_contract_code_0".to_string(), Bytes::from(code));
+        }
+        if let Some(number) = block_number {
+            updated_attributes
+                .insert("block_number".to_string(), Bytes::from(number.to_be_bytes().to_vec()));
+        }
+        ProtocolStateDelta {
+            component_id: state.id.clone(),
+            updated_attributes,
+            deleted_attributes: HashSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_uses_already_loaded_dependency() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let vault = Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap();
+        state
+            .delta_transition(
+                dependency_delta(&state, vault, None, None),
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+        assert!(state.spot_price(&dai(), &bal()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_leaves_dependencies_of_pending_blocks_alone() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let next_block = state
+            .adapter_contract
+            .engine
+            .state
+            .get_current_block()
+            .unwrap()
+            .number +
+            1;
+        let dependency = Address::repeat_byte(0x77);
+        state
+            .delta_transition(
+                dependency_delta(&state, dependency, Some(vec![0x00]), Some(next_block)),
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+
+        assert!(
+            !is_loaded(&state.adapter_contract.engine.state, dependency),
+            "the pending path must not write to the engine database"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delta_transition_rejects_unloaded_dependency_without_code() {
+        let mut state = setup_pool_state().await;
+        state.manual_updates = true;
+        let dependency = Address::repeat_byte(0x78);
+        let error = state
+            .delta_transition(
+                dependency_delta(&state, dependency, None, None),
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("no stateless_contract_code_0"), "{error:?}");
     }
 
     #[tokio::test]

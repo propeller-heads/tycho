@@ -467,13 +467,34 @@ where
     Ok(())
 }
 
-/// Loads one dependency on both snapshot creation and implementation-address updates.
-/// Inline code permits deterministic offline loading; RPC uses the existing blocking bridge.
+/// Loads one dependency while building a pool from a snapshot, fetching its code over RPC unless
+/// it is inline or already loaded.
 pub(crate) fn init_stateless_contract<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
     encoded: &tycho_common::Bytes,
     inline_code: Option<&tycho_common::Bytes>,
 ) -> Result<(), SimulationError>
+where
+    <D as DatabaseRef>::Error: Debug,
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    let address = resolve_stateless_address(engine, encoded)?;
+    let code = match inline_code {
+        Some(code) => Bytecode::new_raw(code.to_vec().into()),
+        // Pools sharing a dependency would otherwise fetch it once each, only for
+        // `init_account` to discard every copy after the first.
+        None if is_loaded(&engine.state, address) => return Ok(()),
+        None => get_code_for_contract_sync(&address.to_string(), None)?,
+    };
+    insert_code(&engine.state, address, code)
+}
+
+/// Resolves a `stateless_contract_addr_{i}` attribute, either UTF-8 `0x…` text or a
+/// `call:0x<target>:method()` directive, to the dependency's address.
+pub(crate) fn resolve_stateless_address<D: EngineDatabaseInterface + Clone + Debug>(
+    engine: &SimulationEngine<D>,
+    encoded: &tycho_common::Bytes,
+) -> Result<Address, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
@@ -486,30 +507,42 @@ where
     } else {
         address.to_owned()
     };
-    let account: Address = resolved.parse().map_err(|_| {
+    resolved.parse().map_err(|_| {
         SimulationError::FatalError(format!("stateless contract has an invalid address {resolved}"))
-    })?;
-    let code = match inline_code {
-        Some(code) => Bytecode::new_raw(code.to_vec().into()),
-        None => get_code_for_contract_sync(&resolved, None)?,
-    };
-    engine
-        .state
-        .init_account(
-            account,
-            AccountInfo {
-                balance: U256::ZERO,
-                nonce: 0,
-                code_hash: code.hash_slow(),
-                code: Some(code),
-            },
-            None,
-            false,
-        )
-        .map_err(|e| {
-            SimulationError::FatalError(format!("stateless contract init_account failed: {e:?}"))
-        })?;
-    Ok(())
+    })
+}
+
+/// Whether `db` already holds an account at `address`.
+pub(crate) fn is_loaded<D: EngineDatabaseInterface>(db: &D, address: Address) -> bool {
+    match db.basic_ref(address) {
+        Ok(Some(_)) => true,
+        Ok(None) | Err(_) => false,
+    }
+}
+
+/// Inserts `code` as a code-only account at `address`; an existing account is kept.
+pub(crate) fn insert_code<D: EngineDatabaseInterface>(
+    db: &D,
+    address: Address,
+    code: Bytecode,
+) -> Result<(), SimulationError>
+where
+    <D as EngineDatabaseInterface>::Error: Debug,
+{
+    db.init_account(
+        address,
+        AccountInfo {
+            balance: U256::ZERO,
+            nonce: 0,
+            code_hash: code.hash_slow(),
+            code: Some(code),
+        },
+        None,
+        false,
+    )
+    .map_err(|e| {
+        SimulationError::FatalError(format!("stateless contract init_account failed: {e:?}"))
+    })
 }
 
 /// Resolve a dynamic `call:0x<address>:method()` directive to a concrete implementation address by
