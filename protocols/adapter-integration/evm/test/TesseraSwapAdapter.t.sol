@@ -9,16 +9,36 @@ import {
 import {ISwapAdapterTypes} from "src/interfaces/ISwapAdapterTypes.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
-contract LimitedTesseraQuotes {
-    function tesseraSwapViewAmounts(address, address, int256 amount)
+/// Engine stand-in that registers `pair` but quotes only up to 5e15 input, at
+/// one output unit per 1e9 input units, and zero beyond.
+contract LimitedTesseraEngine {
+    address immutable pair;
+
+    constructor(address pair_) {
+        pair = pair_;
+    }
+
+    function getTesseraPool(address, address)
+        external
+        view
+        returns (bool, address)
+    {
+        return (true, pair);
+    }
+
+    function swapAmountView(address, address, int256 amount, address)
         external
         pure
-        returns (uint256, uint256)
+        returns (uint256 input, uint256 output)
     {
-        uint256 input =
-            amount < 0 ? (uint256(-amount) + 1) / 2 : uint256(amount);
-        require(input > 0 && input <= 1e15, "ladder depleted");
-        return (input, amount < 0 ? uint256(-amount) : input * 2);
+        if (amount < 0) {
+            output = uint256(-amount);
+            input = output * 1e9;
+        } else {
+            input = uint256(amount);
+            output = input / 1e9;
+        }
+        if (input > 5e15) output = 0;
     }
 }
 
@@ -61,6 +81,8 @@ contract TesseraSwapAdapterTest is Test {
     address constant ENGINE = 0x31e99E05fee3DCE580af777C3fD63eE1B3B40c17;
     address constant EURC = 0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant BTC_PAIR = 0xED57BacDc2a990B631F8817853935791C122c356;
+    address constant TREASURY = 0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE;
     // keccak256(abi.encode(keccak256(abi.encode(WETH, USDC)), 8)): the Engine
     // registry entry for the sorted WETH/USDC pair.
     bytes32 constant WETH_USDC_REGISTRY_SLOT =
@@ -70,7 +92,7 @@ contract TesseraSwapAdapterTest is Test {
 
     function setUp() public {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), 50_548_423);
-        adapter = new TesseraSwapAdapter(VENUE, ENGINE);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
     }
 
     function testTokensCapabilitiesAndLimits() public {
@@ -145,14 +167,67 @@ contract TesseraSwapAdapterTest is Test {
         adapter.price(poolId, WETH, USDC, amounts);
     }
 
-    function testLimitsPreserveSmallRemainingLiquidity() public {
-        // Keep the real pair's large ladder bound but allow only a small quote.
-        vm.etch(VENUE, address(new LimitedTesseraQuotes()).code);
-        uint256[] memory limits = adapter.getLimits(poolId, WETH, USDC);
+    function testLimitsFallBackToSearchWhenLadderBoundDoesNotQuote() public {
+        // The real Pair's ladder bound is far above what this Engine quotes,
+        // so the computed bound fails and a conservative search runs below it.
+        TesseraSwapAdapter limited = new TesseraSwapAdapter(
+            VENUE, address(new LimitedTesseraEngine(PAIR)), TREASURY
+        );
+        uint256[] memory limits = limited.getLimits(poolId, WETH, USDC);
         assertGt(limits[0], 0);
-        assertLe(limits[0], 1e15);
-        assertGt(limits[1], 0);
-        assertLe(limits[1], limits[0] * 2);
+        assertLe(limits[0], 5e15);
+        assertEq(limits[1], limits[0] / 1e9);
+    }
+
+    /// The limit settles in full and one more raw unit does not: either the
+    /// ladder is exhausted or the treasury cannot pay the output.
+    function _assertTightLimits(address pair, address sell, address buy)
+        internal
+        view
+        returns (uint256[] memory limits)
+    {
+        limits = adapter.getLimits(bytes32(bytes20(pair)), sell, buy);
+        assertGt(limits[0], 0);
+        (, uint256 output) = ITesseraSwap(VENUE)
+            .tesseraSwapViewAmounts(sell, buy, int256(limits[0]));
+        assertEq(limits[1], output, "limits[1] is the quote at limits[0]");
+        uint256 inventory = IERC20(buy).balanceOf(TREASURY);
+        assertLe(output, inventory, "the treasury pays the limit");
+        (, uint256 beyond) = ITesseraSwap(VENUE)
+            .tesseraSwapViewAmounts(sell, buy, int256(limits[0] + 1));
+        assertTrue(beyond == 0 || beyond >= inventory, "limit is tight");
+    }
+
+    function testLimitsMatchReviewWorkedExample() public {
+        // True limits from the PR 1364 review at block 52,515,061, each checked
+        // there by quoting one raw unit more.
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_515_061);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
+        // Treasury USDC binds below the ladder net of fills.
+        uint256[] memory sellBtc = _assertTightLimits(BTC_PAIR, CBBTC, USDC);
+        assertEq(sellBtc[0], 507_614_366);
+        assertEq(sellBtc[1], 419_634_350_069);
+        // More flowed back than out since the last post: the whole live ladder.
+        uint256[] memory buyBtc = _assertTightLimits(BTC_PAIR, USDC, CBBTC);
+        assertEq(buyBtc[0], 162_243_010_211);
+        assertEq(buyBtc[1], 196_210_709);
+    }
+
+    function testLimitsNetOwnFillsAndCapByTreasury() public {
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_890_608);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
+        // Ladder up to its first dead order; no fills on this side.
+        assertEq(_assertTightLimits(BTC_PAIR, CBBTC, USDC)[0], 501_275_927);
+        // Ladder net of 14,040.302492 USDC filled, then capped by the
+        // treasury's 1.71543772 cbBTC.
+        assertEq(_assertTightLimits(BTC_PAIR, USDC, CBBTC)[0], 142_476_461_306);
+        // The WETH Pair's ladders start with a dead order.
+        for (uint256 i; i < 2; ++i) {
+            (address sell, address buy) = i == 0 ? (WETH, USDC) : (USDC, WETH);
+            uint256[] memory limits = adapter.getLimits(poolId, sell, buy);
+            assertEq(limits[0], 0);
+            assertEq(limits[1], 0);
+        }
     }
 
     function testCbbtcLimitsAndPriceBothDirections() public {
@@ -239,7 +314,7 @@ contract TesseraSwapAdapterTest is Test {
         // At this block a 1,000-unit step priced EURC up to 0.08% low and
         // cbBTC 0.02% low: the view rounds a 1,000-unit output down.
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_590_300);
-        adapter = new TesseraSwapAdapter(VENUE, ENGINE);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
         address eurcPair = 0x4B963fB4A26f082D94f964FA3c2764821Cc06Bd4;
         address btcPair = 0xED57BacDc2a990B631F8817853935791C122c356;
         _assertSpotPriceMatchesTopLevel(eurcPair, EURC, USDC);
@@ -256,7 +331,7 @@ contract TesseraSwapAdapterTest is Test {
     function testSellReportsSettledOutputInsteadOfViewQuote() public {
         DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
         TesseraSwapAdapter localAdapter =
-            new TesseraSwapAdapter(address(venue), ENGINE);
+            new TesseraSwapAdapter(address(venue), ENGINE, TREASURY);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);
@@ -271,7 +346,7 @@ contract TesseraSwapAdapterTest is Test {
     function testBuyRejectsUnderfilledExactOutput() public {
         DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
         TesseraSwapAdapter localAdapter =
-            new TesseraSwapAdapter(address(venue), ENGINE);
+            new TesseraSwapAdapter(address(venue), ENGINE, TREASURY);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);

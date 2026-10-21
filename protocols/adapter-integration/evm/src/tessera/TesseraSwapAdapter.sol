@@ -5,9 +5,6 @@ import {
     IERC20,
     SafeERC20
 } from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {
-    IERC20Metadata
-} from "openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 interface ITesseraSwap {
     function tesseraSwapViewAmounts(
@@ -33,6 +30,16 @@ interface ITesseraEngine {
         external
         view
         returns (bool registered, address pair);
+    /// The quote TesseraSwap gives `sender`. With `sender` = address(0) it
+    /// skips the caller-code screen, which an unflagged caller such as today's
+    /// TychoRouter also passes, so the output is the same at a fraction of
+    /// the gas. Exact output when `amountSpecified` is negative.
+    function swapAmountView(
+        address tokenIn,
+        address tokenOut,
+        int256 amountSpecified,
+        address sender
+    ) external view returns (uint256 amountIn, uint256 amountOut);
 }
 
 interface ITesseraPair {
@@ -73,7 +80,8 @@ interface ITesseraPair {
     function poolState() external view returns (State memory);
 }
 
-/// Prices and post-swap storage come from executing TesseraSwap itself.
+/// Prices and limits come from the Engine's view quote, and swaps settle
+/// through TesseraSwap itself, so post-swap storage is the venue's own.
 ///
 /// TesseraSwap applies a fixed per-pair haircut (4 bps on WETH and cbBTC,
 /// up to 10 bps) when tx.gasprice exceeds block.basefee by more than an
@@ -87,14 +95,21 @@ contract TesseraSwapAdapter is ISwapAdapter {
     /// than derived from decimals(), which reads 0 in the Tycho VM.
     uint256 internal constant PRICE_STEP_OUTPUT = 1e6;
 
-    ITesseraSwap public immutable tesseraSwap;
-    /// TesseraSwap exposes no Engine getter, so the Engine is fixed per
-    /// deployment, like the Substreams configuration.
-    ITesseraEngine public immutable engine;
+    /// Bisection rounds when the computed limit does not quote.
+    uint256 internal constant FALLBACK_PROBES = 8;
 
-    constructor(address venue, address engine_) {
+    ITesseraSwap public immutable tesseraSwap;
+    /// TesseraSwap exposes neither its Engine nor its treasury, so both are
+    /// fixed per deployment, like the Substreams configuration. A treasury
+    /// rotation leaves the old treasury's balance capping the limits until the
+    /// adapter is redeployed.
+    ITesseraEngine public immutable engine;
+    address public immutable treasury;
+
+    constructor(address venue, address engine_, address treasury_) {
         tesseraSwap = ITesseraSwap(venue);
         engine = ITesseraEngine(engine_);
+        treasury = treasury_;
     }
 
     function _pair(bytes32 poolId, address sell, address buy)
@@ -154,8 +169,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
         returns (uint256 out)
     {
         if (amount > uint256(type(int256).max)) return 0;
-        try tesseraSwap.tesseraSwapViewAmounts(
-            sell, buy, int256(amount)
+        try engine.swapAmountView(
+            sell, buy, int256(amount), address(0)
         ) returns (
             uint256, uint256 output
         ) {
@@ -171,8 +186,8 @@ contract TesseraSwapAdapter is ISwapAdapter {
         returns (uint256 input, uint256 quotedOutput)
     {
         if (output > uint256(type(int256).max)) return (0, 0);
-        try tesseraSwap.tesseraSwapViewAmounts(
-            sell, buy, -int256(output)
+        try engine.swapAmountView(
+            sell, buy, -int256(output), address(0)
         ) returns (
             uint256 amountIn, uint256 amountOut
         ) {
@@ -212,45 +227,85 @@ contract TesseraSwapAdapter is ISwapAdapter {
         }
     }
 
+    /// The largest sell amount that fills in full, computed from the Pair's
+    /// ladder rather than searched for:
+    /// 1. the sell side's orders up to the first dead one, which the venue
+    ///    never fills past;
+    /// 2. minus fills since the operator last posted the ladder, net of fills
+    ///    in the opposite direction, which give capacity back;
+    /// 3. capped so the output fits the treasury's balance of the buy token,
+    ///    which the view quote ignores but settlement needs.
+    /// The `poolState()` field meanings are inferred, not documented. If the
+    /// computed amount does not quote, a stale price or a changed layout, the
+    /// limit falls back to a conservative search below it.
     function getLimits(bytes32 poolId, address sell, address buy)
         external
         view
         returns (uint256[] memory limits)
     {
         ITesseraPair pair = _pair(poolId, sell, buy);
+        limits = new uint256[](2);
+        uint256 amount = _ladderBound(pair, sell, buy);
+        if (amount == 0) return limits;
+        uint256 output = _quote(sell, buy, amount);
+        if (output == 0) (amount, output) = _searchBelow(sell, buy, amount);
+        if (output == 0) return limits;
+        uint256 inventory = IERC20(buy).balanceOf(treasury);
+        if (output > inventory) {
+            // The exact-output input rounds up, so one unit less fits.
+            (uint256 needed,) = _quoteInput(sell, buy, inventory);
+            if (needed <= 1) return limits;
+            amount = needed - 1;
+            output = _quote(sell, buy, amount);
+        }
+        limits[0] = amount;
+        limits[1] = output;
+    }
+
+    function _ladderBound(ITesseraPair pair, address sell, address buy)
+        internal
+        view
+        returns (uint256 bound)
+    {
         ITesseraPair.State memory state = pair.poolState();
-        ITesseraPair.Order[20] memory orders = sell == pair.baseToken()
+        bool sellBase = sell == pair.baseToken();
+        ITesseraPair.Order[20] memory orders = sellBase
             ? state.curve.baseToQuoteOrders
             : state.curve.quoteToBaseOrders;
-        uint256 upper;
-        // Sum is only a search bound. Selection, accumulators, widening and
-        // stale-price rejection remain in venue bytecode, including dead and
-        // fast-pull orders.
-        for (uint256 i; i < 20; ++i) {
-            upper += orders[i].amount;
+        for (uint256 i; i < 20 && !orders[i].isDead; ++i) {
+            bound += orders[i].amount;
         }
-        limits = new uint256[](2);
-        // Seed by an exact-output quote so low-decimal outputs do not round to
-        // zero. This is a conservative hint: if no larger probe succeeds, the
-        // output bound is the seed's exact-output amount.
-        uint256 target = 10 ** IERC20Metadata(buy).decimals() / 1e6;
-        if (target == 0) target = 1;
-        (uint256 good, uint256 out) = _quoteInput(sell, buy, target);
-        if (good == 0 || good > upper || out == 0) return limits;
-        limits[1] = out;
-        // Three venue probes fit the 3M budget at the pinned block. This is a
-        // conservative hint, with up to 25% of the initial interval unresolved.
-        for (uint256 i; i < 2 && upper > good + 1; ++i) {
-            uint256 mid = good + (upper - good) / 2;
-            out = _quote(sell, buy, mid);
-            if (out > 0) {
-                good = mid;
-                limits[1] = out;
+        // Both accumulators count fills since the last ladder post, own in sell
+        // units and opposite in buy units; selling the opposite back converts
+        // it at the venue's price without reading the packed mid price.
+        uint256 own = sellBase ? state.cumulativeBase : state.cumulativeQuote;
+        uint256 opposite =
+            sellBase ? state.cumulativeQuote : state.cumulativeBase;
+        uint256 returned = opposite == 0 ? 0 : _quote(buy, sell, opposite);
+        uint256 netFilled = own > returned ? own - returned : 0;
+        bound = bound > netFilled ? bound - netFilled : 0;
+    }
+
+    /// The largest amount found by bisection between a one-step quote and
+    /// `upper`, with its output, or zeros when even the step does not quote.
+    function _searchBelow(address sell, address buy, uint256 upper)
+        internal
+        view
+        returns (uint256 amount, uint256 output)
+    {
+        (amount,) = _quoteInput(sell, buy, PRICE_STEP_OUTPUT);
+        if (amount == 0 || amount >= upper) return (0, 0);
+        output = _quote(sell, buy, amount);
+        if (output == 0) return (0, 0);
+        for (uint256 i; i < FALLBACK_PROBES && upper > amount + 1; ++i) {
+            uint256 mid = amount + (upper - amount) / 2;
+            uint256 midOutput = _quote(sell, buy, mid);
+            if (midOutput > 0) {
+                (amount, output) = (mid, midOutput);
             } else {
                 upper = mid;
             }
         }
-        limits[0] = good;
     }
 
     function swap(

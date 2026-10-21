@@ -46,8 +46,8 @@ changes.
 | Pair implementation | EIP-1967 slot → attribute 0 + code | Pair proxy template, token slots 48/49 |
 | Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
 | Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
-| Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge | Standard ERC20 and canonical WETH events |
-| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool` | Static ABI; the 20-order ladder only bounds the limit search; the Engine is a constructor argument |
+| Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge; adapter constructor argument | Standard ERC20 and canonical WETH events; a rotation needs a new adapter runtime, or limits are capped by the old treasury |
+| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool` and `swapAmountView` | Static ABI; inferred `isDead` and accumulator meanings set the limits; the Engine is a constructor argument |
 
 A component is marked `paused` when its write helper's tag-0 fee is nonzero (the VM loads the
 helper's code but not its storage, so it would read that fee as zero), and every component is
@@ -68,10 +68,16 @@ indexed: the old component stops quoting and the new one is missing.
 
 ## Limits and price
 
-`getLimits` bounds a search with the ladder sum, seeds it with a small exact-output quote and
-runs two exact-input bisection probes, keeping each call under 3M gas. The result is a
-conservative hint: up to 25% of the initial interval is left unresolved, so remaining
-liquidity can be underestimated. `HardLimits` is not advertised.
+`getLimits` computes the largest sell amount that fills in full from the Pair's `poolState()`:
+the sell side's orders up to the first dead one (the venue fills nothing past it), minus fills
+since the operator last posted the ladder net of fills in the opposite direction (converted by
+selling them back), then capped so the output fits the treasury's balance of the buy token,
+which the view quote ignores but settlement needs. `limits[1]` is the quote at that amount. If
+the computed amount does not quote (a stale price, or a `poolState()` layout that no longer
+means what the adapter assumes), it falls back to an eight-probe search below it. Quotes go
+through `Engine.swapAmountView(..., address(0))`, which matches what today's TychoRouter gets at
+about 150k gas instead of a scan of the adapter's code; a limit costs about 300k gas.
+`HardLimits` is not advertised.
 
 `price` is a marginal price: a finite difference of view quotes whose step buys 10^6 raw output
 units. The view rounds output down by under one unit, so the price is low by less than 10^-6. The

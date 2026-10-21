@@ -1723,6 +1723,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tessera_limits_fit_the_treasury_balance() {
+        let (mut pool, _db, weth, usdc, _) = tessera_fixture().await;
+        let (_, uncapped) = pool
+            .get_limits(usdc.address.clone(), weth.address.clone())
+            .unwrap();
+        // The VM puts the component balance on the treasury, which the adapter caps by.
+        let inventory = U256::from(10_000_000_000_000_000u64);
+        pool.balances
+            .insert(bytes_to_address(&weth.address).unwrap(), inventory);
+        pool.caches.invalidate();
+
+        let (sell, buy) = pool
+            .get_limits(usdc.address.clone(), weth.address.clone())
+            .unwrap();
+
+        assert!(uncapped > BigUint::from(10_000_000_000_000_000u64));
+        assert!(sell > BigUint::ZERO);
+        assert!(buy <= BigUint::from(10_000_000_000_000_000u64), "{buy} WETH out");
+    }
+
+    #[tokio::test]
     async fn test_tessera_upgrade_loads_inline_dependency_code() {
         let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
         let amount_in = BigUint::from(100_000_000u64);
