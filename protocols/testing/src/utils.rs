@@ -305,7 +305,7 @@ modules:
         );
     }
 
-    // Shape used by ethereum-fluid, ethereum-ekubo-v2/v3 and ethereum-template-singleton: no module
+    // Shape used by evm-fluid, evm-ekubo-v2/v3 and evm-template-singleton: no module
     // declares a block inline, so an override that only looked at the modules did nothing.
     #[test]
     fn test_modify_initial_block_rewrites_network_blocks() {

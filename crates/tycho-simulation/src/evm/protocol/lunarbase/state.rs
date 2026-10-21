@@ -1447,7 +1447,7 @@ mod tests {
     fn matches_base_partner_quotes_from_execution_fixture() {
         let capture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../protocols/substreams/base-lunarbase/bootstrap/base-execution.json"
+            "/../../protocols/substreams/evm-lunarbase/bootstrap/base-execution.json"
         )))
         .unwrap();
         let mut state = state();

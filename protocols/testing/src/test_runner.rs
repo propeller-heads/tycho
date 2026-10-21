@@ -65,29 +65,35 @@ use crate::{
 
 static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
-        ("base-sushiswap-v2", "ethereum-uniswap-v2"),
-        ("bsc-lunarbase", "base-lunarbase"),
-        ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
-        ("arc-uniswap-v2", "ethereum-uniswap-v2"),
-        ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
-        ("base-balancer-v3", "ethereum-balancer-v3"),
-        ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
-        ("gnosis-balancer-v3", "ethereum-balancer-v3"),
-        ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
-        ("unichain-curve", "ethereum-curve"),
-        ("robinhood-ramses-v3", "polygon-ramses-v3"),
-        ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
-        ("bsc-ekubo-v3", "ethereum-ekubo-v3"),
-        ("base-ekubo-v3", "ethereum-ekubo-v3"),
-        ("robinhood-up-v3", "base-aerodrome-slipstreams"),
-        ("robinhood-pancakeswap-infinity-cl", "base-pancakeswap-infinity-cl"),
-        ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
-        ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
+        ("ethereum-sushiswap-v2", "evm-uniswap-v2"),
+        ("base-sushiswap-v2", "evm-uniswap-v2"),
+        ("bsc-lunarbase", "evm-lunarbase"),
+        ("ethereum-pancakeswap-v2", "evm-uniswap-v2"),
+        ("arc-uniswap-v2", "evm-uniswap-v2"),
+        ("arc-uniswap-v3", "evm-uniswap-v3-logs-only"),
+        ("arc-uniswap-v4-no-hooks", "evm-uniswap-v4/no-hooks"),
+        ("base-balancer-v3", "evm-balancer-v3"),
+        ("arbitrum-balancer-v3", "evm-balancer-v3"),
+        ("gnosis-balancer-v3", "evm-balancer-v3"),
+        ("base-alienbase-v3", "evm-uniswap-v3-logs-only"),
+        ("robinhood-sushiswap-v3", "evm-uniswap-v3-logs-only"),
+        ("robinhood-robinswap-v3", "evm-uniswap-v3-logs-only"),
+        ("robinhood-gigadex-v3", "evm-pancakeswap-v3"),
+        ("unichain-curve", "evm-curve"),
+        ("robinhood-ramses-v3", "evm-ramses-v3"),
+        ("robinhood-ekubo-v3", "evm-ekubo-v3"),
+        ("bsc-ekubo-v3", "evm-ekubo-v3"),
+        ("base-ekubo-v3", "evm-ekubo-v3"),
+        ("robinhood-up-v3", "evm-aerodrome-slipstreams"),
+        ("robinhood-pancakeswap-infinity-cl", "evm-pancakeswap-infinity-cl"),
+        ("robinhood-uniswap-v4-with-hooks", "evm-uniswap-v4/with-hooks"),
+        ("bsc-ring-swap-v2", "evm-ring-swap-v2"),
+        ("base-aerodrome-slipstreams", "evm-aerodrome-slipstreams"),
+        ("base-aerodrome-v1", "evm-aerodrome-v1"),
+        ("base-lunarbase", "evm-lunarbase"),
+        ("base-pancakeswap-infinity-cl", "evm-pancakeswap-infinity-cl"),
+        ("polygon-ramses-v3", "evm-ramses-v3"),
+        ("unichain-velodrome", "evm-velodrome"),
     ])
 });
 
@@ -1774,11 +1780,11 @@ mod tests {
         let parent_dir = curr_dir.parent().unwrap();
         env::set_current_dir(parent_dir).expect("Failed to set working directory");
 
-        let pattern = "./substreams/*/integration_test.tycho.yaml";
+        let pattern = "./substreams/*/integration_test*.tycho.yaml";
         let mut results = Vec::new();
 
         if glob(pattern).unwrap().count() == 0 {
-            panic!("No integration_test.tycho.yaml files found in substreams/*/");
+            panic!("No integration_test*.tycho.yaml files found in substreams/*/");
         }
         for entry in glob(pattern).unwrap() {
             match entry {
@@ -1823,19 +1829,19 @@ mod tests {
         for (protocol, base_protocol, config_file_name, manifest_path) in [
             (
                 "arc-uniswap-v2",
-                "ethereum-uniswap-v2",
+                "evm-uniswap-v2",
                 "integration_test_arc_uniswap_v2.tycho.yaml",
                 "./arc-uniswap-v2.yaml",
             ),
             (
                 "arc-uniswap-v3",
-                "ethereum-uniswap-v3-logs-only",
+                "evm-uniswap-v3-logs-only",
                 "integration_test_arc_uniswap_v3.tycho.yaml",
                 "./arc-uniswap-v3.yaml",
             ),
             (
                 "arc-uniswap-v4-no-hooks",
-                "ethereum-uniswap-v4/no-hooks",
+                "evm-uniswap-v4/no-hooks",
                 "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
                 "./arc-uniswap-v4-no-hooks.yaml",
             ),
@@ -1921,7 +1927,7 @@ mod tests {
         assert!(
             runner
                 .substreams_path
-                .ends_with("ethereum-uniswap-v4/with-hooks"),
+                .ends_with("evm-uniswap-v4/with-hooks"),
             "unexpected substreams_path: {}",
             runner.substreams_path.display()
         );
@@ -1945,7 +1951,7 @@ mod tests {
         assert!(
             runner
                 .substreams_path
-                .ends_with("substreams/ethereum-ring-swap-v2"),
+                .ends_with("substreams/evm-ring-swap-v2"),
             "unexpected substreams_path: {}",
             runner.substreams_path.display()
         );
@@ -1955,6 +1961,30 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str()),
             Some("integration_test_bsc_ring_swap_v2.tycho.yaml")
+        );
+    }
+
+    #[test]
+    fn chain_named_test_resolves_to_its_evm_package() {
+        let runner = get_mocked_runner_for(
+            Chain::Base,
+            "base-aerodrome-slipstreams",
+            "http://localhost:8545".to_string(),
+        );
+
+        assert!(
+            runner
+                .substreams_path
+                .ends_with("substreams/evm-aerodrome-slipstreams"),
+            "unexpected substreams_path: {}",
+            runner.substreams_path.display()
+        );
+        assert_eq!(
+            runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("integration_test_base_aerodrome_slipstreams.tycho.yaml")
         );
     }
 

@@ -1,7 +1,7 @@
 # Tracking Components
 
 {% hint style="info" %}
-Note: this implementation pattern is, by default, used in the <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/ethereum-template-factory" target="_blank" rel="noopener noreferrer">ethereum-template-factory</a> template.
+Note: this implementation pattern is, by default, used in the <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/evm-template-factory" target="_blank" rel="noopener noreferrer">evm-template-factory</a> template.
 {% endhint %}
 
 If protocols use factories to deploy components, a common pattern used during indexing is to detect the creation of these new components and store their contract addresses to track them downstream. Later, you might need to emit balance and state changes based on the current set of tracked components.

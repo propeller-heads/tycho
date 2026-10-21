@@ -20,7 +20,7 @@ use crate::evm::{
     simulation::SimulationEngine,
 };
 
-// Ethereum Curve factories (from `protocols/substreams/ethereum-curve/ethereum-params.json`).
+// Ethereum Curve factories (from `protocols/substreams/evm-curve/ethereum-params.json`).
 const CRYPTO_POOL_FACTORY: AlloyAddress = address!("f18056bbd320e96a48e3fbf8bc061322531aac99");
 const META_POOL_FACTORY: AlloyAddress = address!("b9fc157394af804a3578134a6585c0dc9cc990d4");
 const CRYPTO_SWAP_NG_FACTORY: AlloyAddress = address!("6a8cbed756804b16e05e741edabd5cb544ae21bf");

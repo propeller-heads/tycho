@@ -31,25 +31,28 @@ RUN forge build
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 # resolve_base maps clone protocol names to buildable substreams directories.
 # This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
+# the parent workspace. The runtime uses evm-uniswap-v4/no-hooks, while build/filter must
+# copy evm-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
-            bsc-lunarbase) echo "base-lunarbase" ;; \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
+            bsc-lunarbase|base-lunarbase) echo "evm-lunarbase" ;; \
+            base-alienbase-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            robinhood-ramses-v3|polygon-ramses-v3) echo "evm-ramses-v3" ;; \
+            robinhood-gigadex-v3) echo "evm-pancakeswap-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "evm-ekubo-v3" ;; \
+            robinhood-up-v3|base-aerodrome-slipstreams) echo "evm-aerodrome-slipstreams" ;; \
+            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "evm-balancer-v3" ;; \
+            arc-uniswap-v2) echo "evm-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "evm-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "evm-ring-swap-v2" ;; \
+            ethereum-pancakeswap-v2) echo "evm-uniswap-v2" ;; \
+            ethereum-sushiswap-v2) echo "evm-uniswap-v2" ;; \
+            unichain-curve) echo "evm-curve" ;; \
+            base-aerodrome-v1) echo "evm-aerodrome-v1" ;; \
+            base-pancakeswap-infinity-cl) echo "evm-pancakeswap-infinity-cl" ;; \
+            unichain-velodrome) echo "evm-velodrome" ;; \
             *) echo "$1" ;; \
         esac; \
     }; \
@@ -82,25 +85,28 @@ ARG PROTOCOLS=""
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/substreams /source
 # resolve_base maps clone protocol names to buildable substreams directories.
 # This follows CLONE_TO_BASE_PROTOCOL in test_runner.rs except that V4 clone aliases resolve to
-# the parent workspace. The runtime uses ethereum-uniswap-v4/no-hooks, while build/filter must
-# copy ethereum-uniswap-v4 so no-hooks and its parent-local target directory are both present.
+# the parent workspace. The runtime uses evm-uniswap-v4/no-hooks, while build/filter must
+# copy evm-uniswap-v4 so no-hooks and its parent-local target directory are both present.
 RUN resolve_base() { \
         case "$1" in \
-            bsc-lunarbase) echo "base-lunarbase" ;; \
-            base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
-            robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
-            robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
-            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
-            arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
-            arc-uniswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            arc-uniswap-v4-no-hooks) echo "ethereum-uniswap-v4" ;; \
-            bsc-ring-swap-v2) echo "ethereum-ring-swap-v2" ;; \
-            ethereum-pancakeswap-v2) echo "ethereum-uniswap-v2" ;; \
-            ethereum-sushiswap-v2) echo "ethereum-uniswap-v2" ;; \
-            unichain-curve) echo "ethereum-curve" ;; \
+            bsc-lunarbase|base-lunarbase) echo "evm-lunarbase" ;; \
+            base-alienbase-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            robinhood-ramses-v3|polygon-ramses-v3) echo "evm-ramses-v3" ;; \
+            robinhood-gigadex-v3) echo "evm-pancakeswap-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "evm-ekubo-v3" ;; \
+            robinhood-up-v3|base-aerodrome-slipstreams) echo "evm-aerodrome-slipstreams" ;; \
+            base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "evm-balancer-v3" ;; \
+            arc-uniswap-v2) echo "evm-uniswap-v2" ;; \
+            arc-uniswap-v3) echo "evm-uniswap-v3-logs-only" ;; \
+            arc-uniswap-v4-no-hooks) echo "evm-uniswap-v4" ;; \
+            bsc-ring-swap-v2) echo "evm-ring-swap-v2" ;; \
+            ethereum-pancakeswap-v2) echo "evm-uniswap-v2" ;; \
+            ethereum-sushiswap-v2) echo "evm-uniswap-v2" ;; \
+            unichain-curve) echo "evm-curve" ;; \
+            base-aerodrome-v1) echo "evm-aerodrome-v1" ;; \
+            base-pancakeswap-infinity-cl) echo "evm-pancakeswap-infinity-cl" ;; \
+            unichain-velodrome) echo "evm-velodrome" ;; \
             *) echo "$1" ;; \
         esac; \
     }; \

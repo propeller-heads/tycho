@@ -12,8 +12,8 @@ Requires: `RPC_URL`, `SUBSTREAMS_API_TOKEN`, Postgres (`DATABASE_URL`, default
 `postgres://postgres:mypassword@localhost:5431/tycho_indexer_0`).
 
 ```bash
-cargo run -- range --package "ethereum-balancer-v2"          # block range from yaml
-cargo run -- full  --package "ethereum-balancer-v2"          # creation block to latest
+cargo run -- range --package "evm-balancer-v2"          # block range from yaml
+cargo run -- full  --package "evm-balancer-v2"          # creation block to latest
 cargo run -- range --package "base-aerodrome-slipstreams" --chain base
 ```
 

@@ -2,26 +2,23 @@
 #
 # Builds and publishes substreams packages (.spkg) to the Tycho registry.
 #
-# Usage: ./release.sh <package> [config_file]
+# Usage: ./release.sh <package> <config_file>
 #
-#   package      Cargo package name ("ethereum-uniswap-v4-with-hooks") or package directory
-#                relative to protocols/substreams ("ethereum-uniswap-v4/with-hooks"). Both
+#   package      Cargo package name ("evm-uniswap-v4-with-hooks") or package directory
+#                relative to protocols/substreams ("evm-uniswap-v4/with-hooks"). Both
 #                forms resolve to the same release.
-#   config_file  Manifest name without the .yaml extension. When omitted, every manifest in
-#                the package directory whose name starts with the chain name is packed, plus
-#                substreams.yaml.
+#   config_file  Manifest name without the .yaml extension ("robinhood-uniswap-v4-with-hooks").
+#                Package directories are chain-agnostic, so the manifest is the only thing that
+#                says which chain the release is for.
 #
 # A tag "<cargo-package-name>-<semver>" on HEAD for the requested package produces an
 # immutable release; anything else produces a pre-release keyed by the short commit sha. Tags
 # for other packages, and the repository's own release tags, are ignored.
 #
 # Artifacts land at "$REPOSITORY/<package directory>/<manifest name>-<version>.spkg". The
-# namespace is the package directory relative to this one, so flat packages keep the
-# namespace they have always had (their directory is their Cargo package name) and nested
-# packages get their directory path, e.g. "ethereum-uniswap-v4/with-hooks". Production Helm
-# values reference the nested Uniswap V4 spkgs under four different namespaces because those
-# objects predate this rule; the directory form is the only one both release paths can
-# produce, and arbitrum already points at it. Objects already in the registry are never moved.
+# namespace is the package directory relative to this one, so nested packages get their
+# directory path, e.g. "evm-uniswap-v4/with-hooks". Objects already in the registry are never
+# moved: spkgs released before a directory rename stay under the old namespace.
 #
 # RELEASE_DRY_RUN=1 prints the build, pack and upload commands instead of running them. Tag
 # and version validation and path resolution still run.
@@ -74,8 +71,8 @@ resolve_package() {
 
     if [ -z "$resolved" ]; then
         die "Unknown package '$input'. Pass the Cargo package name (e.g." \
-            "ethereum-uniswap-v4-with-hooks) or the package directory (e.g." \
-            "ethereum-uniswap-v4/with-hooks)."
+            "evm-uniswap-v4-with-hooks) or the package directory (e.g." \
+            "evm-uniswap-v4/with-hooks)."
     fi
     if [ "$(wc -l <<<"$resolved")" -ne 1 ]; then
         die "Package '$input' is ambiguous, it matches: $(tr '\n' ' ' <<<"$resolved")"
@@ -127,8 +124,9 @@ upload_spkg() {
 package_input=${1:-}
 config_file=${2:-}
 
-if [ -z "$package_input" ]; then
-    die "package argument is required. Usage: ./release.sh <package> [config_file]"
+if [ -z "$package_input" ] || [ -z "$config_file" ]; then
+    die "package and config_file arguments are required. Usage: ./release.sh <package>" \
+        "<config_file>"
 fi
 
 resolved=$(resolve_package "$package_input")
@@ -150,24 +148,9 @@ else
     version="pre.$(git rev-parse --short HEAD)"
 fi
 
-# Manifests are named "<chain>-<protocol>.yaml". The chain a package was first written for is
-# the first segment of its top-level directory, and names the manifests it ships by default.
-top_level_dir="${package_dir%%/*}"
-chain_name="${top_level_dir%%-*}"
-
-yaml_files=()
-if [ -z "$config_file" ]; then
-    for candidate in "$package_dir"/*.yaml; do
-        [ -f "$candidate" ] || continue
-        case "$(basename "$candidate" .yaml)" in
-        "$chain_name"* | substreams) yaml_files+=("$candidate") ;;
-        esac
-    done
-    if [ ${#yaml_files[@]} -eq 0 ]; then
-        die "No manifest in $package_dir matches the chain name '$chain_name' or substreams.yaml."
-    fi
-else
-    yaml_files=("$package_dir/$config_file.yaml")
+yaml_file="$package_dir/$config_file.yaml"
+if [ ! -f "$yaml_file" ]; then
+    die "manifest reader: unable to stat input file $yaml_file: file does not exist."
 fi
 
 echo "Cargo package:      $cargo_package"
@@ -187,41 +170,17 @@ fi
 
 run mkdir -p ./target/spkg
 
-for yaml_file in "${yaml_files[@]}"; do
-    yaml_name=$(basename "$yaml_file" .yaml)
-    if [ "$yaml_name" = "buf.gen" ]; then
-        continue
-    fi
-    if [ "$yaml_name" = "substreams" ] && [ ${#yaml_files[@]} -eq 1 ]; then
-        # A package with one generic manifest is keyed by its directory, which is how its
-        # spkgs are already published (ethereum-fluid ships ethereum-fluid-v<version>.spkg
-        # although its Cargo package is ethereum-fluid_v1). A nested directory would put a
-        # "/" in the filename, so those fall back to the Cargo package name.
-        if [[ "$package_dir" == */* ]]; then
-            version_prefix="$cargo_package"
-        else
-            version_prefix="$package_dir"
-        fi
-    else
-        version_prefix="$yaml_name"
-    fi
+echo "------------------------------------------------------"
+echo "Building substreams package with config: $yaml_file"
 
-    echo "------------------------------------------------------"
-    echo "Building substreams package with config: $yaml_file"
+spkg_path="./target/spkg/$config_file-$version.spkg"
+repository_path="$REPOSITORY/$artifact_namespace/$config_file-$version.spkg"
 
-    if [ ! -f "$yaml_file" ]; then
-        die "manifest reader: unable to stat input file $yaml_file: file does not exist."
-    fi
+run substreams pack "$yaml_file" -o "$spkg_path"
+upload_spkg "$spkg_path" "$repository_path"
 
-    spkg_path="./target/spkg/$version_prefix-$version.spkg"
-    repository_path="$REPOSITORY/$artifact_namespace/$version_prefix-$version.spkg"
-
-    run substreams pack "$yaml_file" -o "$spkg_path"
-    upload_spkg "$spkg_path" "$repository_path"
-
-    if dry_run; then
-        echo "DRY RUN: would release substreams package: '$repository_path'"
-    else
-        echo "RELEASED SUBSTREAMS PACKAGE: '$repository_path'"
-    fi
-done
+if dry_run; then
+    echo "DRY RUN: would release substreams package: '$repository_path'"
+else
+    echo "RELEASED SUBSTREAMS PACKAGE: '$repository_path'"
+fi

@@ -62,7 +62,7 @@ fi
 
 # Determine the artifact name based on the YAML file name. The manifest name identifies the
 # chain and fork being published, which the source directory does not: packing
-# robinhood-uniswap-v4-no-hooks.yaml from ethereum-uniswap-v4/no-hooks must not publish under
+# robinhood-uniswap-v4-no-hooks.yaml from evm-uniswap-v4/no-hooks must not publish under
 # "ethereum". Fall back to the Cargo package name, which flattens nested package paths, so no
 # "/" ever leaks into the S3 key.
 if [ "$yaml_name" = "substreams" ]; then

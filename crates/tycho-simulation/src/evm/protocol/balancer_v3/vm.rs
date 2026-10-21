@@ -186,7 +186,7 @@ impl HooksConfig {
 const DECIMAL_DIFF_BITLENGTH: usize = 5;
 const DECIMAL_DIFF_MASK: u64 = (1 << DECIMAL_DIFF_BITLENGTH) - 1;
 
-// Static attributes the `ethereum-balancer-v3` Substreams package emits.
+// Static attributes the `evm-balancer-v3` Substreams package emits.
 const NORMALIZED_WEIGHTS_ATTRIBUTE: &str = "normalized_weights";
 const POOL_TYPE_ATTRIBUTE: &str = "pool_type";
 
@@ -600,7 +600,7 @@ fn bigint_list_attribute(
         .ok_or_else(|| {
             SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} carries no `{name}` static attribute; it was indexed with an \
-             ethereum-balancer-v3 package that predates it"
+             evm-balancer-v3 package that predates it"
         ))
         })?;
     let values = json_deserialize_be_bigint_list(raw).map_err(|e| {

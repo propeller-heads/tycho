@@ -1,0 +1,50 @@
+specVersion: v0.1.0
+package:
+  name: "base_uniswap_v2"
+  version: v0.3.2
+  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v2"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - uniswap.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_uniswap_v2.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 6601915
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 6601915
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.uniswap.v2.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_pool_events
+    kind: map
+    initialBlock: 6601915
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: factory_address=8909Dc15e40173Ff4699343b6eB8132c65e18eC6&protocol_type_name=uniswap_v2_pool

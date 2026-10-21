@@ -13,7 +13,7 @@ readonly SUBSTREAMS_DIR
 
 readonly BUCKET="s3://repo.propellerheads-propellerheads/substreams"
 # The namespace release.sh must use for the nested Uniswap V4 packages.
-readonly NESTED_NS="ethereum-uniswap-v4/with-hooks"
+readonly NESTED_NS="evm-uniswap-v4/with-hooks"
 
 work=""
 repo=""
@@ -121,20 +121,20 @@ assert_failed() {
 test_prerelease_nested_by_directory() {
     echo "a) pre-release, nested package given as a directory"
     set_head_tags
-    release_sh ethereum-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
+    release_sh evm-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
     assert_status 0 "exits successfully"
     assert_contains "-o ./target/spkg/robinhood-uniswap-v4-with-hooks-pre.$head_sha.spkg" \
         "packs to the manifest-named spkg"
     assert_contains "'$BUCKET/$NESTED_NS/robinhood-uniswap-v4-with-hooks-pre.$head_sha.spkg'" \
         "uploads under the package directory namespace"
-    assert_contains "cd ethereum-uniswap-v4/with-hooks && cargo build" \
+    assert_contains "cd evm-uniswap-v4/with-hooks && cargo build" \
         "builds from the package directory"
 }
 
 test_prerelease_nested_by_cargo_name() {
     echo "b) pre-release, same package given as its Cargo package name"
     set_head_tags
-    release_sh ethereum-uniswap-v4-with-hooks robinhood-uniswap-v4-with-hooks
+    release_sh evm-uniswap-v4-with-hooks robinhood-uniswap-v4-with-hooks
     assert_status 0 "exits successfully"
     assert_contains "-o ./target/spkg/robinhood-uniswap-v4-with-hooks-pre.$head_sha.spkg" \
         "packs to the same spkg as the directory form"
@@ -145,9 +145,9 @@ test_prerelease_nested_by_cargo_name() {
 test_tagged_nested() {
     echo "c) tagged release of the nested package"
     local version
-    version=$(package_version ethereum-uniswap-v4/with-hooks)
-    set_head_tags "ethereum-uniswap-v4-with-hooks-$version"
-    release_sh ethereum-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
+    version=$(package_version evm-uniswap-v4/with-hooks)
+    set_head_tags "evm-uniswap-v4-with-hooks-$version"
+    release_sh evm-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
     assert_status 0 "exits successfully"
     assert_contains "-o ./target/spkg/robinhood-uniswap-v4-with-hooks-v$version.spkg" \
         "packs the tag version"
@@ -160,8 +160,8 @@ test_tagged_nested() {
 
 test_tagged_version_mismatch() {
     echo "d) tag version that does not match Cargo.toml"
-    set_head_tags "ethereum-uniswap-v4-with-hooks-99.0.0"
-    release_sh ethereum-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
+    set_head_tags "evm-uniswap-v4-with-hooks-99.0.0"
+    release_sh evm-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
     assert_failed "refuses to release"
     assert_contains "does not match tag version" "explains the mismatch"
 }
@@ -169,54 +169,51 @@ test_tagged_version_mismatch() {
 test_prerelease_flat() {
     echo "e) pre-release of a flat package"
     set_head_tags
-    release_sh ethereum-uniswap-v2 ethereum-pancakeswap-v2
+    release_sh evm-uniswap-v2 ethereum-pancakeswap-v2
     assert_status 0 "exits successfully"
     assert_contains "-o ./target/spkg/ethereum-pancakeswap-v2-pre.$head_sha.spkg" \
         "packs to the manifest-named spkg"
-    assert_contains "'$BUCKET/ethereum-uniswap-v2/ethereum-pancakeswap-v2-pre.$head_sha.spkg'" \
-        "keeps the flat package namespace"
+    assert_contains "'$BUCKET/evm-uniswap-v2/ethereum-pancakeswap-v2-pre.$head_sha.spkg'" \
+        "uploads under the package directory namespace"
 }
 
 test_tagged_flat() {
-    echo "f) tagged release of a flat package keeps its published namespace"
+    echo "f) tagged release of a flat package"
     local version
-    version=$(package_version ethereum-uniswap-v2)
-    set_head_tags "ethereum-uniswap-v2-$version"
-    release_sh ethereum-uniswap-v2 ethereum-pancakeswap-v2
+    version=$(package_version evm-uniswap-v2)
+    set_head_tags "evm-uniswap-v2-$version"
+    release_sh evm-uniswap-v2 ethereum-pancakeswap-v2
     assert_status 0 "exits successfully"
-    assert_contains "'$BUCKET/ethereum-uniswap-v2/ethereum-pancakeswap-v2-v$version.spkg'" \
-        "uploads where the existing Helm values point"
+    assert_contains "'$BUCKET/evm-uniswap-v2/ethereum-pancakeswap-v2-v$version.spkg'" \
+        "uploads under the package directory namespace"
 }
 
-test_flat_package_with_only_substreams_yaml() {
-    echo "g) flat package whose only manifest is substreams.yaml"
+test_cargo_name_differs_from_directory() {
+    echo "g) flat package whose Cargo name differs from its directory"
     local version
-    version=$(package_version ethereum-fluid)
+    version=$(package_version evm-fluid)
 
-    # ethereum-fluid is the one flat package whose Cargo name (ethereum-fluid_v1) differs from
-    # its directory, so it pins the rule that the artifact is named after the directory.
+    # evm-fluid is the one flat package whose Cargo name (evm-fluid_v1) differs from its
+    # directory, so it pins the rule that the namespace is the directory and the artifact is
+    # named after the manifest.
     set_head_tags
-    release_sh ethereum-fluid
+    release_sh evm-fluid ethereum-fluid
     assert_status 0 "exits successfully"
-    assert_contains "Cargo package:      ethereum-fluid_v1" "resolves the Cargo package name"
-    assert_contains "-o ./target/spkg/ethereum-fluid-pre.$head_sha.spkg" \
-        "packs under the directory name, not the Cargo name"
-    assert_contains "'$BUCKET/ethereum-fluid/ethereum-fluid-pre.$head_sha.spkg'" \
-        "keeps the published pre-release key"
+    assert_contains "Cargo package:      evm-fluid_v1" "resolves the Cargo package name"
+    assert_contains "'$BUCKET/evm-fluid/ethereum-fluid-pre.$head_sha.spkg'" \
+        "uploads the manifest-named spkg under the directory namespace"
 
-    set_head_tags "ethereum-fluid_v1-$version"
-    release_sh ethereum-fluid
+    set_head_tags "evm-fluid_v1-$version"
+    release_sh evm-fluid ethereum-fluid
     assert_status 0 "exits successfully when tagged with the Cargo package name"
-    assert_contains "-o ./target/spkg/ethereum-fluid-v$version.spkg" \
-        "packs the tag version under the directory name"
-    assert_contains "'$BUCKET/ethereum-fluid/ethereum-fluid-v$version.spkg'" \
-        "keeps the published release key"
+    assert_contains "'$BUCKET/evm-fluid/ethereum-fluid-v$version.spkg'" \
+        "uploads the tag version"
 }
 
 test_unrelated_tag_is_ignored() {
     echo "h) an unrelated repository tag on HEAD does not start a release"
-    set_head_tags "0.410.0" "ethereum-uniswap-v2-0.0.1"
-    release_sh ethereum-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
+    set_head_tags "0.410.0" "evm-uniswap-v2-0.0.1"
+    release_sh evm-uniswap-v4/with-hooks robinhood-uniswap-v4-with-hooks
     assert_status 0 "exits successfully"
     assert_contains "robinhood-uniswap-v4-with-hooks-pre.$head_sha.spkg" \
         "falls back to a pre-release"
@@ -225,13 +222,30 @@ test_unrelated_tag_is_ignored() {
 test_unknown_package() {
     echo "i) unknown package"
     set_head_tags
-    release_sh ethereum-uniswap-v4/no-such-crate robinhood-uniswap-v4-with-hooks
+    release_sh evm-uniswap-v4/no-such-crate robinhood-uniswap-v4-with-hooks
     assert_failed "refuses to release"
     assert_contains "Unknown package" "names the bad input"
 }
 
+test_missing_config_file() {
+    echo "j) no config_file"
+    set_head_tags
+    release_sh evm-uniswap-v2
+    assert_failed "refuses to release"
+    assert_contains "config_file arguments are required" "asks for the manifest"
+}
+
+test_unknown_config_file() {
+    echo "k) config_file that names no manifest in the package"
+    set_head_tags
+    release_sh evm-uniswap-v2 no-such-manifest
+    assert_failed "refuses to release"
+    assert_contains "evm-uniswap-v2/no-such-manifest.yaml: file does not exist" \
+        "names the missing manifest"
+}
+
 test_dry_run_leaves_no_artifacts() {
-    echo "j) the dry run leaves the fixture clean"
+    echo "l) the dry run leaves the fixture clean"
     local dirty
     dirty=$(git -C "$repo" status --porcelain)
     if [ -z "$dirty" ]; then
@@ -253,9 +267,11 @@ main() {
     test_tagged_version_mismatch
     test_prerelease_flat
     test_tagged_flat
-    test_flat_package_with_only_substreams_yaml
+    test_cargo_name_differs_from_directory
     test_unrelated_tag_is_ignored
     test_unknown_package
+    test_missing_config_file
+    test_unknown_config_file
     test_dry_run_leaves_no_artifacts
 
     echo
