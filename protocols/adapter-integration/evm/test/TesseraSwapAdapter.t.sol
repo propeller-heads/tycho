@@ -57,12 +57,17 @@ contract TesseraSwapAdapterTest is Test {
     address constant PAIR = 0xf524C1Bc1C64A2C99bc7eccf19EDe9a1d89d5a7C;
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant ENGINE = 0x31e99E05fee3DCE580af777C3fD63eE1B3B40c17;
+    // keccak256(abi.encode(keccak256(abi.encode(WETH, USDC)), 8)): the Engine
+    // registry entry for the sorted WETH/USDC pair.
+    bytes32 constant WETH_USDC_REGISTRY_SLOT =
+        0x7de34ae1e8ba739875fb9abb94e6baebe5cefd45e23d860202def0971a284fe7;
     TesseraSwapAdapter adapter;
     bytes32 poolId = bytes32(bytes20(PAIR));
 
     function setUp() public {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), 50_548_423);
-        adapter = new TesseraSwapAdapter(VENUE);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE);
     }
 
     function testTokensCapabilitiesAndLimits() public {
@@ -164,6 +169,39 @@ contract TesseraSwapAdapterTest is Test {
         }
     }
 
+    function _assertPairUnavailable() internal {
+        bytes memory notRegistered = abi.encodeWithSignature(
+            "Unavailable(string)", "Pair not registered"
+        );
+        uint256[] memory amounts = new uint256[](1);
+        vm.expectRevert(notRegistered);
+        adapter.price(poolId, WETH, USDC, amounts);
+        vm.expectRevert(notRegistered);
+        adapter.getLimits(poolId, WETH, USDC);
+        deal(WETH, address(this), 0.01 ether);
+        IERC20(WETH).approve(address(adapter), 0.01 ether);
+        vm.expectRevert(notRegistered);
+        adapter.swap(
+            poolId, WETH, USDC, ISwapAdapterTypes.OrderSide.Sell, 0.01 ether
+        );
+    }
+
+    function testReplacedPairStopsQuoting() public {
+        // TesseraSwap routes by token pair, so the old Pair would otherwise
+        // quote whatever Pair the Engine registry now points at.
+        vm.store(
+            ENGINE,
+            WETH_USDC_REGISTRY_SLOT,
+            bytes32(uint256(uint160(address(0xBEEF))))
+        );
+        _assertPairUnavailable();
+    }
+
+    function testDeregisteredPairStopsQuoting() public {
+        vm.store(ENGINE, WETH_USDC_REGISTRY_SLOT, bytes32(0));
+        _assertPairUnavailable();
+    }
+
     function testRejectsWrongTokens() public {
         vm.expectRevert();
         adapter.getLimits(poolId, WETH, address(1));
@@ -171,7 +209,8 @@ contract TesseraSwapAdapterTest is Test {
 
     function testSellReportsSettledOutputInsteadOfViewQuote() public {
         DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
-        TesseraSwapAdapter localAdapter = new TesseraSwapAdapter(address(venue));
+        TesseraSwapAdapter localAdapter =
+            new TesseraSwapAdapter(address(venue), ENGINE);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);
@@ -185,7 +224,8 @@ contract TesseraSwapAdapterTest is Test {
 
     function testBuyRejectsUnderfilledExactOutput() public {
         DiscountedTesseraSettlement venue = new DiscountedTesseraSettlement();
-        TesseraSwapAdapter localAdapter = new TesseraSwapAdapter(address(venue));
+        TesseraSwapAdapter localAdapter =
+            new TesseraSwapAdapter(address(venue), ENGINE);
         deal(WETH, address(this), 100);
         deal(USDC, address(venue), 200);
         IERC20(WETH).approve(address(localAdapter), 100);

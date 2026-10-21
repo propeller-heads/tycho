@@ -1661,6 +1661,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tessera_pair_replaced_in_registry_stops_quoting() {
+        let (pool, db, weth, usdc, _) = tessera_fixture().await;
+        let amount_in = BigUint::from(100_000_000u64);
+        assert!(pool
+            .get_amount_out(amount_in.clone(), &usdc, &weth)
+            .is_ok());
+        let engine = Address::from_str("0x31e99e05fee3dce580af777c3fd63ee1b3b40c17").unwrap();
+        // The Engine's registry entry for the sorted WETH/USDC pair.
+        let registry_slot =
+            U256::from_str("0x7de34ae1e8ba739875fb9abb94e6baebe5cefd45e23d860202def0971a284fe7")
+                .unwrap();
+        db.update(
+            vec![AccountUpdate::new(
+                engine,
+                Chain::Base,
+                HashMap::from([(registry_slot, U256::from(0xbeef))]),
+                None,
+                None,
+                ChangeType::Update,
+            )],
+            db.get_current_block(),
+        )
+        .unwrap();
+
+        let error = pool
+            .get_amount_out(amount_in, &usdc, &weth)
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("Pair not registered"), "{error:?}");
+    }
+
+    #[tokio::test]
     async fn test_tessera_upgrade_loads_inline_dependency_code() {
         let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
         let amount_in = BigUint::from(100_000_000u64);

@@ -25,6 +25,16 @@ interface ITesseraSwap {
     ) external;
 }
 
+/// Engine registry getter. The contracts are unverified; the name comes from
+/// matching selector 0x15f09335. It returns `(true, pair)` for a registered
+/// token pair in either order.
+interface ITesseraEngine {
+    function getTesseraPool(address tokenA, address tokenB)
+        external
+        view
+        returns (bool registered, address pair);
+}
+
 interface ITesseraPair {
     struct Order {
         uint160 amount;
@@ -73,9 +83,13 @@ interface ITesseraPair {
 contract TesseraSwapAdapter is ISwapAdapter {
     using SafeERC20 for IERC20;
     ITesseraSwap public immutable tesseraSwap;
+    /// TesseraSwap exposes no Engine getter, so the Engine is fixed per
+    /// deployment, like the Substreams configuration.
+    ITesseraEngine public immutable engine;
 
-    constructor(address venue) {
+    constructor(address venue, address engine_) {
         tesseraSwap = ITesseraSwap(venue);
+        engine = ITesseraEngine(engine_);
     }
 
     function _pair(bytes32 poolId, address sell, address buy)
@@ -89,6 +103,12 @@ contract TesseraSwapAdapter is ISwapAdapter {
         if (!((sell == base && buy == quote) || (sell == quote && buy == base)))
         {
             revert InvalidOrder("Pool/token mismatch");
+        }
+        // TesseraSwap routes by token pair, not pool id: a Pair the registry
+        // no longer points at would quote and settle against its successor.
+        (bool registered, address current) = engine.getTesseraPool(sell, buy);
+        if (!registered || current != address(pair)) {
+            revert Unavailable("Pair not registered");
         }
     }
 
