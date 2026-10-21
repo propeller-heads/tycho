@@ -1,5 +1,10 @@
-use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageChanges};
-use anyhow::Result;
+use crate::{
+    code::{CodeSource, RpcCode},
+    common::*,
+    config::DeploymentConfig,
+    pb::tessera::v1::BlockStorageChanges,
+};
+use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use substreams::{
     pb::substreams::StoreDeltas,
@@ -71,6 +76,7 @@ pub fn map_protocol_changes(
         &storage,
         ModuleInputs { new_components, deltas, balance_store },
         &view,
+        &RpcCode,
     )
 }
 
@@ -98,7 +104,8 @@ fn read_safety(store: &StoreGetString, known: &HashSet<String>) -> Safety {
 /// every known pair, and the attributes derived from their writes.
 ///
 /// A pair write to the implementation, pricing-library or write-helper slot publishes that
-/// address as `stateless_contract_addr_0`, `_1` or `_2`; a zero address is not published.
+/// address as `stateless_contract_addr_0`, `_1` or `_2` and its closing-block code as
+/// `stateless_contract_code_0`, `_1` or `_2`; a zero address is not published.
 /// TesseraSwap writes publish `engine` and `balance_owner` on every pair. A pair is never touched
 /// by a transaction ordered before its creation. Every emitted transaction pauses a pair whose
 /// helper charges a nonzero tag-0 fee, and pauses every pair once the recorded Engine differs from
@@ -109,6 +116,7 @@ fn protocol_changes_from_storage(
     storage: &BlockStorageChanges,
     inputs: ModuleInputs,
     view: &PairView,
+    code: &impl CodeSource,
 ) -> Result<BlockChanges> {
     let known = &view.known;
     let mut changes = HashMap::new();
@@ -151,7 +159,7 @@ fn protocol_changes_from_storage(
         |addr| addr == config.tesseraswap || addr == config.engine || known.contains(&id(addr)),
         &mut changes,
     );
-    record_pair_writes(config, storage, known, &created, &mut changes)?;
+    record_pair_writes(config, storage, known, &created, code, &mut changes)?;
     enforce_pauses(config, storage, view, &created, &mut changes)?;
     let mut changes: Vec<_> = changes.into_iter().collect();
     changes.sort_by_key(|(index, _)| *index);
@@ -171,19 +179,22 @@ fn record_pair_writes(
     storage: &BlockStorageChanges,
     known: &HashSet<String>,
     created: &HashMap<String, u64>,
+    code: &impl CodeSource,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) -> Result<()> {
     // These slots belong to TesseraSwap, not the Pair: Engine at 0, Treasury at 1.
     let engine_slot = slot(0);
     let treasury_slot = slot(config.treasury_slot);
     // Array order is the consumer's stateless_contract_addr_<i> attribute index.
-    // The VM reloads bytecode when one of these addresses changes; a change alone does
-    // not pause the pair.
+    // The VM loads the published code when one of these addresses changes; a change alone
+    // does not pause the pair.
     let dependency_slots = [
         IMPLEMENTATION_SLOT.to_vec(), // Pair EIP-1967 slot: implementation, attribute 0.
         slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
         slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
     ];
+    // (transaction index, pair, attribute index, dependency address), published once code is in.
+    let mut dependencies = vec![];
     for group in &storage.transactions {
         let transaction = storage_transaction(group)?;
         for w in &group.writes {
@@ -225,17 +236,43 @@ fn record_pair_writes(
                         .position(|key| *key == w.key)
                     {
                         if !zero(&w.new_value) {
-                            attribute(
-                                builder,
-                                &pair,
-                                &format!("stateless_contract_addr_{i}"),
-                                id(&address(&w.new_value)).into_bytes(),
-                            );
+                            dependencies.push((transaction.index, pair, i, address(&w.new_value)));
                         }
                     }
                 }
             }
         }
+    }
+    publish_dependencies(dependencies, code, changes)
+}
+
+/// Publishes each dependency's address and code, reading every distinct address's code once.
+fn publish_dependencies(
+    dependencies: Vec<(u64, String, usize, Vec<u8>)>,
+    code: &impl CodeSource,
+    changes: &mut HashMap<u64, TransactionChangesBuilder>,
+) -> Result<()> {
+    let mut addresses: Vec<_> = dependencies
+        .iter()
+        .map(|(_, _, _, address)| address.clone())
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    let codes = code.codes(&addresses)?;
+    for (index, pair, i, address) in dependencies {
+        let bytecode = codes
+            .get(&address)
+            .ok_or_else(|| anyhow!("no code read for dependency {}", id(&address)))?;
+        let builder = changes
+            .get_mut(&index)
+            .ok_or_else(|| anyhow!("no transaction {index} for dependency {}", id(&address)))?;
+        attribute(
+            builder,
+            &pair,
+            &format!("stateless_contract_addr_{i}"),
+            id(&address).into_bytes(),
+        );
+        attribute(builder, &pair, &format!("stateless_contract_code_{i}"), bytecode.clone());
     }
     Ok(())
 }
@@ -317,7 +354,21 @@ fn protocol_changes(
         .collect();
     let storage =
         crate::modules::map_storage_changes::filter_storage_changes(config, block, &known);
-    protocol_changes_from_storage(config, block, &storage, inputs, view)
+    protocol_changes_from_storage(config, block, &storage, inputs, view, &AddressAsCode)
+}
+
+/// Test code source: an address's code is `0x5f` followed by the address.
+#[cfg(test)]
+struct AddressAsCode;
+
+#[cfg(test)]
+impl CodeSource for AddressAsCode {
+    fn codes(&self, addresses: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+        Ok(addresses
+            .iter()
+            .map(|a| (a.clone(), [&[0x5f], a.as_slice()].concat()))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -437,13 +488,101 @@ mod tests {
         assert_eq!(first["stateless_contract_addr_0"], id(&implementation).into_bytes());
         assert_eq!(first["stateless_contract_addr_1"], id(&library).into_bytes());
         assert_eq!(first["stateless_contract_addr_2"], id(&HELPER).into_bytes());
+        assert_eq!(
+            first["stateless_contract_code_0"],
+            [&[0x5f], implementation.as_slice()].concat()
+        );
+        assert_eq!(first["stateless_contract_code_1"], [&[0x5f], library.as_slice()].concat());
+        assert_eq!(first["stateless_contract_code_2"], [&[0x5f], HELPER.as_slice()].concat());
         assert_eq!(first["update_marker"], vec![1]);
         let cleared = attrs_in(&out, 1, &PAIR);
         assert!(
-            !cleared.contains_key("stateless_contract_addr_2"),
+            !cleared.contains_key("stateless_contract_addr_2") &&
+                !cleared.contains_key("stateless_contract_code_2"),
             "zero address is not published"
         );
         assert_eq!(cleared["update_marker"], vec![1]);
+    }
+
+    /// Records every batch it is asked for and serves fixed code.
+    struct RecordingCode {
+        batches: std::cell::RefCell<Vec<Vec<Vec<u8>>>>,
+        fail: bool,
+    }
+
+    impl CodeSource for RecordingCode {
+        fn codes(&self, addresses: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+            self.batches
+                .borrow_mut()
+                .push(addresses.to_vec());
+            if self.fail {
+                return Err(anyhow!("rpc down"));
+            }
+            Ok(addresses
+                .iter()
+                .map(|a| (a.clone(), vec![0xfe]))
+                .collect())
+        }
+    }
+
+    fn changes_with(
+        block: &eth::v2::Block,
+        pairs: &[&[u8]],
+        code: &RecordingCode,
+    ) -> Result<BlockChanges> {
+        let known = pairs
+            .iter()
+            .map(|p| p.to_vec())
+            .collect();
+        let storage =
+            crate::modules::map_storage_changes::filter_storage_changes(&config(), block, &known);
+        protocol_changes_from_storage(
+            &config(),
+            block,
+            &storage,
+            no_inputs(),
+            &view(pairs, safe()),
+            code,
+        )
+    }
+
+    #[test]
+    fn reads_each_dependency_code_once_per_block() {
+        let implementation = [0x71; 20];
+        let block = block(vec![
+            tx(
+                0,
+                vec![write(
+                    &PAIR,
+                    IMPLEMENTATION_SLOT.to_vec(),
+                    word(&[0x70; 20]),
+                    word(&implementation),
+                )],
+            ),
+            tx(
+                1,
+                vec![write(
+                    &OTHER_PAIR,
+                    IMPLEMENTATION_SLOT.to_vec(),
+                    word(&[0x70; 20]),
+                    word(&implementation),
+                )],
+            ),
+        ]);
+        let code = RecordingCode { batches: Default::default(), fail: false };
+        let out = changes_with(&block, &[&PAIR, &OTHER_PAIR], &code).unwrap();
+
+        assert_eq!(*code.batches.borrow(), vec![vec![implementation.to_vec()]]);
+        assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_code_0"], vec![0xfe]);
+        assert_eq!(attrs_in(&out, 1, &OTHER_PAIR)["stateless_contract_code_0"], vec![0xfe]);
+    }
+
+    #[test]
+    fn failed_code_read_fails_the_block() {
+        let block = block(vec![tx(0, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let code = RecordingCode { batches: Default::default(), fail: true };
+        let error = changes_with(&block, &[&PAIR], &code).unwrap_err();
+        assert!(error.to_string().contains("rpc down"));
     }
 
     #[test]
@@ -611,6 +750,7 @@ mod tests {
             &storage,
             no_inputs(),
             &view(&[&PAIR], safe()),
+            &AddressAsCode,
         )
         .unwrap_err();
         assert!(error

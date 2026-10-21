@@ -11,13 +11,18 @@ component; quotes come from executing Tessera's own bytecode in the Tycho VM.
 2. The component ID is the Pair address; tokens are sorted. TesseraSwap, the Engine and the
    Pair are stateful contracts, and their raw storage and code changes are indexed.
 3. The implementation, pricing library and write helper are published as UTF-8 address
-   attributes `stateless_contract_addr_0/1/2` and follow their slot writes. The VM reloads
-   bytecode when one changes; a failed load fails the transition.
+   attributes `stateless_contract_addr_0/1/2` and follow their slot writes. Each address comes
+   with its closing-block code as `stateless_contract_code_0/1/2`, read with one batched
+   `eth_call` per block (see `src/code.rs`), so consumers load dependencies without RPC. A
+   failed code read aborts the block.
 4. `balance_owner` is TesseraSwap slot 1 (the treasury). A new (token, component) is seeded
    with the treasury's closing `balanceOf`, then follows ERC20 transfers and canonical WETH
    wrap/unwrap events. On a treasury rotation, the block's events are counted against the
    previous treasury and `new_owner_balance - old_owner_balance` is bridged at the rotation.
    A failed `balanceOf` call aborts the block.
+
+   Both reads are `eth_call`s. On a Flashblocks partial block an `eth_call` stalls the stream
+   for about three minutes, so this package must run without `--enable-partial-blocks`.
 5. The adapter quotes with `tesseraSwapViewAmounts`, settles with `tesseraSwapWithAllowances`
    and reports the settled amount. The VM keeps the swap's storage writes for later fills.
 6. The Base-only encoder emits the two token addresses (40 bytes). The executor calls
@@ -38,9 +43,9 @@ changes.
 | --- | --- | --- |
 | TesseraSwap | Fixed address, raw state/code | Slot 0 is Engine, slot 1 is treasury, swap/view ABI |
 | Engine | Fixed address, raw state/code | Sorted-token registry mapping at slot 8, registration in the discovery transaction |
-| Pair implementation | EIP-1967 slot → attribute 0 → bytecode reload | Pair proxy template, token slots 48/49 |
-| Pricing library | Pair slot 51 → attribute 1 → bytecode reload | Staticcalled by the implementation; reads no storage |
-| Write helper | Pair slot 52 → attribute 2 → bytecode reload | Tag-0 fee is zero |
+| Pair implementation | EIP-1967 slot → attribute 0 + code | Pair proxy template, token slots 48/49 |
+| Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
+| Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
 | Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge | Standard ERC20 and canonical WETH events |
 | Adapter | Pair `poolState()` and token getters | Static ABI; the 20-order ladder only bounds the limit search |
 
