@@ -2,7 +2,9 @@ author:
   name: PropellerHeads
   email: zach@propellerheads.xyz
 constants:
-  protocol_gas: 150000
+  # A TychoRouter swap, about 2.5M gas at block 52,890,608: TesseraSwap scans
+  # the router's code on settlement (see ROUTER_SETTLEMENT_EXTRA_GAS).
+  protocol_gas: 2500000
   capabilities:
     - SellSide
     - BuySide
