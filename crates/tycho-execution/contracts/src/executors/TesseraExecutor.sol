@@ -51,6 +51,8 @@ contract TesseraExecutor is IExecutor {
         // Output also depends on the transaction's priority fee: at an
         // operator-set threshold the Pair widens its price, which Tycho's
         // quote, simulated at zero priority fee, does not include.
+        // TesseraSwap scans its caller's code, here the router's, on every
+        // settlement; the adapter adds that cost to the simulated gas.
         tesseraSwap.tesseraSwapWithAllowances(
             tokenIn, tokenOut, int256(amountIn), 0, receiver, ""
         );

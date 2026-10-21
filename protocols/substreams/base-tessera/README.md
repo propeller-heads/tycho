@@ -96,6 +96,14 @@ and 0.01 bps on the other pairs (measured at block 51,979,346). The Tycho VM sim
 zero gas price and base fee, so quotes and limits are the zero-priority-fee price; a fill
 that pays a priority fee above the threshold receives the haircut.
 
+TesseraSwap also scans its caller's whole code on every settlement, at about 79 gas per byte.
+The router is the caller on chain, the adapter in the VM, so `swap` adds
+`ROUTER_SETTLEMENT_EXTRA_GAS` (1.36M) to the gas it measures: the scan of the TychoRouter
+at `0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67` (22,390 bytes) beyond the adapter's own, plus
+the storage the adapter's quote has already warmed. It matches the router's settlement gas
+within 1% at block 52,890,608. The constant is tied to that router: a redeployment, or a solver
+settling through its own contract, pays a different scan.
+
 ## Tests
 
 - Substreams: unit tests for discovery, the storage-change filter, balance deltas (seed
@@ -103,7 +111,8 @@ that pays a priority fee above the threshold receives the haircut.
   pause conditions.
 - Adapter: Base forks at blocks 50,548,423 to 52,890,608 — both directions, exact in and out,
   price, staleness, two consecutive fills, settled-output accounting against a synthetic venue,
-  a replaced or removed registry entry, and limits under the fill rules and the treasury cap.
+  a replaced or removed registry entry, limits under the fill rules and the treasury cap, and
+  swap gas against the router's own settlement.
 - Execution: encoder units, executor fork tests, and full Rust-generated router calldata in
   both directions.
 - Simulation: VM delta tests for dependency reload and treasury rotation, snapshot decoding,

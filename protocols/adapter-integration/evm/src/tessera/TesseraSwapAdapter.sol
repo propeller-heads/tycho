@@ -113,6 +113,16 @@ contract TesseraSwapAdapter is ISwapAdapter {
     /// Bisection rounds when the computed limit does not quote.
     uint256 internal constant FALLBACK_PROBES = 8;
 
+    /// Gas the TychoRouter at 0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67
+    /// pays to settle beyond the settlement this adapter measures. TesseraSwap
+    /// scans its caller's whole code on settlement, about 79 gas per byte, so
+    /// the router's 22,390 bytes cost about 1.23M more than this adapter's
+    /// 6,883. The rest is storage that the adapter's quote has already warmed
+    /// and the router reads cold. Measured on a Base fork at block
+    /// 52,890,608; re-measure when the router is redeployed or this adapter's
+    /// code size changes.
+    uint256 internal constant ROUTER_SETTLEMENT_EXTRA_GAS = 1_360_000;
+
     ITesseraSwap public immutable tesseraSwap;
     /// TesseraSwap exposes neither its Engine nor its treasury, so both are
     /// fixed per deployment, like the Substreams configuration. A treasury
@@ -366,7 +376,7 @@ contract TesseraSwapAdapter is ISwapAdapter {
             msg.sender,
             ""
         );
-        trade.gasUsed = gasBefore - gasleft();
+        trade.gasUsed = gasBefore - gasleft() + ROUTER_SETTLEMENT_EXTRA_GAS;
         // Report what the venue settled, not its view quote, so any gap
         // between the two shows up in simulated output.
         uint256 received = IERC20(buy).balanceOf(msg.sender) - outputBefore;

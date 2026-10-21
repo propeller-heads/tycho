@@ -4,6 +4,7 @@ import "forge-std/Test.sol";
 import {
     TesseraSwapAdapter,
     ITesseraSwap,
+    ITesseraEngine,
     ITesseraPair
 } from "src/tessera/TesseraSwapAdapter.sol";
 import {ISwapAdapterTypes} from "src/interfaces/ISwapAdapterTypes.sol";
@@ -102,6 +103,7 @@ contract TesseraSwapAdapterTest is Test {
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant BTC_PAIR = 0xED57BacDc2a990B631F8817853935791C122c356;
     address constant TREASURY = 0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE;
+    address constant ROUTER = 0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67;
     // keccak256(abi.encode(keccak256(abi.encode(WETH, USDC)), 8)): the Engine
     // registry entry for the sorted WETH/USDC pair.
     bytes32 constant WETH_USDC_REGISTRY_SLOT =
@@ -372,6 +374,49 @@ contract TesseraSwapAdapterTest is Test {
         _assertSpotPriceMatchesTopLevel(eurcPair, USDC, EURC);
         _assertSpotPriceMatchesTopLevel(btcPair, CBBTC, USDC);
         _assertSpotPriceMatchesTopLevel(btcPair, USDC, CBBTC);
+    }
+
+    /// Gas of the TychoRouter's own settlement, with the storage the adapter
+    /// touches before settling already warm.
+    function _routerSettlementGas(address sell, address buy, uint256 amount)
+        internal
+        returns (uint256 used)
+    {
+        ITesseraEngine(ENGINE)
+            .swapAmountView(sell, buy, int256(amount), address(0));
+        deal(sell, ROUTER, amount);
+        IERC20(buy).balanceOf(ROUTER);
+        vm.prank(ROUTER);
+        IERC20(sell).approve(VENUE, amount);
+        vm.prank(ROUTER);
+        uint256 gasBefore = gasleft();
+        ITesseraSwap(VENUE)
+            .tesseraSwapWithAllowances(sell, buy, int256(amount), 0, ROUTER, "");
+        used = gasBefore - gasleft();
+    }
+
+    function testSwapGasIsWhatTheRouterPays() public {
+        // TesseraSwap scans its caller's code on settlement, so the router
+        // pays for 22,390 bytes where the adapter settles with its own.
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), 52_890_608);
+        adapter = new TesseraSwapAdapter(VENUE, ENGINE, TREASURY);
+        bytes32 btcPool = bytes32(bytes20(BTC_PAIR));
+        for (uint256 i; i < 2; ++i) {
+            (address sell, address buy, uint256 amount) =
+                i == 0 ? (USDC, CBBTC, 100e6) : (CBBTC, USDC, 1e5);
+            uint256 snapshot = vm.snapshot();
+            uint256 routerGas = _routerSettlementGas(sell, buy, amount);
+            vm.revertTo(snapshot);
+            deal(sell, address(this), amount);
+            IERC20(sell).approve(address(adapter), amount);
+            ISwapAdapterTypes.Trade memory trade = adapter.swap(
+                btcPool, sell, buy, ISwapAdapterTypes.OrderSide.Sell, amount
+            );
+            emit log_named_uint("router settlement gas", routerGas);
+            emit log_named_uint("adapter trade.gasUsed", trade.gasUsed);
+            assertApproxEqRel(trade.gasUsed, routerGas, 0.01e18);
+            vm.revertTo(snapshot);
+        }
     }
 
     function testRejectsWrongTokens() public {
