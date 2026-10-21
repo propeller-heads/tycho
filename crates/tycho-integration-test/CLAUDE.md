@@ -80,7 +80,7 @@ the pool shows up as slippage.
     `FeedStalled` for Metric) the swap counts as a stale quote
     (`tycho_integration_execution_stale_quotes_total`) instead of a revert
 - **`oracle_overrides.rs`**: `OracleOverrides` — keeps the storage overrides Titan's
-  `pamm_quote_stream` publishes, per quoted block, for the venues Titan serves. `VENUE_CHANNELS`
+  `pamm_quote_stream_v2` publishes, per quoted block, for the venues Titan serves. `VENUE_CHANNELS`
   maps each venue to the `TitanChannel`s it needs: one for FermiSwap, Kipseli and Bebop, and both
   of Metric's Ethereum oracles for Metric, which the `rfq:metric` path also uses; a block covers a
   venue only when all its channels published (`covers_all`). A test fails when a venue in

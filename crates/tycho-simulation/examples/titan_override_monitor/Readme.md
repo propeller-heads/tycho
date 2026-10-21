@@ -19,7 +19,7 @@ TYCHO_API_KEY=<key> cargo run -p tycho-simulation --example titan_override_monit
 Optional flags: `--protocols vm:fermiswap` (comma-separated), `--tvl-threshold 1`,
 `--sell-units 0.01` (sell amount in whole units of each pool's first token), `--vm-traces`
 (print full EVM call traces; extremely verbose). The Titan endpoint can be overridden with the
-`TITAN_PAMM_STREAM_URL` env var (same as production).
+`TITAN_PAMM_QUOTE_STREAM_URL` env var (same as production).
 
 ## What to look for
 
@@ -49,7 +49,7 @@ Point the provider at an unreachable endpoint to see the contrast — quotes the
 within each block:
 
 ```bash
-TITAN_PAMM_STREAM_URL=ws://127.0.0.1:1 TYCHO_API_KEY=<key> \
+TITAN_PAMM_QUOTE_STREAM_URL=ws://127.0.0.1:1 TYCHO_API_KEY=<key> \
     cargo run -p tycho-simulation --example titan_override_monitor -- \
     --tycho-url tycho-dev.propellerheads.xyz
 ```

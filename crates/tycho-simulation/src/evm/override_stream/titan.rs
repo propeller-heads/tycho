@@ -1,8 +1,8 @@
 //! Concrete [`StateOverrideProvider`] backed by the Titan pAMM state-override stream.
 //!
-//! Connects to the Titan `pamm_quote_stream` WebSocket and tracks the latest per-block VM storage
-//! overrides published for the known pAMM venues (e.g. FermiSwap), exposing them through the
-//! generic [`StateOverrideProvider`] trait so the decoder can inject them into the matching
+//! Connects to the Titan `pamm_quote_stream_v2` WebSocket and tracks the latest per-block VM
+//! storage overrides published for the known pAMM venues (e.g. FermiSwap), exposing them through
+//! the generic [`StateOverrideProvider`] trait so the decoder can inject them into the matching
 //! `EVMPoolState` instances before simulation. See
 //! <https://docs.titanbuilder.xyz/propamms/takers>.
 //!
@@ -16,22 +16,27 @@
 //! Simulating against the latest indexed block therefore reverts even with the storage overrides
 //! applied; the simulated block timestamp must be bumped to the pending block's.
 //!
-//! The pending block timestamp is derived from the frame's beacon `slot` field as
+//! The pending block timestamp is derived from the entry's beacon `slot` field as
 //! `BEACON_GENESIS_TIMESTAMP + slot * SECONDS_PER_SLOT`. This mirrors Titan's reference taker
 //! implementation ([gattaca-com/propamm](https://github.com/gattaca-com/propamm), `quoter.py`) and
 //! the [LambdaClass propAMM SDK](https://github.com/lambdaclass/propamm-router-contracts), both of
 //! which pass exactly this value as a block override alongside the state overrides. Should `slot`
 //! ever be absent, the timestamp is recovered from the registry lanes themselves, then from the
-//! frame's wall clock; see [`TitanProvider::pending_block_timestamp`].
+//! entry's wall clock; see [`TitanProvider::pending_block_timestamp`].
 //!
 //! # Observed stream anatomy (2026-07)
 //!
 //! Facts established against the live stream and the deployed contracts, on which this module
 //! relies:
 //!
-//! - Each WebSocket message carries `slot` / `blockNumber` / `timestamp` plus a single top-level
-//!   venue key (one message per venue per update), unlike the docs' merged multi-venue sample. Both
-//!   shapes are handled.
+//! - Each WebSocket message is `{"venues": [...]}`, one entry per venue that published. An entry
+//!   names the venue by `quoteAddress` and lists the contracts it prices in `pricedAddresses`, and
+//!   carries its own `slot` / `blockNumber` / `timestamp` and its `stateOverride`. A channel claims
+//!   an entry whose `quoteAddress` or any `pricedAddresses` entry is one of its aliases, so a venue
+//!   that streams under a new key is still found while it prices a known contract (Kipseli streams
+//!   under `0xc9a9…` and prices its oracle `0x5cdb…`). Entries without storage overrides (some
+//!   carry a null `maker` and an empty `stateOverride`) are skipped, leaving the last snapshot to
+//!   expire on its own.
 //! - FermiSwap and Kipseli store their oracle prices in the shared priority-update-registry
 //!   instance at `0xda7afeed01fe625cf15d187a19f94b45f00b8c5f`. A lane's base slot is
 //!   `keccak256(abi.encode(venue, laneIndex))`; the base slot value packs the lane's
@@ -67,31 +72,64 @@ use super::{FailurePolicy, OverrideSnapshot, StateOverrideProvider};
 /// Storage overrides keyed by contract address, then by storage slot.
 type VenueOverrides = HashMap<Address, HashMap<U256, U256>>;
 
-/// A parsed Titan quote-stream frame.
-///
-/// `slot` (the beacon slot the quote targets), `blockNumber` and `timestamp` (the nanosecond
-/// wall-clock instant Titan built the quote) are consumed at this level; every other top-level key
-/// (venue addresses and any future fields) lands in `overrides` as raw JSON. Only the venue keys
-/// we look up are then deserialized into [`AddressEntry`], so an upstream schema change that adds
-/// top-level fields never breaks parsing.
+/// A parsed Titan quote-stream message: the entries of the venues that published in it. Entries
+/// stay raw JSON until [`TitanMessage::entries`] reads them, so an entry this module cannot read
+/// costs that entry alone.
 #[derive(Debug, Deserialize)]
 struct TitanMessage {
     #[serde(default)]
+    venues: Vec<serde_json::Value>,
+}
+
+impl TitanMessage {
+    /// The entries whose keys and block fields parse; an unreadable one is logged and skipped.
+    fn entries(self) -> Vec<VenueEntry> {
+        self.venues
+            .into_iter()
+            .filter_map(|raw| match serde_json::from_value(raw) {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    warn!(error = %e, "Skipping unreadable Titan venue entry");
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// One venue's entry in a message.
+///
+/// `slot` is the beacon slot the quote targets, `timestamp` the nanosecond wall-clock instant
+/// Titan built it. The override set (eth_call State Override Set shape) stays raw JSON until a
+/// channel claims the entry, so an override this module cannot read is reported against that
+/// channel, as before, rather than dropping the entry for every channel. Fields this module does
+/// not read (`maker`, `assetPairs`, `pairSequences`, ...) are ignored.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VenueEntry {
+    #[serde(default)]
+    quote_address: Option<Address>,
+    #[serde(default)]
+    priced_addresses: Vec<Address>,
+    #[serde(default)]
     slot: Option<u64>,
-    #[serde(rename = "blockNumber", default)]
+    #[serde(default)]
     block_number: Option<u64>,
     #[serde(default)]
     timestamp: Option<u64>,
-    #[serde(flatten)]
-    overrides: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    state_override: serde_json::Value,
 }
 
-/// A single venue's override set, following the eth_call State Override Set shape. Only
-/// `stateOverride` is consumed; account addresses are parsed straight from their `0x` hex keys.
-#[derive(Debug, Deserialize)]
-struct AddressEntry {
-    #[serde(rename = "stateOverride", default)]
-    state_override: HashMap<Address, AccountState>,
+impl VenueEntry {
+    /// Whether the entry belongs to a channel with these aliases: its `quoteAddress` or one of
+    /// its `pricedAddresses` is among them.
+    fn is_any_of(&self, venues: &[Address]) -> bool {
+        self.quote_address
+            .iter()
+            .chain(&self.priced_addresses)
+            .any(|address| venues.contains(address))
+    }
 }
 
 /// A single account's override. Only `stateDiff` (storage slot -> value) is used, deserialized
@@ -104,9 +142,10 @@ struct AccountState {
 }
 
 /// Default Titan pAMM quote-stream WebSocket endpoint serving all known pAMM venues.
-const TITAN_URL: &str = "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream";
-/// Environment variable that overrides the default endpoint when no custom URL is passed.
-const TITAN_URL_ENV: &str = "TITAN_PAMM_STREAM_URL";
+const TITAN_URL: &str = "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream_v2";
+/// Environment variable that overrides the default endpoint when no custom URL is passed. Named
+/// after the V2 socket, so a value still pointing at the retired V1 socket is not read.
+const TITAN_URL_ENV: &str = "TITAN_PAMM_QUOTE_STREAM_URL";
 
 /// A channel of Titan's quote stream: the overrides published under one venue's keys, served
 /// under one key ([`key`](Self::key)) that a pool subscribes to.
@@ -150,11 +189,12 @@ impl TitanChannel {
         Self::iter().find(|channel| channel.key() == key)
     }
 
-    /// The venue keys the channel's frames arrive under on Titan's quote stream.
+    /// The addresses that identify the channel's entries on Titan's quote stream, matched against
+    /// an entry's `quoteAddress` and `pricedAddresses`.
     ///
-    /// Every alias of a channel streams the same maker feed (e.g. its oracle and router
-    /// addresses); subscribing to all of them keeps the channel served when one key disappears
-    /// from the stream, which venue deployments have been observed doing within hours.
+    /// Every alias of a channel stands for the same maker feed (e.g. its oracle and router
+    /// addresses); listing all of them keeps the channel served when one key disappears from the
+    /// stream, which venue deployments have been observed doing within hours.
     const fn venue_aliases(self) -> &'static [&'static str] {
         match self {
             // The FermiSwap oracle and the FermiSwapper router. Both keys carry the same
@@ -207,7 +247,7 @@ const MAX_BACKOFF_EXP: u32 = 5;
 /// How long a Titan quote stays usable after it was built, in seconds. Titan targets the pending
 /// L1 block, so one block time (12s) is the window in which the overridden prices are current; past
 /// it the snapshot is stale and the pool reverts to Tycho's indexed state. Used to derive each
-/// snapshot's [`OverrideSnapshot::expires_at`] from the frame's wall-clock `timestamp`.
+/// snapshot's [`OverrideSnapshot::expires_at`] from the entry's wall-clock `timestamp`.
 const TITAN_QUOTE_TTL_SECS: u64 = 12;
 
 /// Unix timestamp of the Ethereum beacon chain genesis (2020-12-01 12:00:23 UTC). A beacon slot's
@@ -217,7 +257,7 @@ const BEACON_GENESIS_TIMESTAMP: u64 = 1_606_824_023;
 /// Post-merge Ethereum slot duration in seconds.
 const SECONDS_PER_SLOT: u64 = 12;
 
-/// Longest a registry lane timestamp may lie ahead of the frame's wall-clock `timestamp` and still
+/// Longest a registry lane timestamp may lie ahead of the entry's wall-clock `timestamp` and still
 /// be accepted by the lane-extraction fallback. A genuine lane timestamp is the pending block's
 /// timestamp, i.e. at most one slot ahead of the instant the quote was built; two slots leaves
 /// margin for clock skew. Anything further out is packed venue data that merely looks like a
@@ -241,7 +281,7 @@ pub fn default_providers(
     if needed.is_empty() {
         return HashMap::new();
     }
-    // Auto-registration endpoint: the `TITAN_PAMM_STREAM_URL` env override if set, else the
+    // Auto-registration endpoint: the `TITAN_PAMM_QUOTE_STREAM_URL` env override if set, else the
     // built-in default. Consumers needing a different endpoint can register their own
     // `TitanProvider::spawn(url, channels)` via `with_override_provider` instead.
     let url = std::env::var(TITAN_URL_ENV).unwrap_or_else(|_| TITAN_URL.to_string());
@@ -287,7 +327,7 @@ impl TitanProvider {
     /// Maintains the Titan WebSocket connection for the lifetime of the process.
     ///
     /// Connects, reads messages, and publishes each parsed [`OverrideSnapshot`] on the matching
-    /// protocol channel (a frame keyed by any of the protocol's venue aliases publishes). Any
+    /// channel (an entry naming any of the channel's aliases publishes). Any
     /// disconnect, read error, server-side close, or idle timeout drops back to the reconnect
     /// loop, which retries forever with capped exponential backoff. The backoff is reset only
     /// after a message is actually received, so a socket that connects and immediately drops
@@ -340,22 +380,15 @@ impl TitanProvider {
                                 attempt = 0;
                                 match serde_json::from_str::<TitanMessage>(text.as_str()) {
                                     Ok(message) => {
+                                        let entries = message.entries();
                                         for (venues, sender) in &senders {
-                                            match Self::extract_any_venue(&message, venues) {
-                                                // A send error means every receiver has been
-                                                // dropped; the check after this loop stops the
-                                                // task, so ignoring it here is safe.
-                                                Ok(Some(snapshot)) => {
-                                                    let _ = sender.send(snapshot);
-                                                }
-                                                // No alias present in this frame — nothing to do.
-                                                Ok(None) => {}
-                                                // Malformed payload for this venue: keep the
-                                                // connection and last good snapshot, but surface
-                                                // it.
-                                                Err(e) => {
-                                                    warn!(?venues, error = %e, "Failed to extract Titan venue snapshot");
-                                                }
+                                            // A send error means every receiver has been
+                                            // dropped; the check after this loop stops the
+                                            // task, so ignoring it here is safe.
+                                            if let Some(snapshot) =
+                                                Self::first_snapshot(&entries, venues)
+                                            {
+                                                let _ = sender.send(snapshot);
                                             }
                                         }
                                     }
@@ -417,64 +450,61 @@ impl TitanProvider {
         }
     }
 
-    /// Extracts the snapshot of the first alias in `venues` present in the frame, or `Ok(None)`
-    /// if none is. A frame carries a single top-level venue key, so at most one alias matches.
-    fn extract_any_venue(
-        message: &TitanMessage,
-        venues: &[Address],
-    ) -> Result<Option<OverrideSnapshot>, String> {
-        for venue in venues {
-            if let Some(snapshot) = Self::extract_venue(message, venue)? {
-                return Ok(Some(snapshot));
-            }
-        }
-        Ok(None)
+    /// The snapshot of the first entry in `entries` that belongs to a channel with these aliases
+    /// and carries storage overrides, or `None` when no entry does. An entry whose override set
+    /// cannot be read is logged and passed over, keeping the channel's last good snapshot.
+    fn first_snapshot(entries: &[VenueEntry], venues: &[Address]) -> Option<OverrideSnapshot> {
+        entries
+            .iter()
+            .filter(|entry| entry.is_any_of(venues))
+            .find_map(|entry| match Self::extract_entry(entry) {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    warn!(?venues, error = %e, "Failed to extract Titan venue snapshot");
+                    None
+                }
+            })
     }
 
-    /// Extracts a single venue's snapshot (`stateDiff` overrides + resolved block environment)
-    /// from an already-parsed Titan stream frame (deserialized once by the caller, then queried per
-    /// venue).
+    /// Extracts an entry's snapshot (`stateDiff` overrides + resolved block environment).
     ///
-    /// Returns `Ok(None)` if the venue is absent from the frame. The block timestamp is resolved
-    /// to the pending block's timestamp (see
+    /// Returns `Ok(None)` when the entry overrides no storage, so there is nothing to apply. The
+    /// block timestamp is resolved to the pending block's timestamp (see
     /// [`pending_block_timestamp`](Self::pending_block_timestamp)) so the registry's
     /// oracle-staleness guard sees the overridden prices as current, and `expires_at` is set to the
-    /// frame's wall-clock `timestamp` plus [`TITAN_QUOTE_TTL_SECS`] so the pool stops using it once
+    /// entry's wall-clock `timestamp` plus [`TITAN_QUOTE_TTL_SECS`] so the pool stops using it once
     /// it goes stale.
-    fn extract_venue(
-        message: &TitanMessage,
-        venue: &Address,
-    ) -> Result<Option<OverrideSnapshot>, String> {
-        // Each frame carries one top-level entry per venue address. Absent => nothing to apply.
-        let venue_key = format!("{venue:#x}");
-        let Some(raw) = message.overrides.get(&venue_key) else {
-            return Ok(None);
+    fn extract_entry(entry: &VenueEntry) -> Result<Option<OverrideSnapshot>, String> {
+        let state_override: HashMap<Address, AccountState> = if entry.state_override.is_null() {
+            HashMap::new()
+        } else {
+            serde_json::from_value(entry.state_override.clone())
+                .map_err(|e| format!("invalid venue override: {e}"))?
         };
-        let entry: AddressEntry = serde_json::from_value(raw.clone())
-            .map_err(|e| format!("invalid venue override: {e}"))?;
-
-        let block_number = message.block_number;
 
         // We only consume `stateDiff` storage; balance / nonce / code are ignored. Slots and values
         // were parsed into `U256` by serde, so we just drop accounts with no overrides.
         let mut storage: VenueOverrides = HashMap::new();
-        for (account, account_override) in entry.state_override {
+        for (account, account_override) in state_override {
             if !account_override.state_diff.is_empty() {
                 storage.insert(account, account_override.state_diff);
             }
         }
+        if storage.is_empty() {
+            return Ok(None);
+        }
 
-        let block_timestamp = Self::pending_block_timestamp(message, &storage);
+        let block_timestamp = Self::pending_block_timestamp(entry.slot, entry.timestamp, &storage);
 
-        // Expire the snapshot one block time after Titan built it, using the frame's nanosecond
+        // Expire the snapshot one block time after Titan built it, using the entry's nanosecond
         // wall-clock `timestamp`. Once past this the pool drops the override and reverts to Tycho's
         // indexed state, so a stalled stream can never keep serving prices indefinitely.
-        let expires_at = message
+        let expires_at = entry
             .timestamp
             .map(|ns| ns / 1_000_000_000 + TITAN_QUOTE_TTL_SECS);
 
         Ok(Some(OverrideSnapshot {
-            block_number,
+            block_number: entry.block_number,
             block_timestamp,
             storage: Arc::new(storage),
             expires_at,
@@ -487,31 +517,33 @@ impl TitanProvider {
         }))
     }
 
-    /// Returns the unix-seconds timestamp of the pending block the frame's quote targets, or
-    /// `None` if the frame carries no timestamp signal at all.
+    /// Returns the unix-seconds timestamp of the pending block an entry's quote targets, or `None`
+    /// if the entry carries no timestamp signal at all. `slot` and `timestamp` are the entry's.
     ///
     /// Resolution order:
-    /// 1. The frame's beacon `slot` field (`BEACON_GENESIS_TIMESTAMP + slot * 12`) — the
+    /// 1. The entry's beacon `slot` field (`BEACON_GENESIS_TIMESTAMP + slot * 12`) — the
     ///    authoritative source, and the one used by Titan's reference taker
     ///    (<https://github.com/gattaca-com/propamm>, `quoter.py`) and the LambdaClass propAMM SDK
     ///    (<https://github.com/lambdaclass/propamm-router-contracts>). Rejected (falling through
     ///    to the next sources) if the multiplication overflows or the derived value is implausible
-    ///    against the frame's wall clock — see [`slot_timestamp`](Self::slot_timestamp).
+    ///    against the entry's wall clock — see [`slot_timestamp`](Self::slot_timestamp).
     /// 2. The registry lane timestamps embedded in the storage overrides (see
     ///    [`max_lane_timestamp`](Self::max_lane_timestamp)): Titan stamps lanes with the pending
     ///    block's timestamp, so a genuine lane timestamp equals the slot-derived value. Only
-    ///    accepted when it lies within [`MAX_LANE_TIMESTAMP_LEAD_SECS`] ahead of the frame's wall
+    ///    accepted when it lies within [`MAX_LANE_TIMESTAMP_LEAD_SECS`] ahead of the entry's wall
     ///    clock, so packed venue data that merely looks like a timestamp (e.g. bopAMM's signed
     ///    quote encoding) can never be injected as the block timestamp. Without a wall clock to
     ///    validate against, a lane timestamp is never trusted.
-    /// 3. The frame's nanosecond wall-clock `timestamp`. Up to one slot earlier than the pending
+    /// 3. The entry's nanosecond wall-clock `timestamp`. Up to one slot earlier than the pending
     ///    block, so registry-backed venues may still reject it as stale, but it is the best
     ///    remaining approximation.
-    fn pending_block_timestamp(message: &TitanMessage, storage: &VenueOverrides) -> Option<u64> {
-        let wall_clock = message
-            .timestamp
-            .map(|ns| ns / 1_000_000_000);
-        if let Some(slot_ts) = Self::slot_timestamp(message.slot, wall_clock) {
+    fn pending_block_timestamp(
+        slot: Option<u64>,
+        timestamp: Option<u64>,
+        storage: &VenueOverrides,
+    ) -> Option<u64> {
+        let wall_clock = timestamp.map(|ns| ns / 1_000_000_000);
+        if let Some(slot_ts) = Self::slot_timestamp(slot, wall_clock) {
             return Some(slot_ts);
         }
         match (Self::max_lane_timestamp(storage), wall_clock) {
@@ -558,7 +590,7 @@ impl TitanProvider {
     /// every overridden slot and keeps the maximum value inside a plausible unix-timestamp window.
     /// Heuristic by nature — continuation slots and non-registry venues store raw data whose top
     /// bytes can collide with the window — so callers must cross-check the result against the
-    /// frame's wall clock before trusting it.
+    /// entry's wall clock before trusting it.
     fn max_lane_timestamp(overrides: &VenueOverrides) -> Option<u64> {
         const MIN_PLAUSIBLE: u64 = 1_000_000_000; // ~2001-09
         const MAX_PLAUSIBLE: u64 = u32::MAX as u64; // uint32 ceiling (~2106)
@@ -611,47 +643,98 @@ mod tests {
         assert_eq!(TitanChannel::from_key("vm:unknown"), None);
     }
 
-    /// Sample message from the Titan docs (<https://docs.titanbuilder.xyz/propamms/takers>).
-    const SAMPLE_MESSAGE: &str = r#"{
-        "slot": 14285824,
-        "blockNumber": 25051224,
-        "timestamp": 1778253913749564761,
-        "0xb1076fe3ab5e28005c7c323bac5ac06a680d452e": {
+    /// A message captured from the live `pamm_quote_stream_v2` socket (2026-10-21), trimmed to two
+    /// storage words per venue: Kipseli under its `0xc9a9…` key, which no channel lists, pricing
+    /// its oracle `0x5cdb…`, which `Kipseli` does; FermiSwap under its router key; and an entry
+    /// with a null `maker` and nothing to override.
+    const SAMPLE_MESSAGE: &str = r#"{"venues": [
+        {
+            "maker": "Kipseli",
+            "quoteAddress": "0xc9a956b5196dfe110debe8781857bc8b97d32091",
+            "pricedAddresses": [
+                "0xc9a956b5196dfe110debe8781857bc8b97d32091",
+                "0x5cdbe59400cc2efdcc2b54acca4a99fe00dd588c"
+            ],
+            "assetPairs": [{"token_1": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                            "token_2": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}],
+            "pairSequences": {"0": 285546706930382120000000000},
+            "slot": 15479518,
+            "blockNumber": 26240354,
+            "timestamp": 1792578232897607200,
             "stateOverride": {
-                "0x1038c87766e36d1925889e6f26d10e0012d50fed": {
+                "0xda7afeed021eafc1c1af9c362de477dad0396b81": {
                     "balance": "0x0",
                     "nonce": "0x1",
                     "stateDiff": {
-                        "0x156b1d71de08fed89d0fce38008e2b9d03a8998077e394b20597ef3d148f5ebc": "0x000000000000000000000000000000000000000000000000000000017e405801"
+                        "0x25c009fc7d8173c87c44eba2110cf042b3bb2f5c82befc107f5eb2e25d05b64a": "0x0000000000000000000000000000000000540288a9d8f91e005000131cd3ae68",
+                        "0x25c009fc7d8173c87c44eba2110cf042b3bb2f5c82befc107f5eb2e25d05b649": "0x6ad892bf020000000000000000000000000000000000000200000b6991ebf1ab"
                     }
                 }
             }
+        },
+        {
+            "maker": "Fermi",
+            "quoteAddress": "0x5979458912f80b96d30d4220af8e2e4925a33320",
+            "pricedAddresses": ["0x5979458912f80b96d30d4220af8e2e4925a33320"],
+            "assetPairs": [{"token_1": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                            "token_2": "0xdac17f958d2ee523a2206206994597c13d831ec7"}],
+            "pairSequences": {"0": 285546706930380330000000000},
+            "slot": 15479518,
+            "blockNumber": 26240354,
+            "timestamp": 1792578232743987700,
+            "stateOverride": {
+                "0x0109aa912b58508886a2a707204b0f8c8b164ccc": {
+                    "balance": "0x0",
+                    "nonce": "0x1",
+                    "stateDiff": {
+                        "0xbb3ced3788a14d74a5ae4731b9cd3b1d86b85903bb5c31829df82a13ecb837f5": "0x0000000000001388000000000000000000000000000000000000000001906562",
+                        "0x156b1d71de08fed89d0fce38008e2b9d03a8998077e394b20597ef3d148f5ebd": "0x000000000000000000000000000000000000000000000000000000390719ca1e"
+                    }
+                }
+            }
+        },
+        {
+            "maker": null,
+            "quoteAddress": "0x77047af6cd8f7f84d96a020a2833d24916b75fde",
+            "pricedAddresses": ["0x77047af6cd8f7f84d96a020a2833d24916b75fde"],
+            "assetPairs": [],
+            "pairSequences": [],
+            "slot": 15479518,
+            "blockNumber": 26240354,
+            "timestamp": 1792578232859779000,
+            "stateOverride": {}
         }
-    }"#;
+    ]}"#;
+
+    fn sample_entries() -> Vec<VenueEntry> {
+        serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE)
+            .expect("valid JSON")
+            .entries()
+    }
+
+    fn address(hex: &str) -> Address {
+        hex.parse().unwrap()
+    }
 
     #[test]
-    fn extract_venue_reads_state_diff() {
-        let venue = TitanChannel::FermiSwap.venues()[0];
-        let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        let snapshot = TitanProvider::extract_venue(&message, &venue)
-            .expect("extract must succeed")
-            .expect("venue is present");
+    fn a_channel_takes_the_entry_quoted_under_one_of_its_aliases() {
+        let snapshot =
+            TitanProvider::first_snapshot(&sample_entries(), &TitanChannel::FermiSwap.venues())
+                .expect("FermiSwap's router key is in the message");
 
-        assert_eq!(snapshot.block_number, Some(25051224));
-        // Pending block timestamp derived from the beacon slot: 1606824023 + 14285824 * 12.
-        assert_eq!(snapshot.block_timestamp, Some(1778253911));
-        // 1778253913749564761 ns -> 1778253913 s, plus the 12s quote TTL.
-        assert_eq!(snapshot.expires_at, Some(1778253913 + TITAN_QUOTE_TTL_SECS));
+        assert_eq!(snapshot.block_number, Some(26240354));
+        // Pending block timestamp derived from the beacon slot: 1606824023 + 15479518 * 12.
+        assert_eq!(snapshot.block_timestamp, Some(1792578239));
+        // 1792578232743987700 ns -> 1792578232 s, plus the 12s quote TTL.
+        assert_eq!(snapshot.expires_at, Some(1792578232 + TITAN_QUOTE_TTL_SECS));
         // Titan overrides are only intermittently applicable, so pools must fall back.
         assert_eq!(snapshot.failure_policy, FailurePolicy::FallbackToIndexedState);
 
-        let account = "0x1038c87766e36d1925889e6f26d10e0012d50fed"
-            .parse::<Address>()
-            .unwrap();
-        let slot = "0x156b1d71de08fed89d0fce38008e2b9d03a8998077e394b20597ef3d148f5ebc"
+        let account = address("0x0109aa912b58508886a2a707204b0f8c8b164ccc");
+        let slot = "0x156b1d71de08fed89d0fce38008e2b9d03a8998077e394b20597ef3d148f5ebd"
             .parse::<U256>()
             .unwrap();
-        let value = "0x000000000000000000000000000000000000000000000000000000017e405801"
+        let value = "0x000000000000000000000000000000000000000000000000000000390719ca1e"
             .parse::<U256>()
             .unwrap();
         assert_eq!(
@@ -661,41 +744,71 @@ mod tests {
                 .and_then(|s| s.get(&slot)),
             Some(&value)
         );
+        assert_eq!(snapshot.storage.len(), 1, "only accounts with a stateDiff are kept");
+    }
+
+    /// Kipseli streams under a key no channel lists, but prices its oracle, which `Kipseli` does.
+    #[test]
+    fn a_channel_takes_an_entry_that_prices_one_of_its_aliases() {
+        let snapshot =
+            TitanProvider::first_snapshot(&sample_entries(), &TitanChannel::Kipseli.venues())
+                .expect("Kipseli prices its oracle in the message");
+
+        let registry = address("0xda7afeed021eafc1c1af9c362de477dad0396b81");
+        assert_eq!(snapshot.storage[&registry].len(), 2);
+        // 1792578232897607200 ns -> 1792578232 s.
+        assert_eq!(snapshot.expires_at, Some(1792578232 + TITAN_QUOTE_TTL_SECS));
     }
 
     #[test]
-    fn extract_venue_returns_none_for_absent_venue() {
-        let venue = TitanChannel::Kipseli.venues()[0];
-        let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        assert!(TitanProvider::extract_venue(&message, &venue)
-            .unwrap()
+    fn a_channel_absent_from_the_message_gets_nothing() {
+        assert!(TitanProvider::first_snapshot(&sample_entries(), &TitanChannel::BopAmm.venues())
             .is_none());
     }
 
-    /// The sample message is keyed by the FermiSwap oracle (its first alias), so listing the router
-    /// alias first must fall through to the oracle rather than give up.
+    /// An entry with nothing to override must not replace a channel's last snapshot with an empty
+    /// one: Titan sends them with a null `maker`, and the last snapshot expires on its own.
     #[test]
-    fn extract_any_venue_falls_back_to_a_later_alias() {
-        let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        let venues = TitanChannel::FermiSwap.venues();
-        let aliases = [venues[1], venues[0]];
-        let snapshot = TitanProvider::extract_any_venue(&message, &aliases)
-            .expect("extract must succeed")
-            .expect("oracle alias is present in the frame");
-        assert_eq!(snapshot.block_number, Some(25051224));
+    fn an_entry_without_storage_overrides_publishes_nothing() {
+        let stelaxis = [address("0x77047af6cd8f7f84d96a020a2833d24916b75fde")];
+        assert!(TitanProvider::first_snapshot(&sample_entries(), &stelaxis).is_none());
     }
 
+    /// One unreadable override set costs only that entry: a later entry of the same channel still
+    /// serves it, and the other channels in the message are unaffected.
     #[test]
-    fn extract_any_venue_returns_none_when_no_alias_matches() {
-        let message = serde_json::from_str::<TitanMessage>(SAMPLE_MESSAGE).expect("valid JSON");
-        let aliases = TitanChannel::Kipseli.venues();
-        assert!(TitanProvider::extract_any_venue(&message, &aliases)
+    fn an_unreadable_override_falls_through_to_the_next_entry() {
+        let mut message: serde_json::Value = serde_json::from_str(SAMPLE_MESSAGE).unwrap();
+        let venues = message["venues"]
+            .as_array_mut()
+            .unwrap();
+        let mut broken = venues[1].clone();
+        broken["stateOverride"] = serde_json::json!({ "not-an-address": {} });
+        venues.insert(1, broken);
+        let entries = serde_json::from_value::<TitanMessage>(message)
             .unwrap()
-            .is_none());
+            .entries();
+
+        let fermi = TitanProvider::first_snapshot(&entries, &TitanChannel::FermiSwap.venues())
+            .expect("the readable FermiSwap entry still serves");
+        assert_eq!(fermi.block_number, Some(26240354));
+        assert!(TitanProvider::first_snapshot(&entries, &TitanChannel::Kipseli.venues()).is_some());
     }
 
-    fn message(slot: Option<u64>, timestamp: Option<u64>) -> TitanMessage {
-        TitanMessage { slot, block_number: Some(25445022), timestamp, overrides: HashMap::new() }
+    /// An entry whose keys do not parse is skipped without taking the message's other entries with
+    /// it.
+    #[test]
+    fn an_unreadable_entry_is_skipped() {
+        let mut message: serde_json::Value = serde_json::from_str(SAMPLE_MESSAGE).unwrap();
+        message["venues"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "quoteAddress": 7 }));
+        let entries = serde_json::from_value::<TitanMessage>(message)
+            .unwrap()
+            .entries();
+
+        assert_eq!(entries.len(), 3);
     }
 
     fn lane_overrides(lane_ts: u64) -> VenueOverrides {
@@ -713,20 +826,20 @@ mod tests {
     #[test]
     fn pending_block_timestamp_derives_from_beacon_slot() {
         // The slot field wins even when lane timestamps are present.
-        let message = message(Some(14681135), Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (Some(14681135), Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &lane_overrides(1_800_000_000)),
+            TitanProvider::pending_block_timestamp(slot, timestamp, &lane_overrides(1_800_000_000)),
             Some(PENDING_BLOCK_TS)
         );
     }
 
     #[test]
     fn pending_block_timestamp_rejects_implausible_slot() {
-        // A slot decoding to a timestamp far from the frame's wall clock is corrupt stream data;
+        // A slot decoding to a timestamp far from the entry's wall clock is corrupt stream data;
         // resolution must fall through to the remaining sources (here: the wall clock).
-        let message = message(Some(1), Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (Some(1), Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &HashMap::new()),
+            TitanProvider::pending_block_timestamp(slot, timestamp, &HashMap::new()),
             Some(1782997641)
         );
     }
@@ -735,9 +848,9 @@ mod tests {
     fn pending_block_timestamp_survives_overflowing_slot() {
         // `u64::MAX * SECONDS_PER_SLOT` must not panic or wrap; it falls through to the wall
         // clock.
-        let message = message(Some(u64::MAX), Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (Some(u64::MAX), Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &HashMap::new()),
+            TitanProvider::pending_block_timestamp(slot, timestamp, &HashMap::new()),
             Some(1782997641)
         );
     }
@@ -746,9 +859,10 @@ mod tests {
     fn pending_block_timestamp_ignores_lane_without_wall_clock() {
         // Without a wall clock there is nothing to validate a lane timestamp against, so even a
         // plausible-looking one must not be trusted.
-        let message = message(None, None);
+        let (slot, timestamp) = (None, None);
         assert!(TitanProvider::pending_block_timestamp(
-            &message,
+            slot,
+            timestamp,
             &lane_overrides(PENDING_BLOCK_TS)
         )
         .is_none());
@@ -756,9 +870,13 @@ mod tests {
 
     #[test]
     fn pending_block_timestamp_backs_up_to_lane_timestamps() {
-        let message = message(None, Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (None, Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &lane_overrides(PENDING_BLOCK_TS)),
+            TitanProvider::pending_block_timestamp(
+                slot,
+                timestamp,
+                &lane_overrides(PENDING_BLOCK_TS)
+            ),
             Some(PENDING_BLOCK_TS)
         );
     }
@@ -767,25 +885,25 @@ mod tests {
     fn pending_block_timestamp_rejects_implausible_lane_timestamps() {
         // Top bytes of bopAMM's packed quote data decode to 1557751927 (2019) — far outside the
         // wall-clock window, so the fallback must skip it and use the wall clock.
-        let message = message(None, Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (None, Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &lane_overrides(1_557_751_927)),
+            TitanProvider::pending_block_timestamp(slot, timestamp, &lane_overrides(1_557_751_927)),
             Some(1782997641)
         );
     }
 
     #[test]
     fn pending_block_timestamp_falls_back_to_wall_clock() {
-        let message = message(None, Some(WALL_CLOCK_NS));
+        let (slot, timestamp) = (None, Some(WALL_CLOCK_NS));
         assert_eq!(
-            TitanProvider::pending_block_timestamp(&message, &HashMap::new()),
+            TitanProvider::pending_block_timestamp(slot, timestamp, &HashMap::new()),
             Some(1782997641)
         );
     }
 
     #[test]
     fn pending_block_timestamp_none_without_any_signal() {
-        let message = message(None, None);
-        assert!(TitanProvider::pending_block_timestamp(&message, &HashMap::new()).is_none());
+        let (slot, timestamp) = (None, None);
+        assert!(TitanProvider::pending_block_timestamp(slot, timestamp, &HashMap::new()).is_none());
     }
 }

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Count top-level venue addresses on the Titan pAMM quote stream.
+"""Count the venues on the Titan pAMM quote stream.
 
-Subscribes to the pamm_quote_stream WebSocket for a fixed duration and prints, per top-level
-venue address: frame count and which accounts received storage overrides (stateDiff). Useful to
-detect venue deployments appearing/disappearing (they historically change every few weeks) and to
+Subscribes to the pamm_quote_stream_v2 WebSocket for a fixed duration and prints, per venue
+`quoteAddress`: entry count, the makers and `pricedAddresses` it was seen with, and which accounts
+received storage overrides (stateDiff). Useful to detect venue deployments appearing/disappearing
+(they historically change every few weeks), to find the aliases a channel can match on, and to
 check whether a venue is registry-backed (overrides 0xda7afeed...) or self-storage.
 
 Usage:
@@ -21,9 +22,8 @@ import os
 from collections import Counter, defaultdict
 
 DEFAULT_URL = os.environ.get(
-    "TITAN_PAMM_STREAM_URL", "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream"
+    "TITAN_PAMM_QUOTE_STREAM_URL", "wss://eu.data.titanbuilder.xyz/ws/pamm_quote_stream_v2"
 )
-META_KEYS = {"slot", "blockNumber", "timestamp"}
 
 
 def payload_hash(state_override: dict) -> str:
@@ -37,6 +37,8 @@ async def census(url: str, seconds: float) -> None:
     import websockets
 
     venues: Counter = Counter()
+    makers: dict = defaultdict(set)
+    priced: dict = defaultdict(set)
     diff_accounts: dict = defaultdict(Counter)
     payloads: dict = defaultdict(set)
     frames = 0
@@ -55,24 +57,28 @@ async def census(url: str, seconds: float) -> None:
                 break
             frame = json.loads(raw)
             frames += 1
-            if "blockNumber" in frame:
-                blocks.add(frame["blockNumber"])
-            for key, value in frame.items():
-                if key in META_KEYS:
-                    continue
+            for entry in frame.get("venues", []):
+                key = str(entry.get("quoteAddress")).lower()
+                if "blockNumber" in entry:
+                    blocks.add(entry["blockNumber"])
                 venues[key] += 1
-                payloads[key].add(payload_hash(value.get("stateOverride", {})))
-                for account, override in value.get("stateOverride", {}).items():
+                makers[key].add(str(entry.get("maker")))
+                priced[key].update(a.lower() for a in entry.get("pricedAddresses", []))
+                state_override = entry.get("stateOverride") or {}
+                payloads[key].add(payload_hash(state_override))
+                for account, override in state_override.items():
                     if override.get("stateDiff"):
                         diff_accounts[key][account] += 1
 
-    print(f"{frames} frames over {seconds:.0f}s, {len(blocks)} blocks, {len(venues)} venues\n")
+    print(f"{frames} messages over {seconds:.0f}s, {len(blocks)} blocks, {len(venues)} venues\n")
     for venue, count in venues.most_common():
-        print(f"{venue}  {count} frames  ({len(payloads[venue])} unique payloads)")
+        print(f"{venue}  {count} entries  ({len(payloads[venue])} unique payloads)")
+        print(f"    makers: {', '.join(sorted(makers[venue]))}")
+        print(f"    pricedAddresses: {' '.join(sorted(priced[venue]))}")
         for account, n in diff_accounts[venue].most_common():
-            print(f"    stateDiff -> {account}  ({n} frames)")
+            print(f"    stateDiff -> {account}  ({n} entries)")
     if not venues:
-        print("No venue frames received.")
+        print("No venue entries received.")
         return
 
     # Venues whose payload streams overlap are aliases of the same maker feed (e.g. a maker's
@@ -96,7 +102,7 @@ async def census(url: str, seconds: float) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seconds", type=float, default=60, help="capture duration (default 60)")
-    parser.add_argument("--url", default=DEFAULT_URL, help=f"stream endpoint (default $TITAN_PAMM_STREAM_URL or {DEFAULT_URL})")
+    parser.add_argument("--url", default=DEFAULT_URL, help=f"stream endpoint (default $TITAN_PAMM_QUOTE_STREAM_URL or {DEFAULT_URL})")
     args = parser.parse_args()
     asyncio.run(census(args.url, args.seconds))
 
