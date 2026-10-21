@@ -750,7 +750,8 @@ where
     /// Updates the pool state.
     ///
     /// It is assumed this is called on a new block. Therefore, first the pool's overwrites cache is
-    /// cleared, then the balances are updated and the spot prices are recalculated.
+    /// cleared, then the balances are updated and the spot prices are recalculated. Spot prices
+    /// that cannot be computed stay uncached instead of failing the update.
     ///
     /// # Arguments
     ///
@@ -815,8 +816,12 @@ where
             }
         }
 
-        // reset spot prices
-        self.set_spot_prices(tokens)?;
+        // A pool whose price cannot be computed, e.g. a venue that stopped quoting, keeps no
+        // cached spot price: `spot_price` recomputes and reports the error on demand. Its state
+        // update still applies, so one unpriceable pool cannot fail the block's transition.
+        if let Err(error) = self.set_spot_prices(tokens) {
+            debug!(pool = %self.id, %error, "Spot prices not refreshed");
+        }
         Ok(())
     }
 
@@ -1689,6 +1694,32 @@ mod tests {
             .get_amount_out(amount_in, &usdc, &weth)
             .unwrap_err();
         assert!(format!("{error:?}").contains("Pair not registered"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn test_tessera_pair_that_stopped_quoting_has_no_spot_price() {
+        let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
+        // Past the Pair's 20-block staleness cutoff it quotes zero output.
+        let mut block = db.get_current_block().unwrap();
+        block.number += 100;
+        db.update(vec![], Some(block)).unwrap();
+        let tokens = HashMap::from([
+            (weth.address.clone(), weth.clone()),
+            (usdc.address.clone(), usdc.clone()),
+        ]);
+        let delta = ProtocolStateDelta {
+            component_id: pool.id.clone(),
+            updated_attributes: HashMap::new(),
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool.delta_transition(delta, &tokens, &Balances::default())
+            .expect("a Pair that stopped quoting still takes its state update");
+
+        assert!(
+            pool.spot_price(&usdc, &weth).is_err(),
+            "a Pair that cannot quote has no spot price, not 0.0"
+        );
     }
 
     #[tokio::test]
