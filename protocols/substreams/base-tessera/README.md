@@ -23,8 +23,8 @@ component; quotes come from executing Tessera's own bytecode in the Tycho VM.
 
    Both reads are `eth_call`s. On a Flashblocks partial block an `eth_call` stalls the stream
    for about three minutes, so this package must run without `--enable-partial-blocks`.
-5. The adapter quotes with `tesseraSwapViewAmounts`, settles with `tesseraSwapWithAllowances`
-   and reports the settled amount. The VM keeps the swap's storage writes for later fills.
+5. The adapter quotes with the Engine's `swapAmountView`, settles with
+   `tesseraSwapWithAllowances` and reports the settled amount. The VM keeps the swap's storage writes for later fills.
 6. The Base-only encoder emits the two token addresses (40 bytes). The executor calls
    TesseraSwap with **empty swapData** (fee tag 0) and the router's debit/allowance flow.
 
@@ -101,8 +101,9 @@ that pays a priority fee above the threshold receives the haircut.
 - Substreams: unit tests for discovery, the storage-change filter, balance deltas (seed
   suppression, self-transfers, rotations), safety-store writes, dependency attributes and
   pause conditions.
-- Adapter: Base fork at block 50,548,423 — both directions, exact in and out, limits, price,
-  staleness, two consecutive fills, and settled-output accounting against a synthetic venue.
+- Adapter: Base forks at blocks 50,548,423 to 52,890,608 — both directions, exact in and out,
+  price, staleness, two consecutive fills, settled-output accounting against a synthetic venue,
+  a replaced or removed registry entry, and limits under the fill rules and the treasury cap.
 - Execution: encoder units, executor fork tests, and full Rust-generated router calldata in
   both directions.
 - Simulation: VM delta tests for dependency reload and treasury rotation, snapshot decoding,
@@ -127,8 +128,8 @@ From `protocols/adapter-integration/evm` with `BASE_RPC_URL` exported:
 
 ```sh
 forge test --match-contract TesseraSwapAdapterTest -vv
-bash scripts/buildRuntime.sh -c TesseraSwapAdapter -s 'constructor(address)' \
-  -a 0x55555522005BcAE1c2424D474BfD5ed477749E3e
+bash scripts/buildRuntime.sh -c TesseraSwapAdapter -s 'constructor(address,address,address)' \
+  -a 0x55555522005BcAE1c2424D474BfD5ed477749E3e,0x31e99E05fee3DCE580af777C3fD63eE1B3B40c17,0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE
 ```
 
 After adapter changes, copy `out/TesseraSwapAdapter.sol/TesseraSwapAdapter.evm.runtime` to
