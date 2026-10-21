@@ -1267,10 +1267,13 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_traced_entry_points_by_component(filter, pagination_params, &mut conn)
-            .await
+        let rows = {
+            let mut conn = self.checkout().await?;
+            self.state_gateway
+                .load_traced_entry_point_rows(filter, pagination_params, &mut conn)
+                .await?
+        };
+        PostgresGateway::decode_traced_entry_points(rows)
     }
 }
 
