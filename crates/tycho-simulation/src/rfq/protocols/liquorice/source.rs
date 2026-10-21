@@ -17,7 +17,7 @@ use crate::{
         client::LiquoriceClient,
         models::LiquoriceTokenPairPrice,
         state::{LiquoriceAllPairsState, LiquoriceState},
-        PROTOCOL_SYSTEM, PROTOCOL_TYPE,
+        PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -28,6 +28,9 @@ use crate::{
 /// far as one swap can fill.
 #[derive(Clone, Debug)]
 pub struct LiquoriceBookSource {
+    /// The protocol system stamped on this source's components: the venue's own, or its
+    /// fallback-router one for a feed built with `with_fallback_router()`.
+    pub protocol_system: &'static str,
     pub book_config: BookFeedConfig,
     /// USD-priced tokens the book's TVL is normalized into before the threshold applies.
     pub usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -66,7 +69,7 @@ impl HttpSource for LiquoriceBookSource {
         debug!(market_makers = prices_by_mm.len(), "fetched price levels");
 
         let mut collector = BookCollector::new(
-            PROTOCOL_SYSTEM,
+            self.protocol_system,
             PROTOCOL_TYPE,
             self.book_config.chain,
             self.component_layout,
@@ -83,7 +86,7 @@ impl HttpSource for LiquoriceBookSource {
                 };
 
                 let component_id =
-                    maker_component_id(PROTOCOL_SYSTEM, base_bytes, quote_bytes, mm_name);
+                    maker_component_id(self.protocol_system, base_bytes, quote_bytes, mm_name);
                 let tvl = token_pair_price.levels.notional();
                 let Some(normalized_tvl) = self.normalized_tvl(tvl, quote_bytes, &prices_by_mm)
                 else {
@@ -137,6 +140,7 @@ mod tests {
             levels::{Levels, PriceLevel},
             test_token_map,
         },
+        rfq::protocols::liquorice::{FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM},
         snapshot_feed::http::test_support::spawn_http_server,
     };
 
@@ -160,6 +164,7 @@ mod tests {
             .map(|address| (*address, "T", 18))
             .collect();
         LiquoriceBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
             component_layout: ComponentLayout::PerPair,
             book_config: BookFeedConfig {
                 chain: Chain::Ethereum,
@@ -274,6 +279,40 @@ mod tests {
                 .eq(&expected),
             "the book holds fresh_mm's own ladder"
         );
+    }
+
+    #[rstest]
+    #[case::per_pair(ComponentLayout::PerPair)]
+    #[case::all_pairs(ComponentLayout::AllPairs(QuoteRule::OncePerMaker))]
+    #[tokio::test]
+    async fn a_fallback_source_labels_its_components_for_the_fallback_router(
+        #[case] component_layout: ComponentLayout<QuoteRule>,
+    ) {
+        let weth = Bytes::from_str(WETH).unwrap();
+        let usdc = Bytes::from_str(USDC).unwrap();
+        let body = format!(
+            r#"{{"prices":{{
+                "test_mm":[{{"baseToken":"{WETH}","quoteToken":"{USDC}","levels":[["3000","1"]]}}]
+            }}}}"#
+        );
+        let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
+        let source = LiquoriceBookSource {
+            protocol_system: FALLBACK_PROTOCOL_SYSTEM,
+            component_layout,
+            ..source_for(&server.url(), &[&weth, &usdc], 0.0)
+        };
+
+        let books = source.fetch().await.unwrap().books;
+
+        let book = books.values().next().expect("one book");
+        assert_eq!(book.component.protocol_system, "fallback:rfq:liquorice");
+        let expected_id = match component_layout {
+            ComponentLayout::PerPair => {
+                maker_component_id(FALLBACK_PROTOCOL_SYSTEM, &weth, &usdc, "test_mm")
+            }
+            ComponentLayout::AllPairs(_) => Bytes::from(FALLBACK_PROTOCOL_SYSTEM.as_bytes()),
+        };
+        assert_eq!(book.component.id, expected_id);
     }
 
     /// Published as one component, each market maker pricing a pair becomes its own book: a

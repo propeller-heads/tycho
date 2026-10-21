@@ -9,6 +9,7 @@ use crate::{
         constants::DEFAULT_QUOTE_TIMEOUT,
         protocols::native::{
             client::NativeClient, models::NativeSupportedChain, source::NativeBookSource,
+            FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
         },
     },
     snapshot_feed::{
@@ -28,6 +29,7 @@ pub struct NativeFeed {
 
 /// Builds a [`NativeFeed`] from the shared [`BookFeedConfig`] and Native's API key.
 pub struct NativeFeedBuilder {
+    protocol_system: &'static str,
     book_config: BookFeedConfig,
     all_pairs: bool,
     usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -48,6 +50,7 @@ impl NativeFeedBuilder {
             api_key,
             feed_config: Self::default_feed_config(),
             quote_timeout: DEFAULT_QUOTE_TIMEOUT,
+            protocol_system: PROTOCOL_SYSTEM,
             all_pairs: false,
         }
     }
@@ -91,6 +94,17 @@ impl NativeFeedBuilder {
         self
     }
 
+    /// Settles this venue's swaps through Tycho's `NativeFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    ///
+    /// The router trades ERC20s only, so the feed then offers no native-token books.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
     /// Fails for chains Native does not serve.
     pub fn build(self) -> Result<NativeFeed, FeedError> {
         let chain =
@@ -98,6 +112,7 @@ impl NativeFeedBuilder {
         Ok(NativeFeed {
             feed_config: self.feed_config,
             source: NativeBookSource {
+                protocol_system: self.protocol_system,
                 all_pairs: self.all_pairs,
                 client: Arc::new(NativeClient::new(None, chain, self.api_key, self.quote_timeout)),
                 book_config: self.book_config,

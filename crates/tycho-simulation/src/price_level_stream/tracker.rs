@@ -14,11 +14,12 @@ use tycho_common::{
 };
 
 use super::{
-    config::PriceLevelStreamConfig,
+    config::{canonical_pamm_address, PriceLevelStreamConfig},
+    convert::{ladders_for_book, resolve_book_tokens, Ladder, SideRejection, UnresolvedToken},
     state::{PriceLevelStreamQuote, PriceLevelStreamState, QUOTE_TTL},
     stream::PAMM_ADDRESS_ATTRIBUTE,
-    telemetry::{self, RejectReason},
-    titan::{TitanPairLevels, TitanPammLevels, TitanPriceLevel, TitanPriceLevelMessage},
+    telemetry::{self, RejectReason, SideRejectReason, SkipReason},
+    titan::{TitanBook, TitanPriceLevelMessage},
     SLOT,
 };
 use crate::protocol::models::{ProtocolComponent, Update};
@@ -40,7 +41,7 @@ const MAX_FUTURE_SKEW_NANOS: u64 = SLOT.as_secs() * NANOS_PER_SECOND;
 const BLOCK_JUMP_SLACK: u64 = 2;
 
 /// How many distinct unregistered venue addresses the tracker logs at INFO, once each. The
-/// addresses come from the wire, so the set is capped to keep a misbehaving upstream from growing
+/// addresses come from the stream, so the set is capped to keep a misbehaving upstream from growing
 /// memory, and no address becomes a metric label.
 const MAX_UNREGISTERED_LOGGED: usize = 64;
 
@@ -102,9 +103,11 @@ impl ServingState {
 
 /// What a [`FreshnessTracker`] is built from.
 pub(super) struct TrackerSettings {
+    /// The venues to serve, keyed by their canonical public identity (see
+    /// [`canonical_pamm_address`]).
     pub registry: HashMap<Bytes, PriceLevelStreamConfig>,
-    /// Venues excluded from auto-detection. Disjoint from `registry`: the builder keeps denying
-    /// and registering the same address from overlapping.
+    /// Venues excluded from auto-detection, by canonical public identity. Disjoint from
+    /// `registry`: the builder keeps denying and registering the same venue from overlapping.
     pub denied: HashSet<Bytes>,
     pub tokens: HashMap<Bytes, Token>,
     /// Whether frames from pAMMs absent from the registry get an address-named configuration
@@ -169,7 +172,9 @@ impl FreshnessTracker {
         for config in registry.values() {
             telemetry::record_served_components(&config.protocol, 0);
             telemetry::record_last_seen(&config.protocol, 0);
+            telemetry::init_stale_removals(&config.protocol);
         }
+        telemetry::init_book_counters();
         Self {
             registry,
             denied,
@@ -196,26 +201,23 @@ impl FreshnessTracker {
         frame: &TitanPriceLevelMessage,
         now: Now,
     ) -> Result<Duration, RejectReason> {
-        let frame_age = Duration::from_nanos(
-            now.wall_nanos
-                .saturating_sub(frame.timestamp),
-        );
+        let frame_age = Duration::from_nanos(now.wall_nanos.saturating_sub(frame.ts));
         if frame_age >= self.stale_after {
             return Err(RejectReason::TooOld);
         }
-        if frame.timestamp >
+        if frame.ts >
             now.wall_nanos
                 .saturating_add(MAX_FUTURE_SKEW_NANOS)
         {
             return Err(RejectReason::InFuture);
         }
-        if frame.timestamp < self.newest_timestamp_nanos {
+        if frame.ts < self.newest_timestamp_nanos {
             return Err(RejectReason::OutOfOrder);
         }
         let ServingState::Serving { deadline: _, frontier } = self.serving_state else {
             return Ok(frame_age);
         };
-        if frame.block_number < frontier.block {
+        if frame.block < frontier.block {
             return Err(RejectReason::BlockRegression);
         }
         let elapsed_slots = now
@@ -227,14 +229,18 @@ impl FreshnessTracker {
             .block
             .saturating_add(elapsed_slots)
             .saturating_add(BLOCK_JUMP_SLACK);
-        if frame.block_number > allowed {
+        if frame.block > allowed {
             return Err(RejectReason::BlockJump);
         }
         Ok(frame_age)
     }
 
     /// Processes one frame into an [`Update`], or `None` if the frame is rejected (see
-    /// [`RejectReason`]) or carries no served pAMM with a pair of known tokens.
+    /// [`RejectReason`]) or carries no book of a served pAMM that prices an admitted pair.
+    ///
+    /// One book carries both directions of its pair, so a venue needs only one book per pair. If
+    /// a frame carries several for one pair anyway — a stream anomaly, never observed — the last in
+    /// stream order is the one served.
     pub(super) fn on_frame(&mut self, frame: TitanPriceLevelMessage, now: Now) -> Option<Update> {
         let frame_age = match self.check_frame(&frame, now) {
             Ok(frame_age) => frame_age,
@@ -249,33 +255,36 @@ impl FreshnessTracker {
         // Signed, unlike `frame_age`: a frame stamped ahead of the local clock records a negative
         // age, so a clock skew between Titan and this host shows on the histogram instead of
         // looking like a perfect feed.
-        let age_nanos = i128::from(now.wall_nanos) - i128::from(frame.timestamp);
+        let age_nanos = i128::from(now.wall_nanos) - i128::from(frame.ts);
         telemetry::record_frame_age(age_nanos as f64 / NANOS_PER_SECOND as f64);
-        self.newest_timestamp_nanos = frame.timestamp;
+        self.newest_timestamp_nanos = frame.ts;
 
         let stale_at = now.monotonic +
             self.stale_after
                 .saturating_sub(frame_age);
-        // `QUOTE_TTL` counts from the frame's wire `timestamp` and is enforced on the monotonic
+        // `QUOTE_TTL` counts from the frame's `timestamp` and is enforced on the monotonic
         // clock; it does not depend on whether the ladder's content changed, because quiet
         // venues repeat a ladder for minutes.
         let quotable_until = self
             .quote_guard
             .then(|| now.monotonic + QUOTE_TTL.saturating_sub(frame_age));
-        let frame_unix_seconds = frame.timestamp / NANOS_PER_SECOND;
+        let frame_unix_seconds = frame.ts / NANOS_PER_SECOND;
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         let mut new_pairs = HashMap::new();
 
-        for TitanPammLevels { pamm, pairs } in frame.pamms {
+        for (pamm, books) in group_by_venue(frame.books) {
             self.admit(&pamm);
             let Some(config) = self.registry.get(&pamm) else {
                 continue;
             };
             telemetry::record_last_seen(&config.protocol, frame_unix_seconds);
 
-            for ((token0, token1), (quotes_0_to_1, quotes_1_to_0)) in
-                merge_pairs(&self.tokens, pairs)
-            {
+            for book in books {
+                let Some(PairLadders { token0, token1, quotes_0_to_1, quotes_1_to_0 }) =
+                    ladders_for_pair(&book, &self.tokens)
+                else {
+                    continue;
+                };
                 let id = component_id(&config.address, &token0, &token1);
                 let id_string = id.to_string();
                 match self.served.get_mut(&id_string) {
@@ -314,16 +323,19 @@ impl FreshnessTracker {
             }
         }
 
-        self.settle(Frontier { block: frame.block_number, accepted_at: now.monotonic });
+        self.settle(Frontier { block: frame.block, accepted_at: now.monotonic });
         if states.is_empty() {
             return None;
         }
-        Some(Update::new(frame.block_number, states, new_pairs).set_is_partial(true))
+        Some(Update::new(frame.block, states, new_pairs).set_is_partial(true))
     }
 
     /// Registers an auto-detected venue on first sight, up to [`MAX_AUTO_DETECTED`]. A denied
     /// venue, an unregistered one while auto-detection is off, and any venue past the cap stay
     /// out of the registry.
+    ///
+    /// `pamm` is a canonical public identity, so a venue is admitted, denied and named by the
+    /// address its swaps are sent to, whichever address Titan streams its books under.
     fn admit(&mut self, pamm: &Bytes) {
         if self.registry.contains_key(pamm) {
             return;
@@ -340,6 +352,7 @@ impl FreshnessTracker {
             );
             telemetry::record_served_components(&config.protocol, 0);
             telemetry::record_last_seen(&config.protocol, 0);
+            telemetry::init_stale_removals(&config.protocol);
             self.registry
                 .insert(pamm.clone(), config);
             self.auto_detected += 1;
@@ -445,8 +458,9 @@ impl FreshnessTracker {
         if self.rejecting {
             tracing::debug!(
                 reason,
-                block_number = frame.block_number,
-                timestamp = frame.timestamp,
+                block = frame.block,
+                slot = ?frame.slot,
+                ts = frame.ts,
                 "Rejecting price level frame"
             );
             return;
@@ -458,8 +472,9 @@ impl FreshnessTracker {
         };
         tracing::warn!(
             reason,
-            block_number = frame.block_number,
-            timestamp = frame.timestamp,
+            block = frame.block,
+            slot = ?frame.slot,
+            ts = frame.ts,
             newest_block = ?newest_block,
             newest_timestamp_nanos = self.newest_timestamp_nanos,
             "Rejecting price level frame; further rejections logged at debug until a frame is \
@@ -468,36 +483,126 @@ impl FreshnessTracker {
     }
 }
 
-/// Merges the frame's per-direction ladders into one entry per unordered token pair, skipping
-/// pairs with a token missing from `tokens`. A direction the frame does not carry yields an empty
-/// ladder, so that direction cannot be quoted.
-fn merge_pairs(
-    tokens: &HashMap<Bytes, Token>,
-    pairs: Vec<TitanPairLevels>,
-) -> HashMap<(Bytes, Bytes), (Vec<PriceLevelStreamQuote>, Vec<PriceLevelStreamQuote>)> {
-    let mut merged: HashMap<(Bytes, Bytes), (Vec<_>, Vec<_>)> = HashMap::new();
-    for TitanPairLevels { token_in, token_out, order_book } in pairs {
-        if !tokens.contains_key(&token_in) || !tokens.contains_key(&token_out) {
-            tracing::debug!(%token_in, %token_out, "Skipping pair with unknown token");
-            continue;
-        }
-        let sells_token0 = token_in < token_out;
-        // The pair in address order, so both directions of a pair share one entry.
-        let key = if sells_token0 { (token_in, token_out) } else { (token_out, token_in) };
-        let quotes = order_book
-            .into_iter()
-            .map(|TitanPriceLevel { amount_in, amount_out }| {
-                PriceLevelStreamQuote::new(amount_in, amount_out)
-            })
-            .collect();
-        let entry = merged.entry(key).or_default();
-        if sells_token0 {
-            entry.0 = quotes;
-        } else {
-            entry.1 = quotes;
+/// Groups a frame's books by the canonical public identity of the venue that quoted them,
+/// keeping the venues and each venue's books in stream order.
+///
+/// Only the grouping key is canonicalized: every book keeps the `quote_address` Titan streamed it
+/// under, so the streamed identity stays available beside the book even though no component ever
+/// carries it.
+fn group_by_venue(books: Vec<TitanBook>) -> Vec<(Bytes, Vec<TitanBook>)> {
+    let mut venues: Vec<(Bytes, Vec<TitanBook>)> = Vec::new();
+    let mut positions: HashMap<Bytes, usize> = HashMap::new();
+    for book in books {
+        let venue = canonical_pamm_address(&book.quote_address);
+        match positions.get(&venue) {
+            Some(&position) => venues[position].1.push(book),
+            None => {
+                positions.insert(venue.clone(), venues.len());
+                venues.push((venue, vec![book]));
+            }
         }
     }
-    merged
+    venues
+}
+
+/// One pair's quote ladders, in the token order [`PriceLevelStreamState`] and [`component_id`]
+/// use: `token0` is the lower address.
+struct PairLadders {
+    token0: Bytes,
+    token1: Bytes,
+    quotes_0_to_1: Vec<PriceLevelStreamQuote>,
+    quotes_1_to_0: Vec<PriceLevelStreamQuote>,
+}
+
+/// The quote ladders of `book`, or `None` if it prices no pair this consumer can serve: an address
+/// that is not 20 bytes (`malformed_address`), one absent from `tokens` (`unadmitted_token`), or
+/// two addresses that name one asset (`one_asset_pair`).
+///
+/// A side the conversion rejects yields an empty ladder, so that one direction is unquotable
+/// while the opposite direction keeps being served — as for a side the venue quoted empty.
+fn ladders_for_pair(book: &TitanBook, tokens: &HashMap<Bytes, Token>) -> Option<PairLadders> {
+    let (base, quote) = match resolve_book_tokens(book, tokens) {
+        Ok(resolved) => resolved,
+        Err(unresolved) => {
+            let (reason, address) = match unresolved {
+                UnresolvedToken::Malformed(address) => (SkipReason::MalformedAddress, address),
+                UnresolvedToken::Unadmitted(address) => (SkipReason::UnadmittedToken, address),
+            };
+            telemetry::record_skipped_book(reason);
+            // The address comes from Titan, so it goes in the log and never in a metric label.
+            tracing::debug!(
+                quote_address = %book.quote_address,
+                token1 = book.token1,
+                token2 = book.token2,
+                reason = <&'static str>::from(reason),
+                %address,
+                "Skipping book: it names no pair of admitted tokens"
+            );
+            return None;
+        }
+    };
+    if base.address == quote.address {
+        telemetry::record_skipped_book(SkipReason::OneAssetPair);
+        tracing::debug!(
+            quote_address = %book.quote_address,
+            token1 = book.token1,
+            token2 = book.token2,
+            address = %base.address,
+            "Skipping book: both of its addresses name one asset"
+        );
+        return None;
+    }
+
+    let (sell_base, sell_quote) = ladders_for_book(book, base, quote);
+    let sell_base = accepted_side(sell_base, book, "bids");
+    let sell_quote = accepted_side(sell_quote, book, "asks");
+    if base.address < quote.address {
+        Some(PairLadders {
+            token0: base.address.clone(),
+            token1: quote.address.clone(),
+            quotes_0_to_1: sell_base,
+            quotes_1_to_0: sell_quote,
+        })
+    } else {
+        Some(PairLadders {
+            token0: quote.address.clone(),
+            token1: base.address.clone(),
+            quotes_0_to_1: sell_quote,
+            quotes_1_to_0: sell_base,
+        })
+    }
+}
+
+/// The side's ladder, or an empty one if the conversion rejected the side.
+fn accepted_side(
+    ladder: Ladder,
+    book: &TitanBook,
+    side: &'static str,
+) -> Vec<PriceLevelStreamQuote> {
+    ladder.unwrap_or_else(|rejection| {
+        let reason = side_reject_reason(rejection);
+        telemetry::record_rejected_side(reason);
+        tracing::debug!(
+            quote_address = %book.quote_address,
+            token1 = book.token1,
+            token2 = book.token2,
+            side,
+            reason = <&'static str>::from(reason),
+            "Dropping book side: its levels are not a usable price function"
+        );
+        Vec::new()
+    })
+}
+
+/// The telemetry reason a side rejected by the conversion is counted under. Spelled out rather
+/// than derived, so a new [`SideRejection`] variant has to be given a label here.
+fn side_reject_reason(rejection: SideRejection) -> SideRejectReason {
+    match rejection {
+        SideRejection::UnsupportedLevel => SideRejectReason::UnsupportedLevel,
+        SideRejection::NonFiniteAmount => SideRejectReason::NonFiniteAmount,
+        SideRejection::ZeroAmount => SideRejectReason::ZeroAmount,
+        SideRejection::ConflictingKnots => SideRejectReason::ConflictingKnots,
+    }
 }
 
 fn build_component(
@@ -543,11 +648,16 @@ mod tests {
             config::DEFAULT_AUTO_DETECTED_GAS_COST,
             state::QUOTE_TTL,
             telemetry::{
-                recorded::{counter_value, gauge_value, histogram_values, record_async},
-                FRAMES_ACCEPTED, FRAMES_REJECTED, FRAME_AGE, LAST_SEEN, SERVED_COMPONENTS,
-                SERVING_STATE, STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES,
+                recorded::{
+                    all_label_values, counter_registered, counter_value, gauge_value,
+                    histogram_values, record_async,
+                },
+                FRAMES_ACCEPTED, FRAMES_REJECTED, FRAME_AGE, LAST_SEEN, REJECTED_SIDES,
+                SERVED_COMPONENTS, SERVING_STATE, SKIPPED_BOOKS, STALE_REMOVALS,
+                UNREGISTERED_PAMM_ENTRIES,
             },
             test_support::*,
+            titan::TitanLevel,
         },
         *,
     };
@@ -604,52 +714,87 @@ mod tests {
         tracker_serving(vec![fermiswap()], false)
     }
 
-    fn level(amount_in: u64, amount_out: u64) -> TitanPriceLevel {
-        TitanPriceLevel {
-            amount_in: BigUint::from(amount_in),
-            amount_out: BigUint::from(amount_out),
+    /// Kipseli under a custom registration on its canonical public identity, which is not the
+    /// address its books are streamed under.
+    fn kipseli_custom() -> PriceLevelStreamConfig {
+        PriceLevelStreamConfig::new("custom-kipseli", address(KIPSELI), BigUint::from(42_000u64))
+    }
+
+    fn level(price: f64, cum_volume: f64) -> TitanLevel {
+        TitanLevel { price, cum_volume }
+    }
+
+    fn quote(amount_in: u64, amount_out: u64) -> PriceLevelStreamQuote {
+        PriceLevelStreamQuote::new(BigUint::from(amount_in), BigUint::from(amount_out))
+    }
+
+    /// A book of the venue at `quote_address` pricing `token1`/`token2` with the given sides.
+    fn book(
+        quote_address: &str,
+        token1: &str,
+        token2: &str,
+        bids: Vec<TitanLevel>,
+        asks: Vec<TitanLevel>,
+    ) -> TitanBook {
+        TitanBook {
+            maker: Some("test".to_string()),
+            quote_address: address(quote_address),
+            token1: token1.to_string(),
+            token2: token2.to_string(),
+            token1_address: address(symbol_address(token1)),
+            token2_address: address(symbol_address(token2)),
+            asks,
+            bids,
         }
     }
 
-    fn pair_levels(
-        token_in: &str,
-        token_out: &str,
-        order_book: Vec<TitanPriceLevel>,
-    ) -> TitanPairLevels {
-        TitanPairLevels {
-            token_in: Bytes::from_str(token_in).unwrap(),
-            token_out: Bytes::from_str(token_out).unwrap(),
-            order_book,
-        }
+    /// A two-sided book of the venue at `quote_address`: one whole `token1` sells for `price`
+    /// `token2`, and `price` `token2` buys one whole `token1`.
+    fn two_sided(quote_address: &str, token1: &str, token2: &str, price: f64) -> TitanBook {
+        book(quote_address, token1, token2, vec![level(price, 1.0)], vec![level(price, 1.0)])
     }
 
     /// A frame built `seconds` after the base instant.
-    fn message_at(
-        block_number: u64,
-        seconds: u64,
-        pairs: Vec<TitanPairLevels>,
-    ) -> TitanPriceLevelMessage {
+    fn message_at(block: u64, seconds: u64, books: Vec<TitanBook>) -> TitanPriceLevelMessage {
         TitanPriceLevelMessage {
-            block_number,
-            timestamp: BASE_WALL_NANOS + seconds * NANOS_PER_SECOND,
-            pamms: vec![TitanPammLevels { pamm: Bytes::from_str(PAMM).unwrap(), pairs }],
+            block,
+            slot: Some(15_387_623),
+            ts: BASE_WALL_NANOS + seconds * NANOS_PER_SECOND,
+            books,
         }
     }
 
-    fn message(block_number: u64, pairs: Vec<TitanPairLevels>) -> TitanPriceLevelMessage {
-        message_at(block_number, 0, pairs)
+    fn message(block: u64, books: Vec<TitanBook>) -> TitanPriceLevelMessage {
+        message_at(block, 0, books)
     }
 
-    fn wbtc_usdc_pairs() -> Vec<TitanPairLevels> {
-        vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-            pair_levels(USDC, WBTC, vec![level(100_000_000_000, 99_000_000)]),
-        ]
+    /// The FermiSwap WBTC/USDC book: 1 WBTC ⇄ 100,000 USDC, both directions quoted.
+    fn wbtc_usdc_books() -> Vec<TitanBook> {
+        vec![two_sided(PAMM, "WBTC", "USDC", 100_000.0)]
+    }
+
+    /// The FermiSwap WETH/USDC book: 1 WETH ⇄ 3,000 USDC, both directions quoted.
+    fn weth_usdc_books() -> Vec<TitanBook> {
+        vec![two_sided(PAMM, "WETH", "USDC", 3_000.0)]
+    }
+
+    /// Both FermiSwap books in one frame, as two components of one venue.
+    fn wbtc_and_weth_books() -> Vec<TitanBook> {
+        vec![two_sided(PAMM, "WBTC", "USDC", 100_000.0), two_sided(PAMM, "WETH", "USDC", 3_000.0)]
+    }
+
+    /// The component id of the WBTC/USDC pair of the venue at `pamm`: WBTC sorts below USDC.
+    fn wbtc_usdc_id(pamm: &str) -> String {
+        format!("{pamm}{}{}", &WBTC[2..], &USDC[2..])
+    }
+
+    /// The component id of the WETH/USDC pair of the venue at `pamm`: USDC sorts below WETH.
+    fn weth_usdc_id(pamm: &str) -> String {
+        format!("{pamm}{}{}", &USDC[2..], &WETH[2..])
     }
 
     fn expected_id() -> String {
-        // pamm ++ token0 ++ token1 with WBTC < USDC.
-        format!("{PAMM}{}{}", &WBTC[2..], &USDC[2..])
+        wbtc_usdc_id(PAMM)
     }
 
     fn state_of(update: &Update) -> &PriceLevelStreamState {
@@ -669,18 +814,12 @@ mod tests {
     fn first_frame_emits_new_pair_with_both_directions() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let Update {
-            block_number_or_timestamp,
-            is_partial,
-            sync_states,
-            states,
-            new_pairs,
-            removed_pairs,
-        } = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
+        let Update { block_number, is_partial, sync_states, states, new_pairs, removed_pairs } =
+            tracker
+                .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
+                .expect("update expected");
 
-        assert_eq!(block_number_or_timestamp, 100);
+        assert_eq!(block_number, 100);
         assert!(is_partial);
         assert!(sync_states.is_empty());
         assert!(removed_pairs.is_empty());
@@ -711,10 +850,10 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         let update = tracker
-            .on_frame(message(101, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(101, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         assert!(update.new_pairs.is_empty());
@@ -729,17 +868,15 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(101, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(101, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
-        let regressed =
-            vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
         assert!(tracker
-            .on_frame(message_at(100, 1, regressed), clock.at(1))
+            .on_frame(message_at(100, 1, weth_usdc_books()), clock.at(1))
             .is_none());
 
         let update = tracker
-            .on_frame(message_at(102, 2, wbtc_usdc_pairs()), clock.at(2))
+            .on_frame(message_at(102, 2, wbtc_usdc_books()), clock.at(2))
             .expect("update expected");
         assert!(update.new_pairs.is_empty());
     }
@@ -752,7 +889,7 @@ mod tests {
     fn frame_age_at_the_stale_after_limit(#[case] built_at: u64, #[case] accepted: bool) {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_pairs()), clock.at(24));
+        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_books()), clock.at(24));
         assert_eq!(update.is_some(), accepted);
     }
 
@@ -764,7 +901,7 @@ mod tests {
     fn frame_timestamp_at_the_future_skew_limit(#[case] built_at: u64, #[case] accepted: bool) {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_pairs()), clock.at(0));
+        let update = tracker.on_frame(message_at(100, built_at, wbtc_usdc_books()), clock.at(0));
         assert_eq!(update.is_some(), accepted);
     }
 
@@ -773,10 +910,10 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 5, wbtc_usdc_pairs()), clock.at(5))
+            .on_frame(message_at(100, 5, wbtc_usdc_books()), clock.at(5))
             .expect("update expected");
         assert!(tracker
-            .on_frame(message_at(100, 4, wbtc_usdc_pairs()), clock.at(5))
+            .on_frame(message_at(100, 4, wbtc_usdc_books()), clock.at(5))
             .is_none());
     }
 
@@ -785,13 +922,10 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 5, wbtc_usdc_pairs()), clock.at(5))
+            .on_frame(message_at(100, 5, wbtc_usdc_books()), clock.at(5))
             .expect("update expected");
-        // Titan re-emits within a build round with the same timestamp and different content.
-        let changed = vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 101_000_000_000)]),
-            pair_levels(USDC, WBTC, vec![level(100_000_000_000, 99_000_000)]),
-        ];
+        // Titan re-emits within a build round with the same `ts` and different content.
+        let changed = vec![two_sided(PAMM, "WBTC", "USDC", 101_000.0)];
         let update = tracker
             .on_frame(message_at(100, 5, changed), clock.at(5))
             .expect("update expected");
@@ -805,18 +939,18 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         // One second later the chain cannot have advanced by more than 0 + 2 blocks.
         assert!(tracker
-            .on_frame(message_at(103, 1, wbtc_usdc_pairs()), clock.at(1))
+            .on_frame(message_at(103, 1, wbtc_usdc_books()), clock.at(1))
             .is_none());
         assert!(tracker
-            .on_frame(message_at(u64::MAX / 2, 1, wbtc_usdc_pairs()), clock.at(1))
+            .on_frame(message_at(u64::MAX / 2, 1, wbtc_usdc_books()), clock.at(1))
             .is_none());
         // A plausible block is still accepted afterwards.
         assert!(tracker
-            .on_frame(message_at(101, 2, wbtc_usdc_pairs()), clock.at(2))
+            .on_frame(message_at(101, 2, wbtc_usdc_books()), clock.at(2))
             .is_some());
     }
 
@@ -825,11 +959,11 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         // 60 s later: 60 / 12 + 2 = 7 blocks allowed.
         assert!(tracker
-            .on_frame(message_at(107, 60, wbtc_usdc_pairs()), clock.at(60))
+            .on_frame(message_at(107, 60, wbtc_usdc_books()), clock.at(60))
             .is_some());
     }
 
@@ -838,13 +972,13 @@ mod tests {
         let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
-            tracker.on_frame(message_at(100, 5, wbtc_usdc_pairs()), clock.at(5));
+            tracker.on_frame(message_at(100, 5, wbtc_usdc_books()), clock.at(5));
             // Still fresh (16 s old) but stamped before the accepted frame: out_of_order.
-            tracker.on_frame(message_at(100, 4, wbtc_usdc_pairs()), clock.at(20));
-            tracker.on_frame(message_at(100, 5, wbtc_usdc_pairs()), clock.at(29)); // too_old
-            tracker.on_frame(message_at(100, 45, wbtc_usdc_pairs()), clock.at(29)); // in_future
-            tracker.on_frame(message_at(99, 6, wbtc_usdc_pairs()), clock.at(29)); // block_regression
-            tracker.on_frame(message_at(200, 6, wbtc_usdc_pairs()), clock.at(29)); // block_jump
+            tracker.on_frame(message_at(100, 4, wbtc_usdc_books()), clock.at(20));
+            tracker.on_frame(message_at(100, 5, wbtc_usdc_books()), clock.at(29)); // too_old
+            tracker.on_frame(message_at(100, 45, wbtc_usdc_books()), clock.at(29)); // in_future
+            tracker.on_frame(message_at(99, 6, wbtc_usdc_books()), clock.at(29)); // block_regression
+            tracker.on_frame(message_at(200, 6, wbtc_usdc_books()), clock.at(29)); // block_jump
         });
         assert_eq!(counter_value(&snapshot, FRAMES_ACCEPTED, &[]), 1);
         for reason in ["too_old", "in_future", "out_of_order", "block_regression", "block_jump"] {
@@ -862,11 +996,11 @@ mod tests {
             let clock = Clock::new();
             let mut tracker = tracker();
             // Built at t=7, accepted at t=9: 2 s old.
-            tracker.on_frame(message_at(100, 7, wbtc_usdc_pairs()), clock.at(9));
+            tracker.on_frame(message_at(100, 7, wbtc_usdc_books()), clock.at(9));
             // Stamped 3 s ahead of the local clock: a negative age, so a skew is visible.
-            tracker.on_frame(message_at(100, 12, wbtc_usdc_pairs()), clock.at(9));
+            tracker.on_frame(message_at(100, 12, wbtc_usdc_books()), clock.at(9));
             // Rejected frames record no age.
-            tracker.on_frame(message_at(100, 6, wbtc_usdc_pairs()), clock.at(9));
+            tracker.on_frame(message_at(100, 6, wbtc_usdc_books()), clock.at(9));
         });
         assert_eq!(histogram_values(&snapshot, FRAME_AGE, &[]), vec![2.0, -3.0]);
     }
@@ -878,11 +1012,12 @@ mod tests {
             let mut tracker =
                 FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
             for index in 0..(MAX_AUTO_DETECTED + 2) as u64 {
-                let address = Bytes::from_str(&format!("0x{index:040x}")).unwrap();
+                let venue = format!("0x{index:040x}");
                 let frame = TitanPriceLevelMessage {
-                    block_number: 100,
-                    timestamp: BASE_WALL_NANOS + index * 1_000,
-                    pamms: vec![TitanPammLevels { pamm: address, pairs: wbtc_usdc_pairs() }],
+                    block: 100,
+                    slot: None,
+                    ts: BASE_WALL_NANOS + index * 1_000,
+                    books: vec![two_sided(&venue, "WBTC", "USDC", 100_000.0)],
                 };
                 let served = tracker
                     .on_frame(frame, clock.at(1))
@@ -904,7 +1039,7 @@ mod tests {
         });
         // 15 s old: past `QUOTE_TTL`, so the guard alone would refuse every quote.
         let update = tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(15))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(15))
             .expect("update expected");
         assert!(state_of(&update)
             .quotable_until()
@@ -924,7 +1059,7 @@ mod tests {
         let mut tracker = tracker();
         // Built at t=7, accepted at t=9: the data is 2 s old, so 10 s of quotability remain.
         let update = tracker
-            .on_frame(message_at(100, 7, wbtc_usdc_pairs()), clock.at(9))
+            .on_frame(message_at(100, 7, wbtc_usdc_books()), clock.at(9))
             .expect("update expected");
         assert_eq!(
             quotable_until(&update),
@@ -938,7 +1073,7 @@ mod tests {
         let mut tracker = tracker();
         // Maximum accepted skew: stamped 12 s ahead of the local clock.
         let update = tracker
-            .on_frame(message_at(100, 12, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 12, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         assert_eq!(quotable_until(&update), clock.at(0).monotonic + QUOTE_TTL);
     }
@@ -949,7 +1084,7 @@ mod tests {
         let mut tracker = tracker();
         // 15 s old: inside the 24 s window, past `QUOTE_TTL`.
         let update = tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(15))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(15))
             .expect("update expected");
         assert_eq!(quotable_until(&update), clock.at(15).monotonic);
         assert_eq!(
@@ -965,13 +1100,11 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
-        let weth_usdc =
-            vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
         let update = tracker
-            .on_frame(message_at(101, 1, weth_usdc), clock.at(1))
+            .on_frame(message_at(101, 1, weth_usdc_books()), clock.at(1))
             .expect("update expected");
         assert!(update.removed_pairs.is_empty());
         assert_eq!(update.new_pairs.len(), 1);
@@ -986,15 +1119,10 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
-        let empty = TitanPriceLevelMessage {
-            block_number: 101,
-            timestamp: BASE_WALL_NANOS + NANOS_PER_SECOND,
-            pamms: vec![],
-        };
         assert!(tracker
-            .on_frame(empty, clock.at(1))
+            .on_frame(message_at(101, 1, Vec::new()), clock.at(1))
             .is_none());
         assert!(tracker.stale_deadline().is_some());
     }
@@ -1004,7 +1132,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         assert!(tracker
@@ -1018,7 +1146,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         let update = tracker
@@ -1031,7 +1159,7 @@ mod tests {
         assert!(update
             .removed_pairs
             .contains_key(&expected_id()));
-        assert_eq!(update.block_number_or_timestamp, 100);
+        assert_eq!(update.block_number, 100);
         assert!(update.is_partial);
         assert!(tracker.stale_deadline().is_none());
     }
@@ -1041,7 +1169,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         tracker
             .on_stale_deadline(clock.at(24).monotonic)
@@ -1057,14 +1185,14 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         tracker
             .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
 
         let update = tracker
-            .on_frame(message_at(102, 26, wbtc_usdc_pairs()), clock.at(26))
+            .on_frame(message_at(102, 26, wbtc_usdc_books()), clock.at(26))
             .expect("update expected");
 
         assert!(update
@@ -1079,7 +1207,7 @@ mod tests {
             let clock = Clock::new();
             let mut tracker = tracker();
             tracker
-                .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+                .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
                 .expect("update expected");
             tracker
                 .on_stale_deadline(clock.at(24).monotonic)
@@ -1094,7 +1222,7 @@ mod tests {
         let mut tracker = tracker();
         // Built at t=0, accepted at t=3: the data is already 3 s old.
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(3))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(3))
             .expect("update expected");
         assert_eq!(
             tracker
@@ -1109,11 +1237,11 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         // The same frame arriving again 10 s later carries the same timestamp.
         tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(10))
+            .on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(10))
             .expect("update expected");
         assert_eq!(
             tracker
@@ -1127,22 +1255,16 @@ mod tests {
     fn omitted_pair_turns_stale_alone_while_the_rest_stays_served() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let both = vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-            pair_levels(USDC, WBTC, vec![level(100_000_000_000, 99_000_000)]),
-            pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)]),
-        ];
+        let both = wbtc_and_weth_books();
         tracker
             .on_frame(message_at(100, 0, both), clock.at(0))
             .expect("update expected");
         // Only WETH/USDC keeps being carried, up to t=23; the clock never goes backwards.
         for second in 1..=23 {
-            let weth_usdc = vec![pair_levels(
-                WETH,
-                USDC,
-                vec![level(1_000_000_000_000_000_000, 3_000_000_000)],
-            )];
-            tracker.on_frame(message_at(100 + second / 12, second, weth_usdc), clock.at(second));
+            tracker.on_frame(
+                message_at(100 + second / 12, second, weth_usdc_books()),
+                clock.at(second),
+            );
         }
         let update = tracker
             .on_stale_deadline(clock.at(24).monotonic)
@@ -1164,10 +1286,7 @@ mod tests {
     fn components_from_one_frame_turn_stale_together() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let both = vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-            pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)]),
-        ];
+        let both = wbtc_and_weth_books();
         tracker
             .on_frame(message_at(100, 0, both), clock.at(0))
             .expect("update expected");
@@ -1181,15 +1300,8 @@ mod tests {
     fn pair_set_oscillation_emits_no_removal() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let wide = || {
-            vec![
-                pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-                pair_levels(USDC, WBTC, vec![level(100_000_000_000, 99_000_000)]),
-                pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)]),
-            ]
-        };
-        let narrow =
-            || vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
+        let wide = || wbtc_and_weth_books();
+        let narrow = weth_usdc_books;
         tracker
             .on_frame(message_at(100, 0, wide()), clock.at(0))
             .expect("update expected");
@@ -1210,12 +1322,12 @@ mod tests {
         // A fresh first frame skips the block checks, so an implausible block becomes
         // `newest_block`.
         tracker
-            .on_frame(message_at(u64::MAX / 2, 0, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message_at(u64::MAX / 2, 0, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         // Plausible frames regress below it and are rejected for the whole window.
         for second in 1..=23 {
             assert!(tracker
-                .on_frame(message_at(100, second, wbtc_usdc_pairs()), clock.at(second))
+                .on_frame(message_at(100, second, wbtc_usdc_books()), clock.at(second))
                 .is_none());
         }
         // The stale removal clears the served set and resets `newest_block`.
@@ -1223,13 +1335,13 @@ mod tests {
             .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         assert_eq!(removal.removed_pairs.len(), 1);
-        assert_eq!(removal.block_number_or_timestamp, u64::MAX / 2);
+        assert_eq!(removal.block_number, u64::MAX / 2);
         // The next plausible frame is accepted as a first frame again, and nothing from the
         // implausible frame survives: the pair comes back as new.
         let update = tracker
-            .on_frame(message_at(100, 25, wbtc_usdc_pairs()), clock.at(25))
+            .on_frame(message_at(100, 25, wbtc_usdc_books()), clock.at(25))
             .expect("update expected");
-        assert_eq!(update.block_number_or_timestamp, 100);
+        assert_eq!(update.block_number, 100);
         assert!(update
             .new_pairs
             .contains_key(&expected_id()));
@@ -1239,21 +1351,17 @@ mod tests {
     fn implausible_block_on_a_frame_serving_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        // Fresh enough to be accepted, but its only pair prices an unknown token, so the frame
+        // Fresh enough to be accepted, but its only book prices an unbound symbol, so the frame
         // serves nothing and its implausible block must not survive as `newest_block`.
-        let unknown = vec![pair_levels(
-            "0x1111111111111111111111111111111111111111",
-            USDC,
-            vec![level(1, 1)],
-        )];
+        let unbound = vec![two_sided(PAMM, "NVDAx", "USDC", 180.0)];
         assert!(tracker
-            .on_frame(message_at(u64::MAX / 2, 0, unknown), clock.at(0))
+            .on_frame(message_at(u64::MAX / 2, 0, unbound), clock.at(0))
             .is_none());
 
         let update = tracker
-            .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
+            .on_frame(message_at(100, 1, wbtc_usdc_books()), clock.at(1))
             .expect("update expected");
-        assert_eq!(update.block_number_or_timestamp, 100);
+        assert_eq!(update.block_number, 100);
         assert!(update
             .new_pairs
             .contains_key(&expected_id()));
@@ -1263,10 +1371,7 @@ mod tests {
     fn recovery_re_adds_only_the_pairs_the_frame_carries() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let both = vec![
-            pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)]),
-            pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)]),
-        ];
+        let both = wbtc_and_weth_books();
         tracker
             .on_frame(message_at(100, 0, both), clock.at(0))
             .expect("update expected");
@@ -1274,10 +1379,8 @@ mod tests {
             .on_stale_deadline(clock.at(24).monotonic)
             .expect("removal expected");
         // After the outage only WETH/USDC comes back: WBTC/USDC stays absent.
-        let weth_usdc =
-            vec![pair_levels(WETH, USDC, vec![level(1_000_000_000_000_000_000, 3_000_000_000)])];
         let update = tracker
-            .on_frame(message_at(102, 25, weth_usdc), clock.at(25))
+            .on_frame(message_at(102, 25, weth_usdc_books()), clock.at(25))
             .expect("update expected");
         assert_eq!(update.new_pairs.len(), 1);
         assert!(!update
@@ -1286,11 +1389,50 @@ mod tests {
         assert!(update.removed_pairs.is_empty());
     }
 
+    /// A book whose `token1` address sorts above its `token2` address orders the pair the other
+    /// way round, so the bids become the `token1 → token0` ladder and the asks the
+    /// `token0 → token1` one. Both sides carry distinct amounts, so a ladder landing in the wrong
+    /// slot cannot pass: WETH sorts above USDC, the bids sell 1 WETH for 3,000 USDC, and the asks
+    /// sell 6,200 USDC for 2 WETH.
+    #[test]
+    fn a_reversed_order_pair_keeps_each_direction_on_its_own_ladder() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        let reversed =
+            vec![book(PAMM, "WETH", "USDC", vec![level(3_000.0, 1.0)], vec![level(3_100.0, 2.0)])];
+
+        let update = tracker
+            .on_frame(message(100, reversed), clock.at(0))
+            .expect("update expected");
+
+        let state = update.states[&weth_usdc_id(PAMM)]
+            .as_any()
+            .downcast_ref::<PriceLevelStreamState>()
+            .expect("price level state");
+        assert_eq!(state.token0, address(USDC));
+        assert_eq!(state.token1, address(WETH));
+        assert_eq!(state.quotes_0_to_1, vec![quote(6_200_000_000, 2_000_000_000_000_000_000)]);
+        assert_eq!(state.quotes_1_to_0, vec![quote(1_000_000_000_000_000_000, 3_000_000_000)]);
+
+        // The same, as the quoting behavior a consumer sees: each direction prices its own side.
+        let usdc = token(USDC, "USDC", 6);
+        let weth = token(WETH, "WETH", 18);
+        let sold_weth = state
+            .get_amount_out(BigUint::from(1_000_000_000_000_000_000u64), &weth, &usdc)
+            .expect("selling one WETH quotes");
+        assert_eq!(sold_weth.amount, BigUint::from(3_000_000_000u64));
+        let sold_usdc = state
+            .get_amount_out(BigUint::from(6_200_000_000u64), &usdc, &weth)
+            .expect("selling 6,200 USDC quotes");
+        assert_eq!(sold_usdc.amount, BigUint::from(2_000_000_000_000_000_000u64));
+    }
+
     #[test]
     fn one_direction_frame_re_adds_the_pair_with_the_other_direction_unquotable() {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let one_way = vec![pair_levels(WBTC, USDC, vec![level(100_000_000, 100_000_000_000)])];
+        // A book quoted on the bid side only: USDC buys nothing.
+        let one_way = vec![book(PAMM, "WBTC", "USDC", vec![level(100_000.0, 1.0)], Vec::new())];
         let update = tracker
             .on_frame(message_at(100, 0, one_way), clock.at(0))
             .expect("update expected");
@@ -1307,15 +1449,48 @@ mod tests {
             .is_err());
     }
 
+    /// Every per-venue series of a registered venue exists from construction, so a venue that
+    /// never appears in a message reads as a zero rather than a gap. `stale_removals_total` is a
+    /// counter, where a zero value and an absent series are indistinguishable by value alone, so
+    /// its presence is asserted directly.
     #[test]
-    fn new_tracker_gauges_every_registered_venue_at_zero() {
+    fn new_tracker_starts_every_registered_venue_series_at_zero() {
         let ((), snapshot) = record_async(async {
             let tracker = tracker();
             drop(tracker);
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
         assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]), 0.0);
+        assert!(
+            counter_registered(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]),
+            "stale_removals_total is a missing series for a registered venue"
+        );
+        assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &[("venue", "fermiswap")]), 0);
         assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0);
+    }
+
+    /// An auto-detected venue joins the registry mid-stream, so its per-venue series are
+    /// registered then rather than at construction — including the removals counter, which would
+    /// otherwise stay absent until the venue first lost a component.
+    #[test]
+    fn an_auto_detected_venue_starts_its_series_at_zero() {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker =
+                FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
+            tracker
+                .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
+                .expect("update expected");
+        });
+
+        let venue = [("venue", PAMM)];
+        assert!(
+            counter_registered(&snapshot, STALE_REMOVALS, &venue),
+            "stale_removals_total is a missing series for an auto-detected venue"
+        );
+        assert_eq!(counter_value(&snapshot, STALE_REMOVALS, &venue), 0);
+        // The venue is serving the book it was detected from, so this one is no longer zero.
+        assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &venue), 1.0);
     }
 
     #[test]
@@ -1323,7 +1498,7 @@ mod tests {
         let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
-            tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
+            tracker.on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0));
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 1.0);
         assert_eq!(
@@ -1338,7 +1513,7 @@ mod tests {
         let ((), snapshot) = record_async(async {
             let clock = Clock::new();
             let mut tracker = tracker();
-            tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0));
+            tracker.on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0));
             tracker.on_stale_deadline(clock.at(24).monotonic);
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
@@ -1350,7 +1525,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker_serving(vec![], false);
         assert!(tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .is_none());
     }
 
@@ -1364,7 +1539,7 @@ mod tests {
             ..settings(vec![])
         });
         assert!(tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .is_none());
     }
 
@@ -1374,7 +1549,7 @@ mod tests {
         let mut tracker =
             FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
         let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         let component = &update.new_pairs[&expected_id()];
@@ -1387,7 +1562,7 @@ mod tests {
 
         // The synthesized config is cached: the next frame is not a new pair again.
         let update = tracker
-            .on_frame(message(101, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(101, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         assert!(update.new_pairs.is_empty());
     }
@@ -1401,7 +1576,7 @@ mod tests {
             ..settings(vec![])
         });
         let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         let state = update.states[&expected_id()]
@@ -1419,11 +1594,12 @@ mod tests {
             // 70 distinct unregistered addresses, each seen twice.
             for round in 0..2u64 {
                 for index in 0..70u64 {
-                    let address = Bytes::from_str(&format!("0x{index:040x}")).unwrap();
+                    let venue = format!("0x{index:040x}");
                     let frame = TitanPriceLevelMessage {
-                        block_number: 100,
-                        timestamp: BASE_WALL_NANOS + (round * 70 + index) * 1_000,
-                        pamms: vec![TitanPammLevels { pamm: address, pairs: wbtc_usdc_pairs() }],
+                        block: 100,
+                        slot: None,
+                        ts: BASE_WALL_NANOS + (round * 70 + index) * 1_000,
+                        books: vec![two_sided(&venue, "WBTC", "USDC", 100_000.0)],
                     };
                     tracker.on_frame(frame, clock.at(1));
                 }
@@ -1434,18 +1610,133 @@ mod tests {
         assert_eq!(logged, MAX_UNREGISTERED_LOGGED);
     }
 
-    #[test]
-    fn unknown_tokens_are_skipped() {
+    /// A pair is served only if the consumer admits both of its assets. Neither `NVDAx` nor
+    /// `cbBTC` is in this consumer's token map, so either book is skipped and the frame serves
+    /// nothing.
+    #[rstest]
+    #[case::unadmitted_token("NVDAx")]
+    #[case::another_unadmitted_token("cbBTC")]
+    fn books_naming_an_unadmitted_asset_are_skipped(#[case] token1: &str) {
         let clock = Clock::new();
         let mut tracker = tracker();
-        let unknown = vec![pair_levels(
-            "0x1111111111111111111111111111111111111111",
-            USDC,
-            vec![level(1, 1)],
-        )];
+        let unserved = vec![two_sided(PAMM, token1, "USDC", 180.0)];
         assert!(tracker
-            .on_frame(message(100, unknown), clock.at(0))
+            .on_frame(message(100, unserved), clock.at(0))
             .is_none());
+    }
+
+    /// Every book left unpriced is counted under the reason it failed on, so an asset a venue
+    /// quotes but this consumer never serves is visible rather than silent.
+    #[rstest]
+    #[case::unadmitted_token("NVDAx", false, "unadmitted_token")]
+    #[case::another_unadmitted_token("cbBTC", false, "unadmitted_token")]
+    #[case::malformed_address("WBTC", true, "malformed_address")]
+    fn skipped_books_are_counted_by_reason(
+        #[case] token1: &str,
+        #[case] malform: bool,
+        #[case] expected_reason: &str,
+    ) {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = tracker();
+            let mut book = two_sided(PAMM, token1, "USDC", 180.0);
+            if malform {
+                // Nineteen bytes: a width that identifies no asset.
+                book.token1_address = address("0x2260fac5e5542a773aa44fbcfedf7c193bc2c5");
+            }
+            tracker.on_frame(message(100, vec![book]), clock.at(0));
+        });
+
+        for reason in ["malformed_address", "unadmitted_token", "one_asset_pair"] {
+            let expected = u64::from(reason == expected_reason);
+            assert_eq!(
+                counter_value(&snapshot, SKIPPED_BOOKS, &[("reason", reason)]),
+                expected,
+                "{reason}"
+            );
+        }
+    }
+
+    /// Every dropped book side is counted under the conversion's own reason for rejecting it.
+    /// Synthetic levels, one per reason, all on the bids of an otherwise valid WBTC/USDC book.
+    #[rstest]
+    #[case::unsupported_level(vec![level(0.0, 1.0)], "unsupported_level")]
+    #[case::non_finite_amount(vec![level(f64::MAX, 1.0)], "non_finite_amount")]
+    #[case::zero_amount(vec![level(100_000.0, 0.000_000_001)], "zero_amount")]
+    #[case::conflicting_knots(
+        vec![level(100_000.0, 1.0), level(101_000.0, 1.0)],
+        "conflicting_knots"
+    )]
+    fn rejected_sides_are_counted_by_reason(
+        #[case] bids: Vec<TitanLevel>,
+        #[case] expected_reason: &str,
+    ) {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = tracker();
+            let corrupt = vec![book(PAMM, "WBTC", "USDC", bids, vec![level(100_000.0, 1.0)])];
+            tracker
+                .on_frame(message(100, corrupt), clock.at(0))
+                .expect("the valid side is still served");
+        });
+
+        assert_eq!(counter_value(&snapshot, REJECTED_SIDES, &[("reason", expected_reason)]), 1);
+    }
+
+    /// A token symbol comes from Titan, so it must never become a metric label: the
+    /// counters carry fixed reasons and the symbol appears only in the accompanying log. The
+    /// frame here carries an unbound symbol, an unadmitted one and a corrupt side, so every
+    /// symbol-driven counter fires.
+    #[test]
+    fn no_streamed_symbol_becomes_a_metric_label() {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = tracker();
+            let books = vec![
+                two_sided(PAMM, "NVDAx", "USDC", 180.0),
+                two_sided(PAMM, "cbBTC", "USDC", 80_000.0),
+                book(PAMM, "WBTC", "USDC", vec![level(0.0, 1.0)], vec![level(100_000.0, 1.0)]),
+            ];
+            tracker
+                .on_frame(message(100, books), clock.at(0))
+                .expect("the WBTC/USDC asks are served");
+        });
+
+        // The counters did fire, so the assertion below is about a populated snapshot. Neither
+        // NVDAx nor cbBTC is in this consumer's token map, so both count as unadmitted.
+        assert_eq!(counter_value(&snapshot, SKIPPED_BOOKS, &[("reason", "unadmitted_token")]), 2);
+        assert_eq!(counter_value(&snapshot, REJECTED_SIDES, &[("reason", "unsupported_level")]), 1);
+
+        let labels = all_label_values(&snapshot);
+        for symbol in ["NVDAx", "cbBTC", "WBTC", "USDC"] {
+            assert!(!labels.contains(&symbol), "{symbol} became a metric label: {labels:?}");
+        }
+    }
+
+    /// Two legs naming one asset state no pair, so the book is skipped — and counted — rather
+    /// than served as a component that would quote an asset against itself.
+    #[test]
+    fn a_book_whose_legs_name_one_asset_is_skipped() {
+        let ((), snapshot) = record_async(async {
+            let clock = Clock::new();
+            let mut tracker = FreshnessTracker::new(settings(vec![fermiswap()]));
+            let mut book = two_sided(PAMM, "USDC", "USDC", 1.0);
+            // Titan naming one asset on both legs, under two of its symbols.
+            book.token2 = "USDbC".to_string();
+            let self_pair = vec![book];
+            assert!(tracker
+                .on_frame(message(100, self_pair), clock.at(0))
+                .is_none());
+        });
+
+        assert_eq!(counter_value(&snapshot, SKIPPED_BOOKS, &[("reason", "one_asset_pair")]), 1);
+        // The pair failed on neither address: both resolved, to the same asset.
+        assert_eq!(counter_value(&snapshot, SKIPPED_BOOKS, &[("reason", "malformed_address")]), 0);
+        assert_eq!(counter_value(&snapshot, SKIPPED_BOOKS, &[("reason", "unadmitted_token")]), 0);
+        let labels = all_label_values(&snapshot);
+        for symbol in ["USDC", "USDbC"] {
+            assert!(!labels.contains(&symbol), "{symbol} became a metric label: {labels:?}");
+        }
     }
 
     /// An id is never in both `removed_pairs` and `new_pairs` of one update, and a removal
@@ -1455,9 +1746,9 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker();
         let mut updates = Vec::new();
-        updates.extend(tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0)));
+        updates.extend(tracker.on_frame(message_at(100, 0, wbtc_usdc_books()), clock.at(0)));
         updates.extend(tracker.on_stale_deadline(clock.at(24).monotonic));
-        updates.extend(tracker.on_frame(message_at(102, 25, wbtc_usdc_pairs()), clock.at(25)));
+        updates.extend(tracker.on_frame(message_at(102, 25, wbtc_usdc_books()), clock.at(25)));
         assert_eq!(updates.len(), 3);
         for update in &updates {
             for id in update.removed_pairs.keys() {
@@ -1474,7 +1765,7 @@ mod tests {
         let clock = Clock::new();
         let mut tracker = tracker_serving(vec![fermiswap()], true);
         let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
 
         let component = &update.new_pairs[&expected_id()];
@@ -1483,6 +1774,95 @@ mod tests {
             component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
             Bytes::from_str(PAMM).unwrap()
         );
+    }
+
+    /// Kipseli's captured books arrive under the address Titan streams them by, but the venue is
+    /// served under its canonical public identity however it was configured: the component ids,
+    /// the contract ids and the executable `pamm_address` all carry the public identity and never
+    /// the streamed one. Only the venue name and the gas cost follow the configuration.
+    #[rstest]
+    #[case::registered_on_the_public_identity(
+        vec![kipseli_custom()],
+        false,
+        "custom-kipseli",
+        42_000
+    )]
+    #[case::auto_detected(vec![], true, KIPSELI, DEFAULT_AUTO_DETECTED_GAS_COST)]
+    fn an_aliased_venue_is_served_under_its_public_identity(
+        #[case] registry: Vec<PriceLevelStreamConfig>,
+        #[case] auto_detect: bool,
+        #[case] expected_name: &str,
+        #[case] expected_gas: u64,
+    ) {
+        let clock = Clock::new();
+        let mut tracker =
+            FreshnessTracker::new(TrackerSettings { auto_detect, ..settings(registry) });
+
+        let update = tracker
+            .on_frame(message(100, captured_books_of("Kipseli")), clock.at(0))
+            .expect("update expected");
+
+        // Kipseli quoted WBTC/USDC and WETH/USDC in the capture.
+        let public = address(KIPSELI);
+        let mut ids: Vec<&String> = update.new_pairs.keys().collect();
+        ids.sort();
+        assert_eq!(ids, [&wbtc_usdc_id(KIPSELI), &weth_usdc_id(KIPSELI)]);
+        for (id, component) in &update.new_pairs {
+            assert!(!id.contains(&KIPSELI_STREAMED[2..]), "{id} carries the streamed address");
+            assert_eq!(component.protocol_system, format!("pricelevelstream:{expected_name}"));
+            assert_eq!(component.static_attributes[PAMM_ADDRESS_ATTRIBUTE], public);
+            assert_eq!(component.contract_ids, vec![public.clone()]);
+        }
+        for state in update.states.values() {
+            let state = state
+                .as_any()
+                .downcast_ref::<PriceLevelStreamState>()
+                .expect("price level state");
+            assert_eq!(state.gas_cost, BigUint::from(expected_gas));
+        }
+    }
+
+    /// Denial is on the public identity, so a venue denied by the address its swaps go to stays
+    /// unserved even though its books arrive under another address.
+    #[test]
+    fn denying_the_public_identity_denies_the_books_of_its_alias() {
+        let clock = Clock::new();
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
+            denied: HashSet::from([address(KIPSELI)]),
+            auto_detect: true,
+            ..settings(vec![])
+        });
+
+        assert!(tracker
+            .on_frame(message(100, captured_books_of("Kipseli")), clock.at(0))
+            .is_none());
+    }
+
+    /// A side the conversion rejects costs that one direction, not the component: the opposite
+    /// direction is served and still quotes. Synthetic: a bid at a zero price states no price.
+    #[test]
+    fn a_rejected_side_leaves_the_opposite_direction_served() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        let corrupt_bids =
+            vec![book(PAMM, "WBTC", "USDC", vec![level(0.0, 1.0)], vec![level(100_000.0, 1.0)])];
+
+        let update = tracker
+            .on_frame(message(100, corrupt_bids), clock.at(0))
+            .expect("update expected");
+
+        let state = state_of(&update);
+        assert!(state.quotes_0_to_1.is_empty(), "the rejected side was served");
+        assert_eq!(state.quotes_1_to_0.len(), 1);
+        let usdc = token(USDC, "USDC", 6);
+        let wbtc = token(WBTC, "WBTC", 8);
+        // Selling USDC still quotes; selling WBTC cannot.
+        assert!(state
+            .get_amount_out(BigUint::from(100_000_000_000u64), &usdc, &wbtc)
+            .is_ok());
+        assert!(state
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc, &usdc)
+            .is_err());
     }
 
     /// Auto-detected, address-named venues take the fallback family too.
@@ -1495,7 +1875,7 @@ mod tests {
             ..settings(vec![])
         });
         let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .on_frame(message(100, wbtc_usdc_books()), clock.at(0))
             .expect("update expected");
         assert_eq!(update.new_pairs[&expected_id()].protocol_system, format!("fallback:{PAMM}"));
     }

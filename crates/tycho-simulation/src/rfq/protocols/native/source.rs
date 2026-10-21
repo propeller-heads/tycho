@@ -16,7 +16,7 @@ use crate::{
         client::NativeClient,
         models::{NativeBookSide, NativeOrderbookEntry, NativeOrderbookSide, NativePriceData},
         state::{NativeAllPairsState, NativeState},
-        PROTOCOL_SYSTEM, PROTOCOL_TYPE,
+        FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -25,6 +25,9 @@ use crate::{
 /// two-sided book per pair, filtered to the configured tokens and the USD TVL threshold.
 #[derive(Clone, Debug)]
 pub struct NativeBookSource {
+    /// The protocol system stamped on this source's components: the venue's own, or its
+    /// fallback-router one for a feed built with `with_fallback_router()`.
+    pub protocol_system: &'static str,
     pub book_config: BookFeedConfig,
     /// USD-priced tokens the book's TVL is normalized into before the threshold applies.
     pub usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -193,12 +196,17 @@ impl HttpSource for NativeBookSource {
             .collect();
 
         let mut collector = BookCollector::new(
-            PROTOCOL_SYSTEM,
+            self.protocol_system,
             PROTOCOL_TYPE,
             self.book_config.chain,
             self.all_pairs.then_some(()),
         );
-        for (component_id, book) in grouped {
+        let native_token = self
+            .book_config
+            .chain
+            .native_token()
+            .address;
+        for (book_key, book) in grouped {
             // Only requested markets become components.
             let Some((base_token, quote_token)) = self
                 .book_config
@@ -206,7 +214,16 @@ impl HttpSource for NativeBookSource {
             else {
                 continue;
             };
-            let Some(tvl) = tvls[&component_id] else {
+            // NativeFallbackRouter trades ERC20s only, so a fallback feed offers no native-token
+            // books.
+            if self.protocol_system == FALLBACK_PROTOCOL_SYSTEM &&
+                (book.base_address == native_token || book.quote_address == native_token)
+            {
+                continue;
+            }
+            let component_id =
+                pair_component_id(self.protocol_system, &book.base_address, &book.quote_address);
+            let Some(tvl) = tvls[&book_key] else {
                 debug!(
                     %component_id,
                     "skipping pair, no book prices its quote token in a USD quote token"
@@ -263,6 +280,7 @@ mod tests {
             .map(|address| (*address, "T", 18))
             .collect();
         NativeBookSource {
+            protocol_system: PROTOCOL_SYSTEM,
             all_pairs: false,
             book_config: BookFeedConfig {
                 chain: Chain::Ethereum,
@@ -748,6 +766,71 @@ mod tests {
         } else {
             assert!(books.is_empty());
         }
+    }
+
+    #[rstest]
+    #[case::per_pair(false)]
+    #[case::all_pairs(true)]
+    #[tokio::test]
+    async fn a_fallback_source_labels_its_components_for_the_fallback_router(
+        #[case] all_pairs: bool,
+    ) {
+        let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        let body = serde_json::to_string(&vec![serde_json::json!({
+            "base_address": weth.to_string(),
+            "quote_address": usdt.to_string(),
+            "minimum_in_base": 0.0,
+            "side": "bid",
+            "levels": [[2.0, 100.0]]
+        })])
+        .unwrap();
+        let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
+        let source = NativeBookSource {
+            protocol_system: FALLBACK_PROTOCOL_SYSTEM,
+            all_pairs,
+            ..test_source(server.url(), &[&weth, &usdt], HashSet::from([usdt.clone()]), 0.0)
+        };
+
+        let books = source.fetch().await.unwrap().books;
+
+        let book = books.values().next().expect("one book");
+        assert_eq!(book.component.protocol_system, "fallback:rfq:native");
+        let expected_id = if all_pairs {
+            Bytes::from(FALLBACK_PROTOCOL_SYSTEM.as_bytes())
+        } else {
+            pair_component_id(FALLBACK_PROTOCOL_SYSTEM, &weth, &usdt)
+        };
+        assert_eq!(book.component.id, expected_id);
+    }
+
+    #[rstest]
+    #[case::rfq(PROTOCOL_SYSTEM, 1)]
+    #[case::fallback(FALLBACK_PROTOCOL_SYSTEM, 0)]
+    #[tokio::test]
+    async fn native_token_book_by_protocol_system(
+        #[case] protocol_system: &'static str,
+        #[case] expected_books: usize,
+    ) {
+        let native_token = Chain::Ethereum.native_token().address;
+        let usdt = Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        let body = serde_json::to_string(&vec![serde_json::json!({
+            "base_address": native_token.to_string(),
+            "quote_address": usdt.to_string(),
+            "minimum_in_base": 0.0,
+            "side": "bid",
+            "levels": [[2.0, 100.0]]
+        })])
+        .unwrap();
+        let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
+        let source = NativeBookSource {
+            protocol_system,
+            ..test_source(server.url(), &[&native_token, &usdt], HashSet::from([usdt.clone()]), 0.0)
+        };
+
+        let books = source.fetch().await.unwrap().books;
+
+        assert_eq!(books.len(), expected_books);
     }
 
     /// Published as one component, Native's pairs are one book advertising the directions its

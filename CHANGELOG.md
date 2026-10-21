@@ -1,3 +1,98 @@
+## [0.472.2](https://github.com/propeller-heads/tycho/compare/0.472.1...0.472.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **deps:** resolve rustls-webpki and webpki-roots advisories ([47e9db0](https://github.com/propeller-heads/tycho/commit/47e9db0b776e7c34974a28318e874472d614c66d))
+* **deps:** resolve rustls-webpki and webpki-roots advisories ([#1661](https://github.com/propeller-heads/tycho/issues/1661)) ([7bdea01](https://github.com/propeller-heads/tycho/commit/7bdea013449f96a52335d16b21b6919e3651903b))
+
+## [0.472.1](https://github.com/propeller-heads/tycho/compare/0.472.0...0.472.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **client:** increase Arbitrum feed timeout ([ec44a95](https://github.com/propeller-heads/tycho/commit/ec44a955017bead5abaaf4f124f00ca0f47f3bdf))
+* **client:** remove unnecessary comment ([a538afa](https://github.com/propeller-heads/tycho/commit/a538afa2ea7ae140f48deb893376d4d5c2bd5d47))
+
+## [0.472.0](https://github.com/propeller-heads/tycho/compare/0.471.0...0.472.0) (2026-10-20)
+
+
+### Features
+
+* **simulation:** serve the Goliath, Stelaxis and ElZorro pAMMs ([994e789](https://github.com/propeller-heads/tycho/commit/994e789e6066947997e41c014749152fc968d264))
+* **simulation:** serve the Goliath, Stelaxis and ElZorro pAMMs ([#1648](https://github.com/propeller-heads/tycho/issues/1648)) ([8a4a3a2](https://github.com/propeller-heads/tycho/commit/8a4a3a2f42ccd5cd195017a15aabe03da0992dfa))
+
+## [0.471.0](https://github.com/propeller-heads/tycho/compare/0.470.1...0.471.0) (2026-10-20)
+
+
+### Features
+
+* **simulation:** migrate the price level stream to Titan V2 ([6d1ad78](https://github.com/propeller-heads/tycho/commit/6d1ad785a0f6738346e7a8e4db96503ca254d895))
+* **simulation:** migrate the price level stream to Titan V2 ([#1597](https://github.com/propeller-heads/tycho/issues/1597)) ([0ed0550](https://github.com/propeller-heads/tycho/commit/0ed0550ef0024f0a9d4d6f31bd9e619e4c409368))
+
+
+### Bug Fixes
+
+* **simulation:** point Metric and TaurusFi at their live routers ([95f67f6](https://github.com/propeller-heads/tycho/commit/95f67f6653df5dee34bc02391a1246635f87db33))
+
+## [0.470.1](https://github.com/propeller-heads/tycho/compare/0.470.0...0.470.1) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **protocol:** rename Update.block_number_or_timestamp to block_number (#1562)
+* **protocol:** `Update.block_number_or_timestamp` is `Update.block_number`,
+with no serde alias — a market recording saved under the old name fails to
+load with `missing field block_number` and needs the key renamed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Code Refactoring
+
+* **protocol:** rename Update.block_number_or_timestamp to block_number ([23070ba](https://github.com/propeller-heads/tycho/commit/23070babf5958bda9ca80664c1f8778e11c42317))
+* **protocol:** rename Update.block_number_or_timestamp to block_number ([#1562](https://github.com/propeller-heads/tycho/issues/1562)) ([2ee3349](https://github.com/propeller-heads/tycho/commit/2ee33493814146d19ebfe12ef8308d0fa0c25629))
+
+## [0.470.0](https://github.com/propeller-heads/tycho/compare/0.469.0...0.470.0) (2026-10-20)
+
+
+### Features
+
+* **execution:** add LiquoriceFallbackRouter and LiquoriceFallbackExecutor ([9707dee](https://github.com/propeller-heads/tycho/commit/9707deea2f7b8841195dddc2dfe54f93a2a3046d))
+* **execution:** add Native and Liquorice fallback routers ([#1607](https://github.com/propeller-heads/tycho/issues/1607)) ([e1c78e0](https://github.com/propeller-heads/tycho/commit/e1c78e0eea7d62039ffd6cbdba54ff710d874b02))
+* **execution:** add NativeFallbackRouter and NativeFallbackExecutor ([5170b25](https://github.com/propeller-heads/tycho/commit/5170b25f8cafbd3a736b9d758b5d472754c1c33c))
+* **simulation:** add fallback-router mode to the Native and Liquorice feeds ([ef9310f](https://github.com/propeller-heads/tycho/commit/ef9310f7ef68b2b03649daccf2ecc9430109c869))
+
+
+### Bug Fixes
+
+* **execution:** lock calldata.txt across test processes ([31644d9](https://github.com/propeller-heads/tycho/commit/31644d9a74b88d49e2b66fe4398c6d8bf17c4b69))
+* **execution:** reject native-token legs in NativeFallbackSwapEncoder ([67970a4](https://github.com/propeller-heads/tycho/commit/67970a4866ce08f28827ec185f190f2d3fc8b0e7))
+* **execution:** reject native-token legs on fallback:rfq:hashflow ([b95cb6d](https://github.com/propeller-heads/tycho/commit/b95cb6d85299cb95a423f11fbd289aa861b05703))
+* **execution:** reject native-token legs on fallback:rfq:liquorice ([b704e34](https://github.com/propeller-heads/tycho/commit/b704e34be192d823468aadb01242c6d7937036ff))
+* **execution:** return unspent input from NativeFallbackRouter ([dabfc87](https://github.com/propeller-heads/tycho/commit/dabfc875b928a9674a6749b58116f4f4cba34a3c))
+
+## [0.469.0](https://github.com/propeller-heads/tycho/compare/0.468.0...0.469.0) (2026-10-20)
+
+
+### Features
+
+* **execution:** add SubsidyPayer contract ([d917aa4](https://github.com/propeller-heads/tycho/commit/d917aa43978f4c91daeec53818d8e27956bfe83d))
+* **execution:** add SubsidyPayer contract ([#1643](https://github.com/propeller-heads/tycho/issues/1643)) ([88a3124](https://github.com/propeller-heads/tycho/commit/88a312437fe81d90dc52b1f644fe4be23f4a26ae))
+
+
+### Bug Fixes
+
+* **execution:** suppress expected Slither findings in SubsidyPayer ([52b5cb6](https://github.com/propeller-heads/tycho/commit/52b5cb60f9e7c91da5db2309aaad1f39467ebb2f))
+
+## [0.468.0](https://github.com/propeller-heads/tycho/compare/0.467.0...0.468.0) (2026-10-20)
+
+
+### Features
+
+* **ekubo-v3:** add BSC and Base substreams manifests ([50df01e](https://github.com/propeller-heads/tycho/commit/50df01ecf7f6a20a714a9a3b34037c8de52e8031))
+* **ekubo-v3:** add BSC and Base substreams manifests  ([#1653](https://github.com/propeller-heads/tycho/issues/1653)) ([7c2b604](https://github.com/propeller-heads/tycho/commit/7c2b604b1184ba537d4c1b79e8b0d823a7c90100))
+* **simulation:** support ekubo_v3 SignedExclusiveSwap on BSC and Base ([cacc01b](https://github.com/propeller-heads/tycho/commit/cacc01b95c1f47d261422c42ad2bd21a73665f49))
+
 ## [0.467.0](https://github.com/propeller-heads/tycho/compare/0.466.0...0.467.0) (2026-10-20)
 
 

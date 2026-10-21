@@ -159,7 +159,7 @@ impl TychoStreamBuilder {
             Chain::Ethereum => (12, 36, 50),
             Chain::Starknet => (2, 8, 50),
             Chain::ZkSync => (3, 12, 50),
-            Chain::Arbitrum => (1, 2, 100), // Typically closer to 0.25s
+            Chain::Arbitrum => (1, 9, 100), // Typically closer to 0.25s
             Chain::Base => (2, 12, 50),
             Chain::Bsc => (1, 12, 50),
             Chain::Unichain => (1, 10, 100),
@@ -798,6 +798,11 @@ mod tests {
     #[test]
     fn arc_uses_fast_chain_default_timing() {
         assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 100));
+    }
+
+    #[test]
+    fn arbitrum_default_timing_outlasts_substreams_reconnect() {
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arbitrum), (1, 9, 100));
     }
 
     #[tokio::test]

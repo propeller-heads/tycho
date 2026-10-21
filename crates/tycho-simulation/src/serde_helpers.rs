@@ -248,7 +248,7 @@ mod tests {
         assert!(json.contains("pool_a"));
 
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 12345);
+        assert_eq!(roundtripped.block_number, 12345);
         assert_eq!(roundtripped.states.len(), 1);
         assert!(roundtripped
             .states
@@ -317,7 +317,7 @@ mod tests {
         let update = Update::new(99999, HashMap::new(), HashMap::new());
         let json = serde_json::to_string(&update).unwrap();
         let roundtripped: Update = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.block_number_or_timestamp, 99999);
+        assert_eq!(roundtripped.block_number, 99999);
         assert!(roundtripped.states.is_empty());
         assert!(roundtripped.new_pairs.is_empty());
     }

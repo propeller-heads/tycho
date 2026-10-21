@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-ekubo-v3"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "alloy-primitives",
  "anyhow",

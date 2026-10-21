@@ -10,7 +10,10 @@ use crate::{
     },
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
-        protocols::liquorice::{client::LiquoriceClient, source::LiquoriceBookSource},
+        protocols::liquorice::{
+            client::LiquoriceClient, source::LiquoriceBookSource, FALLBACK_PROTOCOL_SYSTEM,
+            PROTOCOL_SYSTEM,
+        },
     },
     snapshot_feed::{
         errors::FeedError,
@@ -30,6 +33,7 @@ pub struct LiquoriceFeed {
 /// Builds a [`LiquoriceFeed`] from the shared [`BookFeedConfig`] and Liquorice's solver
 /// credentials.
 pub struct LiquoriceFeedBuilder {
+    protocol_system: &'static str,
     book_config: BookFeedConfig,
     component_layout: ComponentLayout<QuoteRule>,
     usd_quote_tokens: Arc<HashSet<Bytes>>,
@@ -56,6 +60,7 @@ impl LiquoriceFeedBuilder {
             quote_timeout: DEFAULT_QUOTE_TIMEOUT,
             component_layout: ComponentLayout::PerPair,
             quote_expiry_secs: 300,
+            protocol_system: PROTOCOL_SYSTEM,
         }
     }
 
@@ -105,6 +110,18 @@ impl LiquoriceFeedBuilder {
         self
     }
 
+    /// Settles this venue's swaps through Tycho's `LiquoriceFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    ///
+    /// The router does not support Liquorice partial fills: a swap whose input is below the
+    /// quote's signed amount fills through the fallback pool instead.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
     /// Fails for a chain with no numeric chain id, which is all Liquorice's API is addressed by.
     /// Whether the venue prices that chain is Liquorice's own answer, and the first poll carries
     /// it.
@@ -113,6 +130,7 @@ impl LiquoriceFeedBuilder {
         Ok(LiquoriceFeed {
             feed_config: self.feed_config,
             source: LiquoriceBookSource {
+                protocol_system: self.protocol_system,
                 component_layout: self.component_layout,
                 client: Arc::new(LiquoriceClient::new(
                     None,

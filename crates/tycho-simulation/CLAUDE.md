@@ -113,26 +113,41 @@ for any protocol indexed by Tycho.
   Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
   signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting layer
   and never reaches a public signature. Credentials are constructor arguments of the feed builders;
-  the library never reads the environment. `with_fallback_router()` on the Bebop and Hashflow
-  builders (and Metric's, in `pamm/`) stamps components `fallback:rfq:{venue}` instead, so
-  tycho-execution routes their swaps through that venue's fallback router; off by default
+  the library never reads the environment. `with_fallback_router()` on the Bebop, Hashflow,
+  Liquorice and Native builders (and Metric's, in `pamm/`) stamps components
+  `fallback:rfq:{venue}` instead, so tycho-execution routes their swaps through that venue's
+  fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
+  fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
   the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
   and its client is held by the feed alone rather than by every state).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
-  Titan WebSocket's per-pair quote-ladder frames directly into `Update`s (no indexer feed
+  Titan WebSocket's book frames directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating the ladder and refuses to quote
   once its frame is one slot old (`quotable_until`, monotonic, never serialized, ignored by
-  `eq`; `without_quote_guard` on the builder turns it off for slow quoters). Frames are best
+  `eq`; `without_quote_guard` on the builder turns it off for slow quoters). A frame carries one
+  flat `books` list — one book per venue and pair, priced in human units as float
+  `price`/`cumVolume` levels, with both assets named by address in `token1Address`/`token2Address`
+  — so `convert.rs` derives the integer ladders the states serve: `resolve_book_tokens` looks the
+  two addresses up and `ladders_for_book`
+  turns the bids into the `token1 -> token2` ladder and the asks into the reverse, converting the
+  sides independently so a rejected one never costs the other. `tracker.rs` groups the books per
+  venue and feeds the freshness machinery below unchanged. Resolution is fail-closed: a pair
+  prices only if both addresses are in the consumer's token map, which also supplies the decimals.
+  The book's `token1`/`token2` symbols are display labels read for the DEBUG logs alone, never
+  resolved — so a token calling itself `WBTC` neither captures another asset's quotes nor keeps
+  it from being served. Frames are best
   effort, so `tracker.rs` never removes a component because a frame omits it. It gives every
   component its own deadline and emits `removed_pairs` only when the component's data is
   `stale_after` old; the next accepted frame carrying the component re-adds it. Frames are
-  accepted only if their wire `timestamp` is younger than `stale_after`, not more than one slot
+  accepted only if their stream `ts` is younger than `stale_after`, not more than one slot
   in the future, not older than the newest accepted one (equal allowed), and their block neither
   regresses nor jumps more than one block per elapsed slot plus 2; the block frontier lives in
-  `ServingState::Serving`, so it exists only while something is served. The windows and their
+  `ServingState::Serving`, so it exists only while something is served. The frame's beacon `slot`
+  carries no freshness decision, so a frame without it is judged like one carrying it. The windows
+  and their
   defaults are listed under `# Freshness contract` in `price_level_stream/mod.rs`; every window
   is a multiple of `SLOT` in `mod.rs`; the `stale_after` setter caps its value at
   `MAX_STALE_AFTER` (one hour). `build()` is an `async_stream` loop that selects over frames and
@@ -141,14 +156,27 @@ for any protocol indexed by Tycho.
   when no frame parses within the idle timeout; pings, unparsable text and the consumer's own
   pauses between polls do not count. `telemetry.rs` emits `price_level_stream_*` metrics through
   the `metrics` facade, with label values as enums there and a frame-age histogram at
-  acceptance. Per-venue series start at zero, and no label carries a wire value except the
-  address of an auto-detected venue. Components are identified as `pricelevelstream:{pamm}`. A
+  acceptance; `skipped_books_total{reason}` counts the books left unpriced
+  (`unadmitted_token`, `malformed_address`, `one_asset_pair`) and `rejected_sides_total{reason}` the
+  sides dropped whole (`unsupported_level`, `non_finite_amount`, `zero_amount`,
+  `conflicting_knots`). Per-venue series and every one of those reasons start at zero, and no
+  label carries a streamed value except the address of an auto-detected venue — a token address
+  or symbol never becomes a label, only a DEBUG log field. Components are identified as
+  `pricelevelstream:{pamm}`, where `{pamm}` names the venue's **canonical public identity**: the
+  address a swap goes to. `config.rs`'s `PAMM_ADDRESS_ALIASES` normalizes every boundary onto it —
+  incoming book `quoteAddress`es as well as the addresses handed to `add_pamm`/`deny_pamm`, either
+  of which may name either address (today's two entries are Kipseli, streamed under `0xc9a9…` and
+  executed at `0x71e7…`, and Metric, streamed under `0xe844…` and executed at `0x99ab…`).
+  Component ids, venue names, gas costs, denial and the `pamm_address`
+  attribute therefore always carry the public identity, never the streamed one; `maker` is
+  recorded nowhere. A
   new builder serves nothing: `with_known_pamms` registers the known-good venues and denies
   known-unexecutable ones, `add_pamm` registers individual ones, `deny_pamm` excludes one
   (dropping any registration and blocking auto-detection), and opt-in auto-detection
   additionally serves unknown venues under their address (`pricelevelstream:{0xaddress}`), at
-  most 64 per process. Precedence: between `add_pamm` and `deny_pamm` for the same address the
-  later call wins; `with_known_pamms` defaults never override either, regardless of call order.
+  most 64 per process. Precedence: between `add_pamm` and `deny_pamm` for the same venue the
+  later call wins, whichever of its addresses each named; `with_known_pamms` defaults never
+  override either, regardless of call order.
   By default `build` emits every venue under `fallback:{pamm}`, so tycho-execution routes their
   swaps through `TychoFallbackRouter` (retry on a solver-named fallback pool when the venue
   reverts); `without_fallback_router` keeps every venue on the direct `pricelevelstream:` path.
