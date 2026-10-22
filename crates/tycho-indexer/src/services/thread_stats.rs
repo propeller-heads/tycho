@@ -1,6 +1,6 @@
 //! On-CPU time and run-queue wait of threads, as the kernel's schedstat reports them.
 //!
-//! [`spawn_thread_cpu_reporter`] exports them per [`ThreadGroup`]:
+//! [`spawn_thread_cpu_reporter`] exports them per thread group:
 //! `tycho_thread_cpu_ns_total{group}`, `tycho_thread_runqueue_wait_ns_total{group}` and
 //! `tycho_threads{group}`.
 use std::{collections::HashMap, path::Path, sync::Once, time::Duration};
@@ -220,8 +220,8 @@ fn read_threads(task_dir: &Path) -> Vec<ThreadSample> {
     samples
 }
 
-/// Every [`REPORT_PERIOD`], reads the counters of all threads of this process and adds what each
-/// [`ThreadGroup`] gained to `tycho_thread_cpu_ns_total{group}` and
+/// Every 5 s, reads the counters of all threads of this process and adds what each thread group
+/// gained to `tycho_thread_cpu_ns_total{group}` and
 /// `tycho_thread_runqueue_wait_ns_total{group}`; sets `tycho_threads{group}` to its thread count.
 /// The period is shorter than the 10 s after which an idle blocking thread exits, so the work of
 /// a blocking thread is counted before it exits.
