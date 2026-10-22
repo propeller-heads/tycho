@@ -9,10 +9,11 @@ use ekubo_sdk::{
     quoting::{
         pools::{
             full_range::{FullRangePoolKey, FullRangePoolState, FullRangePoolTypeConfig},
+            mev_capture_v21_main::MevCaptureV21MainPoolState,
             stableswap::{StableswapPoolKey, StableswapPoolState},
             twamm::TwammPoolState,
         },
-        types::{PoolConfig, Tick, TimeRateDelta},
+        types::{PoolConfig, PoolKey, Tick, TimeRateDelta},
         util::find_nearest_initialized_tick_index,
     },
     U256,
@@ -27,8 +28,8 @@ use tycho_common::{
 
 use super::{
     addresses::{
-        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, ORACLE_ADDRESS,
-        SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
+        BOOSTED_FEES_CONCENTRATED_ADDRESS, MEV_CAPTURE_ADDRESS, MEV_CAPTURE_V21_ETHEREUM_ADDRESS,
+        ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, TWAMM_ADDRESS_V1, TWAMM_ADDRESS_V2,
         VE33_ROBINHOOD_ADDRESS,
     },
     attributes::{rate_deltas_from_attributes, ticks_from_attributes},
@@ -37,6 +38,7 @@ use super::{
         concentrated::ConcentratedPool,
         full_range::FullRangePool,
         mev_capture::MevCapturePool,
+        mev_capture_v21::{self, MevCaptureV21Pool},
         oracle::OraclePool,
         stableswap::StableswapPool,
         twamm::TwammPool,
@@ -54,6 +56,7 @@ pub enum ExtensionType {
     Oracle,
     Twamm,
     MevCapture,
+    MevCaptureV21,
     BoostedFees,
     SignedExclusiveSwap,
     Ve33,
@@ -74,6 +77,8 @@ pub fn extension_type(extension: Address, chain: Chain) -> Option<ExtensionType>
         ExtensionType::Twamm
     } else if extension == MEV_CAPTURE_ADDRESS {
         ExtensionType::MevCapture
+    } else if chain == Chain::Ethereum && extension == MEV_CAPTURE_V21_ETHEREUM_ADDRESS {
+        ExtensionType::MevCaptureV21
     } else if extension == BOOSTED_FEES_CONCENTRATED_ADDRESS {
         ExtensionType::BoostedFees
     } else if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS.contains(&(chain, extension)) {
@@ -258,6 +263,45 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboV3State {
                     concentrated_pool(&state_attrs, pool_type_config)?;
 
                 Self::MevCapture(MevCapturePool::new(key, tick, concentrated_state, ticks)?)
+            }
+            ExtensionType::MevCaptureV21 => {
+                let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
+                    return Err(InvalidSnapshotError::ValueError(
+                        "expected concentrated pool type config for MEVCapture v2.1 pool"
+                            .to_string(),
+                    ));
+                };
+
+                let tick = attribute(&state_attrs, "tick")?
+                    .clone()
+                    .into();
+                let anchor = mev_capture_v21::anchor_from_bytes(attribute(
+                    &state_attrs,
+                    mev_capture_v21::ANCHOR_STATE_ATTRIBUTE,
+                )?)
+                .map_err(InvalidSnapshotError::ValueError)?;
+
+                let mut ticks = ticks_from_attributes(
+                    state_attrs
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), Cow::Borrowed(value))),
+                )
+                .map_err(InvalidSnapshotError::ValueError)?;
+                ticks.sort_unstable_by_key(|tick| tick.index);
+
+                Self::MevCaptureV21(MevCaptureV21Pool::new(
+                    PoolKey {
+                        token0,
+                        token1,
+                        config: PoolConfig { extension, fee, pool_type_config },
+                    },
+                    mev_capture_v21::config_from_attributes(&static_attrs)?,
+                    MevCaptureV21MainPoolState {
+                        core: mev_capture_v21::core_state(sqrt_ratio, tick, liquidity),
+                        anchor,
+                    },
+                    ticks,
+                )?)
             }
             ExtensionType::SignedExclusiveSwap => {
                 let EvmPoolTypeConfig::Concentrated(pool_type_config) = pool_type_config else {
@@ -472,7 +516,9 @@ mod tests {
             EkuboV3State::Twamm(_) => 3,
             EkuboV3State::MevCapture(_) => 4,
             // BoostedFees is new, no legacy format
-            EkuboV3State::BoostedFees(_) | EkuboV3State::Ve33(_) => return,
+            EkuboV3State::BoostedFees(_) |
+            EkuboV3State::MevCaptureV21(_) |
+            EkuboV3State::Ve33(_) => return,
         };
 
         let mut component = case.component;
