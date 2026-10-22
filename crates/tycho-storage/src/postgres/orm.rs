@@ -27,7 +27,6 @@ use tycho_common::{
 };
 
 use super::{
-    raw_json::RawJson,
     schema::{
         account, account_balance, block, chain, component_balance, component_balance_default,
         component_tvl, contract_code, contract_storage, contract_storage_default, entry_point,
@@ -1985,14 +1984,6 @@ impl From<&EntryPointTracingParams> for models::blockchain::TracingParams {
             }
         }
     }
-}
-
-#[derive(Queryable, Selectable)]
-#[diesel(table_name = entry_point_tracing_params)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub(crate) struct TracingParamsRaw {
-    pub tracing_type: EntryPointTracingType,
-    pub data: Option<RawJson>,
 }
 
 impl EntryPointTracingParams {

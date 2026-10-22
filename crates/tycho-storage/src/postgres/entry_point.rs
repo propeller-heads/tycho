@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use diesel::{prelude::*, upsert::excluded};
+use diesel::{
+    prelude::*,
+    sql_types::{Nullable, Text},
+    upsert::excluded,
+};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::{instrument, warn};
 use tycho_common::{
@@ -21,15 +25,19 @@ use super::{
         NewEntryPointTracingParamsCallsAccount, NewEntryPointTracingResult,
         NewProtocolComponentHasEntryPointTracingParams, NewProtocolComponentUsesEntryPoint,
     },
-    raw_json::RawJson,
     schema::{self},
     storage_error_from_diesel, PostgresError, PostgresGateway,
 };
 
+/// A component id, an entry point, its tracing type, its tracing params JSON and its tracing
+/// result JSON.
+pub(crate) type TracedEntryPointRow =
+    (String, orm::EntryPoint, EntryPointTracingType, Option<String>, Option<String>);
+
 /// Traced entry point rows as loaded from the database, with unparsed JSON.
 pub(crate) struct TracedEntryPointRows {
     pub(crate) total: Option<i64>,
-    pub(crate) rows: Vec<(String, orm::EntryPoint, orm::TracingParamsRaw, Option<RawJson>)>,
+    pub(crate) rows: Vec<TracedEntryPointRow>,
 }
 
 impl PostgresGateway {
@@ -738,7 +746,7 @@ impl PostgresGateway {
     /// * `conn` - The database connection to use.
     ///
     /// Each row holds a component, an entry point with tracing params linked to the component,
-    /// and the tracing result if one exists. The JSON columns stay unparsed; use
+    /// and the tracing result if one exists. The JSON columns are loaded as text; use
     /// `decode_traced_entry_points` to parse them.
     ///
     /// Note: to avoid getting partial results, the pagination is applied to components, not
@@ -798,10 +806,13 @@ impl PostgresGateway {
             .select((
                 pc::external_id,
                 orm::EntryPoint::as_select(),
-                orm::TracingParamsRaw::as_select(),
-                eptr::detection_data.nullable(),
+                eptp::tracing_type,
+                eptp::data.cast::<Nullable<Text>>(),
+                eptr::detection_data
+                    .nullable()
+                    .cast::<Nullable<Text>>(),
             ))
-            .load::<(String, orm::EntryPoint, orm::TracingParamsRaw, Option<RawJson>)>(conn)
+            .load::<TracedEntryPointRow>(conn)
             .await
             .map_err(|err| {
                 storage_error_from_diesel(
@@ -826,19 +837,19 @@ impl PostgresGateway {
         rows: TracedEntryPointRows,
     ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
         let mut traced_entry_points: TracedEntryPoints = HashMap::new();
-        for (pc_ext_id, ep, params, detection_data) in rows.rows {
+        for (pc_ext_id, ep, tracing_type, params, detection_data) in rows.rows {
             let component_traces = traced_entry_points
                 .entry(pc_ext_id)
                 .or_default();
-            let Some(data) = params.data else {
+            let Some(data) = params else {
                 return Err(StorageError::DecodeError(format!(
                     "missing tracing params data for entry point {}",
                     ep.external_id
                 )));
             };
-            let params = match params.tracing_type {
+            let params = match tracing_type {
                 EntryPointTracingType::RpcTracer => TracingParams::RPCTracer(
-                    serde_json::from_str::<RPCTracerParams>(data.as_str()).map_err(|e| {
+                    serde_json::from_str::<RPCTracerParams>(&data).map_err(|e| {
                         StorageError::DecodeError(format!(
                             "Failed to deserialize tracing params for entry point {}: {e}",
                             ep.external_id
@@ -855,8 +866,8 @@ impl PostgresGateway {
                 );
                 continue;
             };
-            let tracing_result = serde_json::from_str::<TracingResult>(detection_data.as_str())
-                .map_err(|e| {
+            let tracing_result =
+                serde_json::from_str::<TracingResult>(&detection_data).map_err(|e| {
                     StorageError::DecodeError(format!(
                         "Failed to deserialize TracingResult for entry point {}: {e}",
                         entry_point_with_params
@@ -1054,28 +1065,16 @@ mod test {
         )
     }
 
-    fn params_json() -> RawJson {
+    fn params_json() -> String {
         let TracingParams::RPCTracer(params) = tracing_params(0);
-        RawJson::from(
-            serde_json::to_string(&params)
-                .unwrap()
-                .as_str(),
-        )
+        serde_json::to_string(&params).unwrap()
     }
 
-    fn result_json() -> RawJson {
-        RawJson::from(
-            serde_json::to_string(&traced_entry_point().tracing_result)
-                .unwrap()
-                .as_str(),
-        )
+    fn result_json() -> String {
+        serde_json::to_string(&traced_entry_point().tracing_result).unwrap()
     }
 
-    fn row(
-        component: &str,
-        params: Option<RawJson>,
-        result: Option<RawJson>,
-    ) -> (String, orm::EntryPoint, orm::TracingParamsRaw, Option<RawJson>) {
+    fn row(component: &str, params: Option<String>, result: Option<String>) -> TracedEntryPointRow {
         let entry_point = rpc_tracer_entry_point(0);
         (
             component.to_string(),
@@ -1087,7 +1086,8 @@ mod test {
                 inserted_ts: NaiveDateTime::default(),
                 modified_ts: NaiveDateTime::default(),
             },
-            orm::TracingParamsRaw { tracing_type: EntryPointTracingType::RpcTracer, data: params },
+            EntryPointTracingType::RpcTracer,
+            params,
             result,
         )
     }
