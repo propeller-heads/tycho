@@ -33,6 +33,12 @@ impl EthereumTokenPreProcessor {
         EthereumTokenPreProcessor { rpc: rpc.clone(), chain, settlement_contract }
     }
 
+    /// The contract token analysis simulates transfers through. It decides the quality, tax and
+    /// gas the pre-processor reports for a token.
+    pub fn settlement_contract(&self) -> Address {
+        self.settlement_contract
+    }
+
     async fn call_symbol(&self, token: Address) -> String {
         let calldata = symbolCall {}.abi_encode();
 
