@@ -3,10 +3,7 @@ use std::{
     fmt::Debug,
 };
 
-use alloy::{
-    primitives::{Address, Keccak256, U256},
-    sol_types::SolValue,
-};
+use alloy::primitives::{Address, U256};
 use itertools::Itertools;
 use revm::{
     primitives::KECCAK_EMPTY,
@@ -26,7 +23,7 @@ use super::{
 use crate::evm::{
     engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface},
     protocol::utils::bytes_to_address,
-    simulation::{BlockEnvOverrides, SimulationEngine, SimulationParameters},
+    simulation::{BlockEnvOverrides, SimulationEngine},
 };
 
 #[derive(Debug)]
@@ -296,19 +293,10 @@ where
 
         if let Some(stateless_contracts) = &self.stateless_contracts {
             for (address, bytecode) in stateless_contracts.iter() {
-                let address = if address.starts_with("call") {
-                    self.get_address_from_call(&engine, address)?
-                        .to_string()
-                } else {
-                    address.clone()
-                };
                 init_stateless_contract(
                     &engine,
-                    &TychoBytes::from(address.into_bytes()),
-                    bytecode
-                        .as_ref()
-                        .map(|code| TychoBytes::from(code.clone()))
-                        .as_ref(),
+                    address.as_bytes(),
+                    bytecode.clone().map(TychoBytes::from),
                 )?;
             }
         }
@@ -356,71 +344,6 @@ where
             );
         }
         Ok(common_capabilities)
-    }
-
-    /// Gets the address of the code - mostly used for dynamic proxy implementations. For example,
-    /// some protocols have some dynamic math implementation that is given by the factory. When
-    /// we swap on the pools for such protocols, it will call the factory to get the implementation
-    /// and use it for the swap.
-    /// This method simulates the call to the pool, which gives us the address of the
-    /// implementation.
-    ///
-    /// # See Also
-    /// [Dynamic Address Resolution Example](https://github.com/propeller-heads/propeller-protocol-lib/blob/main/docs/indexing/reserved-attributes.md#description-2)
-    fn get_address_from_call(
-        &self,
-        engine: &SimulationEngine<D>,
-        decoded: &str,
-    ) -> Result<Address, SimulationError> {
-        let method_name = decoded
-            .split(':')
-            .next_back()
-            .ok_or_else(|| {
-                SimulationError::FatalError(
-                    "Failed to get address from call: Could not decode method name from call"
-                        .into(),
-                )
-            })?;
-
-        let selector = {
-            let mut hasher = Keccak256::new();
-            hasher.update(method_name.as_bytes());
-            let result = hasher.finalize();
-            result[..4].to_vec()
-        };
-
-        let to_address = decoded
-            .split(':')
-            .nth(1)
-            .ok_or_else(|| {
-                SimulationError::FatalError(
-                    "Failed to get address from call: Could not decode to_address from call".into(),
-                )
-            })?;
-
-        let parsed_address: Address = to_address.parse().map_err(|_| {
-            SimulationError::FatalError(format!(
-                "Failed to get address from call: Invalid address format: {to_address}"
-            ))
-        })?;
-
-        let sim_params = SimulationParameters {
-            data: selector.to_vec(),
-            to: parsed_address,
-            overrides: Some(HashMap::new()),
-            caller: *EXTERNAL_ACCOUNT,
-            ..Default::default()
-        };
-
-        let sim_result = engine
-            .simulate(&sim_params)
-            .map_err(|err| SimulationError::FatalError(err.to_string()))?;
-
-        let address: Address = Address::abi_decode(&sim_result.result).map_err(|e| {
-            SimulationError::FatalError(format!("Failed to get address from call: Failed to decode address list from simulation result {e:?}"))
-        })?;
-
-        Ok(address)
     }
 }
 

@@ -459,7 +459,9 @@ where
         init_stateless_contract(
             engine,
             encoded,
-            attributes.get(&format!("stateless_contract_code_{index}")),
+            attributes
+                .get(&format!("stateless_contract_code_{index}"))
+                .cloned(),
         )?;
     }
     Ok(())
@@ -481,12 +483,13 @@ pub(crate) fn stateless_contract_addresses(
         })
 }
 
-/// Loads one dependency while building a pool from a snapshot, fetching its code over RPC unless
-/// it is inline or already loaded.
+/// Loads one stateless dependency's code into the engine: `inline_code` when given; otherwise,
+/// unless the account is already loaded, `eth_getCode` over RPC, which blocks the current thread.
+/// `encoded` is resolved with [`resolve_stateless_address`] first.
 pub(crate) fn init_stateless_contract<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
-    encoded: &tycho_common::Bytes,
-    inline_code: Option<&tycho_common::Bytes>,
+    encoded: &[u8],
+    inline_code: Option<tycho_common::Bytes>,
 ) -> Result<(), SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -494,7 +497,7 @@ where
 {
     let address = resolve_stateless_address(engine, encoded)?;
     let code = match inline_code {
-        Some(code) => Bytecode::new_raw(code.to_vec().into()),
+        Some(code) => Bytecode::new_raw(code.0.into()),
         // Pools sharing a dependency would otherwise fetch it once each, only for
         // `init_account` to discard every copy after the first.
         None if is_loaded(&engine.state, address) => return Ok(()),
@@ -507,7 +510,7 @@ where
 /// `call:0x<target>:method()` directive, to the dependency's address.
 pub(crate) fn resolve_stateless_address<D: EngineDatabaseInterface + Clone + Debug>(
     engine: &SimulationEngine<D>,
-    encoded: &tycho_common::Bytes,
+    encoded: &[u8],
 ) -> Result<Address, SimulationError>
 where
     <D as DatabaseRef>::Error: Debug,

@@ -328,7 +328,7 @@ where
                 .updated_attributes
                 .get(&format!("stateless_contract_code_{index}"))
             {
-                Some(code) => insert_code(db, address, Bytecode::new_raw(code.to_vec().into()))?,
+                Some(code) => insert_code(db, address, Bytecode::new_raw(code.0.clone().into()))?,
                 None if is_loaded(db, address) => {}
                 None => {
                     return Err(SimulationError::FatalError(format!(
