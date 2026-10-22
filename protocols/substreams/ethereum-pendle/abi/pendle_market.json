@@ -1,0 +1,72 @@
+[
+  {
+    "type": "event",
+    "name": "Swap",
+    "anonymous": false,
+    "inputs": [
+      { "name": "caller", "type": "address", "indexed": true },
+      { "name": "receiver", "type": "address", "indexed": true },
+      { "name": "netPtOut", "type": "int256", "indexed": false },
+      { "name": "netSyOut", "type": "int256", "indexed": false },
+      { "name": "netSyFee", "type": "uint256", "indexed": false },
+      { "name": "netSyToReserve", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Mint",
+    "anonymous": false,
+    "inputs": [
+      { "name": "receiver", "type": "address", "indexed": true },
+      { "name": "netLpMinted", "type": "uint256", "indexed": false },
+      { "name": "netSyUsed", "type": "uint256", "indexed": false },
+      { "name": "netPtUsed", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Burn",
+    "anonymous": false,
+    "inputs": [
+      { "name": "receiverSy", "type": "address", "indexed": true },
+      { "name": "receiverPt", "type": "address", "indexed": true },
+      { "name": "netLpBurned", "type": "uint256", "indexed": false },
+      { "name": "netSyOut", "type": "uint256", "indexed": false },
+      { "name": "netPtOut", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "UpdateImpliedRate",
+    "anonymous": false,
+    "inputs": [
+      { "name": "timestamp", "type": "uint256", "indexed": true },
+      { "name": "lnLastImpliedRate", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "readTokens",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      { "name": "_SY", "type": "address" },
+      { "name": "_PT", "type": "address" },
+      { "name": "_YT", "type": "address" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "expiry",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "factory",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  }
+]

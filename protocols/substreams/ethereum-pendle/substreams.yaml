@@ -1,0 +1,236 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_pendle"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_pendle.wasm
+
+network: mainnet
+
+# initialBlock is the deployment block of the original market factory (0x27b1dAcd…0784);
+# the four later factories are all deployed after it.
+modules:
+  - name: map_market_components
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  # One SY backs several markets, so map_market_components re-emits it per market. This store
+  # only records first sight; its deltas are what map_protocol_components filters on.
+  - name: store_sy_seen
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_market_components
+
+  - name: map_protocol_components
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - map: map_market_components
+      - store: store_sy_seen
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  # Every market ever created, under one key. Refreshing the PY index has to enumerate the live
+  # markets on blocks where no Pendle log arrived, and a key-addressed store cannot be walked —
+  # so the set is a value, not a range of keys. See src/registry.rs.
+  - name: store_market_registry
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: store_protocol_components
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  # Every market a yield token backs, for routing its NewInterestIndex back to all of them.
+  - name: store_markets_by_yt
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  # Per token that keeps balances in shares (stETH and its forks, xStocks, Aave aTokens), its latest
+  # amount per share, from its Transfer / TransferShares pairs or its aToken events' index.
+  - name: store_share_ratios
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+
+  # Per such token, the SYs that keep their balance of it in shares, decided at their creation.
+  - name: store_share_holders
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+      - store: store_share_ratios
+
+  # The entry fee the sUSDat vault charges outside US market hours, and the timestamp it applies
+  # from, from the vault's events.
+  - name: store_entry_fee
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+
+  # The SYs whose deposits pay that fee.
+  - name: store_entry_fee_payers
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_protocol_components
+
+  - name: map_relative_component_balance
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+      - store: store_share_ratios
+      - store: store_share_holders
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: map_reserve_deltas
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  # SY classes, pause and supply cap, and each market's `sy_paused`: from creation and from the
+  # SY's Paused / Unpaused / Upgraded / SupplyCapUpdated events, so nothing here is read per block.
+  - name: map_sy_state
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_protocol_components
+      - store: store_market_registry
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  # pyIndexStored per market: seeded by an eth_call at creation, then advanced by the yield
+  # token's NewInterestIndex. It has to be carried, since refresh blocks have no such event.
+  - name: store_py_index
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - store: store_markets_by_yt
+
+  - name: store_balances
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_component_balance
+
+  # The shares behind each balance kept in shares, so a holding can be revalued when its token's
+  # ratio moves without the holding changing.
+  - name: store_share_balances
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_relative_component_balance
+      - store: store_share_holders
+
+  # Separate from store_balances: reserves are not the market's ERC-20 balances, since totalSy
+  # excludes donated excess that skim() later sweeps.
+  - name: store_market_reserves
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_reserve_deltas
+
+  # Which SYs have a rate-converted token, and so need their rate read without a live market.
+  - name: store_sy_rate_needed
+    kind: store
+    initialBlock: 16032059
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_sy_state
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 16032059
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_protocol_components
+      - map: map_relative_component_balance
+      - store: store_balances
+        mode: deltas
+      - map: map_reserve_deltas
+      - store: store_market_reserves
+        mode: deltas
+      - store: store_protocol_components
+      - store: store_market_registry
+      - store: store_py_index
+      - map: map_sy_state
+      - store: store_sy_rate_needed
+      - store: store_markets_by_yt
+      - store: store_share_ratios
+      - store: store_share_holders
+      - store: store_share_balances
+      - store: store_entry_fee
+      - store: store_entry_fee_payers
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+# sy_rate_refresh_blocks: how often SY.exchangeRate() is re-read. Live indexing wants 1. A
+# backfill from initialBlock (November 2022) issues one batched eth_call per refresh block, which
+# is the dominant cost of a historical sync, so raise it there — one refresh per ~50 blocks (~10
+# minutes) bounds the index error to well under the swap fee.
+params:
+  map_protocol_changes: "sy_rate_refresh_blocks=1"
