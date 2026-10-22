@@ -1831,4 +1831,308 @@ mod test {
             Err(CatchUpUnavailable::UnknownHash)
         );
     }
+
+    /// Checks catch-up paths over random block trees with nested reverts, evictions, journal
+    /// pruning and restarts. Unlike the histories `catch_up_properties` in `deltas_buffer.rs`
+    /// runs over, a chain here can return to a branch it left, re-adopting its blocks with the
+    /// same hashes. Every path the window answers must take the state at `from` to the state at
+    /// `to`.
+    mod random_block_trees {
+        use std::collections::BTreeMap;
+
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use tycho_common::models::protocol::ProtocolComponentStateDelta;
+
+        use super::*;
+
+        /// Block trees grown, one per seed.
+        const SEEDS: u64 = 300;
+        /// Blocks, reverts or restarts per tree.
+        const STEPS: usize = 200;
+        /// Random `(from, to)` pairs asked after every step.
+        const QUERIES_PER_STEP: usize = 20;
+        /// The one component every block writes to.
+        const COMPONENT: &str = "c";
+        /// Attributes of `COMPONENT`; the first block writes them all, later ones one or two.
+        const ATTRIBUTES: u64 = 4;
+        /// Blocks the finalized height trails the newest block by.
+        const FINALITY_DEPTH: u64 = 3;
+
+        /// `COMPONENT`'s attribute values, by name.
+        type State = BTreeMap<String, Bytes>;
+
+        /// A block the chain held at some point, with the state after it.
+        struct Node {
+            message: Arc<BlockAggregatedChanges>,
+            state: State,
+        }
+
+        /// How often each case occurs.
+        #[derive(Debug, Default)]
+        struct Coverage {
+            paths: usize,
+            paths_through_a_revert: usize,
+            readopted_blocks: usize,
+            restarts: usize,
+        }
+
+        fn written(message: &BlockAggregatedChanges) -> impl Iterator<Item = (&String, &Bytes)> {
+            message
+                .state_deltas
+                .get(COMPONENT)
+                .into_iter()
+                .flat_map(|delta| delta.updated_attributes.iter())
+        }
+
+        fn apply(state: &mut State, message: &BlockAggregatedChanges) {
+            for (name, value) in written(message) {
+                state.insert(name.clone(), value.clone());
+            }
+        }
+
+        fn writing(mut message: BlockAggregatedChanges, values: State) -> BlockAggregatedChanges {
+            message.state_deltas.insert(
+                COMPONENT.to_string(),
+                ProtocolComponentStateDelta {
+                    component_id: COMPONENT.to_string(),
+                    updated_attributes: values.into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+            message
+        }
+
+        struct BlockTree {
+            rng: StdRng,
+            window: DeltaWindow,
+            /// Every block the chain held, by hash.
+            nodes: HashMap<Bytes, Node>,
+            /// The children each block had, by parent hash.
+            children: HashMap<Bytes, Vec<Bytes>>,
+            /// The extractor's chain, oldest first, including blocks below the window.
+            chain: Vec<Bytes>,
+            hashes: u64,
+            finalized: u64,
+            coverage: Coverage,
+        }
+
+        impl BlockTree {
+            fn new(seed: u64) -> Self {
+                Self {
+                    rng: StdRng::seed_from_u64(seed),
+                    window: window(4, 1),
+                    nodes: HashMap::new(),
+                    children: HashMap::new(),
+                    chain: Vec::new(),
+                    hashes: 0,
+                    finalized: 0,
+                    coverage: Coverage::default(),
+                }
+            }
+
+            fn tip(&self) -> Option<&Node> {
+                self.chain
+                    .last()
+                    .map(|hash| &self.nodes[hash])
+            }
+
+            /// Inserts `message` and folds what became evictable, as the pump does.
+            fn pump(&mut self, message: &Arc<BlockAggregatedChanges>) {
+                self.window.insert(message).unwrap();
+                self.window
+                    .fold_evictable(&DiscardSink)
+                    .unwrap();
+            }
+
+            /// Extends the chain by half the time with a block it held before and left, with its
+            /// original message, else with a new block writing one or two attributes.
+            fn extend(&mut self) {
+                if let Some(tip) = self.tip() {
+                    let left = self
+                        .children
+                        .get(&tip.message.block.hash)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !left.is_empty() && self.rng.gen_bool(0.5) {
+                        let readopted = left[self.rng.gen_range(0..left.len())].clone();
+                        let message = Arc::clone(&self.nodes[&readopted].message);
+                        self.pump(&message);
+                        self.chain.push(readopted);
+                        self.coverage.readopted_blocks += 1;
+                        return;
+                    }
+                }
+                let (number, parent, mut state) = match self.tip() {
+                    Some(tip) => (
+                        tip.message.block.number + 1,
+                        tip.message.block.hash.clone(),
+                        tip.state.clone(),
+                    ),
+                    None => (1, Bytes::from(0u64).lpad(32, 0), State::new()),
+                };
+                self.hashes += 1;
+                let hash = Bytes::from(1_000_000 + self.hashes).lpad(32, 0);
+                let attributes: Vec<u64> = if number == 1 {
+                    (0..ATTRIBUTES).collect()
+                } else {
+                    (0..self.rng.gen_range(1..=2))
+                        .map(|_| self.rng.gen_range(0..ATTRIBUTES))
+                        .collect()
+                };
+                let mut values = State::new();
+                for attribute in attributes {
+                    // Unique per block and attribute, so a wrong path ends in a different state.
+                    values.insert(
+                        format!("a{attribute}"),
+                        Bytes::from(self.hashes * ATTRIBUTES + attribute),
+                    );
+                }
+                self.finalized = self
+                    .finalized
+                    .max(number.saturating_sub(FINALITY_DEPTH));
+                let committed = self
+                    .rng
+                    .gen_bool(0.7)
+                    .then_some(self.finalized);
+                let mut message = msg(number, self.finalized, committed);
+                message.block.hash = hash.clone();
+                message.block.parent_hash = parent.clone();
+                let message = Arc::new(writing(message, values));
+                apply(&mut state, &message);
+                self.nodes
+                    .insert(hash.clone(), Node { message: Arc::clone(&message), state });
+                self.children
+                    .entry(parent)
+                    .or_default()
+                    .push(hash.clone());
+                self.pump(&message);
+                self.chain.push(hash);
+            }
+
+            /// Reverts to a random held block above the irreversible height, restoring every
+            /// attribute the orphaned blocks wrote to its value at the target, as the extractor
+            /// does.
+            fn revert(&mut self) {
+                let (Some(oldest), Some(tip)) = (self.window.floor().map(|b| b.number), self.tip())
+                else {
+                    return;
+                };
+                let tip = tip.message.block.number;
+                let irreversible = match (self.window.finalized, self.window.db_committed) {
+                    (Some(finalized), Some(committed)) => finalized.min(committed),
+                    (Some(finalized), None) => finalized,
+                    (None, _) => 0,
+                };
+                let lowest = oldest.max(irreversible);
+                if lowest >= tip {
+                    return;
+                }
+                let target_number = self.rng.gen_range(lowest..tip);
+                // The chain holds every block from 1 up, so block `n` is at `n - 1`.
+                let target_index = target_number as usize - 1;
+                let target = &self.nodes[&self.chain[target_index]];
+                let mut restored = State::new();
+                for orphan in &self.chain[target_index + 1..] {
+                    for (name, _) in written(&self.nodes[orphan].message) {
+                        restored.insert(name.clone(), target.state[name].clone());
+                    }
+                }
+                let revert = BlockAggregatedChanges {
+                    revert: true,
+                    block: target.message.block.clone(),
+                    ..msg(target_number, self.finalized, None)
+                };
+                self.pump(&Arc::new(writing(revert, restored)));
+                self.chain.truncate(target_index + 1);
+            }
+
+            /// Restarts the extractor: the window folds its committed blocks and clears, and the
+            /// chain falls back to the last committed block, which the extractor replays from.
+            fn restart(&mut self) {
+                let Some(committed) = self.window.db_committed else {
+                    return;
+                };
+                self.window
+                    .fold_committed(&DiscardSink)
+                    .unwrap();
+                self.window.clear();
+                self.chain.truncate(committed as usize);
+                self.coverage.restarts += 1;
+            }
+
+            /// Asks the window for paths from random blocks the chain ever held to random blocks
+            /// the window holds, and applies every path it answers to the state at `from`.
+            fn query(&mut self) {
+                let held: Vec<Bytes> = self
+                    .window
+                    .buffer
+                    .iter()
+                    .map(|m| m.block.hash.clone())
+                    .collect();
+                if held.is_empty() {
+                    return;
+                }
+                let known: Vec<&Bytes> = self.nodes.keys().collect();
+                for _ in 0..QUERIES_PER_STEP {
+                    let from = &self.nodes[known[self.rng.gen_range(0..known.len())]];
+                    let to = &self.nodes[&held[self.rng.gen_range(0..held.len())]];
+                    let Ok(path) = self.window.catch_up_path(
+                        &from.message.block.hash,
+                        from.message.block.number,
+                        &to.message.block.hash,
+                    ) else {
+                        continue;
+                    };
+                    self.coverage.paths += 1;
+                    self.coverage.paths_through_a_revert +=
+                        usize::from(path.iter().any(|m| m.revert));
+                    let mut state = from.state.clone();
+                    for message in &path {
+                        apply(&mut state, message);
+                    }
+                    assert_eq!(
+                        state,
+                        to.state,
+                        "from {} to {}: path {:?}",
+                        from.message.block.hash,
+                        to.message.block.hash,
+                        steps(&path)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn every_answered_path_ends_in_the_state_at_to() {
+            let mut coverage = Coverage::default();
+            for seed in 0..SEEDS {
+                let mut tree = BlockTree::new(seed);
+                for _ in 0..STEPS {
+                    let roll: f64 = tree.rng.gen();
+                    if tree.chain.is_empty() || roll < 0.6 {
+                        tree.extend();
+                    } else if roll < 0.97 {
+                        tree.revert();
+                    } else {
+                        tree.restart();
+                    }
+                    tree.query();
+                }
+                coverage.paths += tree.coverage.paths;
+                coverage.paths_through_a_revert += tree.coverage.paths_through_a_revert;
+                coverage.readopted_blocks += tree.coverage.readopted_blocks;
+                coverage.restarts += tree.coverage.restarts;
+            }
+
+            let Coverage { paths, paths_through_a_revert, readopted_blocks, restarts } = &coverage;
+            for (case, count) in [
+                ("answered paths", paths),
+                ("paths through a revert", paths_through_a_revert),
+                ("re-adopted blocks", readopted_blocks),
+                ("restarts", restarts),
+            ] {
+                assert!(*count > 0, "no {case} in {coverage:?}");
+            }
+        }
+    }
 }
