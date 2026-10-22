@@ -21,85 +21,81 @@ pub fn map_components(
     Ok(BlockTransactionProtocolComponents { tx_components })
 }
 
-/// Skip unrelated transactions before allocating or sorting their storage writes.
-fn discovery_writes<'a>(
-    tx: &'a eth::v2::TransactionTrace,
-    config: &DeploymentConfig,
-) -> Vec<&'a eth::v2::StorageChange> {
-    let writes = tx
+/// The highest-ordinal write to each storage key: `(ordinal, new value)`.
+type LatestWrites<'a> = HashMap<&'a [u8], (u64, &'a [u8])>;
+
+fn keep_latest<'a>(writes: &mut LatestWrites<'a>, w: &'a eth::v2::StorageChange) {
+    let latest = writes
+        .entry(&w.key)
+        .or_insert((w.ordinal, &w.new_value));
+    if w.ordinal >= latest.0 {
+        *latest = (w.ordinal, &w.new_value);
+    }
+}
+
+/// Pairs initialized and registered with this Engine in the same committed transaction.
+///
+/// A Pair initialized in one transaction and registered in a later one is never discovered. That
+/// is a deployment assumption, not a property of the code: every Pair on Base so far was created
+/// in one transaction that sets the implementation and both token slots and writes the registry
+/// entry. Recheck it if Tessera deploys Pairs differently.
+fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<ProtocolComponent> {
+    let base_slot = slot(config.pair_base_token_slot);
+    let quote_slot = slot(config.pair_quote_token_slot);
+    let init_slots = [IMPLEMENTATION_SLOT.as_slice(), &base_slot, &quote_slot];
+    // Nested call order is not storage-write order, so the highest ordinal wins, including an
+    // Engine registry clear.
+    let mut registry = LatestWrites::new();
+    let mut candidates: BTreeMap<&[u8], LatestWrites> = BTreeMap::new();
+    for w in tx
         .calls
         .iter()
         .filter(|call| !call.state_reverted)
-        .flat_map(|call| &call.storage_changes);
-    if !writes
-        .clone()
-        .any(|write| write.address == config.engine)
+        .flat_map(|call| &call.storage_changes)
     {
-        return vec![];
-    }
-    let base_slot = slot(config.pair_base_token_slot);
-    let quote_slot = slot(config.pair_quote_token_slot);
-    let mut relevant: Vec<_> = writes
-        .filter(|write| {
-            // Keep all Engine writes so the last registry value wins, including clears.
-            write.address == config.engine ||
-                ((write.key == IMPLEMENTATION_SLOT ||
-                    write.key == base_slot ||
-                    write.key == quote_slot) &&
-                    zero(&write.old_value) &&
-                    !zero(&write.new_value))
-        })
-        .collect();
-    // Nested call order is not storage-write order.
-    relevant.sort_by_key(|write| write.ordinal);
-    relevant
-}
-
-/// Only an initialized proxy registered by this Engine in the same committed tx is a Pair.
-fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<ProtocolComponent> {
-    let writes = discovery_writes(tx, config);
-    let registry: HashMap<_, _> = writes
-        .iter()
-        .filter(|w| w.address == config.engine)
-        .map(|w| (&w.key, &w.new_value))
-        .collect();
-    if registry.is_empty() {
-        return vec![];
-    }
-    let base_slot = slot(config.pair_base_token_slot);
-    let quote_slot = slot(config.pair_quote_token_slot);
-    let mut candidates: BTreeMap<Vec<u8>, HashMap<Vec<u8>, Vec<u8>>> = BTreeMap::new();
-    for w in writes {
-        if (w.key == IMPLEMENTATION_SLOT || w.key == base_slot || w.key == quote_slot) &&
+        if w.address == config.engine {
+            keep_latest(&mut registry, w);
+        } else if init_slots.contains(&w.key.as_slice()) &&
             zero(&w.old_value) &&
             !zero(&w.new_value)
         {
-            candidates
-                .entry(w.address.clone())
-                .or_default()
-                .insert(w.key.clone(), w.new_value.clone());
+            keep_latest(
+                candidates
+                    .entry(&w.address)
+                    .or_default(),
+                w,
+            );
         }
+    }
+    if registry.is_empty() {
+        return vec![];
     }
     candidates
         .into_iter()
         .filter_map(|(pair, slots)| {
-            slots.get(IMPLEMENTATION_SLOT.as_slice())?;
-            let base = address(slots.get(&base_slot)?);
-            let quote = address(slots.get(&quote_slot)?);
+            if !slots.contains_key(IMPLEMENTATION_SLOT.as_slice()) {
+                return None;
+            }
+            let base = address(slots.get(base_slot.as_slice())?.1);
+            let quote = address(slots.get(quote_slot.as_slice())?.1);
             if zero(&base) || zero(&quote) || base == quote {
                 return None;
             }
             let key = registry_slot(&base, &quote, config.pair_map_slot);
-            if address(registry.get(&key)?) != pair {
+            if address(registry.get(key.as_slice())?.1) != pair {
                 return None;
             }
             let mut tokens = vec![base.clone(), quote.clone()];
             tokens.sort();
             let contained = json_serialize_address_list(&tokens);
             Some(
-                ProtocolComponent::new(&id(&pair))
+                ProtocolComponent::new(&id(pair))
                     .with_tokens(&tokens)
-                    .with_contracts(&[config.tesseraswap.clone(), config.engine.clone(), pair])
+                    .with_contracts(&[
+                        config.tesseraswap.clone(),
+                        config.engine.clone(),
+                        pair.to_vec(),
+                    ])
                     .with_attributes(&[
                         ("base_token", base.as_slice()),
                         ("quote_token", quote.as_slice()),
@@ -143,7 +139,7 @@ mod tests {
         }
     }
     #[test]
-    fn discovers_non_usdc_pair_and_uses_pair_id() {
+    fn discovers_registered_pair() {
         let result = discover(&transaction(), &config());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, id(&[4; 20]));
@@ -175,8 +171,22 @@ mod tests {
         assert!(discover(&tx, &config()).is_empty());
     }
     #[test]
-    fn registry_key_is_sorted_and_wrong_mapping_is_rejected() {
-        assert_eq!(registry_slot(&[5; 20], &[6; 20], 8), registry_slot(&[6; 20], &[5; 20], 8));
+    fn discovers_pair_whose_base_token_sorts_above_its_quote_token() {
+        // The Engine keys its registry by the sorted token pair: keccak256(abi.encode(0x0505…,
+        // 0x0606…)) at mapping slot 8, computed with `cast index`.
+        let key =
+            substreams::hex!("1015ebf4b5bba5d4765ea3c43a1df3370fc92a53197740322f1bf44963ef2c9f");
+        let mut tx = transaction();
+        let writes = &mut tx.calls[0].storage_changes;
+        writes[1].new_value = vec![6; 20];
+        writes[2].new_value = vec![5; 20];
+        writes[3].key = key.to_vec();
+        let result = discover(&tx, &config());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tokens, vec![vec![5; 20], vec![6; 20]]);
+    }
+    #[test]
+    fn wrong_registry_mapping_is_rejected() {
         let mut tx = transaction();
         tx.calls[0].storage_changes[3].key = slot(8);
         assert!(discover(&tx, &config()).is_empty());
@@ -184,24 +194,6 @@ mod tests {
     #[test]
     fn invalid_address_config_is_rejected() {
         assert!(DeploymentConfig::parse("tesseraswap=11").is_err());
-    }
-
-    #[test]
-    fn filters_unrelated_writes_and_transactions() {
-        let mut tx = transaction();
-        tx.calls[0]
-            .storage_changes
-            .extend((100..200).map(|key| eth::v2::StorageChange {
-                address: vec![9; 20],
-                key: slot(key),
-                old_value: vec![0; 32],
-                new_value: vec![1; 32],
-                ..Default::default()
-            }));
-        assert_eq!(discovery_writes(&tx, &config()).len(), 4);
-        assert_eq!(discover(&tx, &config()).len(), 1);
-        tx.calls[0].storage_changes.remove(3);
-        assert!(discovery_writes(&tx, &config()).is_empty());
     }
 
     #[test]
