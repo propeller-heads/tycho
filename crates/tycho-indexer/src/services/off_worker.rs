@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tycho_common::dto;
 
-use crate::services::{rpc::RpcError, state::shadow::Endpoint};
+use crate::services::{rpc::RpcError, state::shadow::Endpoint, thread_stats::SchedStat};
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
 /// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
@@ -123,7 +123,7 @@ impl EndpointPools {
 
 /// A bounded share of the blocking thread pool.
 struct Pool {
-    /// The `endpoint` and `step` labels of the `off_worker_permit_wait_ms` histogram.
+    /// The `endpoint` and `step` labels of the `off_worker_*` metrics.
     endpoint: Endpoint,
     step: &'static str,
     permits: Arc<Semaphore>,
@@ -136,7 +136,8 @@ impl Pool {
 
     /// Runs `work` on the blocking thread pool, in the caller's tracing span, once a permit is
     /// free, and returns its result. The job keeps its permit until `work` returns, also when the
-    /// caller stops waiting. The wait for the permit is recorded in `off_worker_permit_wait_ms`.
+    /// caller stops waiting. The wait for the permit is recorded in `off_worker_permit_wait_ms`,
+    /// and the job itself by [`record_job`].
     ///
     /// # Errors
     ///
@@ -157,14 +158,45 @@ impl Pool {
         )
         .record(wait_started.elapsed().as_secs_f64() * 1000.0);
         let span = tracing::Span::current();
+        let (endpoint, step) = (self.endpoint.label(), self.step);
         tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let before = SchedStat::current_thread();
             let result = span.in_scope(work);
+            let after = SchedStat::current_thread();
             drop(permit);
+            record_job(endpoint, step, started, before.zip(after));
             result
         })
         .await
         .map_err(|err| RpcError::Unknown(format!("Off-worker task failed: {err}")))
     }
+}
+
+/// Records one job that ran from `started` until now: its wall time in `off_worker_job_ms`, and,
+/// when the thread's counters before and after the job are known, its on-CPU time in
+/// `off_worker_job_cpu_ns_total` and its run-queue wait in `off_worker_job_runqueue_wait_ns_total`.
+/// A job runs on one blocking thread from start to end, so the thread's counters are the job's.
+fn record_job(
+    endpoint: &'static str,
+    step: &'static str,
+    started: Instant,
+    thread_stats: Option<(SchedStat, SchedStat)>,
+) {
+    metrics::histogram!("off_worker_job_ms", "endpoint" => endpoint, "step" => step)
+        .record(started.elapsed().as_secs_f64() * 1000.0);
+    let Some((before, after)) = thread_stats else {
+        return;
+    };
+    let used = after.since(before);
+    metrics::counter!("off_worker_job_cpu_ns_total", "endpoint" => endpoint, "step" => step)
+        .increment(used.cpu_ns);
+    metrics::counter!(
+        "off_worker_job_runqueue_wait_ns_total",
+        "endpoint" => endpoint,
+        "step" => step
+    )
+    .increment(used.runqueue_wait_ns);
 }
 
 /// An estimate of the JSON size of a response. Reads map and field lengths only, never map
