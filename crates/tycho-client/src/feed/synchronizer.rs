@@ -5067,6 +5067,85 @@ mod test {
         assert_eq!(*snapshot_blocks.lock().unwrap(), vec![6]);
     }
 
+    /// A resync the fingerprint forced, whose snapshot fails, leaves the consumer with the state
+    /// of the old fingerprint. The next subscription reports the new fingerprint again, and its
+    /// first block follows the consumer's last one: it must still resync, not resume.
+    #[test_log::test(tokio::test)]
+    async fn test_a_failed_resync_does_not_adopt_the_new_fingerprint() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                let mut recorded = recorded.lock().unwrap();
+                recorded.push(request.block_number);
+                if recorded.len() == 1 {
+                    return Err(RPCError::Fatal("snapshot endpoint unavailable".to_string()));
+                }
+                Ok(Snapshot::default())
+            });
+        let mut deltas_client = MockDeltasClient::new();
+        // The restarted, upgraded extractor sends block 6 on both subscriptions: the first
+        // subscription ends when its snapshot fails.
+        for _ in 0..2 {
+            let (tx, rx) = channel(1);
+            tx.try_send(make_block_changes(6, None))
+                .unwrap();
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let failed = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The snapshot fails");
+        let (_, Some(end_rx)) = *failed else {
+            panic!("The close signal was never sent");
+        };
+        assert!(block_rx.try_recv().is_err(), "A failed resync emits nothing");
+        let _ = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await;
+
+        let first = block_rx
+            .try_recv()
+            .expect("The second subscription emits block 6")
+            .expect("Should not be an error");
+        assert_eq!(first.header.number, 6);
+        assert_eq!(
+            *snapshot_blocks.lock().unwrap(),
+            vec![6, 6],
+            "The consumer still holds the old fingerprint's state, so block 6 must come with a \
+             snapshot"
+        );
+    }
+
     /// Runs a synchronizer through `start()` with a 5 s snapshot jitter. Its first subscription
     /// delivers blocks 1 and 2 under fingerprint 1, then ends. The second reports
     /// `second_fingerprint` and delivers block 3, which follows block 2, then a block per second.
