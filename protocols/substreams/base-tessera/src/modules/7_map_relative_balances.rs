@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use std::collections::{BTreeSet, HashSet};
 use substreams::{
     scalar::BigInt,
-    store::{StoreGet, StoreGetProto, StoreGetString},
+    store::{StoreGet, StoreGetArray, StoreGetProto, StoreGetRaw},
 };
 use substreams_ethereum::{pb::eth, Event};
 use tycho_substreams::{
@@ -60,17 +60,23 @@ trait BalanceSources {
 
 struct StoreSources<'a> {
     components: &'a StoreGetProto<ProtocolComponent>,
-    pair_store: &'a StoreGetString,
+    pair_store: &'a StoreGetArray<String>,
 }
 
 impl BalanceSources for StoreSources<'_> {
     fn pairs_for_token(&self, token: &[u8]) -> Vec<String> {
-        pairs(self.pair_store, &format!("token:{}", id(token)))
+        self.pair_store
+            .get_last(format!("token:{}", id(token)))
+            .unwrap_or_default()
     }
 
     fn pair_tokens(&self) -> BTreeSet<Vec<u8>> {
         let mut tokens = BTreeSet::new();
-        for pair in pairs(self.pair_store, "pairs") {
+        for pair in self
+            .pair_store
+            .get_last("pairs")
+            .unwrap_or_default()
+        {
             if let Some(c) = self.components.get_last(pair) {
                 tokens.extend(c.tokens);
             }
@@ -90,17 +96,15 @@ pub fn map_relative_balances(
     storage: BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     components: StoreGetProto<ProtocolComponent>,
-    pair_store: StoreGetString,
-    treasury_store: StoreGetString,
+    pair_store: StoreGetArray<String>,
+    safety_store: StoreGetRaw,
 ) -> Result<BlockBalanceDeltas> {
     let config = DeploymentConfig::parse(&params)?;
     // Balance RPCs read the closing block state, so seeds must use its closing custodian.
     // Rotation accounting below recovers the opening custodian from the first slot write.
-    let owner = treasury_store
+    let owner = safety_store
         .get_last("treasury")
-        .map(hex::decode)
-        .transpose()?
-        .unwrap_or(config.treasury.clone());
+        .unwrap_or_else(|| config.treasury.clone());
     let sources = StoreSources { components: &components, pair_store: &pair_store };
     let balance_deltas =
         balance_deltas_from_storage(&config, &block, &storage, new_components, &owner, &sources)?;
@@ -137,7 +141,7 @@ fn balance_deltas_from_storage(
     let old_owner = rotations
         .first()
         .map(|(_, w)| address(&w.old_value))
-        .unwrap_or(owner.to_vec());
+        .unwrap_or_else(|| owner.to_vec());
     let mut seeded = HashSet::new();
     let mut deltas = vec![];
     for group in new_components.tx_components {

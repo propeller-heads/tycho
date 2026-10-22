@@ -12,9 +12,6 @@ mod store_pairs;
 #[path = "4_map_storage_changes.rs"]
 pub(crate) mod map_storage_changes;
 
-#[path = "5_store_treasury.rs"]
-mod store_treasury;
-
 #[path = "6_store_safety.rs"]
 mod store_safety;
 

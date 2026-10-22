@@ -6,9 +6,9 @@ use tycho_substreams::prelude::*;
 pub fn store_pairs(map: BlockTransactionProtocolComponents, store: StoreAppend<String>) {
     for tx in map.tx_components {
         for c in tx.components {
-            store.append(0, "pairs", format!("{};", c.id));
+            store.append(0, "pairs", c.id.clone());
             for token in c.tokens {
-                store.append(0, format!("token:{}", id(&token)), format!("{};", c.id));
+                store.append(0, format!("token:{}", id(&token)), c.id.clone());
             }
         }
     }

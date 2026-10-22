@@ -1,7 +1,6 @@
 use crate::pb::tessera::v1::TransactionStorageChanges;
 use anyhow::{anyhow, Result};
 use keccak_hash::keccak;
-use substreams::store::{StoreGet, StoreGetString};
 
 pub const IMPLEMENTATION_SLOT: [u8; 32] =
     substreams::hex!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
@@ -30,15 +29,6 @@ pub fn registry_slot(a: &[u8], b: &[u8], base: u64) -> Vec<u8> {
     let mut mapping = keccak(pair).as_bytes().to_vec();
     mapping.extend(slot(base));
     keccak(mapping).as_bytes().to_vec()
-}
-pub fn pairs(store: &StoreGetString, key: &str) -> Vec<String> {
-    store
-        .get_last(key)
-        .unwrap_or_default()
-        .split(';')
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 /// Storage key for the write helper's integrator fee A[0], used by empty swapData.

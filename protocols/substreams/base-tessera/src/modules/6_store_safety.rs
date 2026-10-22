@@ -1,19 +1,22 @@
 use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageChanges};
 use std::collections::HashSet;
-use substreams::store::{StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetString};
+use substreams::store::{StoreGet, StoreGetArray, StoreNew, StoreSet, StoreSetRaw};
 #[cfg(test)]
 use substreams_ethereum::pb::eth;
 
-/// Persist fee-tag-0 and epoch signals even when the affected pair has no price update.
+/// Persist TesseraSwap's Engine and treasury, each Pair's write helper and the tag-0 fee words,
+/// even when the affected pair has no price update.
 #[substreams::handlers::store]
 pub fn store_safety(
     params: String,
     changes: BlockStorageChanges,
-    pairs: StoreGetString,
-    store: StoreSetString,
+    pair_store: StoreGetArray<String>,
+    store: StoreSetRaw,
 ) {
     let config = DeploymentConfig::parse(&params).expect("invalid deployment config");
-    let known: HashSet<_> = crate::common::pairs(&pairs, "pairs")
+    let known: HashSet<_> = pair_store
+        .get_last("pairs")
+        .unwrap_or_default()
         .into_iter()
         .collect();
     for (ordinal, key, value) in safety_writes(&config, &changes, &known) {
@@ -21,16 +24,17 @@ pub fn store_safety(
     }
 }
 
-/// Safety signals to persist from one block, as `(ordinal, key, value)`.
+/// Values to persist from one block, as `(ordinal, key, value)`.
 ///
 /// Produces each known pair's write-helper address under `helper:0x<pair>`, the tag-0 fee word
-/// of every address writing that mapping slot under `fee:0x<address>`, and the Engine held in
-/// TesseraSwap slot 0 under `engine`. Values are hex without `0x`.
+/// of every address writing that mapping slot under `fee:0x<address>`, and the Engine and
+/// treasury held in TesseraSwap slots 0 and 1 under `engine` and `treasury`. Values are raw
+/// bytes: 20-byte addresses and 32-byte fee words.
 fn safety_writes(
     config: &DeploymentConfig,
     changes: &BlockStorageChanges,
     known: &HashSet<String>,
-) -> Vec<(u64, String, String)> {
+) -> Vec<(u64, String, Vec<u8>)> {
     // Helper-owned A[0], not a Pair slot: keccak256(uint256(0) ++ uint256(1)).
     let fee_key = fee_tag_zero_slot();
     // Pair slot 52 links a Pair to the helper whose fee must be checked.
@@ -38,6 +42,7 @@ fn safety_writes(
     // TesseraSwap slot 0 links all Pairs to the Engine; replacement crosses our
     // configured discovery/state-indexing boundary and is evaluated by enforce_pauses.
     let engine_slot = slot(0);
+    let treasury_slot = slot(config.treasury_slot);
     let mut writes = vec![];
     for tx in &changes.transactions {
         for w in &tx.writes {
@@ -45,21 +50,17 @@ fn safety_writes(
                 writes.push((
                     w.ordinal,
                     format!("helper:{}", id(&w.address)),
-                    hex::encode(address(&w.new_value)),
+                    address(&w.new_value),
                 ));
-            }
-            // Remember this single candidate slot even before helper assignment.
-            // Otherwise an already-configured helper could be adopted with a nonzero
-            // tag-0 fee and look safe. No other candidate storage/code is indexed.
-            if w.key == fee_key.as_slice() {
-                writes.push((
-                    w.ordinal,
-                    format!("fee:{}", id(&w.address)),
-                    hex::encode(&w.new_value),
-                ));
-            }
-            if w.address == config.tesseraswap && w.key == engine_slot {
-                writes.push((w.ordinal, "engine".to_string(), hex::encode(address(&w.new_value))));
+            } else if w.key == fee_key.as_slice() {
+                // Remember this single candidate slot even before helper assignment.
+                // Otherwise an already-configured helper could be adopted with a nonzero
+                // tag-0 fee and look safe. No other candidate storage/code is indexed.
+                writes.push((w.ordinal, format!("fee:{}", id(&w.address)), w.new_value.clone()));
+            } else if w.address == config.tesseraswap && w.key == engine_slot {
+                writes.push((w.ordinal, "engine".to_string(), address(&w.new_value)));
+            } else if w.address == config.tesseraswap && w.key == treasury_slot {
+                writes.push((w.ordinal, "treasury".to_string(), address(&w.new_value)));
             }
         }
     }
@@ -145,7 +146,7 @@ mod tests {
             ),
             &known(),
         );
-        assert_eq!(writes, vec![(1, format!("helper:{}", id(&PAIR)), hex::encode(HELPER))]);
+        assert_eq!(writes, vec![(1, format!("helper:{}", id(&PAIR)), HELPER.to_vec())]);
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
             &block(vec![write(&STRANGER, fee_tag_zero_slot(), fee.clone(), 3)], false),
             &known(),
         );
-        assert_eq!(writes, vec![(3, format!("fee:{}", id(&STRANGER)), hex::encode(fee))]);
+        assert_eq!(writes, vec![(3, format!("fee:{}", id(&STRANGER)), fee)]);
     }
 
     #[test]
@@ -174,7 +175,24 @@ mod tests {
             ),
             &known(),
         );
-        assert_eq!(writes, vec![(4, "engine".to_string(), hex::encode(engine))]);
+        assert_eq!(writes, vec![(4, "engine".to_string(), engine.to_vec())]);
+    }
+
+    #[test]
+    fn records_treasury_only_from_tesseraswap_treasury_slot() {
+        let treasury = [0x34; 20];
+        let writes = safety_writes(
+            &config(),
+            &block(
+                vec![
+                    write(&config().tesseraswap, slot(1), word(&treasury), 7),
+                    write(&config().engine, slot(1), word(&treasury), 8),
+                ],
+                false,
+            ),
+            &known(),
+        );
+        assert_eq!(writes, vec![(7, "treasury".to_string(), treasury.to_vec())]);
     }
 
     #[test]

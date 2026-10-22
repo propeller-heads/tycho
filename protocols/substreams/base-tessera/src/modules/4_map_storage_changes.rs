@@ -1,19 +1,22 @@
 use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::*};
 use anyhow::Result;
 use std::collections::HashSet;
-use substreams::store::{StoreGet, StoreGetString};
+use substreams::store::{StoreGet, StoreGetArray};
 use substreams_ethereum::pb::eth;
 
 #[substreams::handlers::map]
 pub fn map_storage_changes(
     params: String,
     block: eth::v2::Block,
-    pair_store: StoreGetString,
+    pair_store: StoreGetArray<String>,
 ) -> Result<BlockStorageChanges> {
     let config = DeploymentConfig::parse(&params)?;
-    // get_last includes this block's discoveries. Downstream attribute emission separately
-    // checks creation transaction indices so an earlier transaction cannot update a new pair.
-    let known = pairs(&pair_store, "pairs")
+    // The pair list already holds the Pairs discovered in this block. Attribute emission
+    // downstream checks creation transaction indices, so an earlier transaction cannot
+    // update a new Pair.
+    let known = pair_store
+        .get_last("pairs")
+        .unwrap_or_default()
         .into_iter()
         .map(|pair| hex::decode(pair.trim_start_matches("0x")))
         .collect::<Result<HashSet<_>, _>>()?;

@@ -33,7 +33,7 @@ component; quotes come from executing Tessera's own bytecode in the Tycho VM.
 `map_storage_changes` runs after `store_pairs` and emits, per successful transaction, the
 committed writes owned by TesseraSwap, the Engine or a known Pair (including pairs created in
 the same block), plus the tag-0 fee slot at any address. Writes are sorted by execution
-ordinal. `store_treasury` and `store_safety` read only this map; `map_relative_balances` and
+ordinal. `store_safety` reads only this map; `map_relative_balances` and
 `map_protocol_changes` read it for storage writes and the block for logs and raw contract
 changes.
 

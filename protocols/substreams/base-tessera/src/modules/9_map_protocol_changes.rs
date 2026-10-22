@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use substreams::{
     pb::substreams::StoreDeltas,
-    store::{StoreGet, StoreGetProto, StoreGetString},
+    store::{StoreGet, StoreGetArray, StoreGetProto, StoreGetRaw},
 };
 use substreams_ethereum::pb::eth;
 use tycho_substreams::{
@@ -17,12 +17,12 @@ use tycho_substreams::{
 
 /// Safety signals recorded for the currently known pairs.
 struct Safety {
-    /// Engine last recorded in TesseraSwap slot 0, hex without `0x`.
-    engine: Option<String>,
-    /// Write helper of each pair, keyed by pair id, hex without `0x`.
-    helpers: HashMap<String, String>,
-    /// Tag-0 fee word of each write helper, keyed like the `helpers` values.
-    fees: HashMap<String, Vec<u8>>,
+    /// Engine last recorded in TesseraSwap slot 0.
+    engine: Option<Vec<u8>>,
+    /// Write helper address of each pair, keyed by pair id.
+    helpers: HashMap<String, Vec<u8>>,
+    /// Tag-0 fee word of each write helper, keyed by helper address.
+    fees: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 /// Store-derived state the block's changes are computed against.
@@ -55,21 +55,20 @@ pub fn map_protocol_changes(
     storage: BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
-    pair_store: StoreGetString,
-    treasury_store: StoreGetString,
-    safety_store: StoreGetString,
+    pair_store: StoreGetArray<String>,
+    safety_store: StoreGetRaw,
     component_store: StoreGetProto<ProtocolComponent>,
     balance_store: StoreDeltas,
 ) -> Result<BlockChanges> {
     let config = DeploymentConfig::parse(&params)?;
-    let known: HashSet<_> = pairs(&pair_store, "pairs")
+    let known: HashSet<_> = pair_store
+        .get_last("pairs")
+        .unwrap_or_default()
         .into_iter()
         .collect();
-    let owner = treasury_store
+    let owner = safety_store
         .get_last("treasury")
-        .map(hex::decode)
-        .transpose()?
-        .unwrap_or(config.treasury.clone());
+        .unwrap_or_else(|| config.treasury.clone());
     let safety = read_safety(&safety_store, &known);
     let registry = registry_slots(&config, &component_store, &known);
     let view = PairView { known, owner, safety, registry };
@@ -102,17 +101,14 @@ fn registry_slots(
 
 /// Closing-block engine, helper assignments and tag-0 fees for `known` pairs.
 /// These get_last reads are not an ordinal-by-ordinal reconstruction of safety state.
-fn read_safety(store: &StoreGetString, known: &HashSet<String>) -> Safety {
+fn read_safety(store: &StoreGetRaw, known: &HashSet<String>) -> Safety {
     let mut helpers = HashMap::new();
     let mut fees = HashMap::new();
     for pair in known {
         let Some(helper) = store.get_last(format!("helper:{pair}")) else {
             continue;
         };
-        if let Some(fee) = store
-            .get_last(format!("fee:0x{helper}"))
-            .and_then(|value| hex::decode(value).ok())
-        {
+        if let Some(fee) = store.get_last(format!("fee:{}", id(&helper))) {
             fees.insert(helper.clone(), fee);
         }
         helpers.insert(pair.clone(), helper);
@@ -322,17 +318,17 @@ fn enforce_pauses(
     // Always enforce persisted signals on emitted component updates. Fee-table writes can
     // occur without a Pair write, so include their transaction explicitly as a trigger.
     let fee_key = fee_tag_zero_slot();
-    let helpers: HashSet<&str> = view
+    let helpers: HashSet<&[u8]> = view
         .safety
         .helpers
         .values()
-        .map(String::as_str)
+        .map(Vec::as_slice)
         .collect();
     for group in &storage.transactions {
         if group
             .writes
             .iter()
-            .any(|w| w.key == fee_key && helpers.contains(hex::encode(&w.address).as_str()))
+            .any(|w| w.key == fee_key && helpers.contains(w.address.as_slice()))
         {
             let tx = storage_transaction(group)?;
             changes
@@ -347,7 +343,7 @@ fn enforce_pauses(
         .safety
         .engine
         .as_ref()
-        .is_some_and(|e| *e != hex::encode(&config.engine));
+        .is_some_and(|e| *e != config.engine);
     for (index, builder) in changes.iter_mut() {
         for pair in &view.known {
             if created
@@ -711,8 +707,8 @@ mod tests {
     fn pauses_only_the_pair_whose_helper_charges_tag_zero() {
         let safety = Safety {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), hex::encode(HELPER))]),
-            fees: HashMap::from([(hex::encode(HELPER), slot(10_000))]),
+            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
         };
         let block = block(vec![tx(
             0,
@@ -733,8 +729,8 @@ mod tests {
     fn zero_tag_zero_fee_does_not_pause() {
         let safety = Safety {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), hex::encode(HELPER))]),
-            fees: HashMap::from([(hex::encode(HELPER), vec![0; 32])]),
+            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), vec![0; 32])]),
         };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out =
@@ -745,7 +741,7 @@ mod tests {
 
     #[test]
     fn engine_replacement_pauses_every_pair() {
-        let safety = Safety { engine: Some(hex::encode([0x23; 20])), ..safe() };
+        let safety = Safety { engine: Some([0x23; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out =
             protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safety))
@@ -757,7 +753,7 @@ mod tests {
 
     #[test]
     fn unchanged_engine_does_not_pause() {
-        let safety = Safety { engine: Some(hex::encode([0x22; 20])), ..safe() };
+        let safety = Safety { engine: Some([0x22; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out =
             protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
@@ -769,8 +765,8 @@ mod tests {
     fn helper_fee_write_alone_emits_the_pause() {
         let safety = Safety {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), hex::encode(HELPER))]),
-            fees: HashMap::from([(hex::encode(HELPER), slot(10_000))]),
+            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
         };
         let block = block(vec![tx(
             3,
@@ -786,8 +782,8 @@ mod tests {
     fn fee_write_outside_assigned_helpers_emits_nothing() {
         let safety = Safety {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), hex::encode(HELPER))]),
-            fees: HashMap::from([(hex::encode(HELPER), slot(10_000))]),
+            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
         };
         let stranger = [0x0f; 20];
         let block =
