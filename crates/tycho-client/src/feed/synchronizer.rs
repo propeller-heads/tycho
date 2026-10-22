@@ -206,6 +206,12 @@ impl<H> StateSyncMessage<H>
 where
     H: HeaderLike,
 {
+    /// Merges `other`, a later message of the same stream, into this one.
+    ///
+    /// Where `other` snapshots a component, this message's state deltas, balances and TVL of that
+    /// component are dropped, and where `other` snapshots a contract (`vm_storage`), this
+    /// message's account deltas and balances of that contract: `other`'s snapshot already holds
+    /// every change up to its block.
     pub fn merge(mut self, other: Self) -> Self {
         // be careful with removed and snapshots attributes here, these can be ambiguous.
         self.removed_components
@@ -213,6 +219,17 @@ where
         self.snapshots
             .states
             .retain(|k, _| !other.removed_components.contains_key(k));
+        // Consumers apply a message's snapshots before its deltas, so an older delta merged into
+        // the same message would overwrite the newer snapshot.
+        if let Some(deltas) = self.deltas.as_mut() {
+            deltas.filter_by_component(|id| !other.snapshots.states.contains_key(id));
+            deltas.filter_by_contract(|address| {
+                !other
+                    .snapshots
+                    .vm_storage
+                    .contains_key(address)
+            });
+        }
 
         self.snapshots.extend(other.snapshots);
         let deltas = match (self.deltas, other.deltas) {
@@ -6173,6 +6190,134 @@ mod test {
         assert!(has_account_delta(&next, &contract_x()), "The traced contract is not tracked");
     }
 
+    /// Component1's attributes as a consumer that applies `messages` in order holds them, the way
+    /// tycho-simulation's decoder applies one message: removals, then snapshots, then deltas, which
+    /// it drops for a component it does not hold. `None` when it does not hold Component1.
+    fn consumer_component1(
+        messages: &[StateSyncMessage<BlockHeader>],
+    ) -> Option<HashMap<String, Bytes>> {
+        let mut held: Option<HashMap<String, Bytes>> = Some(HashMap::new());
+        for message in messages {
+            if message
+                .removed_components
+                .contains_key("Component1")
+            {
+                held = None;
+            }
+            if let Some(snapshot) = message
+                .snapshots
+                .states
+                .get("Component1")
+            {
+                held = Some(snapshot.state.attributes.clone());
+            }
+            let delta = message
+                .deltas
+                .as_ref()
+                .and_then(|deltas| deltas.state_deltas.get("Component1"));
+            if let (Some(attributes), Some(delta)) = (held.as_mut(), delta) {
+                attributes.extend(delta.updated_attributes.clone());
+                for name in &delta.deleted_attributes {
+                    attributes.remove(name);
+                }
+            }
+        }
+        held
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_a_caught_up_message_merged_with_a_later_snapshot_keeps_the_snapshot() {
+        // The client applied block 4, tracking Component1. While it was away, block 5 set x to
+        // 0x05; block 6 dropped Component1 below the TVL threshold and set x to 0x06; block 7
+        // lifted it above the threshold again, which starts a background snapshot at block 7.
+        let block_7 = BlockAggregatedChanges {
+            component_tvl: HashMap::from([("Component1".to_string(), 100.0)]),
+            ..make_block_changes(7, None)
+        };
+        let path = vec![
+            setting(make_block_changes(5, None), "x", "0x05"),
+            setting(block_dropping_tvl(6, "Component1"), "x", "0x06"),
+            block_7,
+        ];
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_delta_catch_up()
+            .return_once(move |_| Ok(DeltaCatchUp::Available(path)));
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        // The server's state at block 7 holds block 6's x.
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(request.block_number);
+                let mut snapshot = snapshot_of_requested(request);
+                for state in snapshot.states.values_mut() {
+                    state
+                        .state
+                        .attributes
+                        .insert("x".to_string(), Bytes::from("0x06"));
+                }
+                Ok(snapshot)
+            });
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(make_block_changes(8, None))
+            .await
+            .unwrap();
+        let caught_up = sync.next().await;
+        timeout(Duration::from_secs(1), async {
+            while snapshot_blocks
+                .lock()
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("The background snapshot should be requested");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        deltas_tx
+            .send(make_block_changes(9, None))
+            .await
+            .unwrap();
+        let next = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![7]);
+        assert!(next
+            .snapshots
+            .states
+            .contains_key("Component1"));
+        let expected = Some(attributes(&[("x", "0x06")]));
+        // A consumer that receives the two messages one by one holds block 6's x.
+        assert_eq!(consumer_component1(&[caught_up.clone(), next.clone()]), expected);
+        // A stream that lags the others gets its queued messages merged by the BlockSynchronizer,
+        // which must not put the caught-up message's x of block 5 on top of the snapshot.
+        let merged = caught_up.merge(next);
+        assert_eq!(
+            consumer_component1(&[merged]),
+            expected,
+            "A stale delta overrides the snapshot"
+        );
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_catch_up_stops_tracking_a_component_a_missed_block_drops() {
         // Block 6, the second missed block, drops Component1 below the TVL threshold.
@@ -7621,5 +7766,128 @@ mod test {
         assert_eq!(account.native_balance, Bytes::from("0x20"));
         // Code updated
         assert_eq!(account.code, Bytes::from("0x0c0d"));
+    }
+
+    /// Block `number`, which sets attribute x, a token balance and the TVL of each of
+    /// `components`, and a slot and a token balance of each of `contracts`, all to `number`.
+    fn block_changing(
+        number: u64,
+        components: &[&str],
+        contracts: &[&Bytes],
+    ) -> BlockAggregatedChanges {
+        use tycho_common::models::{contract::AccountBalance, protocol::ComponentBalance};
+
+        let token = Bytes::from("0xbeef");
+        let value = Bytes::from(vec![number as u8]);
+        let mut block = make_block_changes(number, None);
+        for &component in components {
+            block.state_deltas.insert(
+                component.to_string(),
+                ProtocolComponentStateDelta::new(
+                    component,
+                    HashMap::from([("x".to_string(), value.clone())]),
+                    HashSet::new(),
+                ),
+            );
+            let balance = ComponentBalance::new(
+                token.clone(),
+                value.clone(),
+                number as f64,
+                Bytes::default(),
+                component,
+            );
+            block
+                .component_balances
+                .insert(component.to_string(), HashMap::from([(token.clone(), balance)]));
+            block
+                .component_tvl
+                .insert(component.to_string(), number as f64);
+        }
+        for &contract in contracts {
+            block.account_deltas.insert(
+                contract.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    contract.clone(),
+                    HashMap::from([(Bytes::from("0x01"), Some(value.clone()))]),
+                    None,
+                    None,
+                    ChangeType::Update,
+                ),
+            );
+            let balance = AccountBalance::new(
+                contract.clone(),
+                token.clone(),
+                value.clone(),
+                Bytes::default(),
+            );
+            block
+                .account_balances
+                .insert(contract.clone(), HashMap::from([(token.clone(), balance)]));
+        }
+        block
+    }
+
+    #[test]
+    fn test_merge_drops_the_older_deltas_of_what_the_later_message_snapshots() {
+        let snapshotted_contract = Bytes::from("0xc0ffee");
+        let other_contract = Bytes::from("0xdead");
+        let older = StateSyncMessage {
+            header: header_of(&make_block_changes(5, None)),
+            deltas: Some(block_changing(
+                5,
+                &["Component1", "Component2"],
+                &[&snapshotted_contract, &other_contract],
+            )),
+            ..Default::default()
+        };
+        // The later message snapshots Component1 and one of the contracts, and sets Component1's
+        // y, which the older message did not change.
+        let component1 = ProtocolComponent { id: "Component1".to_string(), ..Default::default() };
+        let snapshots = Snapshot {
+            states: HashMap::from([(
+                "Component1".to_string(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        "Component1",
+                        HashMap::from([("x".to_string(), Bytes::from("0x06"))]),
+                        HashMap::new(),
+                    ),
+                    component: component1,
+                    component_tvl: Some(6.0),
+                    entrypoints: vec![],
+                },
+            )]),
+            vm_storage: HashMap::from([(
+                snapshotted_contract.clone(),
+                Account::new(
+                    Chain::Ethereum,
+                    snapshotted_contract.clone(),
+                    String::new(),
+                    HashMap::from([(Bytes::from("0x01"), Bytes::from("0x06"))]),
+                    Bytes::default(),
+                    HashMap::new(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    None,
+                ),
+            )]),
+        };
+        let later = StateSyncMessage {
+            header: header_of(&make_block_changes(6, None)),
+            snapshots: snapshots.clone(),
+            deltas: Some(setting(make_block_changes(6, None), "y", "0x06")),
+            removed_components: HashMap::new(),
+        };
+
+        let merged = older.merge(later);
+
+        assert_eq!(merged.header, header_of(&make_block_changes(6, None)));
+        assert_eq!(merged.snapshots, snapshots);
+        let kept_of_the_older = block_changing(5, &["Component2"], &[&other_contract]);
+        let expected = kept_of_the_older.merge(setting(make_block_changes(6, None), "y", "0x06"));
+        assert_eq!(merged.deltas, Some(expected));
     }
 }

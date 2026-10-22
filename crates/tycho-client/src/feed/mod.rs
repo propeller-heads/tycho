@@ -3091,6 +3091,95 @@ mod tests {
             })
     }
 
+    /// A lagging stream's first message after a delta catch-up stops tracking Component1 and
+    /// still carries the x a missed block set before that; its next message carries Component1's
+    /// background snapshot, which holds a later x. The merged message must not apply the older x
+    /// on top of the snapshot.
+    #[test(tokio::test)]
+    async fn test_lagging_merge_drops_an_older_delta_of_a_snapshotted_component() {
+        use tycho_common::models::protocol::{
+            ProtocolComponent, ProtocolComponentState, ProtocolComponentStateDelta,
+        };
+
+        use crate::feed::synchronizer::ComponentWithState;
+
+        let (v2, v3, nanny, mut rx) = setup_block_sync().await;
+        advance_both(&v2, &v3, &mut rx, header_message(2)).await;
+        v2.send_header(header_message(3))
+            .await
+            .expect("v2 send failed");
+        receive_message(&mut rx).await;
+
+        let component = ProtocolComponent { id: "Component1".to_string(), ..Default::default() };
+        let mut caught_up = header_message(3);
+        caught_up.deltas = Some(BlockAggregatedChanges {
+            state_deltas: HashMap::from([(
+                "Component1".to_string(),
+                ProtocolComponentStateDelta::new(
+                    "Component1",
+                    HashMap::from([("x".to_string(), Bytes::from("0x05"))]),
+                    HashSet::new(),
+                ),
+            )]),
+            ..Default::default()
+        });
+        caught_up.removed_components =
+            HashMap::from([("Component1".to_string(), component.clone())]);
+        let mut next = header_message(4);
+        next.deltas = Some(BlockAggregatedChanges::default());
+        next.snapshots.states.insert(
+            "Component1".to_string(),
+            ComponentWithState {
+                state: ProtocolComponentState::new(
+                    "Component1",
+                    HashMap::from([("x".to_string(), Bytes::from("0x06"))]),
+                    HashMap::new(),
+                ),
+                component,
+                component_tvl: None,
+                entrypoints: vec![],
+            },
+        );
+        v3.send_header(caught_up)
+            .await
+            .expect("v3 send failed");
+        v3.send_header(next)
+            .await
+            .expect("v3 send failed");
+        v2.send_header(header_message(4))
+            .await
+            .expect("v2 send failed");
+
+        let mut delivered = None;
+        for _ in 0..3 {
+            let feed = receive_message(&mut rx).await;
+            if let Some(msg) = feed.state_msgs.get("uniswap-v3") {
+                if msg
+                    .snapshots
+                    .states
+                    .contains_key("Component1")
+                {
+                    delivered = Some(msg.clone());
+                    break;
+                }
+            }
+        }
+        let delivered = delivered.expect("The snapshot never reached the feed");
+        shutdown_block_synchronizer(nanny, rx).await;
+
+        assert!(
+            delivered.removed_components.is_empty(),
+            "The caught-up and the next message were not merged"
+        );
+        let stale = delivered
+            .deltas
+            .as_ref()
+            .and_then(|deltas| deltas.state_deltas.get("Component1"))
+            .and_then(|delta| delta.updated_attributes.get("x"))
+            .cloned();
+        assert_eq!(stale, None, "The merged message overrides the snapshot's x with an older one");
+    }
+
     /// A lagging stream catches up on two blocks, and the second one introduces a token. The
     /// catch-up merges both messages, and the merged message must still carry the token.
     #[test(tokio::test)]
