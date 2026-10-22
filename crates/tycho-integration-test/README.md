@@ -99,9 +99,9 @@ blocklist, next to the tests. About every `N` blocks (at least 50), each of its 
 its next 10 messages and ends, so the client resubscribes having missed those blocks. A server with
 the delta catch-up endpoint lets the client apply the missed blocks without a snapshot. The client
 falls back to a snapshot when the server can't serve them, when a reorg replaced a block the client
-had delivered, or when the first message after the gap is a revert: revert messages don't restore
-everything yet, so the client doesn't catch up through one. A reorg of blocks the client never
-delivered still lets it catch up.
+had delivered, or when the first message above the last block it delivered is a revert: revert
+messages don't restore everything yet, so the client doesn't catch up through one. A reorg of
+blocks the client never delivered still lets it catch up.
 
 When a protocol has recovered, the check compares the state the client holds for it with a snapshot
 of the same components at the same block: component attributes and balances, and the storage,
@@ -152,8 +152,8 @@ cargo run --package tycho-integration-test -- \
 - **The check proves nothing unless `outcome="caught_up"` grows.** If only `outcome="snapshot"`
   grows, the client never catches up: the server or its gateway does not serve the catch-up endpoint,
   the server cannot serve the gap, or at every gap a reorg replaced a block the client had delivered
-  or the first message after the gap was a revert. `tycho-client` logs the reason at info or warn
-  (`Delta catch-up not possible` / `Delta catch-up failed`, target
+  or the first message above the last block it delivered was a revert. `tycho-client` logs the
+  reason at info or warn (`Delta catch-up not possible` / `Delta catch-up failed`, target
   `tycho_client::feed::synchronizer`), and the server counts `delta_catch_up_responses` by
   extractor and outcome. A high share of unchanged recoveries also means the gaps prove little.
 - **`result="mismatch"` with `resync="caught_up"`** means the state after a catch-up differs from the
