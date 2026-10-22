@@ -43,6 +43,8 @@ services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
   off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
+  thread_stats.rs           Per-thread CPU and run-queue wait from /proc schedstat; reporter of CPU per thread group
+  worker_lag.rs             Poll-lag probe on each actix request worker
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
@@ -59,6 +61,7 @@ services/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
     compression.rs          Zstd response compression
     metrics.rs              RPC request metrics
+    response_metrics.rs     MeteredBody: times and sizes response bodies after compression
     pagination.rs           Request pagination validation
 
 substreams/                 gRPC client for Substreams streaming API (stream.rs)
@@ -203,6 +206,33 @@ count moved during it.
 `--entity-cache-shadow-sample-rate` (default 0.0) sets the share. Metrics:
 `entity_cache_shadow_comparisons_total{endpoint,outcome}`,
 `entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
+
+## Request CPU and wait metrics
+
+These metrics say where request handling spends CPU and time. Durations are summaries in ms;
+`*_ns_total` are counters in ns, meant for `rate()`.
+
+- `off_worker_job_ms{endpoint, step}`, `off_worker_job_cpu_ns_total{endpoint, step}` and
+  `off_worker_job_runqueue_wait_ns_total{endpoint, step}`: wall time, on-CPU time and run-queue
+  wait of each off-worker job (`step` = `build` or `serialize`), next to
+  `off_worker_permit_wait_ms`.
+- `rpc_response_body_bytes{endpoint}`: body size before compression.
+- `rpc_response_body_ms`, `rpc_response_encode_wait_ms` and `rpc_response_wire_bytes`, all
+  `{endpoint, encoding}`: per response after `Compress`, from the first poll of the body to its
+  end, the part of it spent waiting for the compression job, and the bytes sent.
+  `rpc_response_aborted_total{endpoint}` counts bodies dropped before their end.
+- `tycho_thread_cpu_ns_total{group}`, `tycho_thread_runqueue_wait_ns_total{group}` and
+  `tycho_threads{group}`, sampled every 5 s. `rpc_blocking` (tokio's default thread name) holds
+  the request workers' blocking pools, where off-worker jobs and compression run, so compression
+  CPU ≈ `rpc_blocking` CPU − off-worker job CPU. The extraction and main runtimes have their own
+  thread names for this.
+- `rpc_worker_poll_lag_ms`: how late a 100 ms sleep on a request worker wakes.
+- From `tycho-storage`: `db_pool_wait_ms{pool, op}` and `db_conn_hold_ms{pool, op}` (`pool` =
+  `rpc` or `extraction`), plus `db_pool_connections{pool, state}` and `db_pool_waiting{pool}`.
+  The hold time includes the row decoding the caller does while it holds the connection.
+
+`rpc_request_duration_seconds` records ms despite its name, and ends when the handler returns:
+it covers neither compression nor sending the body.
 
 ## Connections
 
