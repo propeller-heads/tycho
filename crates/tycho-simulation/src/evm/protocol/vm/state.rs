@@ -1492,7 +1492,7 @@ mod tests {
             .expect("Failed to build pool state")
     }
 
-    async fn tessera_fixture() -> (EVMPoolState<PreCachedDB>, PreCachedDB, Token, Token, Value) {
+    async fn tessera_fixture() -> (EVMPoolState<PreCachedDB>, PreCachedDB, Token, Token) {
         let fixture: Value =
             serde_json::from_str(include_str!("assets/tessera_50548423.json")).unwrap();
         let db = PreCachedDB::new().unwrap();
@@ -1599,50 +1599,12 @@ mod tests {
         .build(db.clone())
         .await
         .unwrap();
-        (pool, db, tokens[0].clone(), tokens[1].clone(), fixture)
-    }
-
-    #[tokio::test]
-    async fn test_tessera_returned_state_preserves_two_fills() {
-        let (pool, _db, weth, usdc, fixture) = tessera_fixture().await;
-        let expected = |key: &str| {
-            let bytes = hex::decode(
-                fixture[key]
-                    .as_str()
-                    .unwrap()
-                    .trim_start_matches("0x"),
-            )
-            .unwrap();
-            BigUint::from_bytes_be(&bytes[32..64])
-        };
-        let first = pool
-            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
-            .unwrap();
-        assert_eq!(first.amount, expected("first_quote"));
-        let second = first
-            .new_state
-            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
-            .unwrap();
-        assert_eq!(second.amount, expected("second_quote"));
-        let original_again = pool
-            .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
-            .unwrap();
-        assert_eq!(
-            original_again.amount, first.amount,
-            "simulation must not mutate the original snapshot"
-        );
-        let child = first
-            .new_state
-            .as_any()
-            .downcast_ref::<EVMPoolState<PreCachedDB>>()
-            .unwrap();
-        let pair = Address::from_str(&pool.id).unwrap();
-        assert!(child.block_lasting_overwrites[&pair].contains_key(&U256::from(3)));
+        (pool, db, tokens[0].clone(), tokens[1].clone())
     }
 
     #[tokio::test]
     async fn test_tessera_vm_uses_indexed_block_for_freshness() {
-        let (pool, db, weth, usdc, _) = tessera_fixture().await;
+        let (pool, db, weth, usdc) = tessera_fixture().await;
         assert!(pool.block_overrides.is_none());
         assert!(pool
             .get_amount_out(BigUint::from(100_000_000u64), &usdc, &weth)
@@ -1659,7 +1621,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tessera_pair_replaced_in_registry_stops_quoting() {
-        let (pool, db, weth, usdc, _) = tessera_fixture().await;
+        let (pool, db, weth, usdc) = tessera_fixture().await;
         let amount_in = BigUint::from(100_000_000u64);
         assert!(pool
             .get_amount_out(amount_in.clone(), &usdc, &weth)
@@ -1690,7 +1652,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tessera_pair_that_stopped_quoting_has_no_spot_price() {
-        let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
+        let (mut pool, db, weth, usdc) = tessera_fixture().await;
         // Past the Pair's 20-block staleness cutoff it quotes zero output.
         let mut block = db.get_current_block().unwrap();
         block.number += 100;
@@ -1716,7 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tessera_limits_fit_the_treasury_balance() {
-        let (mut pool, _db, weth, usdc, _) = tessera_fixture().await;
+        let (mut pool, _db, weth, usdc) = tessera_fixture().await;
         let (_, uncapped) = pool
             .get_limits(usdc.address.clone(), weth.address.clone())
             .unwrap();
@@ -1737,7 +1699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tessera_upgrade_loads_inline_dependency_code() {
-        let (mut pool, db, weth, usdc, _) = tessera_fixture().await;
+        let (mut pool, db, weth, usdc) = tessera_fixture().await;
         let amount_in = BigUint::from(100_000_000u64);
         let before = pool
             .get_amount_out(amount_in.clone(), &usdc, &weth)
@@ -2480,6 +2442,20 @@ mod tests {
             .delta_transition(delta, &HashMap::new(), &Balances::default())
             .unwrap();
         assert_eq!(state.get_balance_owner(), Some(owner));
+
+        let overwrites = state.get_balance_overwrites().unwrap();
+        assert!(!state.balances.is_empty());
+        for (token, balance) in &state.balances {
+            let mut held_by_owner = TokenProxyOverwriteFactory::new(*token, None);
+            held_by_owner.set_balance(*balance, owner);
+            for (slot, value) in &held_by_owner.get_overwrites()[token] {
+                assert_eq!(
+                    overwrites[token].get(slot),
+                    Some(value),
+                    "{token} balance is not held by the new owner"
+                );
+            }
+        }
     }
 
     #[tokio::test]

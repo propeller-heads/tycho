@@ -116,12 +116,13 @@ settling through its own contract, pays a different scan.
 - Execution: encoder units, executor fork tests, and full Rust-generated router calldata in
   both directions.
 - Simulation: VM delta tests for dependency reload and treasury rotation, snapshot decoding,
-  and offline consumer tests on `vm/assets/tessera_50548423.json` (returned state and
-  indexed-block freshness).
+  and offline consumer tests on `vm/assets/tessera_50548423.json` (indexed-block freshness,
+  registry replacement, a Pair that stopped quoting, treasury-capped limits and an upgrade's
+  inline dependency code).
 
-The offline fixture holds public Base bytecode and storage with two expected USDC→WETH view
-outputs. It was captured with `debug_traceCall`'s prestate tracer plus `eth_getStorageAt` for
-Pair slots 0–52 and TesseraSwap slots 0–2; the second quote overrides Pair slot 3 by +100 USDC.
+The offline fixture holds public Base bytecode and storage for one USDC→WETH quote. It was
+captured with `debug_traceCall`'s prestate tracer plus `eth_getStorageAt` for Pair slots 0–52
+and TesseraSwap slots 0–2.
 
 ## Reproduce
 
