@@ -53,6 +53,7 @@ const deploy_protocols = {
         "aerodrome_v1",
         "native_wrapper",
         "lunarbase",
+        "biconomy",
         "rfq:metric",
         "rfq:native",
         "fallback",
