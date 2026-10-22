@@ -4614,24 +4614,30 @@ plans:
         assert_eq!(response, available(&[&revert]));
     }
 
-    #[test]
-    async fn test_delta_catch_up_without_state_drops_the_state_updates() {
+    /// `message` with a slot of an account and a balance of component `c1`, besides its state
+    /// delta.
+    fn with_account_and_balance(mut message: BlockAggregatedChanges) -> BlockAggregatedChanges {
         let address = Bytes::from(1u64).lpad(20, 0);
-        let mut with_state = catch_up_block(2);
-        with_state.account_deltas.insert(
+        message.account_deltas.insert(
             address.clone(),
             AccountDelta::new(
                 Chain::Ethereum,
                 address,
-                fixtures::optional_slots([(1, 2)]),
+                fixtures::optional_slots([(1, message.block.number)]),
                 None,
                 None,
                 ChangeType::Update,
             ),
         );
-        with_state
+        message
             .component_balances
             .insert("c1".to_string(), HashMap::new());
+        message
+    }
+
+    #[test]
+    async fn test_delta_catch_up_without_state_drops_the_state_updates() {
+        let with_state = with_account_and_balance(catch_up_block(2));
         let handler =
             catch_up_handler(PlansConfig::default(), &[catch_up_block(1), with_state.clone()]);
         let request = dto::DeltaCatchUpRequestBody {
@@ -4657,6 +4663,71 @@ plans:
         };
         assert_eq!(message, &expected);
         assert!(!message.component_balances.is_empty(), "only state updates are dropped");
+    }
+
+    #[test]
+    async fn test_delta_catch_up_without_state_drops_the_state_updates_of_a_revert() {
+        // The client has 3, and its new subscription starts after the window reverted to 2.
+        let blocks: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let revert = with_account_and_balance(catch_up_revert(2));
+        let mut messages = blocks.clone();
+        messages.push(revert.clone());
+        let handler = catch_up_handler(PlansConfig::default(), &messages);
+        let request = dto::DeltaCatchUpRequestBody {
+            include_state: false,
+            ..catch_up_request(&blocks[2], &blocks[1])
+        };
+
+        let response = handler
+            .catch_up
+            .answer(&request)
+            .unwrap();
+
+        let without_state = dto::BlockAggregatedChanges {
+            state_updates: HashMap::new(),
+            account_updates: HashMap::new(),
+            ..revert.into()
+        };
+        assert!(
+            without_state.revert &&
+                !without_state
+                    .component_balances
+                    .is_empty()
+        );
+        assert_eq!(
+            response,
+            dto::DeltaCatchUpRequestResponse::Available { messages: vec![without_state] }
+        );
+    }
+
+    /// Block `number` of `uniswap_v2`, setting attribute `x` of component `u1` to `number`.
+    fn uniswap_v2_block(number: u64) -> BlockAggregatedChanges {
+        testing::with_state_delta(
+            testing::aggregated_changes("uniswap_v2", number, 0, None),
+            "u1",
+            number,
+        )
+    }
+
+    #[test]
+    async fn test_delta_catch_up_answers_from_the_window_of_the_requested_extractor() {
+        // Both extractors run on Ethereum, so their blocks share hashes. `uniswap_v2` is a block
+        // ahead of `ambient` and changes another component.
+        let ambient: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let uniswap_v2: Vec<_> = (1..=4).map(uniswap_v2_block).collect();
+        let handler =
+            catch_up_handler(PlansConfig::default(), &[ambient, uniswap_v2.clone()].concat());
+        let request = dto::DeltaCatchUpRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            ..catch_up_request(&uniswap_v2[0], &uniswap_v2[3])
+        };
+
+        let response = handler
+            .catch_up
+            .answer(&request)
+            .unwrap();
+
+        assert_eq!(response, available(&[&uniswap_v2[1], &uniswap_v2[2], &uniswap_v2[3]]));
     }
 
     #[rstest]
