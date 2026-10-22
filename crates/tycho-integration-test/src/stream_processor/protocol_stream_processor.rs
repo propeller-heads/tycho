@@ -109,6 +109,33 @@ fn validated_tvl_overrides<'a>(
     Ok(thresholds)
 }
 
+/// Returns each protocol in `protocols` with its TVL filter, in the same order. A protocol named in
+/// `overrides` takes its threshold from there, any other one takes `tvl_threshold`. Each filter
+/// adds components at its threshold and removes them below the threshold divided by
+/// `tvl_buffer_ratio`.
+///
+/// # Errors
+/// Returns an error if `overrides` names a protocol twice, or names a protocol that is not in
+/// `protocols`.
+pub fn tvl_filters(
+    protocols: &[String],
+    tvl_threshold: f64,
+    tvl_buffer_ratio: f64,
+    overrides: &[ProtocolTvlThreshold],
+) -> miette::Result<Vec<(String, ComponentFilter)>> {
+    let tvl_overrides = validated_tvl_overrides(overrides, protocols)?;
+    let mut filters = Vec::with_capacity(protocols.len());
+    for protocol in protocols {
+        let threshold = tvl_overrides
+            .get(protocol.as_str())
+            .copied()
+            .unwrap_or(tvl_threshold);
+        let filter = ComponentFilter::with_tvl_range(threshold / tvl_buffer_ratio, threshold);
+        filters.push((protocol.clone(), filter));
+    }
+    Ok(filters)
+}
+
 pub struct ProtocolStreamProcessor {
     chain: Chain,
     tycho_url: String,
@@ -241,21 +268,18 @@ impl ProtocolStreamProcessor {
             None => Self::default_protocols(self.chain),
         };
         info!("Building protocol stream for protocols: {:?}", protocols_to_enable);
-        let tvl_overrides =
-            validated_tvl_overrides(&self.protocol_tvl_thresholds, &protocols_to_enable)?;
-        if !tvl_overrides.is_empty() {
-            info!("TVL threshold overrides: {:?}", tvl_overrides);
+        let tvl_filters = tvl_filters(
+            &protocols_to_enable,
+            self.tvl_threshold,
+            self.tvl_buffer_ratio,
+            &self.protocol_tvl_thresholds,
+        )?;
+        if !self.protocol_tvl_thresholds.is_empty() {
+            info!("TVL threshold overrides: {:?}", self.protocol_tvl_thresholds);
         }
 
-        for protocol in &protocols_to_enable {
-            let threshold = tvl_overrides
-                .get(protocol.as_str())
-                .copied()
-                .unwrap_or(self.tvl_threshold);
-            let tvl_filter =
-                ComponentFilter::with_tvl_range(threshold / self.tvl_buffer_ratio, threshold);
-            protocol_stream =
-                self.add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
+        for (protocol, tvl_filter) in &tvl_filters {
+            protocol_stream = self.add_protocol_to_stream(protocol_stream, protocol, tvl_filter)?;
         }
         for (protocol_system, provider) in &self.override_providers {
             protocol_stream =
@@ -663,5 +687,31 @@ mod tests {
         let err = validated_tvl_overrides(&overrides, &enabled(&["lunarbase"])).unwrap_err();
 
         assert!(err.to_string().contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn tvl_filters_use_an_override_only_for_its_protocol() {
+        let filters = tvl_filters(
+            &enabled(&["uniswap_v3", "lunarbase", "uniswap_v2"]),
+            100.0,
+            2.0,
+            &[threshold("lunarbase", 10.0)],
+        )
+        .unwrap();
+
+        // `ComponentFilter` has no `PartialEq`; its `Debug` shows the TVL range.
+        let range = |filter: &ComponentFilter| format!("{filter:?}");
+        let global = range(&ComponentFilter::with_tvl_range(50.0, 100.0));
+        assert_eq!(
+            filters
+                .iter()
+                .map(|(protocol, filter)| (protocol.as_str(), range(filter)))
+                .collect::<Vec<_>>(),
+            [
+                ("uniswap_v3", global.clone()),
+                ("lunarbase", range(&ComponentFilter::with_tvl_range(5.0, 10.0))),
+                ("uniswap_v2", global),
+            ]
+        );
     }
 }

@@ -29,7 +29,7 @@ use rand::{prelude::IndexedRandom, seq::SliceRandom};
 use tokio::{signal, sync::Semaphore};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState};
+use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
@@ -62,7 +62,7 @@ use crate::{
     stream_processor::{
         book_stream_processor::BookStreamProcessor,
         price_level_stream_processor::PriceLevelStreamProcessor,
-        protocol_stream_processor::{ProtocolStreamProcessor, ProtocolTvlThreshold},
+        protocol_stream_processor::{tvl_filters, ProtocolStreamProcessor, ProtocolTvlThreshold},
         StreamUpdate, StreamUpdatePayload,
     },
 };
@@ -466,21 +466,27 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let mut catch_up_check_handle = match cli.force_catch_up_every_n_blocks {
         Some(every_n_blocks) => {
             info!(every_n_blocks, "Starting the catch-up check");
+            let protocols = cli
+                .protocols
+                .clone()
+                .unwrap_or_else(|| ProtocolStreamProcessor::default_protocols(chain));
+            // The protocol stream's filters, blocklist included.
+            let blocklist = default_blocklist();
+            let protocols = tvl_filters(
+                &protocols,
+                tvl_threshold,
+                cli.tvl_buffer_ratio,
+                &cli.protocol_tvl_thresholds,
+            )?
+            .into_iter()
+            .map(|(protocol, filter)| (protocol, filter.blocklist(blocklist.clone())))
+            .collect();
             let config = CatchUpCheckConfig {
                 chain,
                 tycho_url: cli.tycho_url.clone(),
                 api_key: cli.tycho_api_key.clone(),
                 no_tls: cli.no_tls,
-                protocols: cli
-                    .protocols
-                    .clone()
-                    .unwrap_or_else(|| ProtocolStreamProcessor::default_protocols(chain)),
-                // The protocol stream's filter, blocklist included.
-                component_filter: ComponentFilter::with_tvl_range(
-                    tvl_threshold / cli.tvl_buffer_ratio,
-                    tvl_threshold,
-                )
-                .blocklist(default_blocklist()),
+                protocols,
                 every_n_blocks,
             };
             Some(catch_up_check::spawn(config))

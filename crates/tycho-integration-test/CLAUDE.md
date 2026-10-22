@@ -85,7 +85,8 @@ catch-up endpoint to prove anything.
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls
 - **`metrics.rs`**: Prometheus metrics (served on `--metrics-port`, default 9898)
 - **`catch_up_check/`**: The delta catch-up check (`--force-catch-up-every-n-blocks`, at least
-  50). Runs its own stream of the protocol stream's protocols, TVL filter and blocklist:
+  50). Runs its own stream of the protocol stream's protocols, TVL filters (built by the same
+  `protocol_stream_processor::tvl_filters`, `--protocol-tvl-thresholds` included) and blocklist:
   `ProtocolStateSynchronizer`s under a `BlockSynchronizer`, wired like `TychoStreamBuilder::build`
   (`StreamTiming` copies the private `TychoStreamBuilder::default_timing`) but over a `GapInjector`
   - `gap_injector.rs`: `GapInjector`, a `DeltasClient` wrapper that forwards each subscription

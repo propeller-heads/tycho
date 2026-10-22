@@ -94,14 +94,15 @@ cargo run --package tycho-integration-test -- \
 ## Catch-up check
 
 `--force-catch-up-every-n-blocks N` checks `tycho-client`'s delta catch-up against the live server.
-It runs a second stream of the same protocols, with the protocol stream's TVL filter and component
-blocklist, next to the tests. About every `N` blocks (at least 50), each of its subscriptions drops
-its next 10 messages and ends, so the client resubscribes having missed those blocks. A server with
-the delta catch-up endpoint lets the client apply the missed blocks without a snapshot. The client
-falls back to a snapshot when the server can't serve them, when a reorg replaced a block the client
-had delivered, or when the first message above the last block it delivered is a revert: revert
-messages don't restore everything yet, so the client doesn't catch up through one. A reorg of
-blocks the client never delivered still lets it catch up.
+It runs a second stream of the same protocols, each with the TVL filter the protocol stream gives it
+(`--protocol-tvl-thresholds` included) and the same component blocklist, next to the tests. About
+every `N` blocks (at least 50), each of its subscriptions drops its next 10 messages and ends, so
+the client resubscribes having missed those blocks. A server with the delta catch-up endpoint lets
+the client apply the missed blocks without a snapshot. The client falls back to a snapshot when the
+server can't serve them, when a reorg replaced a block the client had delivered, or when the first
+message above the last block it delivered is a revert: revert messages don't restore everything yet,
+so the client doesn't catch up through one. A reorg of blocks the client never delivered still lets
+it catch up.
 
 When a protocol has recovered, the check compares the state the client holds for it with a snapshot
 of the same components at the same block: component attributes and balances, and the storage,

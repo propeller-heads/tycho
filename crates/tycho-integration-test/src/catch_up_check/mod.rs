@@ -1,14 +1,14 @@
 //! Forces a `tycho-client` stream to resubscribe after missing blocks, and checks the state it
 //! holds afterwards against a snapshot of the same components at the same block.
 //!
-//! The check runs a stream of its own for the protocol stream's protocols: one
-//! `ProtocolStateSynchronizer` per protocol under a `BlockSynchronizer`, wired like
-//! `TychoStreamBuilder::build` but over a [`GapInjector`]. Every `every_n_blocks` blocks, each
-//! subscription drops its next [`GAP_BLOCKS`] messages and ends. The synchronizers resubscribe
-//! having missed those blocks, which they catch up on through the server's delta catch-up
-//! endpoint, or recover from with a snapshot when the server cannot serve them, when a reorg
-//! replaced a block they had delivered, or when the first message above the last block they
-//! delivered is a revert.
+//! The check runs a stream of its own for the protocol stream's protocols, each with the component
+//! filter the protocol stream gives it: one `ProtocolStateSynchronizer` per protocol under a
+//! `BlockSynchronizer`, wired like `TychoStreamBuilder::build` but over a [`GapInjector`]. Every
+//! `every_n_blocks` blocks, each subscription drops its next [`GAP_BLOCKS`] messages and ends. The
+//! synchronizers resubscribe having missed those blocks, which they catch up on through the
+//! server's delta catch-up endpoint, or recover from with a snapshot when the server cannot serve
+//! them, when a reorg replaced a block they had delivered, or when the first message above the
+//! last block they delivered is a revert.
 //!
 //! Every resubscription is classified, forced or not. After each recovery of a protocol that
 //! tracks components, the state held for it is compared with a snapshot of its components at that
@@ -89,8 +89,8 @@ pub struct CatchUpCheckConfig {
     pub tycho_url: String,
     pub api_key: String,
     pub no_tls: bool,
-    pub protocols: Vec<String>,
-    pub component_filter: ComponentFilter,
+    /// The protocols to stream, each with its component filter.
+    pub protocols: Vec<(String, ComponentFilter)>,
     pub every_n_blocks: u64,
 }
 
@@ -112,15 +112,8 @@ pub fn spawn(config: CatchUpCheckConfig) -> JoinHandle<miette::Report> {
 async fn start(
     config: CatchUpCheckConfig,
 ) -> miette::Result<(CatchUpCheck, Feed, JoinHandle<Result<(), DeltasError>>)> {
-    let CatchUpCheckConfig {
-        chain,
-        tycho_url,
-        api_key,
-        no_tls,
-        protocols,
-        component_filter,
-        every_n_blocks,
-    } = config;
+    let CatchUpCheckConfig { chain, tycho_url, api_key, no_tls, protocols, every_n_blocks } =
+        config;
     let (ws_scheme, rpc_scheme) = if no_tls { ("ws", "http") } else { ("wss", "https") };
     let ws_client = WsDeltasClient::new_with_reconnects(
         &format!("{ws_scheme}://{tycho_url}"),
@@ -147,7 +140,10 @@ async fn start(
 
     let (resubscriptions_sender, resubscriptions) = mpsc::unbounded_channel();
     let (deltas, trigger) = GapInjector::new(ws_client, GAP_BLOCKS, resubscriptions_sender);
-    let requested: HashSet<String> = protocols.iter().cloned().collect();
+    let requested: HashSet<String> = protocols
+        .iter()
+        .map(|(protocol, _)| protocol.clone())
+        .collect();
     let dci_protocols = ProtocolSystemsInfo::fetch(&sync_rpc, chain, &requested)
         .await
         .dci_protocols;
@@ -160,12 +156,12 @@ async fn start(
     // The defaults `TychoStreamBuilder` passes.
     let (retrieve_balances, include_snapshots, include_tvl, compression) =
         (true, true, false, true);
-    for protocol in &protocols {
-        let extractor = ExtractorIdentity::new(chain, protocol);
+    for (protocol, component_filter) in protocols {
+        let extractor = ExtractorIdentity::new(chain, &protocol);
         let synchronizer = ProtocolStateSynchronizer::new(
             extractor.clone(),
             retrieve_balances,
-            component_filter.clone(),
+            component_filter,
             u64::MAX,
             SYNC_RETRY_COOLDOWN,
             include_snapshots,
@@ -175,7 +171,7 @@ async fn start(
             deltas.clone(),
             block_time + latency,
         )
-        .with_dci(dci_protocols.contains(protocol));
+        .with_dci(dci_protocols.contains(&protocol));
         block_sync = block_sync.register_synchronizer(extractor, synchronizer);
     }
 
