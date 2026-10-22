@@ -54,22 +54,26 @@ TychoStreamBuilder (stream.rs)
    message.
    When the first candidate message `T` does not follow the last synced block, the synchronizer
    tries delta catch-up before the snapshot delay starts, if `may_resume` holds, the subscription
-   reported a fingerprint and partial-block mode is off. `catch_up_path` asks
-   `get_delta_catch_up` for the messages from the last synced block to `T`'s parent (to `T`'s own
-   block when `T` is a revert), with the subscription's fingerprint and `include_state =
-   include_snapshots`, bounded by the synchronizer's `timeout` but at least `MIN_CATCH_UP_TIMEOUT`
-   (10 s; the RPC client waits 120 s before retrying a 502/503/504). A close signal ends the
-   synchronizer while the request is in flight. `check_catch_up_path` verifies the whole answer
-   before anything runs through `handle_block`: every message is of the subscription's extractor
-   and chain; each block's parent is the block reached so far and its number is one higher; a
-   revert moves back to a lower target block, which must be the block the walk passed at that
-   height when it passed one (the last synced block included); and the walk ends at the target
-   (so an empty path only when the last synced block is the target, and a path may end with a
-   revert to it). `apply_catch_up` then runs each message, then `T`, through `handle_block` and
-   merges the results into one message with `T`'s header, which leaves like any first message
-   (setting `last_synced_block` and `synced_fingerprint`). Any failure is logged once with a
-   `CatchUpSkipped` reason, at warn for an RPC error or an answer that is not a path to the
-   target and at info otherwise, and takes the snapshot path, delay included.
+   reported a fingerprint, partial-block mode is off and `T` is not a revert. `catch_up_path` asks
+   `get_delta_catch_up` for the messages from the last synced block to `T`'s parent, with the
+   subscription's fingerprint and `include_state = include_snapshots`, bounded by the synchronizer's
+   `timeout` but at least `MIN_CATCH_UP_TIMEOUT` (10 s; the RPC client waits 120 s before retrying a
+   502/503/504). A close signal ends the synchronizer while the request is in flight.
+   `check_catch_up_path` verifies the whole answer before anything runs through `handle_block`:
+   every message is of the subscription's extractor and chain; each block's parent is the block
+   reached so far and its number is one higher; a revert moves back to a lower target block, which
+   must be the block the walk passed at that height when it passed one (the last synced block
+   included); and the walk ends at the target (so an empty path only when the last synced block is
+   the target, and a path may end with a revert to it). A verified path that contains a revert falls
+   back too. Revert messages don't restore native balances, code, tokens, TVL or DCI data, and can
+   restore attributes wrongly, so for now a client that missed a reorg resyncs from a snapshot; once
+   reverts restore everything, dropping the two revert checks in `catch_up_path` lets catch-up run
+   through them (a revert `T` then needs the path to its own block). `apply_catch_up` then runs each
+   message, then `T`, through `handle_block` and merges the results into one message with `T`'s
+   header, which leaves like any first message (setting `last_synced_block` and
+   `synced_fingerprint`). Any failure is logged once with a `CatchUpSkipped` reason, at warn for an
+   RPC error or an answer that is not a path to the target and at info otherwise, and takes the
+   snapshot path, delay included.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
    tracked component) and cannot catch up, the synchronizer discards deltas for a random delay in
    `[0, snapshot_jitter]` (default `DEFAULT_SNAPSHOT_JITTER`, 60 s; at least

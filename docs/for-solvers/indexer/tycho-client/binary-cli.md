@@ -142,7 +142,7 @@ For extended explanation on how each parameter works, check our [#usage](./#usag
 
 ### Snapshot jitter
 
-When the Tycho server or one of its extractors restarts, every client reconnects at the same moment. When its next block doesn't follow the last one it delivered, the client first tries to catch up on the blocks it missed from the server, as the [Rust client page](rust-client.md#snapshot-jitter) describes. When it can't, or when an extractor upgrade changed the extractor fingerprint, it requests a new snapshot, and to spread the load it first waits a random time between 0 and `--snapshot-jitter` seconds. The client discards deltas during the wait and takes the snapshot at the next block. The default is 60 seconds and the minimum is 5 seconds.
+When the Tycho server or one of its extractors restarts, every client reconnects at the same moment. When its next block doesn't follow the last one it delivered, the client first tries to catch up on the blocks it missed from the server, as the [Rust client page](rust-client.md#snapshot-jitter) describes. When it can't, for example after a chain reorganization, or when an extractor upgrade changed the extractor fingerprint, it requests a new snapshot, and to spread the load it first waits a random time between 0 and `--snapshot-jitter` seconds. The client discards deltas during the wait and takes the snapshot at the next block. The default is 60 seconds and the minimum is 5 seconds.
 
 The first start has no delay. A restart that continues from the next expected block or catches up, or a stream with `--no-state`, requests no snapshot and has no delay. To shorten the wait, set a lower value:
 
