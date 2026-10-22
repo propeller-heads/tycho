@@ -561,7 +561,7 @@ class DeltaCatchUp:
     lets the client continue without a snapshot, and only when none of its messages is a
     revert: revert messages don't restore everything the reverted blocks changed yet, so the
     Rust client resyncs from a snapshot instead. It also resyncs, without asking, when the new
-    subscription's first message is a revert."""
+    subscription's first message above the last block it delivered is a revert."""
 
     class Available(BaseModel):
         """The missed messages, in order, each exactly as the WebSocket sent it to a full-block
