@@ -42,19 +42,24 @@ changes.
 | Dependency | How it is followed | Assumption |
 | --- | --- | --- |
 | TesseraSwap | Fixed address, raw state/code | Slot 0 is Engine, slot 1 is treasury, swap/view ABI |
-| Engine | Fixed address, raw state/code | Sorted-token registry mapping at slot 8, registration in the discovery transaction |
-| Pair implementation | EIP-1967 slot → attribute 0 + code | Pair proxy template, token slots 48/49 |
+| Engine | Fixed address, raw state/code | Sorted-token registry mapping at slot 8, registration in the discovery transaction; `getTesseraPool`, `swapAmountView` and `fastPullBlock` ABI, compiled into the adapter |
+| Pair implementation | EIP-1967 slot → attribute 0 + code | Pair proxy template, token slots 48/49; `poolState()`, `baseToken()` and `quoteToken()` ABI and the `poolState()` layout, compiled into the adapter from the SDK Tessera provides |
 | Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
 | Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
 | Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge; adapter constructor argument | Standard ERC20 and canonical WETH events; a rotation needs a new adapter runtime, or limits are capped by the old treasury |
-| Adapter | Pair `poolState()` and token getters, Engine `getTesseraPool`, `swapAmountView` and `fastPullBlock` | ABI and fill rules from the SDK Tessera provides; the contracts are unverified; the Engine and treasury are constructor arguments |
 
 A component is marked `paused` when its write helper's tag-0 fee is nonzero (the VM loads the
 helper's code but not its storage, so it would read that fee as zero), and every component is
 paused once TesseraSwap points to a different Engine. A Pair is also paused when an Engine
-registry write moves its token pair to another Pair or clears it. The safety store records the
-tag-0 fee slot at every address from genesis, so a helper that was configured before assignment
-is still caught. `paused` is never cleared. Consumers do not act on `paused` yet.
+registry write moves its token pair to another Pair or clears it. `paused` is never cleared.
+Consumers do not act on `paused` yet.
+
+The safety store records the tag-0 fee slot at every address from block 37,518,600, so a helper
+configured before it is assigned is still caught. A fee set before that block is not recorded and
+reads as zero; the current helper was deployed later, at 48,160,230. The store covers every
+address because helper assignments are themselves derived from `map_storage_changes`, so no
+module before it knows which addresses are helpers. The cost is a few forwarded writes per block
+from other contracts with the same mapping layout, such as Uniswap V4's PoolManager.
 
 TesseraSwap routes by token pair, not by Pair address, so a Pair the registry no longer points at
 would quote and settle against its successor. The adapter therefore checks
