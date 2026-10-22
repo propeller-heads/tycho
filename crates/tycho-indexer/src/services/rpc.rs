@@ -1694,7 +1694,7 @@ mod tests {
         services::state::{
             cache::EntityCache,
             shadow::{testing::moved_comparisons, Sampler},
-            window::{new_windows, DeltaWindow, FoldSink, WindowConfig},
+            window::{new_windows, CatchUpPath, DeltaWindow, FoldSink, WindowConfig},
         },
         testing::{self, evm_contract_slots, MockGateway},
     };
@@ -1740,6 +1740,14 @@ mod tests {
                 f: &dyn Fn(&BlockAggregatedChanges) -> bool,
                 protocol_system: &'a str,
             ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+
+            fn catch_up_path<'a>(
+                &self,
+                protocol_system: &'a str,
+                from: &'a Bytes,
+                from_number: u64,
+                to: &'a Bytes,
+            ) -> Result<CatchUpPath, PendingDeltasError>;
         }
     }
 

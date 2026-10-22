@@ -37,6 +37,10 @@
 //! with it the process. The one recovery is an extractor restart: the extractor replays every
 //! block above its database cursor, so the pump folds the committed blocks with
 //! [`DeltaWindow::fold_committed`], clears the window, and lets the replay refill it.
+//!
+//! Next to its blocks, the window keeps a [`RevertJournal`] of the revert messages it applied.
+//! With both, [`DeltaWindow::catch_up_path`] tells a client that missed messages which ones to
+//! apply to get from its last block to a block the window holds, reverts included.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,13 +56,16 @@ use tycho_common::{
         blockchain::{Block, BlockAggregatedChanges},
         contract::{AccountBalance, AccountDelta},
         protocol::{ComponentBalance, ProtocolComponentStateDelta},
-        Address,
+        Address, BlockHash,
     },
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
-use crate::extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer};
+use crate::{
+    extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer},
+    services::state::revert_journal::RevertJournal,
+};
 
 /// Receives blocks evicted from a [`DeltaWindow`].
 pub(crate) trait FoldSink: Send + Sync {
@@ -129,6 +136,27 @@ pub(crate) enum WindowResolution {
     AboveTip,
 }
 
+/// Why a window cannot serve the messages between two blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CatchUpUnavailable {
+    /// The window holds no block: at startup, or right after the extractor restarted.
+    EmptyWindow,
+    /// `from` is older than the parent of the window's oldest block.
+    BelowFloor,
+    /// `from` is not a block the window holds, was orphaned by no revert the window still
+    /// remembers, and is not the parent of the window's oldest block.
+    UnknownHash,
+    /// `to` is not a canonical block in the window.
+    ToNotInWindow,
+    /// The walk from `from` reaches the window's chain after `to`: the client received a revert
+    /// the window has not applied yet.
+    ToNotAhead,
+}
+
+/// The messages that take a client from one block to another, oldest first, or why a window
+/// cannot serve them.
+pub(crate) type CatchUpPath = Result<Vec<Arc<BlockAggregatedChanges>>, CatchUpUnavailable>;
+
 /// One block's changes to a component, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ComponentChange {
@@ -174,6 +202,9 @@ pub(crate) struct DeltaWindow {
     /// runs under the same lock as the insert or the clear that makes it due. Two equal readings
     /// mean the window did not change in between.
     generation: u64,
+    /// The revert messages applied to `buffer`, kept while their target can still anchor a
+    /// catch-up path. Pruned on eviction and emptied on clear.
+    journal: RevertJournal,
 }
 
 impl DeltaWindow {
@@ -186,6 +217,7 @@ impl DeltaWindow {
             db_committed: None,
             finalized: None,
             generation: 0,
+            journal: RevertJournal::default(),
         }
     }
 
@@ -197,8 +229,9 @@ impl DeltaWindow {
     /// Applies one full-block message to the window.
     ///
     /// Regular messages must extend the buffered chain; revert messages purge the abandoned
-    /// blocks. No folding or eviction happens here — see [`DeltaWindow::fold_evictable`]. The
-    /// caller filters partial-block messages.
+    /// blocks and are journaled with them. No folding or eviction happens here — see
+    /// [`DeltaWindow::fold_evictable`]. The caller filters partial-block messages, reverts
+    /// included: the window holds full blocks only.
     ///
     /// # Errors
     ///
@@ -231,10 +264,11 @@ impl DeltaWindow {
         Ok(())
     }
 
-    /// Purges every block after the revert target. Errors when the purge would remove a block at
-    /// or below `min(finalized, db_committed)`: the database may hold rows from the abandoned
-    /// branch, and persisted state is never rolled back. Watermarks stay as they are.
-    fn revert_to(&mut self, message: &BlockAggregatedChanges) -> Result<(), StorageError> {
+    /// Purges every block after the revert target and journals the revert with the blocks it
+    /// orphaned. Errors when the purge would remove a block at or below `min(finalized,
+    /// db_committed)`: the database may hold rows from the abandoned branch, and persisted state
+    /// is never rolled back. Watermarks stay as they are.
+    fn revert_to(&mut self, message: &Arc<BlockAggregatedChanges>) -> Result<(), StorageError> {
         let target = message.block.number;
         let irreversible = match (self.finalized, self.db_committed) {
             (Some(finalized), Some(committed)) => Some(finalized.min(committed)),
@@ -247,8 +281,11 @@ impl DeltaWindow {
                 irreversible.unwrap_or_default()
             )));
         }
-        self.buffer
+        let orphaned = self
+            .buffer
             .purge(message.block.hash.clone())?;
+        self.journal
+            .record(Arc::clone(message), &orphaned);
         Ok(())
     }
 
@@ -314,11 +351,12 @@ impl DeltaWindow {
             .set(newest.block.number as f64);
     }
 
-    /// Empties the window and forgets both watermarks. The configuration stays. The next
-    /// inserted block starts a new chain, whatever its parent.
+    /// Empties the window and its revert journal, and forgets both watermarks. The configuration
+    /// stays. The next inserted block starts a new chain, whatever its parent.
     pub(crate) fn clear(&mut self) {
         self.generation += 1;
         self.buffer = ReorgBuffer::new();
+        self.journal.clear();
         self.db_committed = None;
         self.finalized = None;
     }
@@ -356,6 +394,9 @@ impl DeltaWindow {
         if let Some(height) = folded_upto {
             self.buffer
                 .drain_blocks_until(height + 1)?;
+            if let Some(oldest) = self.buffer.oldest() {
+                self.journal.prune(oldest.block.number);
+            }
         }
         outcome
     }
@@ -458,6 +499,84 @@ impl DeltaWindow {
             .get_block_range(None, Some(BlockNumberOrTimestamp::Number(upto)))?
             .cloned()
             .collect())
+    }
+
+    /// The messages a client must apply, in order, to get from block `from` to block `to`: the
+    /// same full-block and revert messages the extractor broadcast. Only the `Arc`s are copied,
+    /// so a caller holds the window lock just for this and builds its response after releasing
+    /// it.
+    ///
+    /// | `from`                                  | Path                                        |
+    /// |-----------------------------------------|---------------------------------------------|
+    /// | A block the window holds                | The blocks in `(from, to]`                  |
+    /// | Orphaned by a journaled revert          | That revert, then the path from its target  |
+    /// | The parent of the window's oldest block | The blocks from the oldest one up to `to`   |
+    ///
+    /// A revert target that was orphaned in turn continues through the revert that orphaned it.
+    /// The path is empty when `from` is `to`, and holds only reverts when the walk from `from`
+    /// ends at `to`. `from_number` is the number of `from`; it only tells
+    /// [`CatchUpUnavailable::BelowFloor`] apart from [`CatchUpUnavailable::UnknownHash`].
+    ///
+    /// # Errors
+    ///
+    /// The checks run in this order:
+    /// 1. [`CatchUpUnavailable::EmptyWindow`] when the window holds no block.
+    /// 2. [`CatchUpUnavailable::ToNotInWindow`] when the window does not hold `to`.
+    /// 3. [`CatchUpUnavailable::BelowFloor`] when the walk from `from` gets stuck and `from_number`
+    ///    is below the parent of the oldest block, else [`CatchUpUnavailable::UnknownHash`].
+    /// 4. [`CatchUpUnavailable::ToNotAhead`] when the walk reaches the window's chain after `to`.
+    pub(crate) fn catch_up_path(
+        &self,
+        from: &BlockHash,
+        from_number: u64,
+        to: &BlockHash,
+    ) -> CatchUpPath {
+        let Some(oldest) = self.buffer.oldest() else {
+            return Err(CatchUpUnavailable::EmptyWindow);
+        };
+        let Some(to_position) = self.position(to) else {
+            return Err(CatchUpUnavailable::ToNotInWindow);
+        };
+        let mut path = Vec::new();
+        let mut current = from;
+        // Position of the first held block the path continues with. Each revert walked through
+        // targets a lower block than the one it orphaned, so the walk ends.
+        let continue_at = loop {
+            if let Some(position) = self.position(current) {
+                break position + 1;
+            }
+            if current == &oldest.block.parent_hash {
+                break 0;
+            }
+            let Some(revert) = self.journal.orphaned_by(current) else {
+                return Err(if from_number.saturating_add(1) < oldest.block.number {
+                    CatchUpUnavailable::BelowFloor
+                } else {
+                    CatchUpUnavailable::UnknownHash
+                });
+            };
+            path.push(Arc::clone(revert));
+            current = &revert.block.hash;
+        };
+        if continue_at > to_position + 1 {
+            return Err(CatchUpUnavailable::ToNotAhead);
+        }
+        path.extend(
+            self.buffer
+                .iter()
+                .skip(continue_at)
+                .take(to_position + 1 - continue_at)
+                .cloned(),
+        );
+        Ok(path)
+    }
+
+    /// Position of the held block `hash`, counted from the oldest block.
+    fn position(&self, hash: &BlockHash) -> Option<usize> {
+        // Clients resume close to the tip, so the scan starts there.
+        self.buffer
+            .iter()
+            .rposition(|message| &message.block.hash == hash)
     }
 
     /// Resolves a requested version to a servable window block, from memory only.
@@ -1361,5 +1480,659 @@ mod test {
             w.commit_status(BlockNumberOrTimestamp::Number(2)),
             Some(CommitStatus::Committed)
         );
+    }
+
+    fn hash(number: u64) -> Bytes {
+        testing::block(number).hash
+    }
+
+    /// Hash of block `number` on fork `fork`. Fork 0 is the chain `testing::block` builds, so
+    /// `fork` starts at 1.
+    fn fork_hash(fork: u64, number: u64) -> Bytes {
+        Bytes::from(fork * 1_000 + number).lpad(32, 0)
+    }
+
+    /// Block `number` on fork `fork`, a child of `parent`.
+    fn fork_msg(fork: u64, number: u64, parent: Bytes) -> BlockAggregatedChanges {
+        let mut m = msg(number, 0, None);
+        m.block.hash = fork_hash(fork, number);
+        m.block.parent_hash = parent;
+        m
+    }
+
+    /// Inserts `m` and folds what became evictable, as the pump does after every message.
+    fn pump(w: &mut DeltaWindow, m: BlockAggregatedChanges) {
+        put(w, m).unwrap();
+        w.fold_evictable(&DiscardSink).unwrap();
+    }
+
+    /// `(number, hash, revert)` of every message on a catch-up path, in order.
+    fn steps(path: &[Arc<BlockAggregatedChanges>]) -> Vec<(u64, Bytes, bool)> {
+        path.iter()
+            .map(|m| (m.block.number, m.block.hash.clone(), m.revert))
+            .collect()
+    }
+
+    fn block_step(number: u64, hash: Bytes) -> (u64, Bytes, bool) {
+        (number, hash, false)
+    }
+
+    fn revert_step(number: u64, hash: Bytes) -> (u64, Bytes, bool) {
+        (number, hash, true)
+    }
+
+    #[test]
+    fn catch_up_from_a_canonical_block_is_the_blocks_after_it() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=5, 0, None);
+
+        let path = w
+            .catch_up_path(&hash(2), 2, &hash(4))
+            .unwrap();
+
+        assert_eq!(steps(&path), vec![block_step(3, hash(3)), block_step(4, hash(4))]);
+    }
+
+    #[test]
+    fn catch_up_to_the_client_block_is_an_empty_path() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=5, 0, None);
+
+        assert_eq!(w.catch_up_path(&hash(3), 3, &hash(3)), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn catch_up_from_an_orphaned_block_starts_with_its_revert() {
+        // The client has 4; the chain reverts to 2 and grows 3', 4', 5' on fork 1.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+        put(&mut w, fork_msg(1, 4, fork_hash(1, 3))).unwrap();
+        put(&mut w, fork_msg(1, 5, fork_hash(1, 4))).unwrap();
+
+        let path = w
+            .catch_up_path(&hash(4), 4, &fork_hash(1, 5))
+            .unwrap();
+
+        assert_eq!(
+            steps(&path),
+            vec![
+                revert_step(2, hash(2)),
+                block_step(3, fork_hash(1, 3)),
+                block_step(4, fork_hash(1, 4)),
+                block_step(5, fork_hash(1, 5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn catch_up_to_the_target_of_the_client_revert_is_the_revert_alone() {
+        // The client has 4 and its new subscription starts with 3': it needs the revert to 2 alone,
+        // also once the window holds 3'.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+
+        let path = w
+            .catch_up_path(&hash(4), 4, &hash(2))
+            .unwrap();
+
+        assert_eq!(steps(&path), vec![revert_step(2, hash(2))]);
+    }
+
+    #[test]
+    fn catch_up_follows_nested_reverts_to_the_canonical_chain() {
+        // The client has 4. The chain reverts to 2 and grows 3', 4' on fork 1, then reverts to 1,
+        // orphaning 2 as well, and grows 2'', 3'' on fork 2.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+        put(&mut w, fork_msg(1, 4, fork_hash(1, 3))).unwrap();
+        put(&mut w, revert_msg(1)).unwrap();
+        put(&mut w, fork_msg(2, 2, hash(1))).unwrap();
+        put(&mut w, fork_msg(2, 3, fork_hash(2, 2))).unwrap();
+
+        let path = w
+            .catch_up_path(&hash(4), 4, &fork_hash(2, 3))
+            .unwrap();
+
+        assert_eq!(
+            steps(&path),
+            vec![
+                revert_step(2, hash(2)),
+                revert_step(1, hash(1)),
+                block_step(2, fork_hash(2, 2)),
+                block_step(3, fork_hash(2, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn catch_up_from_a_block_orphaned_twice_goes_through_the_newest_revert() {
+        // The chain leaves 3, 4 for 3', returns to 3, 4 with the same hashes and grows 5, then
+        // leaves them again for 2''. The two reverts to 2 restore different states, so each
+        // carries a marker.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        let first_revert_to_2 = Arc::new(testing::with_state_delta(revert_msg(2), "c1", 4));
+        w.insert(&first_revert_to_2).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+        let second_revert_to_2 = Arc::new(testing::with_state_delta(revert_msg(2), "c1", 3));
+        w.insert(&second_revert_to_2).unwrap();
+        let readopted: Vec<_> = (3..=5)
+            .map(|n| Arc::new(msg(n, 0, None)))
+            .collect();
+        for block in &readopted {
+            w.insert(block).unwrap();
+        }
+
+        assert_eq!(w.catch_up_path(&hash(4), 4, &hash(5)), Ok(vec![readopted[2].clone()]));
+        assert_eq!(
+            w.catch_up_path(&fork_hash(1, 3), 3, &hash(5)),
+            Ok([vec![second_revert_to_2], readopted].concat())
+        );
+
+        let revert_to_1 = Arc::new(revert_msg(1));
+        w.insert(&revert_to_1).unwrap();
+        let two_on_fork_2 = Arc::new(fork_msg(2, 2, hash(1)));
+        w.insert(&two_on_fork_2).unwrap();
+
+        // Block 4 was orphaned by the first revert to 2 and by the revert to 1. Going through
+        // the older one would also end right, in one more step: [revert to 2, revert to 1, 2''].
+        assert_eq!(
+            w.catch_up_path(&hash(4), 4, &fork_hash(2, 2)),
+            Ok(vec![revert_to_1, two_on_fork_2])
+        );
+    }
+
+    #[test]
+    fn catch_up_from_the_parent_of_the_oldest_block_starts_at_the_oldest_block() {
+        // After a restart the window refills from the block above the last committed one, the
+        // block a client may have stopped at.
+        let mut w = window(128, 1);
+        fill(&mut w, 5..=8, 0, None);
+
+        let path = w
+            .catch_up_path(&hash(4), 4, &hash(7))
+            .unwrap();
+
+        assert_eq!(
+            steps(&path),
+            vec![block_step(5, hash(5)), block_step(6, hash(6)), block_step(7, hash(7))]
+        );
+    }
+
+    #[test]
+    fn catch_up_from_an_unknown_hash_is_unavailable() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=5, 0, None);
+        let unknown = Bytes::from(99u64).lpad(32, 0);
+
+        assert_eq!(w.catch_up_path(&unknown, 3, &hash(5)), Err(CatchUpUnavailable::UnknownHash));
+    }
+
+    #[test]
+    fn catch_up_from_below_the_floor_is_unavailable() {
+        let mut w = window(128, 1);
+        fill(&mut w, 5..=8, 0, None);
+
+        assert_eq!(w.catch_up_path(&hash(3), 3, &hash(8)), Err(CatchUpUnavailable::BelowFloor));
+        // A block 4 on another fork is at the height of the oldest block's parent, not below it.
+        assert_eq!(
+            w.catch_up_path(&fork_hash(1, 4), 4, &hash(8)),
+            Err(CatchUpUnavailable::UnknownHash)
+        );
+    }
+
+    #[test]
+    fn catch_up_to_a_block_outside_the_window_is_unavailable() {
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=5, 0, None);
+
+        assert_eq!(w.catch_up_path(&hash(2), 2, &hash(6)), Err(CatchUpUnavailable::ToNotInWindow));
+    }
+
+    #[test]
+    fn catch_up_to_a_block_outside_the_window_is_checked_before_from() {
+        let mut w = window(128, 1);
+        fill(&mut w, 5..=8, 0, None);
+
+        assert_eq!(w.catch_up_path(&hash(2), 2, &hash(9)), Err(CatchUpUnavailable::ToNotInWindow));
+    }
+
+    #[test]
+    fn catch_up_to_an_ancestor_of_from_is_unavailable() {
+        // The client saw a revert to 2 that the window has not applied yet.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=5, 0, None);
+
+        assert_eq!(w.catch_up_path(&hash(4), 4, &hash(2)), Err(CatchUpUnavailable::ToNotAhead));
+    }
+
+    #[test]
+    fn catch_up_through_a_revert_that_lands_past_to_is_unavailable() {
+        // The client has 4. The window reverted to 2; the client saw a revert to 1 the window has
+        // not applied yet.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+
+        assert_eq!(w.catch_up_path(&hash(4), 4, &hash(1)), Err(CatchUpUnavailable::ToNotAhead));
+    }
+
+    #[test]
+    fn catch_up_on_an_empty_window_is_unavailable() {
+        let w = window(128, 1);
+
+        assert_eq!(w.catch_up_path(&hash(2), 2, &hash(3)), Err(CatchUpUnavailable::EmptyWindow));
+    }
+
+    #[rstest]
+    #[case::target_held(1, None)]
+    #[case::target_is_the_parent_of_the_oldest_block(2, None)]
+    #[case::target_below_the_parent_of_the_oldest_block(3, Some(CatchUpUnavailable::UnknownHash))]
+    fn catch_up_goes_through_a_revert_while_its_target_anchors_a_path(
+        #[case] committed: u64,
+        #[case] expected: Option<CatchUpUnavailable>,
+    ) {
+        // The client has 4. The chain reverts to 2 and grows 3'..=7' on fork 1, whose watermarks
+        // evict every block up to `committed`.
+        let mut w = window(2, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        let mut parent = hash(2);
+        for n in 3..=7 {
+            let mut m = fork_msg(1, n, parent);
+            m.finalized_block_height = committed;
+            m.db_committed_block_height = Some(committed);
+            parent = m.block.hash.clone();
+            pump(&mut w, m);
+        }
+        assert_eq!(floor_number(&w), Some(committed + 1));
+
+        let path = w.catch_up_path(&hash(4), 4, &fork_hash(1, 6));
+
+        let expected = match expected {
+            Some(reason) => Err(reason),
+            None => Ok(std::iter::once(revert_step(2, hash(2)))
+                .chain((3..=6).map(|n| block_step(n, fork_hash(1, n))))
+                .collect()),
+        };
+        assert_eq!(path.map(|path| steps(&path)), expected);
+    }
+
+    #[test]
+    fn eviction_forgets_a_revert_once_its_target_is_below_the_parent_of_the_oldest_block() {
+        let mut w = window(2, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        assert_eq!(w.journal.targets(), vec![2]);
+
+        // Blocks 3'..=5' carry watermarks that evict one more block each:
+        // (block, finalized and committed height, oldest block left, reverts still journaled).
+        let mut parent = hash(2);
+        for (n, watermark, oldest, expected) in
+            [(3, 1, 2, vec![2]), (4, 2, 3, vec![2]), (5, 3, 4, vec![])]
+        {
+            let mut m = fork_msg(1, n, parent);
+            m.finalized_block_height = watermark;
+            m.db_committed_block_height = Some(watermark);
+            parent = m.block.hash.clone();
+
+            pump(&mut w, m);
+
+            assert_eq!(floor_number(&w), Some(oldest), "after block {n}'");
+            assert_eq!(w.journal.targets(), expected, "after block {n}'");
+        }
+    }
+
+    #[test]
+    fn a_revert_whose_target_was_evicted_is_forgotten() {
+        // The client has 10. The chain reverts to 2 and grows 3'..=12' on fork 1; committing them
+        // evicts every block up to 10', the revert target among them. 10 is not below the floor,
+        // so only the journal could have led back from it.
+        let mut w = window(2, 1);
+        fill(&mut w, 1..=10, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        let mut parent = hash(2);
+        for n in 3..=12 {
+            let mut m = fork_msg(1, n, parent);
+            m.finalized_block_height = n - 1;
+            m.db_committed_block_height = Some(n - 1);
+            parent = m.block.hash.clone();
+            pump(&mut w, m);
+        }
+
+        assert_eq!(
+            w.catch_up_path(&hash(10), 10, &fork_hash(1, 12)),
+            Err(CatchUpUnavailable::UnknownHash)
+        );
+    }
+
+    #[test]
+    fn clear_forgets_the_journaled_reverts() {
+        // Had the journal survived the clear, its revert to 2 would lead from 4 to the parent of
+        // the refilled window's oldest block.
+        let mut w = window(128, 1);
+        fill(&mut w, 1..=4, 0, None);
+        put(&mut w, revert_msg(2)).unwrap();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+
+        w.clear();
+        put(&mut w, fork_msg(1, 3, hash(2))).unwrap();
+        put(&mut w, fork_msg(1, 4, fork_hash(1, 3))).unwrap();
+
+        assert_eq!(
+            w.catch_up_path(&hash(4), 4, &fork_hash(1, 4)),
+            Err(CatchUpUnavailable::UnknownHash)
+        );
+    }
+
+    /// Checks catch-up paths over random block trees with nested reverts, evictions, journal
+    /// pruning and restarts. Unlike the histories `catch_up_properties` in `deltas_buffer.rs`
+    /// runs over, a chain here can return to a branch it left, re-adopting its blocks with the
+    /// same hashes. Every path the window answers must take the state at `from` to the state at
+    /// `to`.
+    mod random_block_trees {
+        use std::collections::BTreeMap;
+
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use tycho_common::models::protocol::ProtocolComponentStateDelta;
+
+        use super::*;
+
+        /// Block trees grown, one per seed.
+        const SEEDS: u64 = 300;
+        /// Blocks, reverts or restarts per tree.
+        const STEPS: usize = 200;
+        /// Random `(from, to)` pairs asked after every step.
+        const QUERIES_PER_STEP: usize = 20;
+        /// The one component every block writes to.
+        const COMPONENT: &str = "c";
+        /// Attributes of `COMPONENT`; the first block writes them all, later ones one or two.
+        const ATTRIBUTES: u64 = 4;
+        /// Blocks the finalized height trails the newest block by.
+        const FINALITY_DEPTH: u64 = 3;
+
+        /// `COMPONENT`'s attribute values, by name.
+        type State = BTreeMap<String, Bytes>;
+
+        /// A block the chain held at some point, with the state after it.
+        struct Node {
+            message: Arc<BlockAggregatedChanges>,
+            state: State,
+        }
+
+        /// How often each case occurs.
+        #[derive(Debug, Default)]
+        struct Coverage {
+            paths: usize,
+            paths_through_a_revert: usize,
+            readopted_blocks: usize,
+            restarts: usize,
+        }
+
+        fn written(message: &BlockAggregatedChanges) -> impl Iterator<Item = (&String, &Bytes)> {
+            message
+                .state_deltas
+                .get(COMPONENT)
+                .into_iter()
+                .flat_map(|delta| delta.updated_attributes.iter())
+        }
+
+        fn apply(state: &mut State, message: &BlockAggregatedChanges) {
+            for (name, value) in written(message) {
+                state.insert(name.clone(), value.clone());
+            }
+        }
+
+        fn writing(mut message: BlockAggregatedChanges, values: State) -> BlockAggregatedChanges {
+            message.state_deltas.insert(
+                COMPONENT.to_string(),
+                ProtocolComponentStateDelta {
+                    component_id: COMPONENT.to_string(),
+                    updated_attributes: values.into_iter().collect(),
+                    ..Default::default()
+                },
+            );
+            message
+        }
+
+        struct BlockTree {
+            rng: StdRng,
+            window: DeltaWindow,
+            /// Every block the chain held, by hash.
+            nodes: HashMap<Bytes, Node>,
+            /// The children each block had, by parent hash.
+            children: HashMap<Bytes, Vec<Bytes>>,
+            /// The extractor's chain, oldest first, including blocks below the window.
+            chain: Vec<Bytes>,
+            hashes: u64,
+            finalized: u64,
+            coverage: Coverage,
+        }
+
+        impl BlockTree {
+            fn new(seed: u64) -> Self {
+                Self {
+                    rng: StdRng::seed_from_u64(seed),
+                    window: window(4, 1),
+                    nodes: HashMap::new(),
+                    children: HashMap::new(),
+                    chain: Vec::new(),
+                    hashes: 0,
+                    finalized: 0,
+                    coverage: Coverage::default(),
+                }
+            }
+
+            fn tip(&self) -> Option<&Node> {
+                self.chain
+                    .last()
+                    .map(|hash| &self.nodes[hash])
+            }
+
+            /// Inserts `message` and folds what became evictable, as the pump does.
+            fn pump(&mut self, message: &Arc<BlockAggregatedChanges>) {
+                self.window.insert(message).unwrap();
+                self.window
+                    .fold_evictable(&DiscardSink)
+                    .unwrap();
+            }
+
+            /// Extends the chain by half the time with a block it held before and left, with its
+            /// original message, else with a new block writing one or two attributes.
+            fn extend(&mut self) {
+                if let Some(tip) = self.tip() {
+                    let left = self
+                        .children
+                        .get(&tip.message.block.hash)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !left.is_empty() && self.rng.gen_bool(0.5) {
+                        let readopted = left[self.rng.gen_range(0..left.len())].clone();
+                        let message = Arc::clone(&self.nodes[&readopted].message);
+                        self.pump(&message);
+                        self.chain.push(readopted);
+                        self.coverage.readopted_blocks += 1;
+                        return;
+                    }
+                }
+                let (number, parent, mut state) = match self.tip() {
+                    Some(tip) => (
+                        tip.message.block.number + 1,
+                        tip.message.block.hash.clone(),
+                        tip.state.clone(),
+                    ),
+                    None => (1, Bytes::from(0u64).lpad(32, 0), State::new()),
+                };
+                self.hashes += 1;
+                let hash = Bytes::from(1_000_000 + self.hashes).lpad(32, 0);
+                let attributes: Vec<u64> = if number == 1 {
+                    (0..ATTRIBUTES).collect()
+                } else {
+                    (0..self.rng.gen_range(1..=2))
+                        .map(|_| self.rng.gen_range(0..ATTRIBUTES))
+                        .collect()
+                };
+                let mut values = State::new();
+                for attribute in attributes {
+                    // Unique per block and attribute, so a wrong path ends in a different state.
+                    values.insert(
+                        format!("a{attribute}"),
+                        Bytes::from(self.hashes * ATTRIBUTES + attribute),
+                    );
+                }
+                self.finalized = self
+                    .finalized
+                    .max(number.saturating_sub(FINALITY_DEPTH));
+                let committed = self
+                    .rng
+                    .gen_bool(0.7)
+                    .then_some(self.finalized);
+                let mut message = msg(number, self.finalized, committed);
+                message.block.hash = hash.clone();
+                message.block.parent_hash = parent.clone();
+                let message = Arc::new(writing(message, values));
+                apply(&mut state, &message);
+                self.nodes
+                    .insert(hash.clone(), Node { message: Arc::clone(&message), state });
+                self.children
+                    .entry(parent)
+                    .or_default()
+                    .push(hash.clone());
+                self.pump(&message);
+                self.chain.push(hash);
+            }
+
+            /// Reverts to a random held block above the irreversible height, restoring every
+            /// attribute the orphaned blocks wrote to its value at the target, as the extractor
+            /// does.
+            fn revert(&mut self) {
+                let (Some(oldest), Some(tip)) = (self.window.floor().map(|b| b.number), self.tip())
+                else {
+                    return;
+                };
+                let tip = tip.message.block.number;
+                let irreversible = match (self.window.finalized, self.window.db_committed) {
+                    (Some(finalized), Some(committed)) => finalized.min(committed),
+                    (Some(finalized), None) => finalized,
+                    (None, _) => 0,
+                };
+                let lowest = oldest.max(irreversible);
+                if lowest >= tip {
+                    return;
+                }
+                let target_number = self.rng.gen_range(lowest..tip);
+                // The chain holds every block from 1 up, so block `n` is at `n - 1`.
+                let target_index = target_number as usize - 1;
+                let target = &self.nodes[&self.chain[target_index]];
+                let mut restored = State::new();
+                for orphan in &self.chain[target_index + 1..] {
+                    for (name, _) in written(&self.nodes[orphan].message) {
+                        restored.insert(name.clone(), target.state[name].clone());
+                    }
+                }
+                let revert = BlockAggregatedChanges {
+                    revert: true,
+                    block: target.message.block.clone(),
+                    ..msg(target_number, self.finalized, None)
+                };
+                self.pump(&Arc::new(writing(revert, restored)));
+                self.chain.truncate(target_index + 1);
+            }
+
+            /// Restarts the extractor: the window folds its committed blocks and clears, and the
+            /// chain falls back to the last committed block, which the extractor replays from.
+            fn restart(&mut self) {
+                let Some(committed) = self.window.db_committed else {
+                    return;
+                };
+                self.window
+                    .fold_committed(&DiscardSink)
+                    .unwrap();
+                self.window.clear();
+                self.chain.truncate(committed as usize);
+                self.coverage.restarts += 1;
+            }
+
+            /// Asks the window for paths from random blocks the chain ever held to random blocks
+            /// the window holds, and applies every path it answers to the state at `from`.
+            fn query(&mut self) {
+                let held: Vec<Bytes> = self
+                    .window
+                    .buffer
+                    .iter()
+                    .map(|m| m.block.hash.clone())
+                    .collect();
+                if held.is_empty() {
+                    return;
+                }
+                let known: Vec<&Bytes> = self.nodes.keys().collect();
+                for _ in 0..QUERIES_PER_STEP {
+                    let from = &self.nodes[known[self.rng.gen_range(0..known.len())]];
+                    let to = &self.nodes[&held[self.rng.gen_range(0..held.len())]];
+                    let Ok(path) = self.window.catch_up_path(
+                        &from.message.block.hash,
+                        from.message.block.number,
+                        &to.message.block.hash,
+                    ) else {
+                        continue;
+                    };
+                    self.coverage.paths += 1;
+                    self.coverage.paths_through_a_revert +=
+                        usize::from(path.iter().any(|m| m.revert));
+                    let mut state = from.state.clone();
+                    for message in &path {
+                        apply(&mut state, message);
+                    }
+                    assert_eq!(
+                        state,
+                        to.state,
+                        "from {} to {}: path {:?}",
+                        from.message.block.hash,
+                        to.message.block.hash,
+                        steps(&path)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn every_answered_path_ends_in_the_state_at_to() {
+            let mut coverage = Coverage::default();
+            for seed in 0..SEEDS {
+                let mut tree = BlockTree::new(seed);
+                for _ in 0..STEPS {
+                    let roll: f64 = tree.rng.gen();
+                    if tree.chain.is_empty() || roll < 0.6 {
+                        tree.extend();
+                    } else if roll < 0.97 {
+                        tree.revert();
+                    } else {
+                        tree.restart();
+                    }
+                    tree.query();
+                }
+                coverage.paths += tree.coverage.paths;
+                coverage.paths_through_a_revert += tree.coverage.paths_through_a_revert;
+                coverage.readopted_blocks += tree.coverage.readopted_blocks;
+                coverage.restarts += tree.coverage.restarts;
+            }
+
+            let Coverage { paths, paths_through_a_revert, readopted_blocks, restarts } = &coverage;
+            for (case, count) in [
+                ("answered paths", paths),
+                ("paths through a revert", paths_through_a_revert),
+                ("re-adopted blocks", readopted_blocks),
+                ("restarts", restarts),
+            ] {
+                assert!(*count > 0, "no {case} in {coverage:?}");
+            }
+        }
     }
 }

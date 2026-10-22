@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{vec_deque, HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -319,6 +319,11 @@ where
     /// The newest buffered message, or `None` if the buffer is empty.
     pub fn newest(&self) -> Option<&B> {
         self.block_messages.back()
+    }
+
+    /// The buffered messages, oldest first. Retained committing blocks are not included.
+    pub fn iter(&self) -> vec_deque::Iter<'_, B> {
+        self.block_messages.iter()
     }
 
     /// The buffered message for block `number`, or `None` if that block is not buffered.
