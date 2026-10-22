@@ -4447,6 +4447,329 @@ mod test {
         assert!(first.removed_components.is_empty());
     }
 
+    /// A block that sets `component`'s `reserve` attribute to the block number.
+    fn block_setting_reserve(block_num: u64, component: &str) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            state_deltas: HashMap::from([(
+                component.to_string(),
+                ProtocolComponentStateDelta::new(
+                    component,
+                    HashMap::from([("reserve".to_string(), Bytes::from(vec![block_num as u8]))]),
+                    HashSet::new(),
+                ),
+            )]),
+            ..make_block_changes(block_num, None)
+        }
+    }
+
+    /// The result of a background snapshot of `component`, with no attributes, at `block`.
+    fn empty_background_snapshot(component: &str, block: u64) -> SnapshotFetchResult {
+        let component = ProtocolComponent { id: component.to_string(), ..Default::default() };
+        let state = ComponentWithState {
+            state: ProtocolComponentState::new(&component.id, HashMap::new(), HashMap::new()),
+            component: component.clone(),
+            component_tvl: None,
+            entrypoints: vec![],
+        };
+        SnapshotFetchResult {
+            components: HashMap::from([(component.id.clone(), component.clone())]),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot {
+                states: HashMap::from([(component.id.clone(), state)]),
+                vm_storage: HashMap::new(),
+            },
+            snapshot_block: block,
+        }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_resume_buffers_first_message_for_snapshot_in_flight_across_the_gap() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        // Before the gap, block 5 started a background snapshot of Component3 at block 5.
+        let (snapshot_tx, snapshot_rx) = oneshot::channel();
+        state_sync
+            .snapshot_tasks
+            .push(SnapshotTask {
+                component_ids: vec!["Component3".to_string()],
+                snapshot_block: 5,
+                receiver: snapshot_rx,
+            });
+        state_sync
+            .snapshot_queue
+            .insert("Component3".to_string(), SnapshotStatus::InFlight);
+        state_sync
+            .buffered_deltas
+            .push(make_block_changes(5, None));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // Block 6 follows block 5, so the subscription resumes. Component3 is not tracked yet, so
+        // its change in block 6 reaches the consumer only through the snapshot.
+        deltas_tx
+            .send(block_setting_reserve(6, "Component3"))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        assert!(snapshot_tx
+            .send(Ok(empty_background_snapshot("Component3", 5)))
+            .is_ok());
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let second = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        let component3 = second
+            .snapshots
+            .states
+            .get("Component3")
+            .expect("Component3's snapshot lands with block 7");
+        assert_eq!(
+            component3
+                .state
+                .attributes
+                .get("reserve"),
+            Some(&Bytes::from(vec![6u8])),
+            "The snapshot misses the first message's change"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_partial_mode_snapshots_a_new_component_once_its_block_is_complete() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(true);
+        let mut sync = RunningSync::start(state_sync, None).await;
+
+        deltas_tx
+            .send(make_block_changes(1, None))
+            .await
+            .unwrap();
+        sync.next().await;
+        // Component3 crosses the threshold in block 2's first partial. A snapshot taken before
+        // block 2 is complete misses the changes of block 2's partials up to the one it is taken
+        // in, which the filter drops while Component3 is not tracked.
+        deltas_tx
+            .send(BlockAggregatedChanges {
+                component_tvl: HashMap::from([("Component3".to_string(), 100.0)]),
+                ..make_block_changes(2, Some(0))
+            })
+            .await
+            .unwrap();
+        sync.next().await;
+        deltas_tx
+            .send(make_block_changes(2, Some(1)))
+            .await
+            .unwrap();
+        sync.next().await;
+        deltas_tx
+            .send(make_block_changes(3, Some(0)))
+            .await
+            .unwrap();
+        sync.next().await;
+        timeout(Duration::from_secs(1), async {
+            while snapshot_blocks.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Component3's snapshot should be requested");
+        sync.stop().await;
+
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![0, 2]);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_older_snapshot_keeps_the_deltas_it_needs_while_a_newer_one_is_in_flight() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        // Component3's snapshot was started at block 5 and Component4's at block 6; both are in
+        // flight, and block 6 changed Component3.
+        let (component3_tx, component3_rx) = oneshot::channel();
+        let (_component4_tx, component4_rx) = oneshot::channel();
+        state_sync
+            .snapshot_tasks
+            .push(SnapshotTask {
+                component_ids: vec!["Component3".to_string()],
+                snapshot_block: 5,
+                receiver: component3_rx,
+            });
+        state_sync
+            .snapshot_tasks
+            .push(SnapshotTask {
+                component_ids: vec!["Component4".to_string()],
+                snapshot_block: 6,
+                receiver: component4_rx,
+            });
+        for id in ["Component3", "Component4"] {
+            state_sync
+                .snapshot_queue
+                .insert(id.to_string(), SnapshotStatus::InFlight);
+        }
+        state_sync.buffered_deltas =
+            vec![make_block_changes(5, None), block_setting_reserve(6, "Component3")];
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(6, None)))).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        sync.next().await;
+        assert!(component3_tx
+            .send(Ok(empty_background_snapshot("Component3", 5)))
+            .is_ok());
+        deltas_tx
+            .send(make_block_changes(8, None))
+            .await
+            .unwrap();
+        let landed = sync.next().await;
+        sync.stop().await;
+
+        let component3 = landed
+            .snapshots
+            .states
+            .get("Component3")
+            .expect("Component3's snapshot lands with block 8");
+        assert_eq!(
+            component3
+                .state
+                .attributes
+                .get("reserve"),
+            Some(&Bytes::from(vec![6u8])),
+            "Component3's snapshot misses block 6"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_partial_mode_snapshot_includes_the_partial_that_fires_it() {
+        let bg_done = Arc::new(tokio::sync::Notify::new());
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .withf(|params: &crate::rpc::ProtocolComponentsParams| {
+                params
+                    .component_ids()
+                    .is_some_and(|ids| ids.contains(&"Component3".to_string()))
+            })
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component3".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let notify = bg_done.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                if request
+                    .components
+                    .contains_key("Component3")
+                {
+                    notify.notify_one();
+                }
+                Ok(snapshot_of_requested(request))
+            });
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(true);
+        let mut sync = RunningSync::start(state_sync, None).await;
+
+        deltas_tx
+            .send(make_block_changes(1, None))
+            .await
+            .unwrap();
+        sync.next().await;
+        deltas_tx
+            .send(BlockAggregatedChanges {
+                component_tvl: HashMap::from([("Component3".to_string(), 100.0)]),
+                ..make_block_changes(2, Some(0))
+            })
+            .await
+            .unwrap();
+        sync.next().await;
+        // Block 3's first partial fires Component3's snapshot at block 2 and changes Component3,
+        // which is not tracked yet.
+        deltas_tx
+            .send(BlockAggregatedChanges {
+                partial_block_index: Some(0),
+                ..block_setting_reserve(3, "Component3")
+            })
+            .await
+            .unwrap();
+        sync.next().await;
+        timeout(Duration::from_secs(1), bg_done.notified())
+            .await
+            .expect("Component3's snapshot should be requested");
+        deltas_tx
+            .send(make_block_changes(3, Some(1)))
+            .await
+            .unwrap();
+        let landed = sync.next().await;
+        sync.stop().await;
+
+        let component3 = landed
+            .snapshots
+            .states
+            .get("Component3")
+            .expect("Component3's snapshot lands with block 3's second partial");
+        assert_eq!(
+            component3
+                .state
+                .attributes
+                .get("reserve"),
+            Some(&Bytes::from(vec![3u8])),
+            "Component3's snapshot misses the partial that fired it"
+        );
+    }
+
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
         // Use vec to create Bytes from block number
         let hash = Bytes::from(vec![block_num as u8; 32]);
