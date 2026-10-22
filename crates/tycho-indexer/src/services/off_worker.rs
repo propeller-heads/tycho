@@ -136,7 +136,9 @@ impl Pool {
 
     /// Runs `work` on the blocking thread pool, in the caller's tracing span, once a permit is
     /// free, and returns its result. The job keeps its permit until `work` returns, also when the
-    /// caller stops waiting. The wait for the permit is recorded in `off_worker_permit_wait_ms`.
+    /// caller stops waiting. Records the wait for the permit in `off_worker_permit_wait_ms`, and
+    /// the job's wall time, on-CPU time and run-queue wait in `off_worker_job_ms`,
+    /// `off_worker_job_cpu_ns_total` and `off_worker_job_runqueue_wait_ns_total`.
     ///
     /// # Errors
     ///
@@ -157,14 +159,42 @@ impl Pool {
         )
         .record(wait_started.elapsed().as_secs_f64() * 1000.0);
         let span = tracing::Span::current();
+        let (endpoint, step) = (self.endpoint.label(), self.step);
         tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let before = thread_schedstat();
             let result = span.in_scope(work);
+            let after = thread_schedstat();
             drop(permit);
+            metrics::histogram!("off_worker_job_ms", "endpoint" => endpoint, "step" => step)
+                .record(started.elapsed().as_secs_f64() * 1000.0);
+            // A job runs on one thread from start to end, so the thread's counters are the job's.
+            if let (Some((cpu_before, wait_before)), Some((cpu_after, wait_after))) = (before, after)
+            {
+                metrics::counter!("off_worker_job_cpu_ns_total", "endpoint" => endpoint, "step" => step)
+                    .increment(cpu_after.saturating_sub(cpu_before));
+                metrics::counter!(
+                    "off_worker_job_runqueue_wait_ns_total",
+                    "endpoint" => endpoint,
+                    "step" => step
+                )
+                .increment(wait_after.saturating_sub(wait_before));
+            }
             result
         })
         .await
         .map_err(|err| RpcError::Unknown(format!("Off-worker task failed: {err}")))
     }
+}
+
+/// On-CPU time and run-queue wait of the calling thread in ns, from its schedstat. `None` when the
+/// kernel does not expose them.
+fn thread_schedstat() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let mut fields = text
+        .split_ascii_whitespace()
+        .map(|field| field.parse().ok());
+    Some((fields.next()??, fields.next()??))
 }
 
 /// An estimate of the JSON size of a response. Reads map and field lengths only, never map

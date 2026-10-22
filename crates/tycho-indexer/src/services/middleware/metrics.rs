@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use actix_web::{
-    body::{BoxBody, MessageBody},
+    body::{BodySize, BoxBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
     middleware::Next,
 };
@@ -86,6 +86,12 @@ where
                 ];
                 fail_labels.extend(metadata_labels.iter().cloned());
                 counter!("rpc_requests_failed", fail_labels).increment(1);
+            }
+
+            // Compression wraps this middleware, so this is the size before compression.
+            if let BodySize::Sized(bytes) = srv_res.response().body().size() {
+                histogram!("rpc_response_body_bytes", "endpoint" => endpoint.clone())
+                    .record(bytes as f64);
             }
 
             Ok(srv_res.map_into_boxed_body())
@@ -254,6 +260,10 @@ mod tests {
                 "rpc_request_duration_seconds",
                 &[("endpoint", "/v1/health")]
             ),
+            1
+        );
+        assert_eq!(
+            histogram_samples(&after, "rpc_response_body_bytes", &[("endpoint", "/v1/health")]),
             1
         );
 
