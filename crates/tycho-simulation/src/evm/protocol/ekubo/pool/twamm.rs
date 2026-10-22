@@ -265,6 +265,14 @@ impl EkuboPool for TwammPool {
                             virtual_order_deltas[idx] = virtual_order_delta;
                         }
                     }
+                    // A deletion of a sale rate delta the pool never held: nothing to remove.
+                    Err(_)
+                        if virtual_order_delta
+                            .sale_rate_delta0
+                            .is_zero() &&
+                            virtual_order_delta
+                                .sale_rate_delta1
+                                .is_zero() => {}
                     Err(idx) => {
                         virtual_order_deltas.insert(idx, virtual_order_delta);
                     }

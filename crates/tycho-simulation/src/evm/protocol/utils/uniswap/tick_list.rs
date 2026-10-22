@@ -161,6 +161,8 @@ impl TickList {
         Ok(())
     }
 
+    /// Sets the net liquidity of `tick`, inserting the tick when the list lacks it. Zero
+    /// liquidity removes the tick, and leaves the list unchanged when it lacks the tick.
     pub(crate) fn set_tick_liquidity(
         &mut self,
         tick: i32,
@@ -177,6 +179,9 @@ impl TickList {
                     self.ticks.remove(existing_idx);
                 }
             }
+            // A deletion of a tick the list never held: a block that creates and deletes the tick,
+            // or a revert of a tick created and deleted inside the reverted range.
+            Err(_) if liquidity == 0 => {}
             Err(insert_idx) => {
                 self.ticks
                     .insert(insert_idx, TickInfo::new(tick, liquidity)?);
@@ -349,6 +354,29 @@ mod tests {
         let tick_list = create_tick_list();
         assert_eq!(tick_list.ticks.len(), 3);
         assert_eq!(tick_list.tick_spacing, 10);
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_zero_for_an_absent_tick_leaves_the_list_unchanged() {
+        let mut tick_list = create_tick_list();
+        let before = tick_list.clone();
+
+        tick_list
+            .set_tick_liquidity(30, 0)
+            .unwrap();
+
+        assert_eq!(tick_list, before);
+    }
+
+    #[test]
+    fn test_set_tick_liquidity_zero_removes_an_existing_tick() {
+        let mut tick_list = create_tick_list();
+
+        tick_list
+            .set_tick_liquidity(20, 0)
+            .unwrap();
+
+        assert_eq!(tick_list.ticks, vec![create_tick_info(10, 10), create_tick_info(40, -5)]);
     }
 
     #[test]
