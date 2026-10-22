@@ -748,4 +748,26 @@ mod test {
         assert_eq!(view.balances().count(), expected.balances.len());
         assert_eq!(dto::ResponseProtocolState::from(view), expected);
     }
+
+    /// Stops compiling when a DTO gains a field: the view `Serialize` impls must then write it.
+    #[test]
+    #[allow(deprecated)]
+    fn views_write_every_dto_field() {
+        let _ = |dto::ResponseAccount {
+                     chain: _,
+                     address: _,
+                     title: _,
+                     slots: _,
+                     native_balance: _,
+                     token_balances: _,
+                     code: _,
+                     code_hash: _,
+                     balance_modify_tx: _,
+                     code_modify_tx: _,
+                     creation_tx: _,
+                 }: dto::ResponseAccount,
+                 dto::ResponseProtocolState { component_id: _, attributes: _, balances: _ }: dto::ResponseProtocolState,
+                 dto::StateRequestResponse { accounts: _, pagination: _ }: dto::StateRequestResponse,
+                 dto::ProtocolStateRequestResponse { states: _, pagination: _ }: dto::ProtocolStateRequestResponse| {};
+    }
 }
