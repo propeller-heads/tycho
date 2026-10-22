@@ -46,6 +46,7 @@ mod off_worker;
 mod rpc;
 mod state;
 pub mod thread_stats;
+mod worker_lag;
 mod ws;
 
 pub use cache::RpcCacheKind;
@@ -321,6 +322,8 @@ where
         );
 
         let server = HttpServer::new(move || {
+            // The factory runs on each request worker, so this starts one probe per worker.
+            worker_lag::spawn_poll_lag_probe();
             let cors = Cors::default()
                 .allowed_origin("https://open.gitbook.com")
                 .allowed_origin_fn(|origin, _req_head| {
