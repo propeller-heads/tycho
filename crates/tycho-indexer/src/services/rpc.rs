@@ -15,7 +15,8 @@ use tycho_common::{
     models::{
         blockchain::{BlockAggregatedChanges, EntryPoint, TracedEntryPoint, TracingParams},
         protocol::QualityRange,
-        Address, Chain, ComponentId, EntryPointId, PaginationParams,
+        Address, Chain, ComponentId, EntryPointId, ExtractorFingerprint, ExtractorIdentity,
+        PaginationParams,
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, EntryPointFilter, Gateway, StorageError, Version,
@@ -37,7 +38,9 @@ use crate::{
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
+            window::CatchUpUnavailable,
         },
+        ws::subscriber_message,
     },
 };
 
@@ -66,6 +69,10 @@ pub enum RpcError {
 
     #[error("Plan restriction violated: {0}")]
     PlanRestrictionViolation(String),
+
+    /// The process runs no such extractor. Clients recognise the message by its prefix.
+    #[error("Unknown extractor: {0}")]
+    UnknownExtractor(String),
 }
 
 impl From<anyhow::Error> for RpcError {
@@ -85,6 +92,7 @@ impl ResponseError for RpcError {
             RpcError::InvalidPagination { .. } => StatusCode::BAD_REQUEST,
             RpcError::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RpcError::PlanRestrictionViolation(_) => StatusCode::BAD_REQUEST,
+            RpcError::UnknownExtractor(_) => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -99,6 +107,7 @@ impl ResponseError for RpcError {
             RpcError::InvalidPagination { .. } => HttpResponse::BadRequest().body(self.to_string()),
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
+            RpcError::UnknownExtractor(_) => HttpResponse::BadRequest().body(self.to_string()),
         }
     }
 }
@@ -127,6 +136,8 @@ pub struct RpcHandler<G, T> {
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
     off_worker: OffWorker,
+    /// Answers delta catch-ups from the extractors' windows.
+    catch_up: CatchUpService,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -169,6 +180,10 @@ where
             dto::TracedEntryPointRequestResponse,
         >::new("traced_entry_points", HUNDRED_MB, 7 * 60);
 
+        let catch_up = CatchUpService {
+            pending_deltas: pending_deltas.clone(),
+            extractor_fingerprints: Arc::default(),
+        };
         Self {
             db_gateway,
             pending_deltas,
@@ -182,7 +197,22 @@ where
             protocol_systems,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
+            catch_up,
         }
+    }
+
+    /// Sets the fingerprint of every extractor the process runs, `None` for one without. Delta
+    /// catch-up serves only these extractors, and only to clients that synced under the same
+    /// fingerprint.
+    pub(crate) fn with_extractor_fingerprints(
+        mut self,
+        fingerprints: HashMap<ExtractorIdentity, Option<ExtractorFingerprint>>,
+    ) -> Self {
+        for extractor in fingerprints.keys() {
+            register_catch_up_counters(&extractor.name);
+        }
+        self.catch_up.extractor_fingerprints = Arc::new(fingerprints);
+        self
     }
 
     /// Turns the given response caches off. A request to an endpoint whose cache is off always
@@ -1229,6 +1259,155 @@ where
     }
 }
 
+/// Answers delta catch-ups from the extractors' windows. Clones share the windows and the
+/// fingerprints, so a catch-up can run on the blocking thread pool.
+#[derive(Clone)]
+struct CatchUpService {
+    /// `None` in processes without extractors.
+    pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+    /// The fingerprint of every extractor the process runs, `None` for one without. Catch-up
+    /// serves these extractors only. Empty without extractors.
+    extractor_fingerprints: Arc<HashMap<ExtractorIdentity, Option<ExtractorFingerprint>>>,
+}
+
+impl CatchUpService {
+    /// The messages that take a client of the requested extractor from `from_block_hash` to
+    /// `to_block_hash`, as the WebSocket sent them, or why this process cannot serve them. They
+    /// lack state updates when `include_state` is false, like the WebSocket's.
+    ///
+    /// | Case                                               | Answer                             |
+    /// |----------------------------------------------------|------------------------------------|
+    /// | The process runs no extractors                     | `NoWindow`                         |
+    /// | The extractor has no fingerprint, or another one   | `FingerprintChanged`               |
+    /// | The window cannot lead from one block to the other | The window's reason                |
+    /// | Otherwise                                          | The window's path                  |
+    ///
+    /// # Errors
+    ///
+    /// [`RpcError::UnknownExtractor`] when the process runs no extractor `protocol_system` on
+    /// `chain`; [`RpcError::DeltasError`] when that extractor has no window or its lock is
+    /// poisoned.
+    fn answer(
+        &self,
+        request: &dto::DeltaCatchUpRequestBody,
+    ) -> Result<dto::DeltaCatchUpRequestResponse, RpcError> {
+        let Some(pending_deltas) = &self.pending_deltas else {
+            return Ok(dto::DeltaCatchUpRequestResponse::Unavailable {
+                reason: dto::DeltaCatchUpUnavailable::NoWindow,
+            });
+        };
+        let extractor = ExtractorIdentity::new(request.chain.into(), &request.protocol_system);
+        let Some(fingerprint) = self
+            .extractor_fingerprints
+            .get(&extractor)
+        else {
+            return Err(RpcError::UnknownExtractor(extractor.to_string()));
+        };
+        let requested = ExtractorFingerprint::from(request.fingerprint.clone());
+        let response = if fingerprint.as_ref() != Some(&requested) {
+            dto::DeltaCatchUpRequestResponse::Unavailable {
+                reason: dto::DeltaCatchUpUnavailable::FingerprintChanged,
+            }
+        } else {
+            let path = pending_deltas.catch_up_path(
+                &request.protocol_system,
+                &request.from_block_hash,
+                request.from_block_number,
+                &request.to_block_hash,
+            )?;
+            // `catch_up_path` released the window lock, so the conversion runs outside it.
+            match path {
+                Ok(path) => dto::DeltaCatchUpRequestResponse::Available {
+                    messages: path
+                        .iter()
+                        .map(|message| subscriber_message(message, request.include_state))
+                        .collect(),
+                },
+                Err(reason) => {
+                    dto::DeltaCatchUpRequestResponse::Unavailable { reason: reason.into() }
+                }
+            }
+        };
+        record_catch_up(&extractor.name, &response);
+        Ok(response)
+    }
+}
+
+impl From<CatchUpUnavailable> for dto::DeltaCatchUpUnavailable {
+    fn from(reason: CatchUpUnavailable) -> Self {
+        match reason {
+            CatchUpUnavailable::EmptyWindow => Self::EmptyWindow,
+            CatchUpUnavailable::BelowFloor => Self::BelowFloor,
+            CatchUpUnavailable::UnknownHash => Self::UnknownHash,
+            CatchUpUnavailable::ToNotInWindow => Self::ToNotInWindow,
+            CatchUpUnavailable::ToNotAhead => Self::ToNotAhead,
+        }
+    }
+}
+
+/// Every reason a running extractor's catch-up can be unavailable for, to register each
+/// `delta_catch_up_responses` series at zero. `NoWindow` comes from processes without extractors.
+const EXTRACTOR_CATCH_UP_UNAVAILABLE: [dto::DeltaCatchUpUnavailable; 6] = [
+    dto::DeltaCatchUpUnavailable::FingerprintChanged,
+    dto::DeltaCatchUpUnavailable::EmptyWindow,
+    dto::DeltaCatchUpUnavailable::ToNotInWindow,
+    dto::DeltaCatchUpUnavailable::BelowFloor,
+    dto::DeltaCatchUpUnavailable::UnknownHash,
+    dto::DeltaCatchUpUnavailable::ToNotAhead,
+];
+
+/// `outcome` label of an available catch-up in the `delta_catch_up_responses` metric.
+const CATCH_UP_AVAILABLE: &str = "available";
+
+/// `outcome` label of an unavailable catch-up in the `delta_catch_up_responses` metric.
+fn catch_up_unavailable_label(reason: dto::DeltaCatchUpUnavailable) -> &'static str {
+    match reason {
+        dto::DeltaCatchUpUnavailable::NoWindow => "no_window",
+        dto::DeltaCatchUpUnavailable::FingerprintChanged => "fingerprint_changed",
+        dto::DeltaCatchUpUnavailable::EmptyWindow => "empty_window",
+        dto::DeltaCatchUpUnavailable::ToNotInWindow => "to_not_in_window",
+        dto::DeltaCatchUpUnavailable::BelowFloor => "below_floor",
+        dto::DeltaCatchUpUnavailable::UnknownHash => "unknown_hash",
+        dto::DeltaCatchUpUnavailable::ToNotAhead => "to_not_ahead",
+        // Only clients produce it, for reasons added after them.
+        dto::DeltaCatchUpUnavailable::Unknown => "unknown",
+    }
+}
+
+/// Logs and counts a running extractor's catch-up answer.
+fn record_catch_up(extractor: &str, response: &dto::DeltaCatchUpRequestResponse) {
+    let outcome = match response {
+        dto::DeltaCatchUpRequestResponse::Available { messages } => {
+            debug!(extractor, n_messages = messages.len(), "Delta catch-up available");
+            CATCH_UP_AVAILABLE
+        }
+        dto::DeltaCatchUpRequestResponse::Unavailable { reason } => {
+            debug!(extractor, ?reason, "Delta catch-up unavailable");
+            catch_up_unavailable_label(*reason)
+        }
+    };
+    metrics::counter!(
+        "delta_catch_up_responses",
+        "extractor" => extractor.to_string(),
+        "outcome" => outcome
+    )
+    .increment(1);
+}
+
+/// Registers every `delta_catch_up_responses` series of `extractor` at zero, so that `increase()`
+/// sees the first answer of each kind.
+fn register_catch_up_counters(extractor: &str) {
+    let unavailable = EXTRACTOR_CATCH_UP_UNAVAILABLE.map(catch_up_unavailable_label);
+    for outcome in std::iter::once(CATCH_UP_AVAILABLE).chain(unavailable) {
+        metrics::counter!(
+            "delta_catch_up_responses",
+            "extractor" => extractor.to_string(),
+            "outcome" => outcome
+        )
+        .increment(0);
+    }
+}
+
 /// The response to a state service failure: the body the database path returns for the same
 /// failure.
 impl From<StateServiceError> for RpcError {
@@ -1638,6 +1817,56 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
     }
 }
 
+/// Catch up on missed deltas
+///
+/// Returns the messages a WebSocket subscriber missed between the last block it applied and the
+/// block its new subscription continues from, as the WebSocket sent them, reverts included. When
+/// the server cannot serve them it names the reason, and the client must resync from a snapshot.
+/// Answers 400 for an extractor the server does not run.
+#[utoipa::path(
+    post,
+    path = "/v1/delta_catch_up",
+    responses(
+        (status = 200, description = "OK", body = DeltaCatchUpRequestResponse),
+    ),
+    request_body = DeltaCatchUpRequestBody,
+    security(
+         ("apiKey" = [])
+    ),
+)]
+#[instrument(skip_all, fields(protocol_system))]
+pub async fn delta_catch_up<G: Gateway, T: EntryPointTracer>(
+    req: actix_web::HttpRequest,
+    body: web::Json<dto::DeltaCatchUpRequestBody>,
+    handler: web::Data<RpcHandler<G, T>>,
+) -> Result<HttpResponse, RpcError> {
+    tracing::Span::current().record("protocol_system", &body.protocol_system);
+
+    if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
+        body.validate_restrictions(restrictions)?;
+    }
+
+    // The window read, the conversion and the serialization run as one job off the worker.
+    let catch_up = handler.catch_up.clone();
+    let request = body.0.clone();
+    let response = handler
+        .off_worker
+        .delta_catch_up(move || catch_up.answer(&request))
+        .await;
+
+    match response {
+        Ok(response) => Ok(response),
+        Err(err @ RpcError::UnknownExtractor(_)) => {
+            debug!(error = %err, ?body, "Delta catch-up for an unknown extractor.");
+            Err(err)
+        }
+        Err(err) => {
+            error!(error = %err, ?body, "Error while catching up deltas.");
+            Err(err)
+        }
+    }
+}
+
 /// Health check endpoint
 ///
 /// This endpoint is used to check the health of the service.
@@ -1691,10 +1920,15 @@ mod tests {
     use super::*;
     use crate::{
         extractor::models::fixtures,
-        services::state::{
-            cache::EntityCache,
-            shadow::{testing::moved_comparisons, Sampler},
-            window::{new_windows, CatchUpPath, DeltaWindow, FoldSink, WindowConfig},
+        services::{
+            deltas_buffer::PendingDeltas,
+            state::{
+                cache::EntityCache,
+                shadow::{testing::moved_comparisons, Sampler},
+                window::{
+                    new_windows, CatchUpPath, DeltaWindow, DiscardSink, FoldSink, WindowConfig,
+                },
+            },
         },
         testing::{self, evm_contract_slots, MockGateway},
     };
@@ -4228,6 +4462,795 @@ plans:
             assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// Fingerprint of the extractors the catch-up handlers run.
+    fn catch_up_fingerprint() -> ExtractorFingerprint {
+        ExtractorFingerprint(Bytes::from("0x01"))
+    }
+
+    /// Block `number` of `ambient`, setting attribute `x` of component `c1` to `number`.
+    fn catch_up_block(number: u64) -> BlockAggregatedChanges {
+        testing::with_state_delta(
+            testing::aggregated_changes("ambient", number, 0, None),
+            "c1",
+            number,
+        )
+    }
+
+    /// Block `number` of `ambient` on a fork, a child of `parent`.
+    fn catch_up_fork_block(number: u64, parent: &BlockAggregatedChanges) -> BlockAggregatedChanges {
+        let mut message = catch_up_block(number);
+        message.block.hash = Bytes::from(1_000 + number).lpad(32, 0);
+        message.block.parent_hash = parent.block.hash.clone();
+        message
+    }
+
+    /// The revert of `ambient` to block `number`.
+    fn catch_up_revert(number: u64) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { revert: true, ..catch_up_block(number) }
+    }
+
+    /// A handler of a process that runs `ambient` and `uniswap_v2` on Ethereum, both with
+    /// [`catch_up_fingerprint`]. Each message goes into its extractor's window.
+    fn catch_up_handler(
+        plans: PlansConfig,
+        messages: &[BlockAggregatedChanges],
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let extractors = ["ambient", "uniswap_v2"];
+        let windows = new_windows(extractors, WindowConfig::default());
+        for message in messages {
+            windows[&message.extractor]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(message.clone()))
+                .unwrap();
+        }
+        let pending_deltas = PendingDeltas::from_windows(windows, Arc::new(DiscardSink));
+        let fingerprints = extractors.map(|name| {
+            (ExtractorIdentity::new(Chain::Ethereum, name), Some(catch_up_fingerprint()))
+        });
+        RpcHandler::new(
+            MockGateway::new(),
+            Some(Arc::new(pending_deltas)),
+            MockEntryPointTracer::new(),
+            plans,
+            vec![],
+            vec![],
+        )
+        .with_extractor_fingerprints(HashMap::from(fingerprints))
+    }
+
+    /// A catch-up of `ambient` with state, under [`catch_up_fingerprint`].
+    fn catch_up_request(
+        from: &BlockAggregatedChanges,
+        to: &BlockAggregatedChanges,
+    ) -> dto::DeltaCatchUpRequestBody {
+        dto::DeltaCatchUpRequestBody {
+            chain: dto::Chain::Ethereum,
+            protocol_system: "ambient".to_string(),
+            from_block_hash: from.block.hash.clone(),
+            from_block_number: from.block.number,
+            to_block_hash: to.block.hash.clone(),
+            fingerprint: catch_up_fingerprint().into(),
+            include_state: true,
+        }
+    }
+
+    fn available(messages: &[&BlockAggregatedChanges]) -> dto::DeltaCatchUpRequestResponse {
+        dto::DeltaCatchUpRequestResponse::Available {
+            messages: messages
+                .iter()
+                .map(|&message| message.clone().into())
+                .collect(),
+        }
+    }
+
+    fn unavailable(reason: dto::DeltaCatchUpUnavailable) -> dto::DeltaCatchUpRequestResponse {
+        dto::DeltaCatchUpRequestResponse::Unavailable { reason }
+    }
+
+    /// Posts `request` to the catch-up endpoint of `handler`, with the `X-User-Plan` header when
+    /// a plan is given.
+    async fn post_delta_catch_up(
+        handler: RpcHandler<MockGateway, MockEntryPointTracer>,
+        plan: Option<&str>,
+        request: &dto::DeltaCatchUpRequestBody,
+    ) -> (StatusCode, actix_web::web::Bytes) {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/delta_catch_up",
+                    web::post().to(delta_catch_up::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+        let mut req = test::TestRequest::post()
+            .uri("/v1/delta_catch_up")
+            .set_json(request);
+        if let Some(plan) = plan {
+            req = req.insert_header(("X-User-Plan", plan));
+        }
+        let resp = test::call_service(&app, req.to_request()).await;
+        (resp.status(), test::read_body(resp).await)
+    }
+
+    #[test]
+    async fn test_delta_catch_up_answers_the_window_messages_in_order() {
+        // The client has 4. The window reverted to 2 and grew 3' and 4'.
+        let blocks: Vec<_> = (1..=4).map(catch_up_block).collect();
+        let revert = catch_up_revert(2);
+        let fork_3 = catch_up_fork_block(3, &blocks[1]);
+        let fork_4 = catch_up_fork_block(4, &fork_3);
+        let mut messages = blocks.clone();
+        messages.extend([revert.clone(), fork_3.clone(), fork_4.clone()]);
+        let handler = catch_up_handler(PlansConfig::default(), &messages);
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&blocks[3], &fork_4))
+            .unwrap();
+
+        assert_eq!(response, available(&[&revert, &fork_3, &fork_4]));
+    }
+
+    #[test]
+    async fn test_delta_catch_up_can_end_in_a_revert() {
+        // The client has 4, and its new subscription starts with the revert to 2 that the window
+        // already applied.
+        let blocks: Vec<_> = (1..=4).map(catch_up_block).collect();
+        let revert = catch_up_revert(2);
+        let mut messages = blocks.clone();
+        messages.push(revert.clone());
+        let handler = catch_up_handler(PlansConfig::default(), &messages);
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&blocks[3], &blocks[1]))
+            .unwrap();
+
+        assert_eq!(response, available(&[&revert]));
+    }
+
+    /// `message` with a slot of an account and a balance of component `c1`, besides its state
+    /// delta.
+    fn with_account_and_balance(mut message: BlockAggregatedChanges) -> BlockAggregatedChanges {
+        let address = Bytes::from(1u64).lpad(20, 0);
+        message.account_deltas.insert(
+            address.clone(),
+            AccountDelta::new(
+                Chain::Ethereum,
+                address,
+                fixtures::optional_slots([(1, message.block.number)]),
+                None,
+                None,
+                ChangeType::Update,
+            ),
+        );
+        message
+            .component_balances
+            .insert("c1".to_string(), HashMap::new());
+        message
+    }
+
+    #[test]
+    async fn test_delta_catch_up_without_state_drops_the_state_updates() {
+        let with_state = with_account_and_balance(catch_up_block(2));
+        let handler =
+            catch_up_handler(PlansConfig::default(), &[catch_up_block(1), with_state.clone()]);
+        let request = dto::DeltaCatchUpRequestBody {
+            include_state: false,
+            ..catch_up_request(&catch_up_block(1), &with_state)
+        };
+
+        let response = handler
+            .catch_up
+            .answer(&request)
+            .unwrap();
+
+        let dto::DeltaCatchUpRequestResponse::Available { messages } = response else {
+            panic!("expected the path to block 2, got {response:?}");
+        };
+        let [message] = messages.as_slice() else {
+            panic!("expected one message, got {messages:?}");
+        };
+        let expected = dto::BlockAggregatedChanges {
+            state_updates: HashMap::new(),
+            account_updates: HashMap::new(),
+            ..with_state.into()
+        };
+        assert_eq!(message, &expected);
+        assert!(!message.component_balances.is_empty(), "only state updates are dropped");
+    }
+
+    #[test]
+    async fn test_delta_catch_up_without_state_drops_the_state_updates_of_a_revert() {
+        // The client has 3, and its new subscription starts after the window reverted to 2.
+        let blocks: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let revert = with_account_and_balance(catch_up_revert(2));
+        let mut messages = blocks.clone();
+        messages.push(revert.clone());
+        let handler = catch_up_handler(PlansConfig::default(), &messages);
+        let request = dto::DeltaCatchUpRequestBody {
+            include_state: false,
+            ..catch_up_request(&blocks[2], &blocks[1])
+        };
+
+        let response = handler
+            .catch_up
+            .answer(&request)
+            .unwrap();
+
+        let without_state = dto::BlockAggregatedChanges {
+            state_updates: HashMap::new(),
+            account_updates: HashMap::new(),
+            ..revert.into()
+        };
+        assert!(
+            without_state.revert &&
+                !without_state
+                    .component_balances
+                    .is_empty()
+        );
+        assert_eq!(
+            response,
+            dto::DeltaCatchUpRequestResponse::Available { messages: vec![without_state] }
+        );
+    }
+
+    /// Block `number` of `uniswap_v2`, setting attribute `x` of component `u1` to `number`.
+    fn uniswap_v2_block(number: u64) -> BlockAggregatedChanges {
+        testing::with_state_delta(
+            testing::aggregated_changes("uniswap_v2", number, 0, None),
+            "u1",
+            number,
+        )
+    }
+
+    #[test]
+    async fn test_delta_catch_up_answers_from_the_window_of_the_requested_extractor() {
+        // Both extractors run on Ethereum, so their blocks share hashes. `uniswap_v2` is a block
+        // ahead of `ambient` and changes another component.
+        let ambient: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let uniswap_v2: Vec<_> = (1..=4).map(uniswap_v2_block).collect();
+        let handler =
+            catch_up_handler(PlansConfig::default(), &[ambient, uniswap_v2.clone()].concat());
+        let request = dto::DeltaCatchUpRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            ..catch_up_request(&uniswap_v2[0], &uniswap_v2[3])
+        };
+
+        let response = handler
+            .catch_up
+            .answer(&request)
+            .unwrap();
+
+        assert_eq!(response, available(&[&uniswap_v2[1], &uniswap_v2[2], &uniswap_v2[3]]));
+    }
+
+    #[rstest]
+    #[case::empty_window(&[], 2, 3, dto::DeltaCatchUpUnavailable::EmptyWindow)]
+    #[case::below_floor(&[5, 6, 7, 8], 3, 8, dto::DeltaCatchUpUnavailable::BelowFloor)]
+    #[case::to_not_in_window(&[1, 2, 3, 4, 5], 2, 6, dto::DeltaCatchUpUnavailable::ToNotInWindow)]
+    // The client saw a revert to 2 that the window has not applied yet.
+    #[case::to_not_ahead(&[1, 2, 3, 4, 5], 4, 2, dto::DeltaCatchUpUnavailable::ToNotAhead)]
+    #[actix_web::test]
+    async fn test_delta_catch_up_names_why_the_window_cannot_serve_it(
+        #[case] held: &[u64],
+        #[case] from: u64,
+        #[case] to: u64,
+        #[case] reason: dto::DeltaCatchUpUnavailable,
+    ) {
+        let messages: Vec<_> = held
+            .iter()
+            .map(|&n| catch_up_block(n))
+            .collect();
+        let handler = catch_up_handler(PlansConfig::default(), &messages);
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&catch_up_block(from), &catch_up_block(to)))
+            .unwrap();
+
+        assert_eq!(response, unavailable(reason));
+    }
+
+    #[test]
+    async fn test_delta_catch_up_from_a_block_the_window_never_saw_is_unavailable() {
+        let blocks: Vec<_> = (1..=5).map(catch_up_block).collect();
+        let handler = catch_up_handler(PlansConfig::default(), &blocks);
+        let unseen = catch_up_fork_block(3, &blocks[1]);
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&unseen, &blocks[4]))
+            .unwrap();
+
+        assert_eq!(response, unavailable(dto::DeltaCatchUpUnavailable::UnknownHash));
+    }
+
+    #[rstest]
+    #[case::other_fingerprint(Some(ExtractorFingerprint(Bytes::from("0x02"))))]
+    #[case::no_fingerprint(None)]
+    #[actix_web::test]
+    async fn test_delta_catch_up_under_another_fingerprint_is_unavailable(
+        #[case] server_fingerprint: Option<ExtractorFingerprint>,
+    ) {
+        // The window could serve the path: only the fingerprint stops it.
+        let blocks: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let handler = catch_up_handler(PlansConfig::default(), &blocks)
+            .with_extractor_fingerprints(HashMap::from([(
+                ExtractorIdentity::new(Chain::Ethereum, "ambient"),
+                server_fingerprint,
+            )]));
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&blocks[0], &blocks[2]))
+            .unwrap();
+
+        assert_eq!(response, unavailable(dto::DeltaCatchUpUnavailable::FingerprintChanged));
+    }
+
+    #[test]
+    async fn test_delta_catch_up_without_windows_is_unavailable() {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let response = handler
+            .catch_up
+            .answer(&catch_up_request(&catch_up_block(1), &catch_up_block(2)))
+            .unwrap();
+
+        assert_eq!(response, unavailable(dto::DeltaCatchUpUnavailable::NoWindow));
+    }
+
+    #[rstest]
+    #[case::unknown_name(
+        dto::Chain::Ethereum,
+        "sushiswap",
+        "Unknown extractor: ethereum:sushiswap"
+    )]
+    #[case::other_chain(dto::Chain::Base, "ambient", "Unknown extractor: base:ambient")]
+    #[actix_web::test]
+    async fn test_delta_catch_up_of_an_unknown_extractor_is_a_bad_request(
+        #[case] chain: dto::Chain,
+        #[case] protocol_system: &str,
+        #[case] message: &str,
+    ) {
+        let blocks: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let handler = catch_up_handler(PlansConfig::default(), &blocks);
+        let request = dto::DeltaCatchUpRequestBody {
+            chain,
+            protocol_system: protocol_system.to_string(),
+            ..catch_up_request(&blocks[0], &blocks[2])
+        };
+
+        let (status, body) = post_delta_catch_up(handler, None, &request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, message);
+    }
+
+    #[actix_web::test]
+    async fn test_delta_catch_up_refuses_a_protocol_system_outside_the_plan() {
+        // The process runs `uniswap_v2` and could serve the path; the plan allows `ambient` and
+        // `uniswap_v3` only.
+        let blocks: Vec<_> = (1..=3)
+            .map(|n| BlockAggregatedChanges {
+                extractor: "uniswap_v2".to_string(),
+                ..catch_up_block(n)
+            })
+            .collect();
+        let handler = catch_up_handler(plans_config_with_restrictions(), &blocks);
+        let request = dto::DeltaCatchUpRequestBody {
+            protocol_system: "uniswap_v2".to_string(),
+            ..catch_up_request(&blocks[0], &blocks[2])
+        };
+
+        let (status, body) = post_delta_catch_up(handler, Some("restricted"), &request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("not available on this plan"), "{body:?}");
+    }
+
+    #[actix_web::test]
+    async fn test_delta_catch_up_serves_a_protocol_system_on_the_plan() {
+        let blocks: Vec<_> = (1..=3).map(catch_up_block).collect();
+        let handler = catch_up_handler(plans_config_with_restrictions(), &blocks);
+
+        let (status, body) = post_delta_catch_up(
+            handler,
+            Some("restricted"),
+            &catch_up_request(&blocks[0], &blocks[2]),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<dto::DeltaCatchUpRequestResponse>(&body).unwrap(),
+            available(&[&blocks[1], &blocks[2]])
+        );
+    }
+
+    #[test]
+    async fn test_delta_catch_up_counts_answers_by_extractor_and_outcome() {
+        use metrics_util::{debugging::DebugValue, MetricKind};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let blocks: Vec<_> = (1..=2).map(catch_up_block).collect();
+        let handler = catch_up_handler(PlansConfig::default(), &blocks);
+        let stale = dto::DeltaCatchUpRequestBody {
+            fingerprint: dto::ExtractorFingerprint(Bytes::from("0x02")),
+            ..catch_up_request(&blocks[0], &blocks[1])
+        };
+
+        for request in [catch_up_request(&blocks[0], &blocks[1]), stale] {
+            handler
+                .catch_up
+                .answer(&request)
+                .unwrap();
+        }
+
+        let mut ambient_series: Vec<(String, u64)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let DebugValue::Counter(count) = value else { return None };
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_string())
+                };
+                (key.kind() == MetricKind::Counter &&
+                    key.key().name() == "delta_catch_up_responses" &&
+                    label("extractor").as_deref() == Some("ambient"))
+                .then(|| (label("outcome").unwrap_or_default(), count))
+            })
+            .collect();
+        ambient_series.sort();
+        assert_eq!(
+            ambient_series,
+            [
+                ("available", 1),
+                ("below_floor", 0),
+                ("empty_window", 0),
+                ("fingerprint_changed", 1),
+                ("to_not_ahead", 0),
+                ("to_not_in_window", 0),
+                ("unknown_hash", 0),
+            ]
+            .map(|(outcome, count)| (outcome.to_string(), count))
+        );
+    }
+
+    /// Checks catch-ups served over HTTP, parsed as the Rust client parses them, over generated
+    /// histories: an answered path must equal the window's path as a WebSocket client with the
+    /// same `include_state` parses it, and, with state, bring the client to the canonical chain.
+    /// Each upgraded restart starts a process under a new fingerprint, as a new indexer version
+    /// does, so a gap across one must be refused.
+    mod catch_up_through_the_wire {
+        use std::collections::BTreeMap;
+
+        use rand::{rngs::StdRng, SeedableRng};
+        use tycho_common::testing::delta_history::{
+            follower_states, generate_history, sample_gaps, DeltaStateModel, Gap, History,
+            HistoryConfig, HistoryEvent, RestartKind, CHAIN, EXTRACTOR,
+        };
+        use uuid::Uuid;
+
+        use super::*;
+
+        /// Histories per configuration.
+        const SEEDS: u64 = 12;
+        /// Random gaps drawn per history.
+        const RANDOM_GAPS: usize = 30;
+
+        fn configs() -> [HistoryConfig; 2] {
+            [
+                HistoryConfig::default(),
+                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
+                // bound and clients fall below the floor.
+                HistoryConfig {
+                    window_depth: 4,
+                    finality_depth: 3,
+                    max_revert_depth: 3,
+                    max_commit_lag: 2,
+                    ..Default::default()
+                },
+            ]
+        }
+
+        /// How often each case occurs.
+        #[derive(Debug, Default)]
+        struct Coverage {
+            /// Paths served with state and checked against the canonical chain.
+            checked: usize,
+            /// Checked paths holding a revert.
+            checked_through_a_revert: usize,
+            /// Paths served without state.
+            without_state: usize,
+            /// Requests the window could not serve, for the same reason over HTTP.
+            unavailable: usize,
+            /// Requests across an upgraded restart, refused for the fingerprint.
+            fingerprint_changed: usize,
+        }
+
+        /// The fingerprint of the process that emits `history.events[index]`: one more per
+        /// upgraded restart before it.
+        fn fingerprint_at(history: &History, index: usize) -> ExtractorFingerprint {
+            let mut upgrades = 0u64;
+            for event in &history.events[..index] {
+                match event {
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Upgraded,
+                    } => upgrades += 1,
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Unchanged,
+                    } |
+                    HistoryEvent::Message(_) => {}
+                }
+            }
+            ExtractorFingerprint(Bytes::from(upgrades))
+        }
+
+        /// A handler of a process that runs the history's extractor over `windows`, under
+        /// `fingerprint`.
+        fn handler(
+            windows: &HashMap<String, Arc<Mutex<DeltaWindow>>>,
+            fingerprint: ExtractorFingerprint,
+        ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+            let pending_deltas =
+                PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
+            RpcHandler::new(
+                MockGateway::new(),
+                Some(Arc::new(pending_deltas)),
+                MockEntryPointTracer::new(),
+                PlansConfig::default(),
+                vec![],
+                vec![],
+            )
+            .with_extractor_fingerprints(HashMap::from([(
+                ExtractorIdentity::new(CHAIN, EXTRACTOR),
+                Some(fingerprint),
+            )]))
+        }
+
+        /// `message` as a WebSocket client with `include_state` parses it.
+        fn ws_client_receives(
+            message: &BlockAggregatedChanges,
+            include_state: bool,
+        ) -> BlockAggregatedChanges {
+            let sent = dto::WebSocketMessage::BlockAggregatedChanges {
+                subscription_id: Uuid::nil(),
+                deltas: subscriber_message(message, include_state),
+            };
+            let text = serde_json::to_string(&sent).unwrap();
+            let dto::WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id: _ } =
+                serde_json::from_str(&text).unwrap()
+            else {
+                panic!("{text} is not a block message");
+            };
+            BlockAggregatedChanges::from(deltas)
+        }
+
+        /// Applies `path`, then the messages of the subscription that starts at `first_live`, to
+        /// `client`, and checks it against the canonical chain right after the first live
+        /// message and after the last one, before a restart ends the subscription.
+        fn check_resume(
+            history: &History,
+            mut client: DeltaStateModel,
+            path: &[BlockAggregatedChanges],
+            first_live: usize,
+            context: &str,
+        ) {
+            for message in path {
+                client.apply(message);
+            }
+            let mut last_live = first_live;
+            for (index, event) in history
+                .events
+                .iter()
+                .enumerate()
+                .skip(first_live)
+            {
+                let message = match event {
+                    HistoryEvent::Message(message) => message,
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => break,
+                };
+                client.apply(&ws_client_receives(message, true));
+                last_live = index;
+                if index == first_live {
+                    assert_eq!(
+                        client.check_against(
+                            &history.canonical_states[index],
+                            &history.connected_states[index]
+                        ),
+                        Ok(()),
+                        "{context}, after the first live message"
+                    );
+                }
+            }
+            assert_eq!(
+                client.check_against(
+                    &history.canonical_states[last_live],
+                    &history.connected_states[last_live]
+                ),
+                Ok(()),
+                "{context}, after event {last_live}"
+            );
+        }
+
+        #[actix_web::test]
+        async fn http_catch_ups_equal_the_websocket_messages_and_end_canonical() {
+            let mut rng = StdRng::seed_from_u64(7);
+            let mut coverage = Coverage::default();
+            for config in &configs() {
+                for seed in 0..SEEDS {
+                    let history = generate_history(config, seed);
+                    let follower = follower_states(&history);
+                    let mut by_first_live: BTreeMap<usize, Vec<Gap>> = BTreeMap::new();
+                    for gap in sample_gaps(&history, RANDOM_GAPS, &mut rng) {
+                        by_first_live
+                            .entry(gap.first_live)
+                            .or_default()
+                            .push(gap);
+                    }
+                    let windows = new_windows(
+                        [EXTRACTOR],
+                        WindowConfig { depth: history.config.window_depth, min_fold_batch: 1 },
+                    );
+                    for (index, event) in history.events.iter().enumerate() {
+                        // The window as it stands when the client's first live message arrives.
+                        let serving = fingerprint_at(&history, index);
+                        for (&gap, include_state) in by_first_live
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|gap| [(gap, true), (gap, false)])
+                        {
+                            let context = format!(
+                                "seed {seed}, {config:?}, {gap:?}, include_state {include_state}"
+                            );
+                            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) = (
+                                &history.events[gap.last_applied],
+                                &history.events[gap.first_live],
+                            ) else {
+                                panic!("{context}: the gap does not start and end at a message");
+                            };
+                            let to = if live.revert {
+                                &live.block.hash
+                            } else {
+                                &live.block.parent_hash
+                            };
+                            let synced_under = fingerprint_at(&history, gap.last_applied);
+                            let request = dto::DeltaCatchUpRequestBody {
+                                chain: CHAIN.into(),
+                                protocol_system: EXTRACTOR.to_string(),
+                                from_block_hash: last.block.hash.clone(),
+                                from_block_number: last.block.number,
+                                to_block_hash: to.clone(),
+                                fingerprint: synced_under.clone().into(),
+                                include_state,
+                            };
+
+                            let (status, body) = post_delta_catch_up(
+                                handler(&windows, serving.clone()),
+                                None,
+                                &request,
+                            )
+                            .await;
+
+                            assert_eq!(status, StatusCode::OK, "{context}");
+                            // As `HttpRPCClient::get_delta_catch_up` parses it.
+                            let response: dto::DeltaCatchUpRequestResponse =
+                                serde_json::from_slice(&body).unwrap();
+                            if synced_under != serving {
+                                assert_eq!(
+                                    response,
+                                    unavailable(dto::DeltaCatchUpUnavailable::FingerprintChanged),
+                                    "{context}"
+                                );
+                                coverage.fingerprint_changed += 1;
+                                continue;
+                            }
+                            let window_path = windows[EXTRACTOR]
+                                .lock()
+                                .unwrap()
+                                .catch_up_path(&last.block.hash, last.block.number, to);
+                            let (messages, path) = match (response, window_path) {
+                                (
+                                    dto::DeltaCatchUpRequestResponse::Available { messages },
+                                    Ok(path),
+                                ) => (messages, path),
+                                (
+                                    dto::DeltaCatchUpRequestResponse::Unavailable { reason },
+                                    Err(window_reason),
+                                ) => {
+                                    assert_eq!(reason, window_reason.into(), "{context}");
+                                    coverage.unavailable += 1;
+                                    continue;
+                                }
+                                (response, window_path) => panic!(
+                                    "{context}: HTTP answers {response:?}, the window \
+                                     {window_path:?}"
+                                ),
+                            };
+                            let http: Vec<BlockAggregatedChanges> = messages
+                                .into_iter()
+                                .map(BlockAggregatedChanges::from)
+                                .collect();
+                            let ws: Vec<BlockAggregatedChanges> = path
+                                .iter()
+                                .map(|message| ws_client_receives(message, include_state))
+                                .collect();
+                            assert_eq!(http, ws, "{context}");
+                            if !include_state {
+                                coverage.without_state += 1;
+                                continue;
+                            }
+                            coverage.checked += 1;
+                            coverage.checked_through_a_revert += usize::from(
+                                http.iter()
+                                    .any(|message| message.revert),
+                            );
+                            check_resume(
+                                &history,
+                                follower[gap.last_applied].clone(),
+                                &http,
+                                gap.first_live,
+                                &context,
+                            );
+                        }
+                        let mut window = windows[EXTRACTOR].lock().unwrap();
+                        match event {
+                            HistoryEvent::Message(message) => {
+                                window.insert(message).unwrap();
+                                window
+                                    .fold_evictable(&DiscardSink)
+                                    .unwrap();
+                            }
+                            HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                                window
+                                    .fold_committed(&DiscardSink)
+                                    .unwrap();
+                                window.clear();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let Coverage {
+                checked,
+                checked_through_a_revert,
+                without_state,
+                unavailable,
+                fingerprint_changed,
+            } = &coverage;
+            for (case, count) in [
+                ("checked paths", checked),
+                ("checked paths through a revert", checked_through_a_revert),
+                ("paths without state", without_state),
+                ("unavailable paths", unavailable),
+                ("requests across an upgrade", fingerprint_changed),
+            ] {
+                assert!(*count > 0, "no {case} in {coverage:?}");
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 use tycho_common::dto::{
     AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
-    ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,
-    PaginationParams, PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
+    ComponentTvlRequestResponse, ContractId, DeltaCatchUpRequestBody, DeltaCatchUpRequestResponse,
+    DeltaCatchUpUnavailable, EntryPoint, EntryPointWithTracingParams, Health, PaginationParams,
+    PaginationResponse, ProtocolComponent, ProtocolComponentRequestResponse,
     ProtocolComponentsRequestBody, ProtocolId, ProtocolStateDelta, ProtocolStateRequestBody,
     ProtocolStateRequestResponse, ProtocolSystemsRequestBody, ProtocolSystemsRequestResponse,
     RPCTracerParams, ResponseAccount, ResponseProtocolState, ResponseToken, StateRequestBody,
@@ -43,6 +44,7 @@ impl Modify for SecurityAddon {
         rpc::protocol_state,
         rpc::contract_state,
         rpc::component_tvl,
+        rpc::delta_catch_up,
     ),
     components(
         schemas(VersionParam),
@@ -81,6 +83,9 @@ impl Modify for SecurityAddon {
         schemas(RPCTracerParams),
         schemas(AccountOverrides),
         schemas(StorageOverride),
+        schemas(DeltaCatchUpRequestBody),
+        schemas(DeltaCatchUpRequestResponse),
+        schemas(DeltaCatchUpUnavailable),
     ),
     modifiers(&SecurityAddon),
 )]

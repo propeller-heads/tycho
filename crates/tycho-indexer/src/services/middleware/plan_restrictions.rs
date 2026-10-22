@@ -276,6 +276,13 @@ impl ValidateRestrictions for dto::TracedEntryPointRequestBody {
     }
 }
 
+impl ValidateRestrictions for dto::DeltaCatchUpRequestBody {
+    fn validate_restrictions(&self, restrictions: &PlanRestrictions) -> Result<(), RpcError> {
+        // The other limits bound component, token and version filters; a catch-up takes none.
+        restrictions.check_protocol_system(&self.protocol_system)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

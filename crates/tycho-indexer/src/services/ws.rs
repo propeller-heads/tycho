@@ -14,7 +14,7 @@ use metrics::{counter, gauge, Label};
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{BlockAggregatedChanges, Command, Response, WebSocketMessage},
-    models::{error::WebsocketError, ExtractorIdentity},
+    models::{blockchain, error::WebsocketError, ExtractorIdentity},
 };
 use uuid::Uuid;
 
@@ -40,6 +40,19 @@ pub struct WsData {
 impl WsData {
     pub fn new(extractors: MessageSenderMap) -> Self {
         Self { subscribers: Arc::new(extractors) }
+    }
+}
+
+/// `message` as a subscription with this `include_state` receives it: without state and account
+/// updates when `include_state` is false.
+pub(super) fn subscriber_message(
+    message: &blockchain::BlockAggregatedChanges,
+    include_state: bool,
+) -> BlockAggregatedChanges {
+    if include_state {
+        message.clone().into()
+    } else {
+        message.drop_state().into()
     }
 }
 
@@ -255,6 +268,9 @@ impl WsActor {
             }
         };
 
+        // Sent with the confirmation, so the client knows which deltas the subscription carries.
+        let fingerprint = message_sender.fingerprint();
+
         // Step 2: Generate subscription ID and prepare for async operation
         // Generate a unique ID for this subscription
         let subscription_id = Uuid::new_v4();
@@ -305,11 +321,7 @@ impl WsActor {
                                 }
                             }
 
-                            let result = if include_state {
-                                (*item).clone().into()
-                            } else {
-                                item.drop_state().into()
-                            };
+                            let result = subscriber_message(&item, include_state);
 
                             yield ExtractorEvent::Message(subscription_id, Box::new(result));
                         }
@@ -372,6 +384,7 @@ impl WsActor {
                             let message = Response::NewSubscription {
                                 extractor_id: extractor_id.into(),
                                 subscription_id,
+                                fingerprint: fingerprint.map(Into::into),
                             };
                             ctx.text(serde_json::to_string(&message).unwrap());
                         }
@@ -670,7 +683,7 @@ mod tests {
         dto::{self, Response},
         models::{
             blockchain::{Block, BlockAggregatedChanges},
-            Chain,
+            Chain, ExtractorFingerprint,
         },
         Bytes,
     };
@@ -681,12 +694,19 @@ mod tests {
     pub struct MyMessageSender {
         extractor_id: ExtractorIdentity,
         block_template: BlockAggregatedChanges,
+        fingerprint: Option<ExtractorFingerprint>,
     }
 
     impl MyMessageSender {
         pub fn new(extractor_id: ExtractorIdentity) -> Self {
             let block_template = Self::default_block(&extractor_id.name);
-            Self { extractor_id, block_template }
+            Self { extractor_id, block_template, fingerprint: None }
+        }
+
+        /// Reports `fingerprint` instead of the trait's default, `None`.
+        pub fn with_fingerprint(mut self, fingerprint: ExtractorFingerprint) -> Self {
+            self.fingerprint = Some(fingerprint);
+            self
         }
 
         /// Creates a default `BlockAggregatedChanges` for testing purposes.
@@ -743,6 +763,10 @@ mod tests {
             });
 
             Ok(rx)
+        }
+
+        fn fingerprint(&self) -> Option<ExtractorFingerprint> {
+            self.fingerprint.clone()
         }
     }
 
@@ -965,6 +989,7 @@ mod tests {
         let first_subscription_id = if let Response::NewSubscription {
             extractor_id: _extractor_id,
             subscription_id: first_subscription_id,
+            fingerprint: _,
         } = response
         {
             debug!(first_subscription_id = ?first_subscription_id, "Received first subscription ID");
@@ -999,6 +1024,7 @@ mod tests {
         if let Response::NewSubscription {
             extractor_id: _extractor_id2,
             subscription_id: second_subscription_id,
+            fingerprint: _,
         } = response
         {
             debug!(second_subscription_id = ?second_subscription_id, "Received second subscription ID");
@@ -1050,6 +1076,85 @@ mod tests {
         debug!("Closed connection");
 
         Ok(())
+    }
+
+    /// The subscription confirmation carries the extractor's fingerprint, and has no
+    /// `fingerprint` field when the extractor has none.
+    #[actix_rt::test]
+    async fn test_new_subscription_carries_the_extractor_fingerprint() {
+        let fingerprinted_id = ExtractorIdentity::new(Chain::Ethereum, "fingerprinted");
+        let unfingerprinted_id = ExtractorIdentity::new(Chain::Ethereum, "unfingerprinted");
+        let fingerprint = ExtractorFingerprint(Bytes::from("0xabcdef"));
+        let mut subscribers_map = HashMap::new();
+        subscribers_map.insert(
+            fingerprinted_id.clone(),
+            Arc::new(
+                MyMessageSender::new(fingerprinted_id.clone())
+                    .with_fingerprint(fingerprint.clone()),
+            ) as Arc<dyn MessageSender + Send + Sync>,
+        );
+        subscribers_map.insert(
+            unfingerprinted_id.clone(),
+            Arc::new(MyMessageSender::new(unfingerprinted_id.clone()))
+                as Arc<dyn MessageSender + Send + Sync>,
+        );
+        let app_state = web::Data::new(WsData::new(subscribers_map));
+        let server = start_with(
+            TestServerConfig::default().client_request_timeout(Duration::from_secs(5)),
+            move || {
+                App::new()
+                    .app_data(app_state.clone())
+                    .service(web::resource("/ws/").route(web::get().to(WsActor::ws_index)))
+            },
+        );
+        let url = server
+            .url("/ws/")
+            .to_string()
+            .replacen("http://", "ws://", 1);
+        let (mut connection, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("Failed to connect");
+
+        let mut confirmations = Vec::new();
+        for extractor_id in [&fingerprinted_id, &unfingerprinted_id] {
+            let subscribe = Command::Subscribe {
+                extractor_id: extractor_id.clone().into(),
+                include_state: false,
+                compression: false,
+                partial_blocks: false,
+            };
+            connection
+                .send(Message::Text(serde_json::to_string(&subscribe).unwrap()))
+                .await
+                .expect("Failed to send subscribe");
+            let confirmation = wait_for_response(&mut connection, |message| {
+                matches!(message, Message::Text(text) if text.contains("newsubscription"))
+            })
+            .await
+            .expect("Failed to get the subscription confirmation");
+            let Message::Text(text) = confirmation else {
+                panic!("the confirmation is a text message");
+            };
+            confirmations.push(serde_json::from_str::<serde_json::Value>(&text).unwrap());
+        }
+
+        let [fingerprinted, unfingerprinted] = confirmations.as_slice() else {
+            panic!("one confirmation per subscription");
+        };
+        let Ok(Response::NewSubscription { extractor_id, subscription_id: _, fingerprint: sent }) =
+            serde_json::from_value::<Response>(fingerprinted.clone())
+        else {
+            panic!("expected a NewSubscription, got {fingerprinted}");
+        };
+        assert_eq!(extractor_id, dto::ExtractorIdentity::from(fingerprinted_id));
+        assert_eq!(sent, Some(fingerprint.into()));
+        assert_eq!(unfingerprinted["extractor_id"]["name"], "unfingerprinted");
+        assert!(
+            unfingerprinted
+                .get("fingerprint")
+                .is_none(),
+            "a confirmation without fingerprint has no field: {unfingerprinted}"
+        );
     }
 
     #[actix_rt::test]
@@ -1110,7 +1215,11 @@ mod tests {
         let response = wait_for_new_subscription(&mut connection)
             .await
             .expect("Failed to get the expected new subscription message");
-        if let Response::NewSubscription { extractor_id: _extractor_id, subscription_id } = response
+        if let Response::NewSubscription {
+            extractor_id: _extractor_id,
+            subscription_id,
+            fingerprint: _,
+        } = response
         {
             debug!(subscription_id = ?subscription_id, "Received subscription ID");
         } else {

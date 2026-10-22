@@ -567,8 +567,14 @@ impl WsDeltasClient {
                         WebSocketMessage::Response(Response::NewSubscription {
                             extractor_id,
                             subscription_id,
+                            fingerprint,
                         }) => {
-                            info!(?extractor_id, ?subscription_id, "Received a new subscription");
+                            info!(
+                                ?extractor_id,
+                                ?subscription_id,
+                                ?fingerprint,
+                                "Received a new subscription"
+                            );
                             let inner = guard
                                 .as_mut()
                                 .ok_or_else(|| DeltasError::NotConnected)?;
