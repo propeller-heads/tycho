@@ -562,10 +562,11 @@ class DeltaCatchUp:
     Rust client resyncs from a snapshot instead."""
 
     class Available(BaseModel):
-        """The missed messages, oldest first, as the WebSocket sent them: revert messages
-        and full blocks. Applied in order to the state at `from_block_hash`, they give the
-        state at `to_block_hash`; the last one may be a revert to that block. Empty when the
-        two blocks are the same."""
+        """The missed messages: exactly the full-block and revert messages the WebSocket sent
+        a full-block subscriber with the same ``include_state``, in order. The last one may be
+        a revert to ``to_block_hash``. Empty when the two blocks are the same. A path
+        containing a revert inherits what revert messages don't restore, so tycho-client takes
+        a snapshot instead of applying it."""
 
         status: Literal["available"] = "available"
         messages: List[BlockChanges]
