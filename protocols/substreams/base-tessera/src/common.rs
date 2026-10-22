@@ -40,14 +40,13 @@ pub fn fee_tag_zero_slot() -> Vec<u8> {
     keccak(key).as_bytes().to_vec()
 }
 
-/// The transaction a `map_storage_changes` group belongs to.
-pub fn storage_transaction(
-    group: &TransactionStorageChanges,
-) -> Result<&tycho_substreams::prelude::Transaction> {
-    group
-        .tx
-        .as_ref()
-        .ok_or_else(|| anyhow!("map_storage_changes emitted writes without a transaction"))
+impl TransactionStorageChanges {
+    /// The transaction these writes belong to; `map_storage_changes` always sets it.
+    pub fn tx(&self) -> Result<&tycho_substreams::prelude::Transaction> {
+        self.tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("map_storage_changes emitted writes without a transaction"))
+    }
 }
 
 #[cfg(test)]

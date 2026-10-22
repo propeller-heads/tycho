@@ -22,7 +22,17 @@ fn balance(token: &[u8], owner: &[u8]) -> Result<BigInt> {
         .ok_or_else(|| anyhow!("balanceOf failed for {} at {}", id(token), id(owner)))
 }
 
+/// How much one log changes `owner`'s token balance, or `None` if it does not touch it.
+///
+/// `tycho_substreams::balances::extract_balance_deltas_from_tx` decodes the same events, but it
+/// takes `Deposit`/`Withdrawal` from any contract and its predicate cannot see which event
+/// matched, so it cannot keep wrap and unwrap to Base's canonical WETH.
 fn event_delta(log: &eth::v2::Log, owner: &[u8]) -> Option<BigInt> {
+    // A zero owner means no treasury, as in `balance`; matching it would count every mint as
+    // an outflow and every burn as an inflow.
+    if zero(owner) {
+        return None;
+    }
     if let Some(erc20::events::Transfer { from, to, value }) =
         erc20::events::Transfer::match_and_decode(log)
     {
@@ -49,7 +59,7 @@ fn event_delta(log: &eth::v2::Log, owner: &[u8]) -> Option<BigInt> {
 }
 
 /// Store and RPC reads the treasury accounting depends on.
-trait BalanceSources {
+trait TreasuryInputs {
     /// Component ids of every pair holding `token`.
     fn pairs_for_token(&self, token: &[u8]) -> Vec<String>;
     /// Every token held by at least one known pair.
@@ -58,12 +68,12 @@ trait BalanceSources {
     fn balance(&self, token: &[u8], owner: &[u8]) -> Result<BigInt>;
 }
 
-struct StoreSources<'a> {
+struct StoreInputs<'a> {
     components: &'a StoreGetProto<ProtocolComponent>,
     pair_store: &'a StoreGetArray<String>,
 }
 
-impl BalanceSources for StoreSources<'_> {
+impl TreasuryInputs for StoreInputs<'_> {
     fn pairs_for_token(&self, token: &[u8]) -> Vec<String> {
         self.pair_store
             .get_last(format!("token:{}", id(token)))
@@ -105,9 +115,9 @@ pub fn map_relative_balances(
     let owner = safety_store
         .get_last("treasury")
         .unwrap_or_else(|| config.treasury.clone());
-    let sources = StoreSources { components: &components, pair_store: &pair_store };
+    let inputs = StoreInputs { components: &components, pair_store: &pair_store };
     let balance_deltas =
-        balance_deltas_from_storage(&config, &block, &storage, new_components, &owner, &sources)?;
+        balance_deltas_from_storage(&config, &block, &storage, new_components, &owner, &inputs)?;
     Ok(BlockBalanceDeltas { balance_deltas })
 }
 
@@ -124,12 +134,12 @@ fn balance_deltas_from_storage(
     storage: &BlockStorageChanges,
     new_components: BlockTransactionProtocolComponents,
     owner: &[u8],
-    sources: &impl BalanceSources,
+    inputs: &impl TreasuryInputs,
 ) -> Result<Vec<BalanceDelta>> {
     let treasury_slot = slot(config.treasury_slot);
     let mut rotations = vec![];
     for group in &storage.transactions {
-        let tx = storage_transaction(group)?;
+        let tx = group.tx()?;
         for w in &group.writes {
             if w.address == config.tesseraswap && w.key == treasury_slot {
                 rotations.push((tx, w));
@@ -160,7 +170,7 @@ fn balance_deltas_from_storage(
             })?;
         for c in group.components {
             for token in c.tokens {
-                let amount = sources.balance(&token, owner)?;
+                let amount = inputs.balance(&token, owner)?;
                 seeded.insert((token.clone(), c.id.clone()));
                 deltas.push(BalanceDelta {
                     ord,
@@ -174,7 +184,7 @@ fn balance_deltas_from_storage(
     }
     for log in block.logs() {
         if let Some(amount) = event_delta(log.log, &old_owner) {
-            for pair in sources.pairs_for_token(log.address()) {
+            for pair in inputs.pairs_for_token(log.address()) {
                 if seeded.contains(&(log.address().to_vec(), pair.clone())) {
                     continue;
                 }
@@ -192,10 +202,9 @@ fn balance_deltas_from_storage(
     // must not contribute extra bridges: both balance RPCs already include the whole block.
     // Attach the adjustment to the final rotation transaction and skip end-block seeds.
     if let Some((tx, write)) = rotations.last() {
-        for token in sources.pair_tokens() {
-            let adjustment =
-                sources.balance(&token, owner)? - sources.balance(&token, &old_owner)?;
-            for pair in sources.pairs_for_token(&token) {
+        for token in inputs.pair_tokens() {
+            let adjustment = inputs.balance(&token, owner)? - inputs.balance(&token, &old_owner)?;
+            for pair in inputs.pairs_for_token(&token) {
                 if seeded.contains(&(token.clone(), pair.clone())) {
                     continue;
                 }
@@ -227,12 +236,12 @@ mod tests {
     const BASE_TOKEN: [u8; 20] = [0x0b; 20];
     const UNHELD: [u8; 20] = [0x0e; 20];
 
-    struct FakeSources {
+    struct FakeInputs {
         holders: HashMap<Vec<u8>, Vec<String>>,
         balances: HashMap<(Vec<u8>, Vec<u8>), i64>,
     }
 
-    impl BalanceSources for FakeSources {
+    impl TreasuryInputs for FakeInputs {
         fn pairs_for_token(&self, token: &[u8]) -> Vec<String> {
             self.holders
                 .get(token)
@@ -255,10 +264,10 @@ mod tests {
         block: &eth::v2::Block,
         new_components: BlockTransactionProtocolComponents,
         owner: &[u8],
-        sources: &impl BalanceSources,
+        inputs: &impl TreasuryInputs,
     ) -> Result<Vec<BalanceDelta>> {
         let storage = storage_changes(block);
-        balance_deltas_from_storage(config, block, &storage, new_components, owner, sources)
+        balance_deltas_from_storage(config, block, &storage, new_components, owner, inputs)
     }
 
     fn config() -> DeploymentConfig {
@@ -380,8 +389,17 @@ mod tests {
     }
 
     #[test]
+    fn zero_treasury_matches_no_events() {
+        let none = [0; 20];
+        // Mints come from the zero address and burns go to it; neither moves a treasury.
+        assert_eq!(event_delta(&transfer(&USDC, &none, &OUTSIDER, 100, 0), &none), None);
+        assert_eq!(event_delta(&transfer(&USDC, &OUTSIDER, &none, 100, 0), &none), None);
+        assert_eq!(event_delta(&deposit(&BASE_WETH, &none, 40, 0), &none), None);
+    }
+
+    #[test]
     fn new_pair_seed_suppresses_only_its_own_events() {
-        let sources = FakeSources {
+        let inputs = FakeInputs {
             holders: HashMap::from([
                 (USDC.to_vec(), vec!["old".to_string(), "new".to_string()]),
                 (BASE_TOKEN.to_vec(), vec!["new".to_string()]),
@@ -407,7 +425,7 @@ mod tests {
             &block,
             created("new", &[&USDC, &BASE_TOKEN], 0),
             &TREASURY,
-            &sources,
+            &inputs,
         )
         .unwrap();
 
@@ -419,7 +437,7 @@ mod tests {
 
     #[test]
     fn seed_stays_inside_its_transaction_ordinal_range() {
-        let sources = FakeSources {
+        let inputs = FakeInputs {
             holders: HashMap::from([
                 (USDC.to_vec(), vec!["old".to_string(), "new".to_string()]),
                 (BASE_TOKEN.to_vec(), vec!["old".to_string()]),
@@ -450,7 +468,7 @@ mod tests {
             &block(vec![swap, creation]),
             created("new", &[&USDC], 47),
             &TREASURY,
-            &sources,
+            &inputs,
         )
         .unwrap();
 
@@ -463,13 +481,13 @@ mod tests {
 
     #[test]
     fn seed_for_transaction_missing_from_block_returns_an_error() {
-        let sources = FakeSources { holders: HashMap::new(), balances: HashMap::new() };
+        let inputs = FakeInputs { holders: HashMap::new(), balances: HashMap::new() };
         let error = balance_deltas(
             &config(),
             &block(vec![tx(0, vec![], vec![])]),
             created("new", &[&USDC], 5),
             &TREASURY,
-            &sources,
+            &inputs,
         )
         .unwrap_err();
         assert!(error
@@ -479,7 +497,7 @@ mod tests {
 
     #[test]
     fn treasury_slot_writes_outside_tesseraswap_are_not_rotations() {
-        let sources = FakeSources {
+        let inputs = FakeInputs {
             holders: HashMap::from([(USDC.to_vec(), vec!["pair".to_string()])]),
             balances: HashMap::from([
                 ((USDC.to_vec(), TREASURY.to_vec()), 80),
@@ -503,7 +521,7 @@ mod tests {
             &block,
             BlockTransactionProtocolComponents::default(),
             &TREASURY,
-            &sources,
+            &inputs,
         )
         .unwrap();
 
@@ -512,7 +530,7 @@ mod tests {
 
     #[test]
     fn weth_deposits_count_only_on_canonical_weth() {
-        let sources = FakeSources {
+        let inputs = FakeInputs {
             holders: HashMap::from([
                 (BASE_WETH.to_vec(), vec!["pair".to_string()]),
                 (OUTSIDER.to_vec(), vec!["pair".to_string()]),
@@ -529,7 +547,7 @@ mod tests {
             &block,
             BlockTransactionProtocolComponents::default(),
             &TREASURY,
-            &sources,
+            &inputs,
         )
         .unwrap();
 
@@ -539,7 +557,7 @@ mod tests {
 
     #[test]
     fn multiple_rotations_bridge_once_to_closing_owner_and_skip_new_pair_seed() {
-        let sources = FakeSources {
+        let inputs = FakeInputs {
             holders: HashMap::from([(USDC.to_vec(), vec!["existing".into(), "new".into()])]),
             balances: HashMap::from([
                 ((USDC.to_vec(), TREASURY.to_vec()), 80),
@@ -561,7 +579,7 @@ mod tests {
             tx(2, vec![], vec![rotation(&OUTSIDER, &NEW_TREASURY, 30)]),
         ]);
         let deltas =
-            balance_deltas(&config(), &block, created("new", &[&USDC], 1), &NEW_TREASURY, &sources)
+            balance_deltas(&config(), &block, created("new", &[&USDC], 1), &NEW_TREASURY, &inputs)
                 .unwrap();
         assert_eq!(
             deltas_of(&deltas, "existing", &USDC),

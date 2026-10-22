@@ -15,8 +15,8 @@ use tycho_substreams::{
     balances::aggregate_balances_changes, contract::extract_contract_changes_builder, prelude::*,
 };
 
-/// Safety signals recorded for the currently known pairs.
-struct Safety {
+/// The recorded values the pause decisions are made from.
+struct PauseInputs {
     /// Engine last recorded in TesseraSwap slot 0.
     engine: Option<Vec<u8>>,
     /// Write helper address of each pair, keyed by pair id.
@@ -26,16 +26,18 @@ struct Safety {
 }
 
 /// Store-derived state the block's changes are computed against.
-struct PairView {
-    known: HashSet<String>,
-    owner: Vec<u8>,
-    safety: Safety,
+struct StoreState {
+    /// Ids of every known Pair, including those discovered in this block.
+    pairs: HashSet<String>,
+    /// The treasury, published as each Pair's `balance_owner`.
+    treasury: Vec<u8>,
+    pause_inputs: PauseInputs,
     /// Engine registry slot of each known pair's token pair, keyed by pair id.
     registry: HashMap<String, Vec<u8>>,
 }
 
-/// This module's upstream map and store inputs.
-struct ModuleInputs {
+/// The block's new pairs and treasury balance deltas, as the upstream modules emit them.
+struct NewPairsAndBalances {
     new_components: BlockTransactionProtocolComponents,
     deltas: BlockBalanceDeltas,
     balance_store: StoreDeltas,
@@ -61,23 +63,23 @@ pub fn map_protocol_changes(
     balance_store: StoreDeltas,
 ) -> Result<BlockChanges> {
     let config = DeploymentConfig::parse(&params)?;
-    let known: HashSet<_> = pair_store
+    let pairs: HashSet<_> = pair_store
         .get_last("pairs")
         .unwrap_or_default()
         .into_iter()
         .collect();
-    let owner = safety_store
+    let treasury = safety_store
         .get_last("treasury")
         .unwrap_or_else(|| config.treasury.clone());
-    let safety = read_safety(&safety_store, &known);
-    let registry = registry_slots(&config, &component_store, &known);
-    let view = PairView { known, owner, safety, registry };
+    let pause_inputs = read_pause_inputs(&safety_store, &pairs);
+    let registry = registry_slots(&config, &component_store, &pairs);
+    let state = StoreState { pairs, treasury, pause_inputs, registry };
     protocol_changes_from_storage(
         &config,
         &block,
         &storage,
-        ModuleInputs { new_components, deltas, balance_store },
-        &view,
+        NewPairsAndBalances { new_components, deltas, balance_store },
+        &state,
         &RpcCode,
     )
 }
@@ -100,8 +102,8 @@ fn registry_slots(
 }
 
 /// Closing-block engine, helper assignments and tag-0 fees for `known` pairs.
-/// These get_last reads are not an ordinal-by-ordinal reconstruction of safety state.
-fn read_safety(store: &StoreGetRaw, known: &HashSet<String>) -> Safety {
+/// These get_last reads are not an ordinal-by-ordinal reconstruction of the recorded state.
+fn read_pause_inputs(store: &StoreGetRaw, known: &HashSet<String>) -> PauseInputs {
     let mut helpers = HashMap::new();
     let mut fees = HashMap::new();
     for pair in known {
@@ -113,7 +115,7 @@ fn read_safety(store: &StoreGetRaw, known: &HashSet<String>) -> Safety {
         }
         helpers.insert(pair.clone(), helper);
     }
-    Safety { engine: store.get_last("engine"), helpers, fees }
+    PauseInputs { engine: store.get_last("engine"), helpers, fees }
 }
 
 /// The block's Tycho changes: new pairs, balances, raw storage of TesseraSwap, the Engine and
@@ -132,37 +134,24 @@ fn protocol_changes_from_storage(
     config: &DeploymentConfig,
     block: &eth::v2::Block,
     storage: &BlockStorageChanges,
-    inputs: ModuleInputs,
-    view: &PairView,
+    upstream: NewPairsAndBalances,
+    state: &StoreState,
     code: &impl CodeSource,
 ) -> Result<BlockChanges> {
-    let known = &view.known;
     let mut changes = HashMap::new();
-    let created: HashMap<_, _> = inputs
-        .new_components
-        .tx_components
-        .iter()
-        .flat_map(|g| {
-            let index =
-                g.tx.as_ref()
-                    .expect("component transaction")
-                    .index;
-            g.components
-                .iter()
-                .map(move |c| (c.id.clone(), index))
-        })
-        .collect();
-    for group in inputs.new_components.tx_components {
+    let mut created = HashMap::new();
+    for group in upstream.new_components.tx_components {
         let tx = group.tx.expect("component transaction");
         let builder = changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
         for c in group.components {
+            created.insert(c.id.clone(), tx.index);
             builder.add_protocol_component(&c);
-            attribute(builder, &c.id, "balance_owner", view.owner.clone());
+            attribute(builder, &c.id, "balance_owner", state.treasury.clone());
         }
     }
-    for (_, (tx, balances)) in aggregate_balances_changes(inputs.balance_store, inputs.deltas) {
+    for (_, (tx, balances)) in aggregate_balances_changes(upstream.balance_store, upstream.deltas) {
         let builder = changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
@@ -174,11 +163,13 @@ fn protocol_changes_from_storage(
     }
     extract_contract_changes_builder(
         block,
-        |addr| addr == config.tesseraswap || addr == config.engine || known.contains(&id(addr)),
+        |addr| {
+            addr == config.tesseraswap || addr == config.engine || state.pairs.contains(&id(addr))
+        },
         &mut changes,
     );
-    record_pair_writes(config, storage, view, &created, code, &mut changes)?;
-    enforce_pauses(config, storage, view, &created, &mut changes)?;
+    record_pair_writes(config, storage, state, &created, code, &mut changes)?;
+    enforce_pauses(config, storage, state, &created, &mut changes)?;
     let mut changes: Vec<_> = changes.into_iter().collect();
     changes.sort_by_key(|(index, _)| *index);
     Ok(BlockChanges {
@@ -197,7 +188,7 @@ fn protocol_changes_from_storage(
 fn record_pair_writes(
     config: &DeploymentConfig,
     storage: &BlockStorageChanges,
-    view: &PairView,
+    state: &StoreState,
     created: &HashMap<String, u64>,
     code: &impl CodeSource,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
@@ -213,7 +204,7 @@ fn record_pair_writes(
         slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
         slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
     ];
-    // known includes end-block discoveries; never attach changes to a Pair in a transaction
+    // state.pairs includes end-block discoveries; never attach changes to a Pair in a transaction
     // earlier than the one that created it.
     let exists_at = |pair: &String, tx_index: u64| {
         created
@@ -223,11 +214,11 @@ fn record_pair_writes(
     // (transaction index, pair, attribute index, dependency address), published once code is in.
     let mut dependencies = vec![];
     for group in &storage.transactions {
-        let transaction = storage_transaction(group)?;
+        let transaction = group.tx()?;
         for w in &group.writes {
             if w.address == config.engine {
                 let replaced = id(&address(&w.old_value));
-                if view.registry.get(&replaced) == Some(&w.key) &&
+                if state.registry.get(&replaced) == Some(&w.key) &&
                     address(&w.new_value) != address(&w.old_value)
                 {
                     changes
@@ -247,14 +238,14 @@ fn record_pair_writes(
                 let builder = changes
                     .entry(transaction.index)
                     .or_insert_with(|| TransactionChangesBuilder::new(transaction));
-                for pair in &view.known {
+                for pair in &state.pairs {
                     if exists_at(pair, transaction.index) {
                         attribute(builder, pair, name, address(&w.new_value));
                     }
                 }
             } else {
                 let pair = id(&w.address);
-                if !view.known.contains(&pair) || !exists_at(&pair, transaction.index) {
+                if !state.pairs.contains(&pair) || !exists_at(&pair, transaction.index) {
                     continue;
                 }
                 let Some(i) = dependency_slots
@@ -263,6 +254,10 @@ fn record_pair_writes(
                 else {
                     continue;
                 };
+                // A cleared slot publishes nothing. There is no dependency to load, and an empty
+                // account at the zero address would land in the engine database every protocol
+                // shares. The old attribute can stay: the Pair reads the pointer from its own
+                // indexed storage, so it stops calling the old contract as the chain does.
                 if !zero(&w.new_value) {
                     changes
                         .entry(transaction.index)
@@ -307,19 +302,19 @@ fn publish_dependencies(
 }
 
 /// Emits a sticky pause signal for unsafe pairs in every emitted transaction.
-/// Safety is evaluated against closing-block stores; this module never emits an unpause.
+/// Pauses are evaluated against closing-block stores; this module never emits an unpause.
 fn enforce_pauses(
     config: &DeploymentConfig,
     storage: &BlockStorageChanges,
-    view: &PairView,
+    state: &StoreState,
     created: &HashMap<String, u64>,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) -> Result<()> {
     // Always enforce persisted signals on emitted component updates. Fee-table writes can
     // occur without a Pair write, so include their transaction explicitly as a trigger.
     let fee_key = fee_tag_zero_slot();
-    let helpers: HashSet<&[u8]> = view
-        .safety
+    let helpers: HashSet<&[u8]> = state
+        .pause_inputs
         .helpers
         .values()
         .map(Vec::as_slice)
@@ -330,7 +325,7 @@ fn enforce_pauses(
             .iter()
             .any(|w| w.key == fee_key && helpers.contains(w.address.as_slice()))
         {
-            let tx = storage_transaction(group)?;
+            let tx = group.tx()?;
             changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(tx));
@@ -339,24 +334,24 @@ fn enforce_pauses(
     // Discovery and state indexing follow config.engine. If TesseraSwap slot 0 points at
     // another Engine, every Pair is paused. Storage updates inside config.engine are not
     // an Engine replacement.
-    let epoch_changed = view
-        .safety
+    let epoch_changed = state
+        .pause_inputs
         .engine
         .as_ref()
         .is_some_and(|e| *e != config.engine);
     for (index, builder) in changes.iter_mut() {
-        for pair in &view.known {
+        for pair in &state.pairs {
             if created
                 .get(pair)
                 .is_some_and(|created_index| created_index > index)
             {
                 continue;
             }
-            let fee = view
-                .safety
+            let fee = state
+                .pause_inputs
                 .helpers
                 .get(pair)
-                .and_then(|helper| view.safety.fees.get(helper));
+                .and_then(|helper| state.pause_inputs.fees.get(helper));
             // Empty swapData selects helper fee A[0] (mapping base slot 1). The VM loads
             // the helper's bytecode but not its storage, so it reads the fee as zero; a
             // nonzero on-chain fee would make simulation over-quote execution.
@@ -376,11 +371,11 @@ mod tests {
     fn protocol_changes(
         config: &DeploymentConfig,
         block: &eth::v2::Block,
-        inputs: ModuleInputs,
-        view: &PairView,
+        upstream: NewPairsAndBalances,
+        state: &StoreState,
     ) -> Result<BlockChanges> {
         let storage = storage_changes(block);
-        protocol_changes_from_storage(config, block, &storage, inputs, view, &AddressAsCode)
+        protocol_changes_from_storage(config, block, &storage, upstream, state, &AddressAsCode)
     }
 
     /// Test code source: an address's code is `0x5f` followed by the address.
@@ -456,35 +451,36 @@ mod tests {
         }
     }
 
-    fn no_inputs() -> ModuleInputs {
-        ModuleInputs {
+    fn no_upstream() -> NewPairsAndBalances {
+        NewPairsAndBalances {
             new_components: BlockTransactionProtocolComponents::default(),
             deltas: BlockBalanceDeltas::default(),
             balance_store: StoreDeltas::default(),
         }
     }
 
-    fn safe() -> Safety {
-        Safety { engine: None, helpers: HashMap::new(), fees: HashMap::new() }
+    fn safe() -> PauseInputs {
+        PauseInputs { engine: None, helpers: HashMap::new(), fees: HashMap::new() }
     }
 
-    fn view(pairs: &[&[u8]], safety: Safety) -> PairView {
-        PairView {
-            known: pairs.iter().map(|p| id(p)).collect(),
-            owner: TREASURY.to_vec(),
-            safety,
+    fn store_state(pairs: &[&[u8]], pause_inputs: PauseInputs) -> StoreState {
+        StoreState {
+            pairs: pairs.iter().map(|p| id(p)).collect(),
+            treasury: TREASURY.to_vec(),
+            pause_inputs,
             registry: HashMap::new(),
         }
     }
 
     const PAIR_REGISTRY_SLOT: [u8; 32] = [0x99; 32];
 
-    /// A view where PAIR's token pair sits at `PAIR_REGISTRY_SLOT` in the Engine registry.
-    fn registered_view() -> PairView {
-        let mut view = view(&[&PAIR, &OTHER_PAIR], safe());
-        view.registry
+    /// A state where PAIR's token pair sits at `PAIR_REGISTRY_SLOT` in the Engine registry.
+    fn registered_state() -> StoreState {
+        let mut state = store_state(&[&PAIR, &OTHER_PAIR], safe());
+        state
+            .registry
             .insert(id(&PAIR), PAIR_REGISTRY_SLOT.to_vec());
-        view
+        state
     }
 
     #[test]
@@ -494,7 +490,7 @@ mod tests {
             0,
             vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), word(&OTHER_PAIR))],
         )]);
-        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
         assert!(!attrs_in(&out, 0, &OTHER_PAIR).contains_key("paused"));
@@ -507,7 +503,7 @@ mod tests {
             0,
             vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), vec![0; 32])],
         )]);
-        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
     }
@@ -517,7 +513,7 @@ mod tests {
         let engine = config().engine;
         let block =
             block(vec![tx(0, vec![write(&engine, slot(77), word(&PAIR), word(&OTHER_PAIR))])]);
-        let out = protocol_changes(&config(), &block, no_inputs(), &registered_view()).unwrap();
+        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
         assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
     }
@@ -560,7 +556,8 @@ mod tests {
             tx(1, vec![write(&PAIR, slot(52), word(&HELPER), vec![0; 32])]),
         ]);
         let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safe())).unwrap();
+            protocol_changes(&config(), &block, no_upstream(), &store_state(&[&PAIR], safe()))
+                .unwrap();
 
         let first = attrs_in(&out, 0, &PAIR);
         assert_eq!(first["stateless_contract_addr_0"], id(&implementation).into_bytes());
@@ -606,18 +603,13 @@ mod tests {
         pairs: &[&[u8]],
         code: &RecordingCode,
     ) -> Result<BlockChanges> {
-        let known = pairs
-            .iter()
-            .map(|p| p.to_vec())
-            .collect();
-        let storage =
-            crate::modules::map_storage_changes::filter_storage_changes(&config(), block, &known);
+        let storage = storage_changes(block);
         protocol_changes_from_storage(
             &config(),
             block,
             &storage,
-            no_inputs(),
-            &view(pairs, safe()),
+            no_upstream(),
+            &store_state(pairs, safe()),
             code,
         )
     }
@@ -664,9 +656,13 @@ mod tests {
     #[test]
     fn pair_writes_touch_only_their_own_pair() {
         let block = block(vec![tx(0, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safe()))
-                .unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR, &OTHER_PAIR], safe()),
+        )
+        .unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"], id(&HELPER).into_bytes());
         assert!(attrs_in(&out, 0, &OTHER_PAIR).is_empty());
@@ -683,9 +679,13 @@ mod tests {
                 write(&tesseraswap, slot(1), word(&TREASURY), word(&treasury)),
             ],
         )]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safe()))
-                .unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR, &OTHER_PAIR], safe()),
+        )
+        .unwrap();
 
         for pair in [PAIR, OTHER_PAIR] {
             let attrs = attrs_in(&out, 0, &pair);
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn pauses_only_the_pair_whose_helper_charges_tag_zero() {
-        let safety = Safety {
+        let pause_inputs = PauseInputs {
             engine: None,
             helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
             fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
@@ -708,9 +708,13 @@ mod tests {
                 write(&OTHER_PAIR, slot(0), vec![1; 32], vec![2; 32]),
             ],
         )]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safety))
-                .unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR, &OTHER_PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
         assert!(!attrs_in(&out, 0, &OTHER_PAIR).contains_key("paused"));
@@ -718,25 +722,34 @@ mod tests {
 
     #[test]
     fn zero_tag_zero_fee_does_not_pause() {
-        let safety = Safety {
+        let pause_inputs = PauseInputs {
             engine: None,
             helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
             fees: HashMap::from([(HELPER.to_vec(), vec![0; 32])]),
         };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
     }
 
     #[test]
     fn engine_replacement_pauses_every_pair() {
-        let safety = Safety { engine: Some([0x23; 20].to_vec()), ..safe() };
+        let pause_inputs = PauseInputs { engine: Some([0x23; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR, &OTHER_PAIR], safety))
-                .unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR, &OTHER_PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
         assert_eq!(attrs_in(&out, 0, &OTHER_PAIR)["paused"], vec![1]);
@@ -744,17 +757,22 @@ mod tests {
 
     #[test]
     fn unchanged_engine_does_not_pause() {
-        let safety = Safety { engine: Some([0x22; 20].to_vec()), ..safe() };
+        let pause_inputs = PauseInputs { engine: Some([0x22; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
     }
 
     #[test]
     fn helper_fee_write_alone_emits_the_pause() {
-        let safety = Safety {
+        let pause_inputs = PauseInputs {
             engine: None,
             helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
             fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
@@ -763,15 +781,20 @@ mod tests {
             3,
             vec![write(&HELPER, fee_tag_zero_slot(), vec![0; 32], slot(10_000))],
         )]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert_eq!(attrs_in(&out, 3, &PAIR)["paused"], vec![1]);
     }
 
     #[test]
     fn fee_write_outside_assigned_helpers_emits_nothing() {
-        let safety = Safety {
+        let pause_inputs = PauseInputs {
             engine: None,
             helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
             fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
@@ -779,28 +802,34 @@ mod tests {
         let stranger = [0x0f; 20];
         let block =
             block(vec![tx(3, vec![write(&stranger, fee_tag_zero_slot(), vec![0; 32], slot(1))])]);
-        let out =
-            protocol_changes(&config(), &block, no_inputs(), &view(&[&PAIR], safety)).unwrap();
+        let out = protocol_changes(
+            &config(),
+            &block,
+            no_upstream(),
+            &store_state(&[&PAIR], pause_inputs),
+        )
+        .unwrap();
 
         assert!(out.changes.is_empty());
     }
 
     #[test]
     fn writes_before_pair_creation_are_ignored() {
-        let inputs = ModuleInputs {
+        let upstream = NewPairsAndBalances {
             new_components: BlockTransactionProtocolComponents {
                 tx_components: vec![TransactionProtocolComponents {
                     tx: Some(Transaction { index: 5, ..Default::default() }),
                     components: vec![ProtocolComponent { id: id(&PAIR), ..Default::default() }],
                 }],
             },
-            ..no_inputs()
+            ..no_upstream()
         };
         let block = block(vec![
             tx(2, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))]),
             tx(5, vec![write(&PAIR, slot(0), vec![0; 32], vec![1; 32])]),
         ]);
-        let out = protocol_changes(&config(), &block, inputs, &view(&[&PAIR], safe())).unwrap();
+        let out =
+            protocol_changes(&config(), &block, upstream, &store_state(&[&PAIR], safe())).unwrap();
 
         assert!(attrs_in(&out, 2, &PAIR).is_empty(), "tx 2 precedes the pair");
         assert_eq!(attrs_in(&out, 5, &PAIR)["balance_owner"], TREASURY.to_vec());
@@ -824,8 +853,8 @@ mod tests {
             &config(),
             &block(vec![]),
             &storage,
-            no_inputs(),
-            &view(&[&PAIR], safe()),
+            no_upstream(),
+            &store_state(&[&PAIR], safe()),
             &AddressAsCode,
         )
         .unwrap_err();
