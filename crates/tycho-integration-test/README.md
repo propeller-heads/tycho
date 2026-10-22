@@ -128,6 +128,7 @@ cargo run --package tycho-integration-test -- \
   --chain ethereum \
   --protocols uniswap_v2,uniswap_v3 \
   --disable-rfq \
+  --disable-pamm \
   --force-catch-up-every-n-blocks 300
 ```
 
