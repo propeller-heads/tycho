@@ -9,6 +9,7 @@ use tycho_substreams::models::{
 };
 
 use crate::{
+    abi::mev_capture_v21,
     addresses::CORE_ADDRESS,
     pb::ekubo::{
         block_transaction_events::transaction_events::{pool_log::Event, PoolLog},
@@ -154,6 +155,10 @@ fn maybe_create_component(
         },
     ];
 
+    if pi.is_mev_capture_v21 {
+        static_att.extend(mev_capture_v21_config_attributes(pool_config.extension));
+    }
+
     if Some(pool_config.extension) == signed_exclusive_swap_address {
         static_att.push(Attribute {
             change: ChangeType::Creation.into(),
@@ -190,4 +195,38 @@ fn maybe_create_component(
             },
         ],
     ))
+}
+
+/// The MEVCapture v2.1 extension's immutable configuration (`getConfig`), which
+/// quoting needs and which no event carries.
+fn mev_capture_v21_config_attributes(extension: Address) -> Vec<Attribute> {
+    let (
+        half_life,
+        slope_k,
+        segment_exp,
+        _segment_width_multiplier,
+        j_lin,
+        max_fee,
+        clamp_ticks,
+        m_gate,
+    ) = mev_capture_v21::functions::GetConfig {}
+        .call(extension.to_vec())
+        .expect("MEVCapture v2.1 getConfig call to succeed");
+
+    [
+        ("half_life", half_life.to_u64().to_be_bytes()[4..].to_vec()),
+        ("slope_k", vec![slope_k.to_u64() as u8]),
+        ("segment_exp", vec![segment_exp.to_u64() as u8]),
+        ("j_lin", vec![j_lin.to_u64() as u8]),
+        ("max_fee", max_fee.to_u64().to_be_bytes().to_vec()),
+        ("clamp_ticks", clamp_ticks.to_u64().to_be_bytes()[4..].to_vec()),
+        ("m_gate", vec![m_gate.to_u64() as u8]),
+    ]
+    .into_iter()
+    .map(|(name, value)| Attribute {
+        change: ChangeType::Creation.into(),
+        name: name.to_string(),
+        value,
+    })
+    .collect()
 }
