@@ -564,11 +564,11 @@ class DeltaCatchUp:
     subscription's first message is a revert."""
 
     class Available(BaseModel):
-        """The missed messages: exactly the full-block and revert messages the WebSocket sent
-        a full-block subscriber with the same ``include_state``, in order. The last one may be
-        a revert to ``to_block_hash``. Empty when the two blocks are the same. A path
-        containing a revert inherits what revert messages don't restore, so tycho-client takes
-        a snapshot instead of applying it."""
+        """The missed messages, in order, each exactly as the WebSocket sent it to a full-block
+        subscriber with the same ``include_state``. Blocks the gap held that a revert orphaned
+        are left out. The last message may be a revert to ``to_block_hash``. Empty when the two
+        blocks are the same. A path containing a revert inherits what revert messages don't
+        restore, so tycho-client takes a snapshot instead of applying it."""
 
         status: Literal["available"] = "available"
         messages: List[BlockChanges]
