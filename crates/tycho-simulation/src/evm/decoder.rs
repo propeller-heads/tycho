@@ -469,7 +469,7 @@ where
                         .len()
                 );
 
-                let mut proxy_token_accounts: HashMap<Address, AccountUpdate> = HashMap::new();
+                let mut proxy_token_accounts: Vec<AccountUpdate> = Vec::new();
                 let mut storage_by_address: HashMap<Address, ResponseAccount> = HashMap::new();
                 for (key, value) in protocol_msg
                     .snapshots
@@ -487,31 +487,17 @@ where
                         // contract address. This is because the proxy contract uses
                         // delegatecall to the original (implementation) contract.
 
-                        // Handle proxy token accounts
-                        let (impl_addr, proxy_state) = match state_guard
+                        // Handle proxy token accounts. A token that already has a proxy keeps
+                        // its implementation address. Its proxy is rebuilt and replaced, not
+                        // merged: snapshots leave out slots whose value is zero, so merging into
+                        // the old storage would keep stale values, e.g. for a token that was not
+                        // tracked for a while (after a drop in TVL) and is tracked again.
+                        let impl_addr = match state_guard
                             .proxy_token_addresses
                             .get(&original_address)
                         {
-                            Some(impl_addr) => {
-                                // Token already has a proxy contract, simply update it.
-
-                                // Note: we apply the snapshot as an update. This is to cover the
-                                // case where a contract may be stale as it stopped being tracked
-                                // for some reason (e.g. due to a drop in tvl) and is now being
-                                // tracked again.
-                                let proxy_state = AccountUpdate::new(
-                                    original_address,
-                                    value.chain,
-                                    account.slots.clone(),
-                                    Some(account.native_balance),
-                                    None,
-                                    ChangeType::Update,
-                                );
-                                (*impl_addr, proxy_state)
-                            }
+                            Some(impl_addr) => *impl_addr,
                             None => {
-                                // Token does not have a proxy contract yet, create one
-
                                 // Assign original token contract to new address
                                 let impl_addr = generate_proxy_token_address(
                                     state_guard.proxy_token_addresses.len() as u32,
@@ -519,21 +505,19 @@ where
                                 state_guard
                                     .proxy_token_addresses
                                     .insert(original_address, impl_addr);
-
-                                // Add proxy token contract at original token address
-                                let proxy_state = create_proxy_token_account(
-                                    original_address,
-                                    Some(impl_addr),
-                                    &account.slots,
-                                    value.chain,
-                                    Some(account.native_balance),
-                                );
-
-                                (impl_addr, proxy_state)
+                                impl_addr
                             }
                         };
+                        // Add proxy token contract at original token address
+                        let proxy_state = create_proxy_token_account(
+                            original_address,
+                            Some(impl_addr),
+                            &account.slots,
+                            value.chain,
+                            Some(account.native_balance),
+                        );
 
-                        proxy_token_accounts.insert(original_address, proxy_state);
+                        proxy_token_accounts.push(proxy_state);
 
                         // Assign original token contract to the implementation address
                         let impl_update = ResponseAccount {
@@ -548,34 +532,21 @@ where
                     }
                 }
 
-                // Split proxy accounts by change type:
-                // - Creation: new proxies that must overwrite any existing placeholder
-                // - Update: existing proxies whose storage is being refreshed (handled normally)
-                let mut proxy_creates: Vec<AccountUpdate> = Vec::new();
-                let mut proxy_updates: HashMap<Address, AccountUpdate> = HashMap::new();
-                for (addr, update) in proxy_token_accounts {
-                    if matches!(update.change, ChangeType::Creation) {
-                        proxy_creates.push(update);
-                    } else {
-                        proxy_updates.insert(addr, update);
-                    }
-                }
-
                 info!("Updating engine with {} contracts from snapshots", storage_by_address.len());
                 update_engine(
                     SHARED_TYCHO_DB.clone(),
                     header.clone().block(),
                     Some(storage_by_address),
-                    proxy_updates,
+                    HashMap::new(),
                 )
                 .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
 
-                // Force-overwrite new proxy token accounts so that authoritative vm_storage data
-                // always wins over any empty placeholder previously inserted by engine setup
-                // (which uses init_account / init-if-not-exists).
-                if !proxy_creates.is_empty() {
+                // Force-overwrite proxy token accounts so that authoritative vm_storage data
+                // always wins over the old proxy storage and over any empty placeholder previously
+                // inserted by engine setup (which uses init_account / init-if-not-exists).
+                if !proxy_token_accounts.is_empty() {
                     SHARED_TYCHO_DB
-                        .force_update_accounts(proxy_creates)
+                        .force_update_accounts(proxy_token_accounts)
                         .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
                 }
                 info!("Engine updated");
@@ -1734,6 +1705,71 @@ mod tests {
             .decode(&msg)
             .await
             .expect("decode of a token Creation delta with an existing proxy failed");
+    }
+
+    /// The uniswap_v2 snapshot message with `token` in `vm_storage`, holding `slots`.
+    fn token_snapshot_msg(token: &str, slots: &[(u64, u64)]) -> FeedMessage<BlockHeader> {
+        use std::{fs, path::Path};
+
+        use tycho_client::feed::dto;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/assets/decoder/uniswap_v2_snapshot.json");
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).expect("read asset")).expect("parse");
+        let slots: serde_json::Map<String, serde_json::Value> = slots
+            .iter()
+            .map(|(slot, value)| (format!("0x{slot:064x}"), format!("0x{value:064x}").into()))
+            .collect();
+        json["state_msgs"]["uniswap_v2"]["snapshots"]["vm_storage"] = serde_json::json!({
+            token: {
+                "chain": "ethereum",
+                "address": token,
+                "title": "",
+                "slots": slots,
+                "native_balance": "0x00",
+                "token_balances": {},
+                "code": "0x6000",
+                "code_hash": "0x00",
+                "balance_modify_tx": "0x00",
+                "code_modify_tx": "0x00",
+                "creation_tx": null
+            }
+        });
+        let feed_msg: dto::FeedMessage<BlockHeader> =
+            serde_json::from_value(json).expect("deserialize FeedMessage");
+        FeedMessage::from(feed_msg)
+    }
+
+    #[tokio::test]
+    async fn test_decode_token_snapshot_replaces_the_existing_proxy_storage() {
+        // An address no other test uses: the engine database is shared.
+        let token = "0x00000000000000000000000000000000000d1e01";
+        let mut decoder = TychoStreamDecoder::new(Chain::Ethereum);
+        decoder.register_decoder::<UniswapV2State>("uniswap_v2");
+        let token_bytes = Bytes::from(token);
+        decoder
+            .set_tokens(HashMap::from([(
+                token_bytes.clone(),
+                Token::new(&token_bytes, "T", 18, 100, &[Some(100_000)], Chain::Ethereum, 100),
+            )]))
+            .await;
+        let address = Address::from_str(token).unwrap();
+
+        decoder
+            .decode(&token_snapshot_msg(token, &[(1, 5), (2, 7)]))
+            .await
+            .expect("first snapshot");
+        // Slot 2 became zero, so the next snapshot leaves it out.
+        decoder
+            .decode(&token_snapshot_msg(token, &[(1, 5)]))
+            .await
+            .expect("second snapshot");
+
+        assert_eq!(SHARED_TYCHO_DB.get_storage(&address, &U256::from(1)), Some(U256::from(5)));
+        assert_eq!(SHARED_TYCHO_DB.get_storage(&address, &U256::from(2)), None);
+        assert!(SHARED_TYCHO_DB
+            .get_storage(&address, &IMPLEMENTATION_SLOT)
+            .is_some());
     }
 
     #[tokio::test]
