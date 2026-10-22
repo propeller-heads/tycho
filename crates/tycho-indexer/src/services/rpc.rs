@@ -4935,4 +4935,322 @@ plans:
             .map(|(outcome, count)| (outcome.to_string(), count))
         );
     }
+
+    /// Checks catch-ups served over HTTP, parsed as the Rust client parses them, over generated
+    /// histories: an answered path must equal the window's path as a WebSocket client with the
+    /// same `include_state` parses it, and, with state, bring the client to the canonical chain.
+    /// Each upgraded restart starts a process under a new fingerprint, as a new indexer version
+    /// does, so a gap across one must be refused.
+    mod catch_up_through_the_wire {
+        use std::collections::BTreeMap;
+
+        use rand::{rngs::StdRng, SeedableRng};
+        use tycho_common::testing::delta_history::{
+            follower_states, generate_history, sample_gaps, DeltaStateModel, Gap, History,
+            HistoryConfig, HistoryEvent, RestartKind, CHAIN, EXTRACTOR,
+        };
+        use uuid::Uuid;
+
+        use super::*;
+
+        /// Histories per configuration.
+        const SEEDS: u64 = 12;
+        /// Random gaps drawn per history.
+        const RANDOM_GAPS: usize = 30;
+
+        fn configs() -> [HistoryConfig; 2] {
+            [
+                HistoryConfig::default(),
+                // A shallow window evicts on most blocks, so reverts reach the journal's pruning
+                // bound and clients fall below the floor.
+                HistoryConfig {
+                    window_depth: 4,
+                    finality_depth: 3,
+                    max_revert_depth: 3,
+                    max_commit_lag: 2,
+                    ..Default::default()
+                },
+            ]
+        }
+
+        /// How often each case occurs.
+        #[derive(Debug, Default)]
+        struct Coverage {
+            /// Paths served with state and checked against the canonical chain.
+            checked: usize,
+            /// Checked paths holding a revert.
+            checked_through_a_revert: usize,
+            /// Paths served without state.
+            without_state: usize,
+            /// Requests the window could not serve, for the same reason over HTTP.
+            unavailable: usize,
+            /// Requests across an upgraded restart, refused for the fingerprint.
+            fingerprint_changed: usize,
+        }
+
+        /// The fingerprint of the process that emits `history.events[index]`: one more per
+        /// upgraded restart before it.
+        fn fingerprint_at(history: &History, index: usize) -> ExtractorFingerprint {
+            let mut upgrades = 0u64;
+            for event in &history.events[..index] {
+                match event {
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Upgraded,
+                    } => upgrades += 1,
+                    HistoryEvent::ExtractorRestarted {
+                        last_committed: _,
+                        kind: RestartKind::Unchanged,
+                    } |
+                    HistoryEvent::Message(_) => {}
+                }
+            }
+            ExtractorFingerprint(Bytes::from(upgrades))
+        }
+
+        /// A handler of a process that runs the history's extractor over `windows`, under
+        /// `fingerprint`.
+        fn handler(
+            windows: &HashMap<String, Arc<Mutex<DeltaWindow>>>,
+            fingerprint: ExtractorFingerprint,
+        ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+            let pending_deltas =
+                PendingDeltas::from_windows(windows.clone(), Arc::new(DiscardSink));
+            RpcHandler::new(
+                MockGateway::new(),
+                Some(Arc::new(pending_deltas)),
+                MockEntryPointTracer::new(),
+                PlansConfig::default(),
+                vec![],
+                vec![],
+            )
+            .with_extractor_fingerprints(HashMap::from([(
+                ExtractorIdentity::new(CHAIN, EXTRACTOR),
+                Some(fingerprint),
+            )]))
+        }
+
+        /// `message` as a WebSocket client with `include_state` parses it.
+        fn ws_client_receives(
+            message: &BlockAggregatedChanges,
+            include_state: bool,
+        ) -> BlockAggregatedChanges {
+            let sent = dto::WebSocketMessage::BlockAggregatedChanges {
+                subscription_id: Uuid::nil(),
+                deltas: subscriber_message(message, include_state),
+            };
+            let text = serde_json::to_string(&sent).unwrap();
+            let dto::WebSocketMessage::BlockAggregatedChanges { deltas, subscription_id: _ } =
+                serde_json::from_str(&text).unwrap()
+            else {
+                panic!("{text} is not a block message");
+            };
+            BlockAggregatedChanges::from(deltas)
+        }
+
+        /// Applies `path`, then the messages of the subscription that starts at `first_live`, to
+        /// `client`, and checks it against the canonical chain right after the first live
+        /// message and after the last one, before a restart ends the subscription.
+        fn check_resume(
+            history: &History,
+            mut client: DeltaStateModel,
+            path: &[BlockAggregatedChanges],
+            first_live: usize,
+            context: &str,
+        ) {
+            for message in path {
+                client.apply(message);
+            }
+            let mut last_live = first_live;
+            for (index, event) in history
+                .events
+                .iter()
+                .enumerate()
+                .skip(first_live)
+            {
+                let message = match event {
+                    HistoryEvent::Message(message) => message,
+                    HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => break,
+                };
+                client.apply(&ws_client_receives(message, true));
+                last_live = index;
+                if index == first_live {
+                    assert_eq!(
+                        client.check_against(
+                            &history.canonical_states[index],
+                            &history.connected_states[index]
+                        ),
+                        Ok(()),
+                        "{context}, after the first live message"
+                    );
+                }
+            }
+            assert_eq!(
+                client.check_against(
+                    &history.canonical_states[last_live],
+                    &history.connected_states[last_live]
+                ),
+                Ok(()),
+                "{context}, after event {last_live}"
+            );
+        }
+
+        #[actix_web::test]
+        async fn http_catch_ups_equal_the_websocket_messages_and_end_canonical() {
+            let mut rng = StdRng::seed_from_u64(7);
+            let mut coverage = Coverage::default();
+            for config in &configs() {
+                for seed in 0..SEEDS {
+                    let history = generate_history(config, seed);
+                    let follower = follower_states(&history);
+                    let mut by_first_live: BTreeMap<usize, Vec<Gap>> = BTreeMap::new();
+                    for gap in sample_gaps(&history, RANDOM_GAPS, &mut rng) {
+                        by_first_live
+                            .entry(gap.first_live)
+                            .or_default()
+                            .push(gap);
+                    }
+                    let windows = new_windows(
+                        [EXTRACTOR],
+                        WindowConfig { depth: history.config.window_depth, min_fold_batch: 1 },
+                    );
+                    for (index, event) in history.events.iter().enumerate() {
+                        // The window as it stands when the client's first live message arrives.
+                        let serving = fingerprint_at(&history, index);
+                        for (&gap, include_state) in by_first_live
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|gap| [(gap, true), (gap, false)])
+                        {
+                            let context = format!(
+                                "seed {seed}, {config:?}, {gap:?}, include_state {include_state}"
+                            );
+                            let (HistoryEvent::Message(last), HistoryEvent::Message(live)) = (
+                                &history.events[gap.last_applied],
+                                &history.events[gap.first_live],
+                            ) else {
+                                panic!("{context}: the gap does not start and end at a message");
+                            };
+                            let to = if live.revert {
+                                &live.block.hash
+                            } else {
+                                &live.block.parent_hash
+                            };
+                            let synced_under = fingerprint_at(&history, gap.last_applied);
+                            let request = dto::DeltaCatchUpRequestBody {
+                                chain: CHAIN.into(),
+                                protocol_system: EXTRACTOR.to_string(),
+                                from_block_hash: last.block.hash.clone(),
+                                from_block_number: last.block.number,
+                                to_block_hash: to.clone(),
+                                fingerprint: synced_under.clone().into(),
+                                include_state,
+                            };
+
+                            let (status, body) = post_delta_catch_up(
+                                handler(&windows, serving.clone()),
+                                None,
+                                &request,
+                            )
+                            .await;
+
+                            assert_eq!(status, StatusCode::OK, "{context}");
+                            // As `HttpRPCClient::get_delta_catch_up` parses it.
+                            let response: dto::DeltaCatchUpRequestResponse =
+                                serde_json::from_slice(&body).unwrap();
+                            if synced_under != serving {
+                                assert_eq!(
+                                    response,
+                                    unavailable(dto::DeltaCatchUpUnavailable::FingerprintChanged),
+                                    "{context}"
+                                );
+                                coverage.fingerprint_changed += 1;
+                                continue;
+                            }
+                            let window_path = windows[EXTRACTOR]
+                                .lock()
+                                .unwrap()
+                                .catch_up_path(&last.block.hash, last.block.number, to);
+                            let (messages, path) = match (response, window_path) {
+                                (
+                                    dto::DeltaCatchUpRequestResponse::Available { messages },
+                                    Ok(path),
+                                ) => (messages, path),
+                                (
+                                    dto::DeltaCatchUpRequestResponse::Unavailable { reason },
+                                    Err(window_reason),
+                                ) => {
+                                    assert_eq!(reason, window_reason.into(), "{context}");
+                                    coverage.unavailable += 1;
+                                    continue;
+                                }
+                                (response, window_path) => panic!(
+                                    "{context}: HTTP answers {response:?}, the window \
+                                     {window_path:?}"
+                                ),
+                            };
+                            let http: Vec<BlockAggregatedChanges> = messages
+                                .into_iter()
+                                .map(BlockAggregatedChanges::from)
+                                .collect();
+                            let ws: Vec<BlockAggregatedChanges> = path
+                                .iter()
+                                .map(|message| ws_client_receives(message, include_state))
+                                .collect();
+                            assert_eq!(http, ws, "{context}");
+                            if !include_state {
+                                coverage.without_state += 1;
+                                continue;
+                            }
+                            coverage.checked += 1;
+                            coverage.checked_through_a_revert += usize::from(
+                                http.iter()
+                                    .any(|message| message.revert),
+                            );
+                            check_resume(
+                                &history,
+                                follower[gap.last_applied].clone(),
+                                &http,
+                                gap.first_live,
+                                &context,
+                            );
+                        }
+                        let mut window = windows[EXTRACTOR].lock().unwrap();
+                        match event {
+                            HistoryEvent::Message(message) => {
+                                window.insert(message).unwrap();
+                                window
+                                    .fold_evictable(&DiscardSink)
+                                    .unwrap();
+                            }
+                            HistoryEvent::ExtractorRestarted { last_committed: _, kind: _ } => {
+                                window
+                                    .fold_committed(&DiscardSink)
+                                    .unwrap();
+                                window.clear();
+                            }
+                        }
+                    }
+                }
+            }
+
+            let Coverage {
+                checked,
+                checked_through_a_revert,
+                without_state,
+                unavailable,
+                fingerprint_changed,
+            } = &coverage;
+            for (case, count) in [
+                ("checked paths", checked),
+                ("checked paths through a revert", checked_through_a_revert),
+                ("paths without state", without_state),
+                ("unavailable paths", unavailable),
+                ("requests across an upgrade", fingerprint_changed),
+            ] {
+                assert!(*count > 0, "no {case} in {coverage:?}");
+            }
+        }
+    }
 }
