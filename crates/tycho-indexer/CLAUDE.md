@@ -193,10 +193,12 @@ In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/
 first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
 window changes up to the requested version, without reading the database. A `/contract_state` or
 `/protocol_state` answer is made of views (`services/state/cache/view.rs`). The service builds
-them from the cached entries and the window changes, without copying the entries. The handler
-writes the JSON from the views. The answer does not enter the response caches, which keep only
-database answers. A request the service cannot answer comes back as a `FallbackReason`, and the
-handler answers it from the database path and counts it in `db_path_requests{endpoint, reason}`.
+them from the cached entries and the window changes, without copying the entries. The JSON is
+written from the views. A large answer drops its views while it waits for a serialize permit
+(`services/off_worker.rs`) and builds them again in the serialize job. The answer does not enter
+the response caches, which keep only database answers. A request the service cannot answer comes
+back as a `FallbackReason`, and the handler answers it from the database path and counts it in
+`db_path_requests{endpoint, reason}`.
 `shadow` answers every request from the database path.
 
 In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the database path (the

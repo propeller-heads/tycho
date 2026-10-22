@@ -24,8 +24,9 @@
 //!
 //! Accounts and component states are held behind an `Arc`: an account can hold a large storage
 //! map, and a component many attributes. A reader copies only the `Arc` under the read lock, and
-//! the response is written from it through a view (`view`), without a full copy. A fold that
-//! changes an entry a reader still holds copies the entry first, under the write lock
+//! the response is written from it through a view (`view`), without a full copy. A view holds an
+//! entry while it is built and written to JSON, not while it waits for a serialize permit. A fold
+//! that changes an entry a reader still holds copies the entry first, under the write lock
 //! (`Arc::make_mut`). Reads wait for that copy, but it happens at most once per fold instead of
 //! once per read. Each such copy adds to `entity_cache_shared_copies_total` and records its
 //! duration in `entity_cache_shared_copy_duration_ms`, both labelled by `entity`.

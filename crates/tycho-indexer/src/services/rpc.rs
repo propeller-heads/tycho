@@ -33,11 +33,10 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
-        off_worker::OffWorker,
+        off_worker::{CacheReply, OffWorker},
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
-            view::{ContractStateView, ProtocolStateView},
         },
     },
 };
@@ -106,10 +105,10 @@ impl ResponseError for RpcError {
 
 /// A state endpoint's answer: built by the entity cache, or read through the database path.
 #[derive(Debug)]
-enum StateAnswer<C, D> {
-    /// Views over the cache entries. They are written to JSON without a copy and are never kept in
-    /// a response cache, which would hold old entries alive for its whole TTL.
-    EntityCache(C),
+enum StateAnswer<D> {
+    /// The entity cache's answer, written to JSON from views over the cache entries. It never
+    /// enters a response cache.
+    EntityCache(HttpResponse),
     /// The database path's answer, shared with the response cache.
     Db(Arc<D>),
 }
@@ -305,7 +304,7 @@ where
     async fn get_contract_state(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<StateAnswer<ContractStateView, dto::StateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::StateRequestResponse>, RpcError> {
         if let Some(ref contract_ids) = request.contract_ids {
             info!(
                 n_contract_ids = contract_ids.len(),
@@ -324,16 +323,13 @@ where
                 let cache_request = request.clone();
                 let answer = self
                     .off_worker
-                    .build(Endpoint::ContractState, move || {
+                    .view_json(Endpoint::ContractState, move || {
                         service.contract_state_view(&cache_request)
                     })
                     .await?;
                 match answer {
-                    Ok(view) => return Ok(StateAnswer::EntityCache(view)),
-                    Err(StateServiceError::Fallback(reason)) => {
-                        count_db_path(Endpoint::ContractState, reason)
-                    }
-                    Err(err) => return Err(err.into()),
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ContractState, reason),
                 }
             }
         }
@@ -590,7 +586,7 @@ where
     async fn get_protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<StateAnswer<ProtocolStateView, dto::ProtocolStateRequestResponse>, RpcError> {
+    ) -> Result<StateAnswer<dto::ProtocolStateRequestResponse>, RpcError> {
         if let Some(ref component_ids) = request.protocol_ids {
             info!(
                 n_component_ids = component_ids.len(),
@@ -609,16 +605,13 @@ where
                 let cache_request = request.clone();
                 let answer = self
                     .off_worker
-                    .build(Endpoint::ProtocolState, move || {
+                    .view_json(Endpoint::ProtocolState, move || {
                         service.protocol_state_view(&cache_request)
                     })
                     .await?;
                 match answer {
-                    Ok(view) => return Ok(StateAnswer::EntityCache(view)),
-                    Err(StateServiceError::Fallback(reason)) => {
-                        count_db_path(Endpoint::ProtocolState, reason)
-                    }
-                    Err(err) => return Err(err.into()),
+                    CacheReply::Answered(response) => return Ok(StateAnswer::EntityCache(response)),
+                    CacheReply::Fallback(reason) => count_db_path(Endpoint::ProtocolState, reason),
                 }
             }
         }
@@ -1263,7 +1256,7 @@ where
 impl From<StateServiceError> for RpcError {
     fn from(err: StateServiceError) -> Self {
         match err {
-            // The routing match answers a fallback from the database path before converting.
+            // A fallback goes to the database path before any conversion, so this arm does not run.
             StateServiceError::Fallback(reason) => {
                 RpcError::Unknown(format!("Unhandled entity cache fallback: {reason:?}"))
             }
@@ -1346,12 +1339,7 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_contract_state(&body).await;
 
     match response {
-        Ok(StateAnswer::EntityCache(view)) => {
-            handler
-                .off_worker
-                .json(Endpoint::ContractState, Arc::new(view))
-                .await
-        }
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
         Ok(StateAnswer::Db(state)) => {
             handler
                 .off_worker
@@ -1494,12 +1482,7 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_protocol_state(&body).await;
 
     match response {
-        Ok(StateAnswer::EntityCache(view)) => {
-            handler
-                .off_worker
-                .json(Endpoint::ProtocolState, Arc::new(view))
-                .await
-        }
+        Ok(StateAnswer::EntityCache(response)) => Ok(response),
         Ok(StateAnswer::Db(state)) => {
             handler
                 .off_worker
