@@ -185,6 +185,9 @@ snapshot after the extractors are built and before the server starts (`EntityCac
 `services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
 window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
 load, and the windows fold into `DiscardSink`.
+A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
+`entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
+`entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).
 
 In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
 first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the

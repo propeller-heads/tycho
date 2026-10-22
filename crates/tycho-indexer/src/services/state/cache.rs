@@ -27,7 +27,8 @@
 //! the response is written from it through a view (`view`), without a full copy. A fold that
 //! changes an entry a reader still holds copies the entry first, under the write lock
 //! (`Arc::make_mut`). Reads wait for that copy, but it happens at most once per fold instead of
-//! once per read.
+//! once per read. Each such copy adds to `entity_cache_shared_copies_total` and records its
+//! duration in `entity_cache_shared_copy_duration_ms`, both labelled by `entity`.
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -39,7 +40,7 @@ use std::{
     time::Instant,
 };
 
-use metrics::gauge;
+use metrics::{counter, gauge, histogram};
 use tracing::{info, warn};
 use tycho_common::{
     keccak256,
@@ -646,6 +647,20 @@ fn component_changes(
     created.chain(changed)
 }
 
+/// `Arc::make_mut` that counts the copy and records its duration when a reader still holds the
+/// entry. The `entity` label is `account` or `component`.
+fn make_mut_recorded<'a, T: Clone>(entry: &'a mut Arc<T>, entity: &'static str) -> &'a mut T {
+    let shared = Arc::strong_count(entry) > 1;
+    let started = Instant::now();
+    let value = Arc::make_mut(entry);
+    if shared {
+        counter!("entity_cache_shared_copies_total", "entity" => entity).increment(1);
+        histogram!("entity_cache_shared_copy_duration_ms", "entity" => entity)
+            .record(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    value
+}
+
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
     /// block's own delta and balances; one the cache already holds is logged and then takes the
@@ -668,7 +683,7 @@ impl CacheState {
                             "Creation of a component already cached skipped"
                         );
                     }
-                    Arc::make_mut(entry).apply_block(delta, balances, at);
+                    make_mut_recorded(entry, "component").apply_block(delta, balances, at);
                 }
                 (None, true) => {
                     system_components.insert(
@@ -722,7 +737,9 @@ impl CacheState {
                 continue;
             }
             match (self.accounts.get_mut(address), delta) {
-                (Some(entry), delta) => Arc::make_mut(entry).apply_block(delta, balances, at),
+                (Some(entry), delta) => {
+                    make_mut_recorded(entry, "account").apply_block(delta, balances, at)
+                }
                 (None, Some(delta)) if delta.is_creation() => {
                     self.accounts.insert(
                         address.clone(),
@@ -760,6 +777,7 @@ mod test {
     use std::str::FromStr;
 
     use async_trait::async_trait;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
@@ -1384,6 +1402,92 @@ mod test {
             account.token_balances,
             HashMap::from([(addr(9), account_balance(&address, &addr(9), 7))])
         );
+    }
+
+    /// Returns the copy count and the number of recorded durations for one `entity` label.
+    fn shared_copies(snapshotter: &Snapshotter, entity: &str) -> (u64, usize) {
+        let (mut copies, mut durations) = (0, 0);
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            if !key
+                .key()
+                .labels()
+                .any(|l| l.key() == "entity" && l.value() == entity)
+            {
+                continue;
+            }
+            match (key.key().name(), value) {
+                ("entity_cache_shared_copies_total", DebugValue::Counter(n)) => copies += n,
+                ("entity_cache_shared_copy_duration_ms", DebugValue::Histogram(v)) => {
+                    durations += v.len()
+                }
+                _ => {}
+            }
+        }
+        (copies, durations)
+    }
+
+    #[rstest]
+    #[case::reader_holds_the_account(true, (1, 1))]
+    #[case::no_reader_holds_the_account(false, (0, 0))]
+    fn fold_records_a_copy_of_an_account_only_when_a_reader_holds_it(
+        #[case] held: bool,
+        #[case] expected: (u64, usize),
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        let reader = held.then(|| {
+            cache
+                .read()
+                .account(&address)
+                .cloned()
+                .unwrap()
+        });
+
+        cache
+            .fold(&with_account_delta(
+                msg(2),
+                update(&address, fixtures::optional_slots([(1, 12)])),
+            ))
+            .unwrap();
+
+        drop(reader);
+        assert_eq!(shared_copies(&snapshotter, "account"), expected);
+    }
+
+    #[rstest]
+    #[case::reader_holds_the_component(true, (1, 1))]
+    #[case::no_reader_holds_the_component(false, (0, 0))]
+    fn fold_records_a_copy_of_a_component_only_when_a_reader_holds_it(
+        #[case] held: bool,
+        #[case] expected: (u64, usize),
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(1), "c1"), "c1", 1))
+            .unwrap();
+        let reader = held.then(|| {
+            cache
+                .read()
+                .component(EXTRACTOR, "c1")
+                .cloned()
+                .unwrap()
+        });
+
+        cache
+            .fold(&with_state_delta(msg(2), "c1", 2))
+            .unwrap();
+
+        drop(reader);
+        assert_eq!(shared_copies(&snapshotter, "component"), expected);
     }
 
     #[test]
