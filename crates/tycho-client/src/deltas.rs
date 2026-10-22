@@ -333,8 +333,15 @@ impl Inner {
         }
     }
 
-    /// Sends a message to a subscription's receiver.
+    /// Sends a message to a subscription's receiver, unless the subscription is ending.
     fn send(&mut self, id: &Uuid, msg: BlockAggregatedChanges) -> Result<(), DeltasError> {
+        // The server keeps sending until it gets the unsubscribe request. When the subscription
+        // ends because the receiver's buffer overflowed, a message delivered after the dropped
+        // one would hand the subscriber a block whose parent it never received.
+        if let Some(SubscriptionInfo::RequestedUnsubscription(_)) = self.subscriptions.get(id) {
+            debug!(subscription_id = ?id, "Dropping a message of an ending subscription");
+            return Ok(());
+        }
         if let Some(sender) = self.sender.get_mut(id) {
             sender
                 .try_send(msg)
@@ -2017,6 +2024,61 @@ mod tests {
 
         let _ = jh.await;
         let _ = server_thread.await;
+    }
+
+    /// A block message of the `vm:ambient` subscription at `number`, whose parent is `number - 1`.
+    fn ambient_block(number: u64) -> String {
+        format!(
+            r#"{{"subscription_id":"30b740d1-cf09-4e0e-8cfe-b1434d447ece","deltas":{{"extractor":"vm:ambient","chain":"ethereum","block":{{"number":{number},"hash":"0x{hash:064x}","parent_hash":"0x{parent:064x}","chain":"ethereum","ts":"2023-09-14T00:00:00"}},"finalized_block_height":0,"revert":false,"new_tokens":{{}},"account_updates":{{}},"state_updates":{{}},"new_protocol_components":{{}},"deleted_protocol_components":{{}},"component_balances":{{}},"account_balances":{{}},"component_tvl":{{}},"dci_update":{{"new_entrypoints":{{}},"new_entrypoint_params":{{}},"trace_results":{{}}}}}}}}"#,
+            hash = number,
+            parent = number - 1,
+        )
+    }
+
+    /// The subscription buffer overflows on block 124, but the server had already sent block 125
+    /// when it got the unsubscribe. The subscriber must never receive 125 after missing 124: it
+    /// would apply 125 on top of 123 and later resume or catch up from 125.
+    #[test_log::test(tokio::test)]
+    async fn test_buffer_overflow_delivers_no_block_after_the_dropped_one() {
+        let exp_comm = [
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(123))),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(124))),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(125))),
+            ExpectedComm::Receive(1000, tungstenite::protocol::Message::Text(unsubscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_ended())),
+        ];
+        let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
+        let jh = client
+            .connect()
+            .await
+            .expect("connect failed");
+        let (_sub_id, mut rx) = timeout(
+            Duration::from_millis(100),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        // A slow consumer: block 124 arrives while 123 still fills the buffer.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut received = Vec::new();
+        while let Ok(Some(message)) = timeout(Duration::from_secs(8), rx.recv()).await {
+            received.push(message.block.number);
+        }
+        jh.abort();
+        server_thread.abort();
+
+        assert_eq!(received, vec![123], "Delivered a block after the one the buffer dropped");
     }
 
     #[tokio::test]
