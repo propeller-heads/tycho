@@ -4,7 +4,7 @@ use tycho_common::{models::Chain, storage::StorageError};
 
 use crate::{
     postgres,
-    postgres::{cache::CachedGateway, direct::DirectGateway, PostgresGateway},
+    postgres::{cache::CachedGateway, direct::DirectGateway, pool_metrics, PostgresGateway},
 };
 
 #[derive(Default)]
@@ -100,6 +100,7 @@ impl GatewayBuilder {
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
+        pool_metrics::spawn_pool_gauges(pool.clone(), pool_metrics::EXTRACTION_POOL);
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
@@ -124,7 +125,8 @@ impl GatewayBuilder {
     ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
         let rpc_pool = postgres::new_pool(&self.database_url)?;
         let (extraction_gw, writer) = self.build().await?;
-        let rpc_gw = extraction_gw.with_pool(rpc_pool);
+        pool_metrics::spawn_pool_gauges(rpc_pool.clone(), pool_metrics::RPC_POOL);
+        let rpc_gw = extraction_gw.with_pool(rpc_pool, pool_metrics::RPC_POOL);
         Ok((extraction_gw, rpc_gw, writer))
     }
 

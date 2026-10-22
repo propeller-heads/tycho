@@ -17,6 +17,7 @@ postgres/
 ├── component_index.rs  — in-memory id/TVL index counting and paging get_protocol_components
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence
+├── pool_metrics.rs     — timed pool get (db_pool_wait_ms / db_conn_hold_ms) + pool status gauges
 ├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
