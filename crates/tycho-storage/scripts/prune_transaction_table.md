@@ -20,29 +20,70 @@ cleanup keeps the table at its floor and the file size plateaus. Run this only a
 structural changed — e.g. partman retention was shortened, or a large historic orphan backlog
 was just deleted for the first time.
 
-## Special case: after an initial sync / large backfill
+## Post-resync drain (routine after an initial sync / large backfill)
 
 Backfills orphan transactions immediately and in bulk: referencing rows carry historic
 `valid_to` timestamps, fall outside the partman retention window, and vanish while the
-transactions stay behind. The daily cron will NOT clean these up promptly — its horizon is
-based on `inserted_ts` (DB insertion time), so backfilled rows look young for 35 days even
-though they are already orphaned, and the 45-minute daily budget is sized for the steady-state
-trickle, not a backlog of tens of millions of rows.
+transactions stay behind. The scheduled cron runs will NOT clean these up promptly — their
+horizon is based on `inserted_ts` (DB insertion time), so backfilled rows look young for
+35 days even though they are already orphaned, and the 45-minute budget is sized for the
+steady-state trickle, not a backlog of tens of millions of rows.
 
-After (or during) a large sync, drain the backlog with aggressive manual passes instead.
-`p_min_age` can be lowered safely: correctness comes from the `NOT EXISTS` probes, and block
-flushes are atomic, so a committed transaction is never momentarily reference-less. Repeat
-until a run reports `deleted 0 rows` twice in a row (one full cursor wrap):
+After (or during) a large sync, drain the backlog with manual passes. `p_min_age` can be
+lowered safely: correctness comes from the `NOT EXISTS` probes, and block flushes are atomic,
+so a committed transaction is never momentarily reference-less. The cursor is committed with
+every batch, so an interrupted or budget-stopped pass resumes where it left off — repeat
+passes until one reports `deleted 0 rows` twice in a row (one full cursor wrap).
 
-```sql
-CALL cleanup_orphaned_transactions(
-    p_min_age     => interval '1 day',
-    p_time_budget => interval '6 hours'
-);
+The same procedure serves both the scheduled cron and these manual drains — only the
+parameters differ.
+
+### How to run a drain: from a pod (recommended)
+
+The procedure executes entirely server-side, but if the psql session that issued the `CALL`
+dies, Postgres cancels the run. Multi-hour drains should therefore run from a pod in the
+cluster, not a laptop psql over a port-forward. The pod consumes `DATABASE_URL` from the
+chain's indexer secret, so no credentials touch your shell (adjust namespace/secret per
+chain):
+
+```bash
+kubectl -n dev-tycho apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tx-cleanup
+  labels: {app: tx-cleanup}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: psql
+      image: postgres:15
+      envFrom:
+        - secretRef: {name: bsc-tycho-indexer-secret}
+      env:
+        - name: PGOPTIONS
+          value: "-c client_min_messages=notice"
+      command: ["psql"]
+      args:
+        - "$(DATABASE_URL)"
+        - "-c"
+        - "CALL cleanup_orphaned_transactions(p_min_age => interval '7 days', p_time_budget => interval '4 hours');"
+EOF
+
+kubectl -n dev-tycho logs -f tx-cleanup   # progress NOTICEs; final line reports deleted/cursor
 ```
 
-The same procedure serves both the daily cron and these manual drains — only the parameters
-differ.
+When the pod reaches `Completed`, check the last log line: if the cursor stopped short of the
+horizon (time budget hit), delete the pod and re-apply the same manifest to resume:
+
+```bash
+kubectl -n dev-tycho delete pod tx-cleanup   # then re-apply; repeat until "deleted 0 rows"
+```
+
+Timing: avoid overlapping the scheduled runs (02:00 and 14:00 UTC) — an overlap is safe (the
+batches serialize on the cursor row) but wasteful. Short passes (under ~45 minutes) are fine
+from a local psql session; a fully client-independent alternative is to temporarily point the
+pg_cron job's command at the parameterized `CALL`, let it fire once, and restore it.
 
 Timing trade-off: every batch commits in seconds and yields via `lock_timeout`, so running
 during the sync is safe and keeps the backlog from accumulating (100M+ dangling rows), but it
