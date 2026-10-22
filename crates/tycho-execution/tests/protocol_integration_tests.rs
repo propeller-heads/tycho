@@ -2811,6 +2811,75 @@ fn test_single_encoding_strategy_ekubo_v3() {
 }
 
 #[test]
+fn test_single_encoding_strategy_ekubo_v3_mev_capture_v21() {
+    //   USDC ──(EKUBO V3, MEVCapture v2.1)──> USDT
+    //
+    // The pool is created on the fork by the Solidity test; the checked amount is the
+    // tycho-simulation quote of that pool's state, so any shortfall reverts.
+
+    let token_in = usdc();
+    let token_out = usdt();
+
+    let static_attributes = HashMap::from([
+        ("fee".to_string(), Bytes::from(0x0020_c49b_a5e3_53f7_u64)),
+        ("pool_type_config".to_string(), Bytes::from_str("0x800003e8").unwrap()), /* tick spacing = 1000 */
+        (
+            "extension".to_string(),
+            Bytes::from_str("0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49").unwrap(), /* MEVCapture v2.1 */
+        ),
+    ]);
+
+    let component = ProtocolComponent {
+        protocol_system: "ekubo_v3".to_string(),
+        static_attributes,
+        ..Default::default()
+    };
+
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        token_in,
+        token_out,
+        BigUint::from(50_000_000_000_u64),
+        BigUint::from(49_868_947_729_u64),
+        BigUint::from(49_868_947_729_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_ekubo_v3_mev_capture_v21",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
 fn test_single_ekubo_v3_grouped_swap() {
     // Test multi-hop Ekubo V3 swap (grouped swaps)
     //
