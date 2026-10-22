@@ -12,8 +12,10 @@
 //!   that matches the canonical chain. When it resyncs instead, the snapshot and `T` give the
 //!   canonical state.
 //! - Property 2, no needless snapshots: the synchronizer takes a snapshot exactly when the spec
-//!   says catch-up is not possible, or when the server answers with something that is not a path to
-//!   `T`.
+//!   says catch-up is not possible, when the server answers with something that is not a path to
+//!   `T`, or when `T` or a message of the path is a revert. Revert messages don't restore
+//!   everything yet (deferred bugs 1, 2, 24 and 25), so the synchronizer doesn't catch up through
+//!   one.
 //!
 //! The synchronizer tracks every component of the history by id, and every component names every
 //! account as its contract, so the deltas it keeps depend on neither TVL nor DCI data. What a
@@ -156,6 +158,10 @@ enum Start {
     Unavailable(FallbackReason),
     /// Resync from a snapshot at `T` without asking: an upgraded extractor restarted in the gap.
     FingerprintChanged,
+    /// Resync from a snapshot at `T` without asking: `T` is a revert.
+    RevertFirst,
+    /// Ask to catch up, receive a path through a revert and resync from a snapshot at `T`.
+    PathThroughARevert(Vec<Arc<BlockAggregatedChanges>>),
 }
 
 /// A synchronizer that applied `events[gap.last_applied]` resubscribes, and its new subscription
@@ -247,7 +253,17 @@ impl<'a> Case<'a> {
         if self.t_follows() {
             return Start::Resume;
         }
+        if self.first().revert {
+            return Start::RevertFirst;
+        }
         match &self.spec {
+            CatchUpSpec::Possible(path)
+                if path
+                    .iter()
+                    .any(|message| message.revert) =>
+            {
+                Start::PathThroughARevert(path.clone())
+            }
             CatchUpSpec::Possible(path) => Start::CatchUp(path.clone()),
             CatchUpSpec::Fallback(reason) => Start::Unavailable(*reason),
         }
@@ -260,18 +276,17 @@ impl<'a> Case<'a> {
         !first.revert && first.block.parent_hash == self.last().block.hash
     }
 
-    /// The catch-up request for the spec's gap: from the synchronizer's block to `T`'s parent, or
-    /// to `T`'s own block when it is a revert.
+    /// The catch-up request for the spec's gap: from the synchronizer's block to `T`'s parent,
+    /// under the fingerprint the synchronizer synced under.
     fn request(&self) -> DeltaCatchUpParams {
-        let (last, first) = (&self.last().block, self.first());
-        let to = if first.revert { &first.block.hash } else { &first.block.parent_hash };
+        let (last, first) = (&self.last().block, &self.first().block);
         DeltaCatchUpParams::new(
             CHAIN,
             EXTRACTOR,
             last.hash.clone(),
             last.number,
-            to.clone(),
-            self.live_fingerprint(),
+            first.parent_hash.clone(),
+            self.synced_fingerprint(),
         )
     }
 
@@ -871,11 +886,13 @@ struct Outcomes {
     resumed: usize,
     resumed_across_an_unchanged_restart: usize,
     caught_up: usize,
-    through_a_revert: usize,
-    through_nested_reverts: usize,
     caught_up_across_an_unchanged_restart: usize,
-    /// Catch-ups whose `T` is a revert, so the path leads to `T`'s own block.
-    caught_up_to_a_revert: usize,
+    /// Resyncs for a path through one revert or more.
+    through_a_revert: usize,
+    /// Resyncs for a path through two reverts or more.
+    through_nested_reverts: usize,
+    /// Resyncs for a `T` that is a revert.
+    revert_first: usize,
     /// Components the merge put in both component maps, compared through the relaxation.
     components_in_both_maps: usize,
     /// Upgrades in the gap with a `T` that follows the synchronizer's block: only the fingerprint
@@ -897,17 +914,19 @@ impl Outcomes {
                 self.resumed += 1;
                 self.resumed_across_an_unchanged_restart += usize::from(unchanged_restart);
             }
-            Start::CatchUp(path) => {
+            Start::CatchUp(_) => {
+                self.caught_up += 1;
+                self.caught_up_across_an_unchanged_restart += usize::from(unchanged_restart);
+            }
+            Start::PathThroughARevert(path) => {
                 let reverts = path
                     .iter()
                     .filter(|message| message.revert)
                     .count();
-                self.caught_up += 1;
-                self.through_a_revert += usize::from(reverts >= 1);
+                self.through_a_revert += 1;
                 self.through_nested_reverts += usize::from(reverts >= 2);
-                self.caught_up_across_an_unchanged_restart += usize::from(unchanged_restart);
-                self.caught_up_to_a_revert += usize::from(case.first().revert);
             }
+            Start::RevertFirst => self.revert_first += 1,
             Start::Unavailable(reason) => {
                 *self
                     .fallbacks
@@ -958,8 +977,12 @@ async fn test_resubscriptions_match_the_delta_history_model() {
                             .or_default() += 1;
                     }
                 }
-                Start::Unavailable(_) => check_resync(&case, case.answer(), true).await,
-                Start::FingerprintChanged => check_resync(&case, case.answer(), false).await,
+                Start::Unavailable(_) | Start::PathThroughARevert(_) => {
+                    check_resync(&case, case.answer(), true).await
+                }
+                Start::FingerprintChanged | Start::RevertFirst => {
+                    check_resync(&case, case.answer(), false).await
+                }
             }
         }
     }
@@ -970,10 +993,10 @@ async fn test_resubscriptions_match_the_delta_history_model() {
         resumed,
         resumed_across_an_unchanged_restart,
         caught_up,
+        caught_up_across_an_unchanged_restart,
         through_a_revert,
         through_nested_reverts,
-        caught_up_across_an_unchanged_restart,
-        caught_up_to_a_revert,
+        revert_first,
         components_in_both_maps: _,
         upgraded_with_t_following,
         fallbacks,
@@ -984,10 +1007,10 @@ async fn test_resubscriptions_match_the_delta_history_model() {
         ("resumes", resumed),
         ("resumes across an unchanged restart", resumed_across_an_unchanged_restart),
         ("catch-ups", caught_up),
-        ("catch-ups through a revert", through_a_revert),
-        ("catch-ups through nested reverts", through_nested_reverts),
         ("catch-ups across an unchanged restart", caught_up_across_an_unchanged_restart),
-        ("catch-ups to a revert", caught_up_to_a_revert),
+        ("resyncs for a path through a revert", through_a_revert),
+        ("resyncs for a path through nested reverts", through_nested_reverts),
+        ("resyncs for a T that is a revert", revert_first),
         ("upgrades with a T that follows the synchronizer's block", upgraded_with_t_following),
     ] {
         assert!(*count > 0, "no {shape} in {outcomes:?}");
