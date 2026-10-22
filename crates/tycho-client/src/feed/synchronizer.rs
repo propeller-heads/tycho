@@ -257,9 +257,9 @@ enum CatchUpSkipped {
     /// receives one, so it cannot tell whether it applied a whole block.
     #[error("partial-block subscriptions do not catch up")]
     PartialBlocks,
-    /// The subscription reported no fingerprint (a server or deltas client that predates them),
-    /// so the server cannot check that its deltas match the ones the client applied.
-    #[error("the subscription reported no extractor fingerprint")]
+    /// The client synced under no fingerprint (a server or deltas client that predates them), so
+    /// the server cannot check that its deltas match the ones the client applied.
+    #[error("the client synced under no extractor fingerprint")]
     NoFingerprint,
     /// The first live message, or one of the missed ones, is a revert to block `number`. A revert
     /// message does not restore everything the reverted blocks changed, so replaying one can
@@ -789,11 +789,9 @@ where
                                 self.last_synced_block.as_ref().filter(|_| may_resume);
                             if let Some(last_synced) = last_synced {
                                 let caught_up = select! {
-                                    caught_up = self.catch_up_path(
-                                        last_synced,
-                                        fingerprint.as_ref(),
-                                        &incoming,
-                                    ) => caught_up,
+                                    caught_up = self.catch_up_path(last_synced, &incoming) => {
+                                        caught_up
+                                    }
                                     _ = &mut end_rx => {
                                         info!("Received close signal during delta catch-up");
                                         return Ok(());
@@ -1174,6 +1172,9 @@ where
     /// the new subscription's first message `first`, and checks that they do. Runs nothing
     /// through [`Self::handle_block`], so a failure leaves the synchronizer untouched.
     ///
+    /// The request carries `synced_fingerprint`, the fingerprint the consumer's state was synced
+    /// under, so that the server serves only deltas that match the ones the consumer applied.
+    ///
     /// # Errors
     ///
     /// The [`CatchUpSkipped`] reason when catch-up is not possible, when `first` or a missed
@@ -1182,13 +1183,12 @@ where
     async fn catch_up_path(
         &self,
         last_synced: &BlockHeader,
-        fingerprint: Option<&ExtractorFingerprint>,
         first: &BlockHeader,
     ) -> Result<Vec<BlockAggregatedChanges>, CatchUpSkipped> {
         if self.partial_blocks {
             return Err(CatchUpSkipped::PartialBlocks);
         }
-        let Some(fingerprint) = fingerprint else {
+        let Some(fingerprint) = self.synced_fingerprint.as_ref() else {
             return Err(CatchUpSkipped::NoFingerprint);
         };
         // A revert message doesn't restore native balances, code, most account token balances,
@@ -6465,6 +6465,32 @@ mod test {
                 .with_include_state(include_snapshots)]
         );
         assert_eq!(message.header.number, 7);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_asks_for_the_deltas_under_the_synced_fingerprint() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let mut state_sync = with_mocked_clients(true, false, Some(rpc_client), None);
+        state_sync.synced_fingerprint = Some(fingerprint(7));
+        let last_synced = make_block_changes(4, None);
+
+        state_sync
+            .catch_up_path(&header_of(&last_synced), &header_of(&make_block_changes(7, None)))
+            .await
+            .expect("The path leads from block 4 to block 6");
+
+        let expected = DeltaCatchUpParams::new(
+            Chain::Ethereum,
+            "uniswap-v2",
+            last_synced.block.hash,
+            4,
+            fork_hash(6, 0),
+            fingerprint(7),
+        );
+        assert_eq!(calls.catch_up_requests(), vec![expected]);
     }
 
     /// A message of `extractor` on `chain` dropping Component1 below the TVL threshold at block 5.

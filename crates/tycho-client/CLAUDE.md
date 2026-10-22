@@ -55,10 +55,11 @@ TychoStreamBuilder (stream.rs)
    When the first candidate message `T` does not follow the last synced block, the synchronizer
    tries delta catch-up before the snapshot delay starts, if `may_resume` holds, the subscription
    reported a fingerprint, partial-block mode is off and `T` is not a revert. `catch_up_path` asks
-   `get_delta_catch_up` for the messages from the last synced block to `T`'s parent, with the
-   subscription's fingerprint and `include_state = include_snapshots`, bounded by the synchronizer's
-   `timeout` but at least `MIN_CATCH_UP_TIMEOUT` (10 s; the RPC client waits 120 s before retrying a
-   502/503/504). A close signal ends the synchronizer while the request is in flight.
+   `get_delta_catch_up` for the messages from the last synced block to `T`'s parent, with
+   `synced_fingerprint` (which `may_resume` makes equal to the subscription's) and
+   `include_state = include_snapshots`, bounded by the synchronizer's `timeout` but at least
+   `MIN_CATCH_UP_TIMEOUT` (10 s; the RPC client waits 120 s before retrying a 502/503/504). A
+   close signal ends the synchronizer while the request is in flight.
    `check_catch_up_path` verifies the whole answer before anything runs through `handle_block`:
    every message is of the subscription's extractor and chain; each block's parent is the block
    reached so far and its number is one higher; a revert moves back to a lower target block, which
