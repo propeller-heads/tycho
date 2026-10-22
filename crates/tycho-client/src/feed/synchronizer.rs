@@ -633,6 +633,10 @@ where
     /// `last_synced_block` to that block without a revert, emits them merged with the block as one
     /// message. Otherwise it discards deltas for `snapshot_delay` and requests a snapshot at the
     /// first block after the delay.
+    ///
+    /// In full-block mode, a later block that does not extend the last synced block ends the
+    /// subscription with an error before it is emitted, so that `last_synced_block` stays the last
+    /// block the consumer holds with nothing missing below it.
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
@@ -935,6 +939,18 @@ where
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
+                            if let Some(last_synced) = self.missed_blocks_before(&header) {
+                                // The subscription lost messages, e.g. when the deltas client
+                                // dropped one on a full buffer. Applying this block would leave
+                                // the consumer without them for good, so the next subscription
+                                // catches up, or resyncs from a snapshot, from the last block
+                                // the consumer holds whole.
+                                return Err(SynchronizerError::ConnectionError(format!(
+                                    "Block {} ({}) does not extend the last synced block {} \
+                                     ({}): the subscription lost messages",
+                                    header.number, header.hash, last_synced.number, last_synced.hash
+                                )));
+                            }
                             let next = self.handle_block(deltas);
                             let n_changes = next
                                 .deltas
@@ -1410,6 +1426,19 @@ where
     /// under, or neither subscription reported one (servers that predate fingerprints).
     fn may_resume(&self, fingerprint: Option<&ExtractorFingerprint>) -> bool {
         self.synced_fingerprint.as_ref() == fingerprint
+    }
+
+    /// The last synced block, when the live message `incoming` shows that the subscription lost
+    /// messages after it: in full-block mode, a block whose parent is not the last synced block.
+    /// `None` for a revert, which names its target's parent, and in partial-block mode, where
+    /// every partial of a block names the same parent.
+    fn missed_blocks_before(&self, incoming: &BlockHeader) -> Option<&BlockHeader> {
+        if self.partial_blocks || incoming.revert {
+            return None;
+        }
+        self.last_synced_block
+            .as_ref()
+            .filter(|last_synced| incoming.parent_hash != last_synced.hash)
     }
 
     /// Whether `incoming` follows `last_synced_block`. Never true for a revert.
@@ -5964,6 +5993,132 @@ mod test {
         // Block 8 follows block 7, the first message of the subscription that caught up.
         assert_eq!(calls.catch_up_requests().len(), 1);
         assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_a_gap_in_the_live_stream_ends_the_subscription_before_the_gap() {
+        // The client applied block 4. Its subscription then delivers 5 and 7 and ends: the deltas
+        // client lost block 6, which sets x to 0x06. The next subscription starts at block 10.
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            setting(make_block_changes(6, None), "x", "0x06"),
+            make_block_changes(7, None),
+            make_block_changes(8, None),
+            make_block_changes(9, None),
+        ])));
+        let mut deltas_client = MockDeltasClient::new();
+        for blocks in [vec![5, 7], vec![10]] {
+            let (tx, rx) = channel(4);
+            for block in blocks {
+                tx.try_send(make_block_changes(block, None))
+                    .unwrap();
+            }
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(4, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let ended = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The first subscription ends");
+        let (_, Some(end_rx)) = *ended else {
+            panic!("The close signal was never sent");
+        };
+        let block_5 = make_block_changes(5, None);
+        assert_eq!(state_sync.last_synced_block, Some(header_of(&block_5)));
+        state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The second subscription ends");
+
+        let mut emitted = Vec::new();
+        while let Ok(message) = block_rx.try_recv() {
+            emitted.push(message.expect("Should not be an error"));
+        }
+        let emitted_blocks: Vec<u64> = emitted
+            .iter()
+            .map(|message| message.header.number)
+            .collect();
+        assert_eq!(emitted_blocks, vec![5, 10]);
+        assert_eq!(calls.catch_up_requests(), vec![catch_up_request(&block_5, &fork_hash(9, 0))]);
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(attributes_set(&emitted[1]), attributes(&[("x", "0x06")]));
+    }
+
+    // Each case's live messages include one whose parent is not the block before it, without a
+    // gap: a revert names its target's parent, and partials of one block share a parent. The
+    // subscription resumes at `live[resumes_at]` and must emit every message from there.
+    #[rstest]
+    #[case::blocks_with_a_revert(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            make_block_changes(7, None),
+            revert_to(make_block_changes(6, None)),
+            fork_block(7, 1, 0),
+            fork_block(8, 1, 1),
+        ],
+        0
+    )]
+    // A partial-block subscription starts at the first partial of a new block.
+    #[case::partial_blocks(
+        true,
+        make_block_changes(5, Some(3)),
+        vec![
+            make_block_changes(5, Some(4)),
+            make_block_changes(6, Some(0)),
+            make_block_changes(6, Some(1)),
+            make_block_changes(7, Some(0)),
+        ],
+        1
+    )]
+    #[test_log::test(tokio::test)]
+    async fn test_live_messages_without_a_gap_keep_the_subscription(
+        #[case] partial_blocks: bool,
+        #[case] last_synced: BlockAggregatedChanges,
+        #[case] live: Vec<BlockAggregatedChanges>,
+        #[case] resumes_at: usize,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(partial_blocks);
+        let mut sync = RunningSync::start(state_sync, Some(header_of(&last_synced))).await;
+        let expected: Vec<BlockHeader> = live[resumes_at..]
+            .iter()
+            .map(header_of)
+            .collect();
+
+        for message in live {
+            deltas_tx.send(message).await.unwrap();
+        }
+        let mut emitted = Vec::new();
+        for _ in 0..expected.len() {
+            emitted.push(sync.next().await.header);
+        }
+        let RunningSync { end_tx, task, .. } = sync;
+        let _ = end_tx.send(());
+        let ended = task
+            .await
+            .expect("Task should not panic");
+
+        assert!(ended.is_ok(), "The subscription ended before the close signal");
+        assert_eq!(emitted, expected);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), Vec::<u64>::new());
     }
 
     fn contract_x() -> Bytes {
