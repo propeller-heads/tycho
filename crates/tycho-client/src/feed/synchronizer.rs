@@ -651,9 +651,10 @@ where
     /// message. Otherwise it discards deltas for `snapshot_delay` and requests a snapshot at the
     /// first block after the delay.
     ///
-    /// In full-block mode, a later block that does not extend the last synced block ends the
-    /// subscription with an error before it is emitted, so that `last_synced_block` stays the last
-    /// block the consumer holds with nothing missing below it.
+    /// In full-block mode, a later block that does not extend the last synced block, or a revert
+    /// to a block the consumer never had, ends the subscription with an error before it is
+    /// emitted, so that `last_synced_block` stays the last block the consumer holds with nothing
+    /// missing below it.
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
@@ -956,12 +957,14 @@ where
 
                             if let Some(last_synced) = self.missed_blocks_before(&header) {
                                 // The subscription lost messages, e.g. when the deltas client
-                                // dropped one on a full buffer. Applying this block would leave
+                                // dropped one on a full buffer. Applying this one would leave
                                 // the consumer without them for good, so the next subscription
                                 // catches up, or resyncs from a snapshot, from the last block
                                 // the consumer holds whole.
+                                let what =
+                                    if header.revert { "A revert to block" } else { "Block" };
                                 return Err(SynchronizerError::ConnectionError(format!(
-                                    "Block {} ({}) does not extend the last synced block {} \
+                                    "{what} {} ({}) does not follow the last synced block {} \
                                      ({}): the subscription lost messages",
                                     header.number, header.hash, last_synced.number, last_synced.hash
                                 )));
@@ -1446,16 +1449,24 @@ where
     }
 
     /// The last synced block, when the live message `incoming` shows that the subscription lost
-    /// messages after it: in full-block mode, a block whose parent is not the last synced block.
-    /// `None` for a revert, which names its target's parent, and in partial-block mode, where
-    /// every partial of a block names the same parent.
+    /// messages after it, in full-block mode: a block whose parent is not the last synced block,
+    /// or a revert to a block the consumer never had, i.e. above the last synced block or at its
+    /// height with another hash. `None` in partial-block mode, where every partial of a block names
+    /// the same parent.
     fn missed_blocks_before(&self, incoming: &BlockHeader) -> Option<&BlockHeader> {
-        if self.partial_blocks || incoming.revert {
+        if self.partial_blocks {
             return None;
         }
-        self.last_synced_block
-            .as_ref()
-            .filter(|last_synced| incoming.parent_hash != last_synced.hash)
+        let last_synced = self.last_synced_block.as_ref()?;
+        // A revert names its target, which the consumer must hold: the last synced block or one
+        // below it. Targets below it can't be checked, since the consumer keeps no history.
+        let missed = if incoming.revert {
+            incoming.number > last_synced.number ||
+                (incoming.number == last_synced.number && incoming.hash != last_synced.hash)
+        } else {
+            incoming.parent_hash != last_synced.hash
+        };
+        missed.then_some(last_synced)
     }
 
     /// Whether `incoming` follows `last_synced_block`. Never true for a revert.
@@ -6082,6 +6093,41 @@ mod test {
         assert_eq!(attributes_set(&emitted[1]), attributes(&[("x", "0x06")]));
     }
 
+    // The client resumes at block 5, then receives a revert to a block it never had: the
+    // subscription lost the messages that led to it.
+    #[rstest]
+    // The chain built 6 and 7, then reverted to 6.
+    #[case::revert_above_the_last_block(revert_to(make_block_changes(6, None)))]
+    // The chain replaced 5 with 5', built on it, then reverted to 5'.
+    #[case::revert_to_a_sibling_of_the_last_block(revert_to(fork_block(5, 1, 0)))]
+    #[test_log::test(tokio::test)]
+    async fn test_a_live_revert_to_a_block_the_client_never_had_ends_the_subscription(
+        #[case] revert: BlockAggregatedChanges,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+
+        deltas_tx
+            .send(make_block_changes(5, None))
+            .await
+            .unwrap();
+        deltas_tx.send(revert).await.unwrap();
+        let resumed = sync.next().await;
+        let RunningSync { mut block_rx, end_tx: _end_tx, task } = sync;
+        let ended = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("The subscription should end")
+            .expect("Task should not panic");
+
+        assert_eq!(resumed.header.number, 5);
+        assert!(ended.is_err(), "The subscription ended cleanly");
+        assert!(block_rx.try_recv().is_err(), "The revert was emitted");
+        assert_eq!(*snapshot_blocks.lock().unwrap(), Vec::<u64>::new());
+    }
+
     // Each case's live messages include one whose parent is not the block before it, without a
     // gap: a revert names its target's parent, and partials of one block share a parent. The
     // subscription resumes at `live[resumes_at]` and must emit every message from there.
@@ -6096,6 +6142,46 @@ mod test {
             revert_to(make_block_changes(6, None)),
             fork_block(7, 1, 0),
             fork_block(8, 1, 1),
+        ],
+        0
+    )]
+    #[case::back_to_back_reverts(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            make_block_changes(7, None),
+            revert_to(make_block_changes(6, None)),
+            revert_to(make_block_changes(5, None)),
+            fork_block(6, 1, 0),
+            fork_block(7, 1, 1),
+        ],
+        0
+    )]
+    // The second revert goes back to a block of the branch the first one started.
+    #[case::nested_reverts(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(5, None)),
+            fork_block(6, 1, 0),
+            fork_block(7, 1, 1),
+            revert_to(fork_block(6, 1, 0)),
+            fork_block(7, 2, 1),
+        ],
+        0
+    )]
+    #[case::revert_to_the_current_block(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(6, None)),
+            make_block_changes(7, None),
         ],
         0
     )]
