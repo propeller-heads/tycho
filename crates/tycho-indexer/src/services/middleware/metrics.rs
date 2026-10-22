@@ -10,8 +10,7 @@ use tracing::{instrument, Span};
 
 use crate::services::client_metadata;
 
-/// Middleware to record metrics for RPC requests. `rpc_response_body_bytes{endpoint}` is the size
-/// of the response body before compression.
+/// Middleware to record metrics for RPC requests.
 #[instrument(skip_all, fields(user_identity))]
 pub(in crate::services) async fn rpc_metrics_middleware<B>(
     req: ServiceRequest,
@@ -89,7 +88,7 @@ where
                 counter!("rpc_requests_failed", fail_labels).increment(1);
             }
 
-            // Compression wraps this middleware, so the body is not compressed yet.
+            // Compression wraps this middleware, so this is the size before compression.
             if let BodySize::Sized(bytes) = srv_res.response().body().size() {
                 histogram!("rpc_response_body_bytes", "endpoint" => endpoint.clone())
                     .record(bytes as f64);

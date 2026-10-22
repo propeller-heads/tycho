@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tycho_common::dto;
 
-use crate::services::{rpc::RpcError, state::shadow::Endpoint, thread_stats::SchedStat};
+use crate::services::{rpc::RpcError, state::shadow::Endpoint};
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
 /// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
@@ -123,7 +123,7 @@ impl EndpointPools {
 
 /// A bounded share of the blocking thread pool.
 struct Pool {
-    /// The `endpoint` and `step` labels of the `off_worker_*` metrics.
+    /// The `endpoint` and `step` labels of the `off_worker_permit_wait_ms` histogram.
     endpoint: Endpoint,
     step: &'static str,
     permits: Arc<Semaphore>,
@@ -136,8 +136,9 @@ impl Pool {
 
     /// Runs `work` on the blocking thread pool, in the caller's tracing span, once a permit is
     /// free, and returns its result. The job keeps its permit until `work` returns, also when the
-    /// caller stops waiting. The wait for the permit is recorded in `off_worker_permit_wait_ms`,
-    /// and the job itself by [`record_job`].
+    /// caller stops waiting. Records the wait for the permit in `off_worker_permit_wait_ms`, and
+    /// the job's wall time, on-CPU time and run-queue wait in `off_worker_job_ms`,
+    /// `off_worker_job_cpu_ns_total` and `off_worker_job_runqueue_wait_ns_total`.
     ///
     /// # Errors
     ///
@@ -161,11 +162,24 @@ impl Pool {
         let (endpoint, step) = (self.endpoint.label(), self.step);
         tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let before = SchedStat::current_thread();
+            let before = thread_schedstat();
             let result = span.in_scope(work);
-            let after = SchedStat::current_thread();
+            let after = thread_schedstat();
             drop(permit);
-            record_job(endpoint, step, started, before.zip(after));
+            metrics::histogram!("off_worker_job_ms", "endpoint" => endpoint, "step" => step)
+                .record(started.elapsed().as_secs_f64() * 1000.0);
+            // A job runs on one thread from start to end, so the thread's counters are the job's.
+            if let (Some((cpu_before, wait_before)), Some((cpu_after, wait_after))) = (before, after)
+            {
+                metrics::counter!("off_worker_job_cpu_ns_total", "endpoint" => endpoint, "step" => step)
+                    .increment(cpu_after.saturating_sub(cpu_before));
+                metrics::counter!(
+                    "off_worker_job_runqueue_wait_ns_total",
+                    "endpoint" => endpoint,
+                    "step" => step
+                )
+                .increment(wait_after.saturating_sub(wait_before));
+            }
             result
         })
         .await
@@ -173,30 +187,14 @@ impl Pool {
     }
 }
 
-/// Records one job that ran from `started` until now: its wall time in `off_worker_job_ms`, and,
-/// when the thread's counters before and after the job are known, its on-CPU time in
-/// `off_worker_job_cpu_ns_total` and its run-queue wait in `off_worker_job_runqueue_wait_ns_total`.
-/// A job runs on one blocking thread from start to end, so the thread's counters are the job's.
-fn record_job(
-    endpoint: &'static str,
-    step: &'static str,
-    started: Instant,
-    thread_stats: Option<(SchedStat, SchedStat)>,
-) {
-    metrics::histogram!("off_worker_job_ms", "endpoint" => endpoint, "step" => step)
-        .record(started.elapsed().as_secs_f64() * 1000.0);
-    let Some((before, after)) = thread_stats else {
-        return;
-    };
-    let used = after.since(before);
-    metrics::counter!("off_worker_job_cpu_ns_total", "endpoint" => endpoint, "step" => step)
-        .increment(used.cpu_ns);
-    metrics::counter!(
-        "off_worker_job_runqueue_wait_ns_total",
-        "endpoint" => endpoint,
-        "step" => step
-    )
-    .increment(used.runqueue_wait_ns);
+/// On-CPU time and run-queue wait of the calling thread in ns, from its schedstat. `None` when the
+/// kernel does not expose them.
+fn thread_schedstat() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let mut fields = text
+        .split_ascii_whitespace()
+        .map(|field| field.parse().ok());
+    Some((fields.next()??, fields.next()??))
 }
 
 /// An estimate of the JSON size of a response. Reads map and field lengths only, never map

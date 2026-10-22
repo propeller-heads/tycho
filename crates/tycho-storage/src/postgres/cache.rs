@@ -5,16 +5,18 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel_async::{
-    pooled_connection::deadpool::{Pool, PoolError},
+    pooled_connection::deadpool::{Object, Pool},
     scoped_futures::ScopedFutureExt,
     AsyncConnection, AsyncPgConnection,
 };
 use lru::LruCache;
+use metrics::{gauge, histogram};
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
     task::JoinHandle,
@@ -46,7 +48,6 @@ use tycho_common::{
 
 use super::{
     is_transaction_conflict,
-    pool_metrics::{get_timed, TimedConn, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
     PostgresError, PostgresGateway,
 };
@@ -332,7 +333,8 @@ impl DBCacheWriteExecutor {
         state_gateway: PostgresGateway,
         msg_receiver: mpsc::Receiver<DBCacheMessage>,
     ) -> Self {
-        let mut conn = get_timed(&pool, EXTRACTION_POOL, "load_persisted_block")
+        let mut conn = pool
+            .get()
             .await
             .expect("pool should be connected");
 
@@ -369,7 +371,9 @@ impl DBCacheWriteExecutor {
             tracing::Span::current().record("extractor_id", extractor_id);
         }
 
-        let mut conn = get_timed(&self.pool, EXTRACTION_POOL, "write")
+        let mut conn = self
+            .pool
+            .get()
             .await
             .expect("pool should be connected");
 
@@ -588,7 +592,7 @@ pub struct CachedGateway {
     flushed_block_height: AtomicU64,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
-    /// Name of `pool` in the pool metrics.
+    /// The `pool` label of the pool metrics.
     pool_name: &'static str,
     state_gateway: PostgresGateway,
     lru_cache: Arc<Mutex<DeltasCache>>,
@@ -715,7 +719,7 @@ impl CachedGateway {
             open_tx: Arc::new(Mutex::new(None)),
             flushed_block_height: AtomicU64::new(0),
             pool,
-            pool_name: EXTRACTION_POOL,
+            pool_name: "extraction",
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
@@ -740,14 +744,26 @@ impl CachedGateway {
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
-    /// connections from `pool`. The pool metrics name the pool `pool_name`.
+    /// connections from `pool`, named `pool_name` in the pool metrics.
     pub fn with_pool(&self, pool: Pool<AsyncPgConnection>, pool_name: &'static str) -> Self {
         CachedGateway { pool, pool_name, ..self.new_instance() }
     }
 
-    /// Gets a connection from the pool and records the wait and hold time under `op`.
-    async fn conn(&self, op: &'static str) -> Result<TimedConn, PoolError> {
-        get_timed(&self.pool, self.pool_name, op).await
+    /// Gets a connection from the pool. Records the wait in `db_pool_wait_ms`, and the
+    /// connections in use and the waiting callers in `db_pool_in_use` and `db_pool_waiting`.
+    async fn conn(&self) -> Result<Object<AsyncPgConnection>, StorageError> {
+        let started = Instant::now();
+        let conn = self.pool.get().await;
+        histogram!("db_pool_wait_ms", "pool" => self.pool_name)
+            .record(started.elapsed().as_secs_f64() * 1000.0);
+        let status = self.pool.status();
+        gauge!("db_pool_in_use", "pool" => self.pool_name).set(
+            status
+                .size
+                .saturating_sub(status.available) as f64,
+        );
+        gauge!("db_pool_waiting", "pool" => self.pool_name).set(status.waiting as f64);
+        conn.map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))
     }
 
     #[cfg(test)]
@@ -789,7 +805,7 @@ impl CachedGateway {
         tracing::debug!("Cache didn't hit delta. Getting delta for {:?}", key);
 
         // Fetch the delta from the database
-        let mut db = self.conn("get_delta").await.unwrap();
+        let mut db = self.pool.get().await.unwrap();
         let accounts_delta = self
             .state_gateway
             .get_accounts_delta(chain, start_version, end_version, &mut db)
@@ -815,10 +831,7 @@ impl CachedGateway {
 impl ExtractionStateGateway for CachedGateway {
     #[instrument(skip_all)]
     async fn get_state(&self, name: &str, chain: &Chain) -> Result<ExtractionState, StorageError> {
-        let mut conn = self
-            .conn("get_state")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_state(name, chain, &mut conn)
             .await
@@ -842,10 +855,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_block(&self, id: &BlockIdentifier) -> Result<Block, StorageError> {
-        let mut conn = self
-            .conn("get_block")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_block(id, &mut conn)
             .await
@@ -859,10 +869,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_tx(&self, hash: &TxHash) -> Result<Transaction, StorageError> {
-        let mut conn = self
-            .conn("get_tx")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_tx(hash, &mut conn)
             .await
@@ -870,10 +877,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn revert_state(&self, to: &BlockIdentifier) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("revert_state")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .revert_state(to, &mut conn)
             .await
@@ -889,10 +893,7 @@ impl ContractStateGateway for CachedGateway {
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
-        let mut conn = self
-            .conn("get_contract")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_contract(id, version, include_slots, &mut conn)
             .await
@@ -907,10 +908,7 @@ impl ContractStateGateway for CachedGateway {
         include_slots: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
-        let mut conn = self
-            .conn("get_contracts")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_contracts(chain, addresses, version, include_slots, pagination_params, &mut conn)
             .await
@@ -932,10 +930,7 @@ impl ContractStateGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn delete_contract(&self, id: &ContractId, at_tx: &TxHash) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("delete_contract")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .delete_contract(id, at_tx, &mut conn)
             .await
@@ -948,10 +943,7 @@ impl ContractStateGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<AccountDelta>, StorageError> {
-        let mut conn = self
-            .conn("get_accounts_delta")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_accounts_delta(chain, start_version, end_version, &mut conn)
             .await
@@ -974,10 +966,7 @@ impl ContractStateGateway for CachedGateway {
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
-        let mut conn = self
-            .conn("get_account_balances")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_account_balances(chain, addresses, version, false, &mut conn)
             .await
@@ -995,10 +984,7 @@ impl ProtocolGateway for CachedGateway {
         min_tvl: Option<f64>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
-        let mut conn = self
-            .conn("get_protocol_components")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_protocol_components(chain, system, ids, min_tvl, pagination_params, &mut conn)
             .await
@@ -1011,10 +997,7 @@ impl ProtocolGateway for CachedGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
     ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
-        let mut conn = self
-            .conn("get_token_owners")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)
             .await
@@ -1033,10 +1016,7 @@ impl ProtocolGateway for CachedGateway {
         to_delete: &[ProtocolComponent],
         block_ts: NaiveDateTime,
     ) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("delete_protocol_components")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .delete_protocol_components(to_delete, block_ts, &mut conn)
             .await
@@ -1047,10 +1027,7 @@ impl ProtocolGateway for CachedGateway {
         &self,
         new_protocol_types: &[ProtocolType],
     ) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("add_protocol_types")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .add_protocol_types(new_protocol_types, &mut conn)
             .await
@@ -1066,10 +1043,7 @@ impl ProtocolGateway for CachedGateway {
         retrieve_balances: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
-        let mut conn = self
-            .conn("get_protocol_states")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_protocol_states(
                 chain,
@@ -1102,10 +1076,7 @@ impl ProtocolGateway for CachedGateway {
         traded_n_days_ago: Option<NaiveDateTime>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
-        let mut conn = self
-            .conn("get_tokens")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_tokens(chain, address, quality, traded_n_days_ago, pagination_params, &mut conn)
             .await
@@ -1139,10 +1110,7 @@ impl ProtocolGateway for CachedGateway {
     /// for these use cases that creates a single transactions and emits them immediately.
     #[instrument(skip_all)]
     async fn update_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("update_tokens")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
 
         conn.transaction(|conn| {
             async {
@@ -1164,10 +1132,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<ProtocolComponentStateDelta>, StorageError> {
-        let mut conn = self
-            .conn("get_protocol_states_delta")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_protocol_states_delta(chain, start_version, end_version, &mut conn)
             .await
@@ -1180,10 +1145,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         target_version: &BlockOrTimestamp,
     ) -> Result<Vec<ComponentBalance>, StorageError> {
-        let mut conn = self
-            .conn("get_balance_deltas")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_balance_deltas(chain, start_version, target_version, &mut conn)
             .await
@@ -1196,10 +1158,7 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
-        let mut conn = self
-            .conn("get_component_balances")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_component_balances(chain, ids, version, &mut conn)
             .await
@@ -1207,10 +1166,7 @@ impl ProtocolGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_token_prices(&self, chain: &Chain) -> Result<HashMap<Bytes, f64>, StorageError> {
-        let mut conn = self
-            .conn("get_token_prices")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_token_prices(chain, &mut conn)
             .await
@@ -1223,10 +1179,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tvl_values: &HashMap<String, f64>,
     ) -> Result<(), StorageError> {
-        let mut conn = self
-            .conn("upsert_component_tvl")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .upsert_component_tvl(chain, tvl_values, &mut conn)
             .await
@@ -1251,10 +1204,7 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {
-        let mut conn = self
-            .conn("get_component_tvls")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
             .await
@@ -1289,10 +1239,7 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPoint>>>, StorageError> {
-        let mut conn = self
-            .conn("get_entry_points")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_entry_points(filter, pagination_params, &mut conn)
             .await
@@ -1305,10 +1252,7 @@ impl EntryPointGateway for CachedGateway {
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPointWithTracingParams>>>, StorageError>
     {
-        let mut conn = self
-            .conn("get_entry_points_tracing_params")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_entry_points_tracing_params(filter, pagination_params, &mut conn)
             .await
@@ -1329,10 +1273,7 @@ impl EntryPointGateway for CachedGateway {
         &self,
         entry_points: &HashSet<EntryPointId>,
     ) -> Result<HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>, StorageError> {
-        let mut conn = self
-            .conn("get_traced_entry_points")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_tracing_results(entry_points, &mut conn)
             .await
@@ -1344,10 +1285,7 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
-        let mut conn = self
-            .conn("get_traced_entry_points_by_component")
-            .await
-            .map_err(|e| StorageError::Unexpected(format!("Failed to retrieve connection: {e}")))?;
+        let mut conn = self.conn().await?;
         self.state_gateway
             .get_traced_entry_points_by_component(filter, pagination_params, &mut conn)
             .await
@@ -1363,12 +1301,9 @@ impl StateSnapshotGateway for CachedGateway {
     /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
     /// by Postgres.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
-        let mut conn = self
-            .conn("state_snapshot")
-            .await
-            .map_err(|e| {
-                StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
-            })?;
+        let mut conn = self.pool.get().await.map_err(|e| {
+            StorageError::Unexpected(format!("No connection for the state snapshot: {e}"))
+        })?;
         snapshot_transaction(&mut conn)
             .run(|conn| {
                 async move {

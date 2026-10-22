@@ -25,7 +25,9 @@ use crate::{
     services::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
-        middleware::{compression_middleware, response_metrics_middleware, rpc_metrics_middleware},
+        middleware::{
+            compression_metrics_middleware, compression_middleware, rpc_metrics_middleware,
+        },
         state::{
             service::StateService,
             shadow::{self, Sampler, Shadow},
@@ -45,8 +47,6 @@ mod middleware;
 mod off_worker;
 mod rpc;
 mod state;
-pub mod thread_stats;
-mod worker_lag;
 mod ws;
 
 pub use cache::RpcCacheKind;
@@ -322,8 +322,16 @@ where
         );
 
         let server = HttpServer::new(move || {
-            // The factory runs on each request worker, so this starts one probe per worker.
-            worker_lag::spawn_poll_lag_probe();
+            // The factory runs on each request worker. The probe records how late a 100 ms sleep
+            // wakes: a busy or CPU-starved worker polls ready futures late.
+            actix_web::rt::spawn(async {
+                loop {
+                    let due = std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    actix_web::rt::time::sleep_until(due.into()).await;
+                    metrics::histogram!("rpc_worker_poll_lag_ms")
+                        .record(due.elapsed().as_secs_f64() * 1000.0);
+                }
+            });
             let cors = Cors::default()
                 .allowed_origin("https://open.gitbook.com")
                 .allowed_origin_fn(|origin, _req_head| {
@@ -345,8 +353,7 @@ where
                 .wrap(actix_middleware::from_fn(rpc_metrics_middleware))
                 // Enable zstd compression while being backwards compatible with clients that do not
                 .wrap(compression_middleware())
-                // Outside compression, so it measures the compressed body as it is sent.
-                .wrap(actix_middleware::from_fn(response_metrics_middleware))
+                .wrap(actix_middleware::from_fn(compression_metrics_middleware))
                 .wrap(RequestTracing::new())
                 .app_data(rpc_data.clone())
                 .service(
