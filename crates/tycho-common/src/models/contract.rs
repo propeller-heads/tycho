@@ -97,8 +97,9 @@ pub struct AccountDelta {
     pub address: Address,
     pub slots: ContractStoreDeltas,
     pub balance: Option<Balance>,
-    code: Option<Code>,
-    change: ChangeType,
+    // Crate-visible so the `testing` reference model can destructure every field.
+    pub(crate) code: Option<Code>,
+    pub(crate) change: ChangeType,
 }
 
 impl AccountDelta {
