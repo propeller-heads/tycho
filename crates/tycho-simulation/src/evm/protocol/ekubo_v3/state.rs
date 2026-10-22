@@ -350,6 +350,33 @@ mod tests {
         assert_eq!(state, case.state_after_transition);
     }
 
+    /// A one-sided order changes only token0's sale rate at times the pool holds no delta for.
+    /// The pool must add those deltas, with token1's rate delta at zero.
+    #[test]
+    fn test_delta_transition_adds_one_sided_rate_deltas() {
+        let case = twamm();
+        let mut state = case.state_after_transition.clone();
+
+        state
+            .delta_transition(
+                ProtocolStateDelta {
+                    updated_attributes: HashMap::from([
+                        ("rate_delta/token0/600".to_string(), 1_000_000_i128.to_be_bytes().into()),
+                        (
+                            "rate_delta/token0/700".to_string(),
+                            (-1_000_000_i128).to_be_bytes().into(),
+                        ),
+                    ]),
+                    ..Default::default()
+                },
+                &HashMap::default(),
+                &Balances::default(),
+            )
+            .expect("executing transition");
+
+        assert_ne!(state, case.state_after_transition, "the one-sided order was dropped");
+    }
+
     #[apply(all_cases)]
     fn test_get_amount_out(case: TestCase) {
         let (token0, token1) = (case.token0(), case.token1());
