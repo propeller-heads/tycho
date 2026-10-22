@@ -7,7 +7,7 @@ use crate::{
     postgres::{
         cache::CachedGateway,
         direct::DirectGateway,
-        pool::{spawn_status_gauges, PoolRole, POOL_STATUS_PERIOD},
+        pool::{spawn_status_gauges, DIRECT_POOL, EXTRACTION_POOL, POOL_STATUS_PERIOD, RPC_POOL},
         PostgresGateway,
     },
 };
@@ -105,7 +105,7 @@ impl GatewayBuilder {
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
-        spawn_status_gauges(pool.clone(), PoolRole::Extraction, POOL_STATUS_PERIOD);
+        spawn_status_gauges(pool.clone(), EXTRACTION_POOL, POOL_STATUS_PERIOD);
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
@@ -130,8 +130,8 @@ impl GatewayBuilder {
     ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
         let rpc_pool = postgres::new_pool(&self.database_url)?;
         let (extraction_gw, writer) = self.build().await?;
-        spawn_status_gauges(rpc_pool.clone(), PoolRole::Rpc, POOL_STATUS_PERIOD);
-        let rpc_gw = extraction_gw.with_pool(rpc_pool, PoolRole::Rpc);
+        spawn_status_gauges(rpc_pool.clone(), RPC_POOL, POOL_STATUS_PERIOD);
+        let rpc_gw = extraction_gw.with_pool(rpc_pool, RPC_POOL);
         Ok((extraction_gw, rpc_gw, writer))
     }
 
@@ -177,7 +177,7 @@ impl GatewayBuilder {
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
-        spawn_status_gauges(pool.clone(), PoolRole::Direct, POOL_STATUS_PERIOD);
+        spawn_status_gauges(pool.clone(), DIRECT_POOL, POOL_STATUS_PERIOD);
 
         let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)

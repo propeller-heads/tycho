@@ -32,14 +32,13 @@ use tycho_common::{
 };
 
 use super::{
-    pool::{self, PoolRole, PooledConnection},
+    pool::{self, PooledConnection, DIRECT_POOL},
     PostgresError, PostgresGateway,
 };
 
 #[derive(Clone)]
 pub struct DirectGateway {
     pool: Pool<AsyncPgConnection>,
-    pool_role: PoolRole,
     state_gateway: PostgresGateway,
     chain: Chain,
 }
@@ -51,11 +50,11 @@ impl DirectGateway {
         state_gateway: PostgresGateway,
         chain: Chain,
     ) -> Self {
-        DirectGateway { pool, pool_role: PoolRole::Direct, state_gateway, chain }
+        DirectGateway { pool, state_gateway, chain }
     }
 
     async fn checkout(&self) -> Result<PooledConnection, StorageError> {
-        pool::checkout(&self.pool, self.pool_role).await
+        pool::checkout(&self.pool, DIRECT_POOL).await
     }
 
     pub async fn get_delta(
