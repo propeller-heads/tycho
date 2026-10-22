@@ -31,7 +31,7 @@ use super::{
     erc20_token::{Overwrites, TokenProxyOverwriteFactory},
     models::Capability,
     tycho_simulation_contract::TychoSimulationContract,
-    utils::{insert_code, is_loaded, resolve_stateless_address},
+    utils::{insert_code, is_loaded, resolve_stateless_address, stateless_contract_addresses},
 };
 use crate::evm::{
     engine_db::{engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB},
@@ -321,15 +321,7 @@ where
         if !self.engine_has_block_of(delta) {
             return Ok(());
         }
-        // Deltas are sparse: an upgrade can update only index 1 or 2, so do not
-        // use the snapshot loader's contiguous enumeration here.
-        for (key, encoded) in &delta.updated_attributes {
-            let Some(index) = key
-                .strip_prefix("stateless_contract_addr_")
-                .and_then(|index| index.parse::<usize>().ok())
-            else {
-                continue;
-            };
+        for (index, encoded) in stateless_contract_addresses(&delta.updated_attributes) {
             let db = &self.adapter_contract.engine.state;
             let address = resolve_stateless_address(&self.adapter_contract.engine, encoded)?;
             match delta

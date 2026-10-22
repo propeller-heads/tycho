@@ -455,16 +455,30 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
-    let mut index = 0;
-    while let Some(encoded) = attributes.get(&format!("stateless_contract_addr_{index}")) {
+    for (index, encoded) in stateless_contract_addresses(attributes) {
         init_stateless_contract(
             engine,
             encoded,
             attributes.get(&format!("stateless_contract_code_{index}")),
         )?;
-        index += 1;
     }
     Ok(())
+}
+
+/// The `stateless_contract_addr_{i}` attributes in `attributes`, as `(i, value)` pairs in no
+/// particular order. Indices may have gaps, so every index present is returned.
+pub(crate) fn stateless_contract_addresses(
+    attributes: &HashMap<String, tycho_common::Bytes>,
+) -> impl Iterator<Item = (usize, &tycho_common::Bytes)> {
+    attributes
+        .iter()
+        .filter_map(|(key, value)| {
+            let index = key
+                .strip_prefix("stateless_contract_addr_")?
+                .parse()
+                .ok()?;
+            Some((index, value))
+        })
 }
 
 /// Loads one dependency while building a pool from a snapshot, fetching its code over RPC unless

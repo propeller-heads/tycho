@@ -12,7 +12,10 @@ use super::{state::EVMPoolState, state_builder::EVMPoolStateBuilder};
 use crate::{
     evm::{
         engine_db::{tycho_db::PreCachedDB, SHARED_TYCHO_DB},
-        protocol::vm::{constants::get_adapter_file, utils::json_deserialize_address_list},
+        protocol::vm::{
+            constants::get_adapter_file,
+            utils::{json_deserialize_address_list, stateless_contract_addresses},
+        },
         simulation::BlockEnvOverrides,
     },
     protocol::{
@@ -41,32 +44,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
 
         // Decode involved contracts
         let mut stateless_contracts = HashMap::new();
-        let mut index = 0;
-
-        loop {
-            let address_key = format!("stateless_contract_addr_{index}");
-            if let Some(encoded_address_bytes) = snapshot
+        for (index, encoded) in stateless_contract_addresses(&snapshot.state.attributes) {
+            // The wire value is UTF-8 address text; anything else is rejected.
+            let decoded = String::from_utf8(encoded.to_vec()).map_err(|_| {
+                InvalidSnapshotError::ValueError(format!(
+                    "stateless_contract_addr_{index} must be UTF-8"
+                ))
+            })?;
+            let code = snapshot
                 .state
                 .attributes
-                .get(&address_key)
-            {
-                // The wire value is UTF-8 address text; anything else is rejected.
-                let decoded = String::from_utf8(encoded_address_bytes.to_vec()).map_err(|_| {
-                    InvalidSnapshotError::ValueError(format!("{address_key} must be UTF-8"))
-                })?;
-
-                let code_key = format!("stateless_contract_code_{index}");
-                let code = snapshot
-                    .state
-                    .attributes
-                    .get(&code_key)
-                    .map(|value| value.to_vec());
-
-                stateless_contracts.insert(decoded, code);
-                index += 1;
-            } else {
-                break;
-            }
+                .get(&format!("stateless_contract_code_{index}"))
+                .map(|value| value.to_vec());
+            stateless_contracts.insert(decoded, code);
         }
         let involved_contracts = snapshot
             .component
@@ -260,7 +250,7 @@ mod tests {
     use std::{collections::HashSet, fs, path::Path};
 
     use chrono::DateTime;
-    use revm::{primitives::KECCAK_EMPTY, state::AccountInfo};
+    use revm::{primitives::KECCAK_EMPTY, state::AccountInfo, DatabaseRef};
     use serde_json::Value;
     use tycho_common::models::{
         protocol::{ProtocolComponent, ProtocolComponentState},
@@ -320,9 +310,8 @@ mod tests {
         accounts
     }
 
-    #[tokio::test]
-    async fn test_try_from_with_header() {
-        let attributes: HashMap<String, Bytes> = vec![
+    fn balancer_attributes() -> HashMap<String, Bytes> {
+        vec![
             (
                 "balance_owner".to_string(),
                 Bytes::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap(),
@@ -332,7 +321,13 @@ mod tests {
             ("reserve1".to_string(), Bytes::from(200_u64.to_le_bytes().to_vec())),
         ]
         .into_iter()
-        .collect();
+        .collect()
+    }
+
+    /// Decodes a vm:balancer_v2 snapshot with `attributes` against the indexed Vault storage.
+    async fn decode_balancer_snapshot(
+        attributes: HashMap<String, Bytes>,
+    ) -> EVMPoolState<PreCachedDB> {
         let tokens = [
             Token::new(
                 &Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
@@ -407,18 +402,20 @@ mod tests {
             ]),
         )]);
 
-        let decoder_context = DecoderContext::new();
-        let res = EVMPoolState::try_from_with_header(
+        EVMPoolState::try_from_with_header(
             snapshot,
             block,
             &account_balances,
             &tokens,
-            &decoder_context,
+            &DecoderContext::new(),
         )
         .await
-        .unwrap();
+        .unwrap()
+    }
 
-        let res_pool = res;
+    #[tokio::test]
+    async fn test_try_from_with_header() {
+        let res_pool = decode_balancer_snapshot(balancer_attributes()).await;
         assert_eq!(
             res_pool.get_balance_owner(),
             Some(Address::from_str("0xBA12222222228d8Ba445958a75a0704d566BF2C8").unwrap())
@@ -434,6 +431,31 @@ mod tests {
             res_pool.get_block_overrides(),
             Some(BlockEnvOverrides { number: Some(123), timestamp: Some(456) })
         );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_loads_dependencies_past_an_index_gap() {
+        // Index 1 was never published, as when a Pair's library slot is still zero.
+        let first = Address::from_str("0x00000000000000000000000000000000000d0e01").unwrap();
+        let third = Address::from_str("0x00000000000000000000000000000000000d0e03").unwrap();
+        let mut attributes = balancer_attributes();
+        for (index, address) in [(0, first), (2, third)] {
+            attributes.insert(
+                format!("stateless_contract_addr_{index}"),
+                address.to_string().into_bytes().into(),
+            );
+            attributes.insert(format!("stateless_contract_code_{index}"), Bytes::from(vec![0x00]));
+        }
+        decode_balancer_snapshot(attributes).await;
+        for address in [first, third] {
+            assert!(
+                SHARED_TYCHO_DB
+                    .basic_ref(address)
+                    .unwrap()
+                    .is_some(),
+                "{address} not loaded"
+            );
+        }
     }
 
     #[test]
