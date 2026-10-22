@@ -46,7 +46,6 @@ fn attribute(builder: &mut TransactionChangesBuilder, component: &str, name: &st
         component_id: component.into(),
         attributes: vec![Attribute { name: name.into(), value, change: ChangeType::Update.into() }],
     });
-    builder.mark_component_as_updated(component);
 }
 
 #[substreams::handlers::map]
@@ -196,7 +195,9 @@ fn protocol_changes_from_storage(
     })
 }
 
-/// Marks the pairs each committed write touches and publishes the attributes it sets.
+/// Publishes the attributes each committed write sets and pauses a pair the registry moves away
+/// from. Consumers refresh a pair on any change to its contracts or balances, so writes are not
+/// marked.
 fn record_pair_writes(
     config: &DeploymentConfig,
     storage: &BlockStorageChanges,
@@ -216,61 +217,61 @@ fn record_pair_writes(
         slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
         slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
     ];
-    let known = &view.known;
+    // known includes end-block discoveries; never attach changes to a Pair in a transaction
+    // earlier than the one that created it.
+    let exists_at = |pair: &String, tx_index: u64| {
+        created
+            .get(pair)
+            .is_none_or(|index| *index <= tx_index)
+    };
     // (transaction index, pair, attribute index, dependency address), published once code is in.
     let mut dependencies = vec![];
     for group in &storage.transactions {
         let transaction = storage_transaction(group)?;
         for w in &group.writes {
-            let pair_id = id(&w.address);
-            // Swap/Engine state is shared: conservatively refresh every existing Pair.
-            // Pair-owned writes affect only that Pair, including ordinary quote/inventory
-            // writes that do not change any of the dependency addresses below.
-            let targets: Vec<_> = if w.address == config.engine || w.address == config.tesseraswap {
-                known.iter().cloned().collect()
-            } else if known.contains(&pair_id) {
-                vec![pair_id]
-            } else {
-                continue;
-            };
-            let builder = changes
-                .entry(transaction.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(transaction));
             if w.address == config.engine {
                 let replaced = id(&address(&w.old_value));
                 if view.registry.get(&replaced) == Some(&w.key) &&
                     address(&w.new_value) != address(&w.old_value)
                 {
-                    builder.change_component_pause_state(&replaced, true);
+                    changes
+                        .entry(transaction.index)
+                        .or_insert_with(|| TransactionChangesBuilder::new(transaction))
+                        .change_component_pause_state(&replaced, true);
                 }
-            }
-            for pair in targets {
-                // known includes end-block discoveries; never attach changes to a Pair
-                // in a transaction earlier than the one that created it.
-                if created
-                    .get(&pair)
-                    .is_some_and(|index| *index > transaction.index)
-                {
+            } else if w.address == config.tesseraswap {
+                let name = if w.key == engine_slot {
+                    "engine"
+                } else if w.key == treasury_slot {
+                    // map_relative_balances emits the matching balance bridge.
+                    "balance_owner"
+                } else {
+                    continue;
+                };
+                let builder = changes
+                    .entry(transaction.index)
+                    .or_insert_with(|| TransactionChangesBuilder::new(transaction));
+                for pair in &view.known {
+                    if exists_at(pair, transaction.index) {
+                        attribute(builder, pair, name, address(&w.new_value));
+                    }
+                }
+            } else {
+                let pair = id(&w.address);
+                if !view.known.contains(&pair) || !exists_at(&pair, transaction.index) {
                     continue;
                 }
-                builder.mark_component_as_updated(&pair);
-                if w.address == config.tesseraswap {
-                    if w.key == engine_slot {
-                        attribute(builder, &pair, "engine", address(&w.new_value));
-                    }
-                    if w.key == treasury_slot {
-                        // map_relative_balances emits the matching balance bridge.
-                        attribute(builder, &pair, "balance_owner", address(&w.new_value));
-                    }
-                } else if w.address != config.engine {
-                    if let Some(i) = dependency_slots
-                        .iter()
-                        .position(|key| *key == w.key)
-                    {
-                        if !zero(&w.new_value) {
-                            dependencies.push((transaction.index, pair, i, address(&w.new_value)));
-                        }
-                    }
+                let Some(i) = dependency_slots
+                    .iter()
+                    .position(|key| *key == w.key)
+                else {
+                    continue;
+                };
+                if !zero(&w.new_value) {
+                    changes
+                        .entry(transaction.index)
+                        .or_insert_with(|| TransactionChangesBuilder::new(transaction));
+                    dependencies.push((transaction.index, pair, i, address(&w.new_value)));
                 }
             }
         }
@@ -444,7 +445,15 @@ mod tests {
         eth::v2::TransactionTrace {
             status: 1,
             index,
-            calls: vec![eth::v2::Call { storage_changes: writes, ..Default::default() }],
+            // One call per write, made by the written contract, as on chain.
+            calls: writes
+                .into_iter()
+                .map(|w| eth::v2::Call {
+                    address: w.address.clone(),
+                    storage_changes: vec![w],
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         }
     }
@@ -576,14 +585,12 @@ mod tests {
         );
         assert_eq!(first["stateless_contract_code_1"], [&[0x5f], library.as_slice()].concat());
         assert_eq!(first["stateless_contract_code_2"], [&[0x5f], HELPER.as_slice()].concat());
-        assert_eq!(first["update_marker"], vec![1]);
         let cleared = attrs_in(&out, 1, &PAIR);
         assert!(
             !cleared.contains_key("stateless_contract_addr_2") &&
                 !cleared.contains_key("stateless_contract_code_2"),
             "zero address is not published"
         );
-        assert_eq!(cleared["update_marker"], vec![1]);
     }
 
     /// Records every batch it is asked for and serves fixed code.

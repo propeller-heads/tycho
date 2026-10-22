@@ -103,7 +103,6 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
                     .with_attributes(&[
                         ("base_token", base.as_slice()),
                         ("quote_token", quote.as_slice()),
-                        ("manual_updates", &[1]),
                         ("self_contained_tokens", &contained),
                     ])
                     .as_swap_type("tessera_pair", ImplementationType::Vm),
@@ -149,6 +148,16 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, id(&[4; 20]));
         assert_eq!(result[0].tokens, vec![vec![5; 20], vec![6; 20]]);
+    }
+    #[test]
+    fn pair_updates_on_any_change_to_its_contracts_or_balances() {
+        // With `manual_updates`, consumers drop a balance-only change unless it is marked, and
+        // a swap on one Pair moves the treasury balance of every Pair sharing a token.
+        let result = discover(&transaction(), &config());
+        assert!(!result[0]
+            .static_att
+            .iter()
+            .any(|attribute| attribute.name == "manual_updates"));
     }
     #[test]
     fn rejects_unregistered_proxy_and_reverted_calls() {
