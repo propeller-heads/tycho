@@ -17,13 +17,14 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn};
 use tycho_common::{
+    dto::DeltaCatchUpUnavailable,
     models::{
         blockchain::{
             BlockAggregatedChanges, DCIUpdate, EntryPointWithTracingParams, TracingResult,
         },
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
-        Chain, ExtractorIdentity,
+        BlockHash, Chain, ExtractorFingerprint, ExtractorIdentity,
     },
     Bytes,
 };
@@ -35,8 +36,8 @@ use crate::{
         BlockHeader, HeaderLike,
     },
     rpc::{
-        RPCClient, RPCError, SnapshotParameters, TracedEntryPointsPaginatedParams,
-        RPC_CLIENT_CONCURRENCY,
+        DeltaCatchUp, DeltaCatchUpParams, RPCClient, RPCError, SnapshotParameters,
+        TracedEntryPointsPaginatedParams, RPC_CLIENT_CONCURRENCY,
     },
     DeltasError,
 };
@@ -45,6 +46,8 @@ use crate::{
 pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
 /// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
 pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
+/// Lowest time a resubscribed synchronizer waits for the server's answer to a catch-up request.
+const MIN_CATCH_UP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -130,6 +133,9 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     include_snapshots: bool,
     component_tracker: ComponentTracker<R>,
     last_synced_block: Option<BlockHeader>,
+    /// The fingerprint the subscription that emitted `last_synced_block` reported. `None` before
+    /// the first sync, or when the server or deltas client predates fingerprints.
+    synced_fingerprint: Option<ExtractorFingerprint>,
     timeout: u64,
     include_tvl: bool,
     compression: bool,
@@ -200,6 +206,12 @@ impl<H> StateSyncMessage<H>
 where
     H: HeaderLike,
 {
+    /// Merges `other`, a later message of the same stream, into this one.
+    ///
+    /// Where `other` snapshots a component, this message's state deltas, balances and TVL of that
+    /// component are dropped, and where `other` snapshots a contract (`vm_storage`), this
+    /// message's account deltas and balances of that contract: `other`'s snapshot already holds
+    /// every change up to its block.
     pub fn merge(mut self, other: Self) -> Self {
         // be careful with removed and snapshots attributes here, these can be ambiguous.
         self.removed_components
@@ -207,6 +219,17 @@ where
         self.snapshots
             .states
             .retain(|k, _| !other.removed_components.contains_key(k));
+        // Consumers apply a message's snapshots before its deltas, so an older delta merged into
+        // the same message would overwrite the newer snapshot.
+        if let Some(deltas) = self.deltas.as_mut() {
+            deltas.filter_by_component(|id| !other.snapshots.states.contains_key(id));
+            deltas.filter_by_contract(|address| {
+                !other
+                    .snapshots
+                    .vm_storage
+                    .contains_key(address)
+            });
+        }
 
         self.snapshots.extend(other.snapshots);
         let deltas = match (self.deltas, other.deltas) {
@@ -224,6 +247,130 @@ where
             removed_components: self.removed_components,
         }
     }
+}
+
+/// Why a resubscribed synchronizer resyncs from a snapshot instead of catching up on the messages
+/// it missed.
+#[derive(Debug, Error)]
+enum CatchUpSkipped {
+    /// Partial-block mode: the server keeps full blocks only, and a partial-block client never
+    /// receives one, so it cannot tell whether it applied a whole block.
+    #[error("partial-block subscriptions do not catch up")]
+    PartialBlocks,
+    /// The client synced under no fingerprint (a server or deltas client that predates them), so
+    /// the server cannot check that its deltas match the ones the client applied.
+    #[error("the client synced under no extractor fingerprint")]
+    NoFingerprint,
+    /// The first live message, or one of the missed ones, is a revert to block `number`. A revert
+    /// message does not restore everything the reverted blocks changed, so replaying one can
+    /// leave the consumer with another state than a snapshot gives.
+    #[error("catching up would replay a revert to block {number}")]
+    Revert { number: u64 },
+    /// The server predates delta catch-up.
+    #[error("the server does not support delta catch-up")]
+    Unsupported,
+    /// The server cannot serve the messages.
+    #[error("the server cannot serve the missed deltas: {0:?}")]
+    Unavailable(DeltaCatchUpUnavailable),
+    /// The request failed, e.g. because the plan has no access to the protocol system.
+    #[error("the delta catch-up request failed: {0}")]
+    Rpc(RPCError),
+    /// The server did not answer in time.
+    #[error("the server did not answer the delta catch-up request within {0:?}")]
+    TimedOut(Duration),
+    /// A message belongs to another extractor or chain. Extractors on one chain share block
+    /// hashes, so the hashes alone cannot tell their messages apart.
+    #[error("the missed deltas include block {number} of extractor {chain}:{extractor}")]
+    ForeignMessage { extractor: String, chain: Chain, number: u64 },
+    /// A block does not extend the block the messages before it lead to: another parent, or a
+    /// number that is not one higher.
+    #[error("missed block {number} does not extend the blocks before it")]
+    DetachedBlock { number: u64 },
+    /// A revert's target is not an ancestor of the block the messages before it lead to: it is not
+    /// lower, or it differs from the block the walk passed at its height.
+    #[error("missed revert to block {number} does not go back to an earlier block of the path")]
+    RevertToNonAncestor { number: u64 },
+    /// The messages lead to another block than the one the first live message continues from.
+    /// This includes an empty path when the last synced block is not that block.
+    #[error("the missed deltas lead to block {reached}, not to {to}")]
+    WrongEnd { reached: BlockHash, to: BlockHash },
+}
+
+impl CatchUpSkipped {
+    /// Whether the reason points at a faulty server or transport rather than at an ordinary
+    /// fallback: a correct server answers with a path that checks out, or says why it can't.
+    fn is_fault(&self) -> bool {
+        match self {
+            CatchUpSkipped::Rpc(_) |
+            CatchUpSkipped::ForeignMessage { .. } |
+            CatchUpSkipped::DetachedBlock { .. } |
+            CatchUpSkipped::RevertToNonAncestor { .. } |
+            CatchUpSkipped::WrongEnd { .. } => true,
+            CatchUpSkipped::PartialBlocks |
+            CatchUpSkipped::NoFingerprint |
+            CatchUpSkipped::Revert { .. } |
+            CatchUpSkipped::Unsupported |
+            CatchUpSkipped::Unavailable(_) |
+            CatchUpSkipped::TimedOut(_) => false,
+        }
+    }
+}
+
+/// Checks that `path` takes a consumer of `extractor` from block `from` to block `to`.
+///
+/// Every message must belong to `extractor` and its chain. Walking from `from`, each block must
+/// extend the block reached so far: its parent is that block and its number is one higher. A
+/// revert moves back to its target block (the block its header names), which must be lower than
+/// the block reached and, when the walk passed a block at the target's height and has not reverted
+/// it, must be that block. The walk must end at `to`, so an empty path is valid only when `from` is
+/// `to`, and a path may end with a revert to `to`.
+fn check_catch_up_path(
+    path: &[BlockAggregatedChanges],
+    extractor: &ExtractorIdentity,
+    from: &BlockHeader,
+    to: &BlockHash,
+) -> Result<(), CatchUpSkipped> {
+    let mut reached_number = from.number;
+    let mut reached_hash = &from.hash;
+    // The blocks below the one reached that the walk passed and has not reverted, at consecutive
+    // heights, oldest first. A revert can only check targets the walk passed: the client keeps no
+    // history below `from`.
+    let mut passed: Vec<(u64, &BlockHash)> = Vec::new();
+    for message in path {
+        let block = &message.block;
+        if message.extractor != extractor.name || message.chain != extractor.chain {
+            return Err(CatchUpSkipped::ForeignMessage {
+                extractor: message.extractor.clone(),
+                chain: message.chain,
+                number: block.number,
+            });
+        }
+        if message.revert {
+            if block.number >= reached_number {
+                return Err(CatchUpSkipped::RevertToNonAncestor { number: block.number });
+            }
+            passed.retain(|&(number, _)| number <= block.number);
+            if let Some(&(number, hash)) = passed.last() {
+                if number == block.number {
+                    if hash != &block.hash {
+                        return Err(CatchUpSkipped::RevertToNonAncestor { number: block.number });
+                    }
+                    passed.pop();
+                }
+            }
+        } else {
+            if &block.parent_hash != reached_hash || block.number != reached_number + 1 {
+                return Err(CatchUpSkipped::DetachedBlock { number: block.number });
+            }
+            passed.push((reached_number, reached_hash));
+        }
+        reached_number = block.number;
+        reached_hash = &block.hash;
+    }
+    if reached_hash != to {
+        return Err(CatchUpSkipped::WrongEnd { reached: reached_hash.clone(), to: to.clone() });
+    }
+    Ok(())
 }
 
 /// Tracks the lifecycle of a component's initial snapshot request.
@@ -441,6 +588,7 @@ where
             max_retries,
             retry_cooldown,
             last_synced_block: None,
+            synced_fingerprint: None,
             timeout,
             include_tvl,
             compression,
@@ -497,8 +645,16 @@ where
     /// The returned `end_rx` (if any) should be reused for retry attempts since the close
     /// signal may still arrive and we want to remain cancellable across retries.
     ///
-    /// If the first block needs a snapshot, the synchronizer discards deltas for
-    /// `snapshot_delay` and requests the snapshot at the first block after the delay.
+    /// If the first block does not follow `last_synced_block` and is not a revert, the
+    /// synchronizer first asks the server for the messages it missed and, when they lead from
+    /// `last_synced_block` to that block without a revert, emits them merged with the block as one
+    /// message. Otherwise it discards deltas for `snapshot_delay` and requests a snapshot at the
+    /// first block after the delay.
+    ///
+    /// In full-block mode, a later block that does not extend the last synced block, or a revert
+    /// to a block the consumer never had, ends the subscription with an error before it is
+    /// emitted, so that `last_synced_block` stays the last block the consumer holds with nothing
+    /// missing below it.
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
@@ -511,9 +667,9 @@ where
             .with_state(self.include_snapshots)
             .with_compression(self.compression)
             .with_partial_blocks(self.partial_blocks);
-        let (subscription_id, mut msg_rx) = match self
+        let (subscription_id, mut msg_rx, fingerprint) = match self
             .deltas_client
-            .subscribe(self.extractor_id.clone(), subscription_options)
+            .subscribe_with_fingerprint(self.extractor_id.clone(), subscription_options)
             .await
         {
             Ok(result) => result,
@@ -532,9 +688,22 @@ where
             // up without tearing down the WS subscription and rebuilding state from scratch.
             const MAX_STALE_RETRIES: u32 = 5;
             let mut stale_retries: u32 = 0;
-            // Messages keep arriving during the delay, so we discard them instead of sleeping:
-            // a sleep would overflow the subscription buffer on fast chains.
+            // Set when the first candidate that cannot resume the stream arrives, so later
+            // candidates (after a stale snapshot, for instance) don't decide again. Messages keep
+            // arriving during the delay, so we discard them instead of sleeping: a sleep would
+            // overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
+            // An upgraded extractor may have emitted other deltas for the blocks the consumer
+            // already applied, so a block that follows `last_synced_block` resumes the stream only
+            // when the fingerprint is unchanged. Otherwise the consumer resyncs from a snapshot.
+            let may_resume = self.may_resume(fingerprint.as_ref());
+            if !may_resume && self.last_synced_block.is_some() {
+                info!(
+                    synced = ?self.synced_fingerprint,
+                    reported = ?fingerprint,
+                    "Extractor fingerprint changed; resyncing from a snapshot"
+                );
+            }
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
@@ -600,7 +769,9 @@ where
 
                     // Check if we've already synced this block (applies to both modes)
                     if let Some(current) = &self.last_synced_block {
-                        if current.number >= incoming.number && !self.is_next_expected(&incoming) {
+                        if current.number >= incoming.number &&
+                            !(may_resume && self.is_next_expected(&incoming))
+                        {
                             if !warned_skipping_synced {
                                 info!(extractor=%self.extractor_id, from=incoming.number, to=current.number, "Syncing. Skipping already synced block");
                                 warned_skipping_synced = true;
@@ -610,16 +781,56 @@ where
                     }
                     match snapshot_not_before {
                         Some(not_before) if Instant::now() < not_before => continue,
-                        None if !snapshot_delay.is_zero() && !self.is_next_expected(&incoming) => {
-                            info!(
-                                extractor=%self.extractor_id,
-                                delay_ms=snapshot_delay.as_millis(),
-                                "Syncing. Delaying snapshot request"
-                            );
+                        Some(_) => {}
+                        None if may_resume && self.is_next_expected(&incoming) => {}
+                        None => {
+                            // Catching up needs no snapshot, so it runs before the snapshot delay
+                            // starts; the delay applies only when it falls back.
+                            let last_synced =
+                                self.last_synced_block.as_ref().filter(|_| may_resume);
+                            if let Some(last_synced) = last_synced {
+                                let caught_up = select! {
+                                    caught_up = self.catch_up_path(last_synced, &incoming) => {
+                                        caught_up
+                                    }
+                                    _ = &mut end_rx => {
+                                        info!("Received close signal during delta catch-up");
+                                        return Ok(());
+                                    }
+                                };
+                                match caught_up {
+                                    Ok(path) => {
+                                        info!(
+                                            height = incoming.number,
+                                            n_missed = path.len(),
+                                            "Caught up on missed deltas"
+                                        );
+                                        break 'init (self.apply_catch_up(path, msg), incoming);
+                                    }
+                                    Err(skipped) if skipped.is_fault() => {
+                                        warn!(
+                                            %skipped,
+                                            "Delta catch-up failed; resyncing from a snapshot"
+                                        );
+                                    }
+                                    Err(skipped) => {
+                                        info!(
+                                            %skipped,
+                                            "Delta catch-up not possible; resyncing from a snapshot"
+                                        );
+                                    }
+                                }
+                            }
                             snapshot_not_before = Some(Instant::now() + snapshot_delay);
-                            continue;
+                            if !snapshot_delay.is_zero() {
+                                info!(
+                                    extractor=%self.extractor_id,
+                                    delay_ms=snapshot_delay.as_millis(),
+                                    "Syncing. Delaying snapshot request"
+                                );
+                                continue;
+                            }
                         }
-                        _ => {}
                     }
                     break msg;
                 };
@@ -629,7 +840,7 @@ where
                 let header: BlockHeader = (&first_msg).into();
 
                 // If possible skip retrieving snapshots
-                if !self.is_next_expected(&header) {
+                if !(may_resume && self.is_next_expected(&header)) {
                     info!("Retrieving snapshot");
                     // With partial blocks, the server only has full blocks in its buffer; pass the
                     // previous block's header so we request state at N-1, then merge with deltas.
@@ -736,6 +947,7 @@ where
 
             block_tx.send(Ok(msg)).await?;
             self.last_synced_block = Some(header);
+            self.synced_fingerprint = fingerprint;
             loop {
                 select! {
                     deltas_opt = msg_rx.recv() => {
@@ -743,6 +955,20 @@ where
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
 
+                            if let Some(last_synced) = self.missed_blocks_before(&header) {
+                                // The subscription lost messages, e.g. when the deltas client
+                                // dropped one on a full buffer. Applying this one would leave
+                                // the consumer without them for good, so the next subscription
+                                // catches up, or resyncs from a snapshot, from the last block
+                                // the consumer holds whole.
+                                let what =
+                                    if header.revert { "A revert to block" } else { "Block" };
+                                return Err(SynchronizerError::ConnectionError(format!(
+                                    "{what} {} ({}) does not follow the last synced block {} \
+                                     ({}): the subscription lost messages",
+                                    header.number, header.hash, last_synced.number, last_synced.hash
+                                )));
+                            }
                             let next = self.handle_block(deltas);
                             let n_changes = next
                                 .deltas
@@ -945,6 +1171,98 @@ where
         StateSyncMessage { header, snapshots, deltas: Some(deltas), removed_components }
     }
 
+    /// Asks the server for the messages that take the consumer from `last_synced` to the parent of
+    /// the new subscription's first message `first`, and checks that they do. Runs nothing
+    /// through [`Self::handle_block`], so a failure leaves the synchronizer untouched.
+    ///
+    /// The request carries `synced_fingerprint`, the fingerprint the consumer's state was synced
+    /// under, so that the server serves only deltas that match the ones the consumer applied.
+    ///
+    /// # Errors
+    ///
+    /// The [`CatchUpSkipped`] reason when catch-up is not possible, when `first` or a missed
+    /// message is a revert, or when the answer is not a path from `last_synced` to `first`'s
+    /// parent; the caller then resyncs from a snapshot.
+    async fn catch_up_path(
+        &self,
+        last_synced: &BlockHeader,
+        first: &BlockHeader,
+    ) -> Result<Vec<BlockAggregatedChanges>, CatchUpSkipped> {
+        if self.partial_blocks {
+            return Err(CatchUpSkipped::PartialBlocks);
+        }
+        let Some(fingerprint) = self.synced_fingerprint.as_ref() else {
+            return Err(CatchUpSkipped::NoFingerprint);
+        };
+        // A revert message doesn't restore native balances, code, most account token balances,
+        // tokens, TVL or DCI data, and can delete or restore an attribute wrongly (deferred bugs
+        // 1, 2, 24 and 25), so a consumer that replays one can end up with another state than a
+        // snapshot gives. Fixing those bugs lifts both revert checks here: the server already
+        // serves reverts, and `check_catch_up_path` already verifies them. A revert `first` then
+        // needs the path to its own block, since it carries its target's header but not that
+        // block's own changes.
+        if first.revert {
+            return Err(CatchUpSkipped::Revert { number: first.number });
+        }
+        let to = &first.parent_hash;
+        let params = DeltaCatchUpParams::new(
+            self.extractor_id.chain,
+            self.extractor_id.name.clone(),
+            last_synced.hash.clone(),
+            last_synced.number,
+            to.clone(),
+            fingerprint.clone(),
+        )
+        .with_include_state(self.include_snapshots);
+        // The RPC client waits 120 s before retrying a 502/503/504, which would hold back the
+        // snapshot fallback. The synchronizer's timeout spans a few blocks (the stream builder
+        // sets `block_time + timeout`), so the subscription buffers few messages meanwhile. On
+        // fast chains that is only a few seconds (3 s on Arbitrum), in which a long path may not
+        // arrive while every client catches up at once after a server restart; they would all
+        // fall back to heavier snapshots. The 128-message subscription buffer lasts about 32 s at
+        // 0.25 s blocks, so waiting at least `MIN_CATCH_UP_TIMEOUT` does not overflow it.
+        let limit = Duration::from_secs(self.timeout).max(MIN_CATCH_UP_TIMEOUT);
+        let answer = timeout(
+            limit,
+            self.rpc_client
+                .get_delta_catch_up(params),
+        )
+        .await
+        .map_err(|_| CatchUpSkipped::TimedOut(limit))?
+        .map_err(CatchUpSkipped::Rpc)?;
+        let path = match answer {
+            DeltaCatchUp::Available(path) => path,
+            DeltaCatchUp::Unavailable(reason) => return Err(CatchUpSkipped::Unavailable(reason)),
+            DeltaCatchUp::Unsupported => return Err(CatchUpSkipped::Unsupported),
+        };
+        check_catch_up_path(&path, &self.extractor_id, last_synced, to)?;
+        if let Some(revert) = path
+            .iter()
+            .find(|message| message.revert)
+        {
+            return Err(CatchUpSkipped::Revert { number: revert.block.number });
+        }
+        Ok(path)
+    }
+
+    /// Runs each message of a checked catch-up `path`, then the subscription's first message
+    /// `first`, through [`Self::handle_block`], and merges the results, in that order, into one
+    /// message with `first`'s header.
+    fn apply_catch_up(
+        &mut self,
+        path: Vec<BlockAggregatedChanges>,
+        first: BlockAggregatedChanges,
+    ) -> StateSyncMessage<BlockHeader> {
+        // Merging into an empty message yields the merged message unchanged.
+        let mut merged = StateSyncMessage::default();
+        for message in path {
+            let handled = self.handle_block(message);
+            merged = merged.merge(handled);
+        }
+        let first = self.handle_block(first);
+        merged.merge(first)
+    }
+
     /// Applies `self.buffered_deltas` to `snapshot`, updating attributes, balances, and contract
     /// storage for deltas strictly after `snapshot_block`.
     fn apply_deltas_to_snapshot(
@@ -1123,8 +1441,35 @@ where
         result
     }
 
-    /// Whether `incoming` continues the stream from `last_synced_block`, so the consumer needs no
-    /// snapshot. Never true for a revert.
+    /// Whether a subscription that reported `fingerprint` may continue the consumer's stream from
+    /// `last_synced_block` without a snapshot: the fingerprint equals the one the consumer synced
+    /// under, or neither subscription reported one (servers that predate fingerprints).
+    fn may_resume(&self, fingerprint: Option<&ExtractorFingerprint>) -> bool {
+        self.synced_fingerprint.as_ref() == fingerprint
+    }
+
+    /// The last synced block, when the live message `incoming` shows that the subscription lost
+    /// messages after it, in full-block mode: a block whose parent is not the last synced block,
+    /// or a revert to a block the consumer never had, i.e. above the last synced block or at its
+    /// height with another hash. `None` in partial-block mode, where every partial of a block names
+    /// the same parent.
+    fn missed_blocks_before(&self, incoming: &BlockHeader) -> Option<&BlockHeader> {
+        if self.partial_blocks {
+            return None;
+        }
+        let last_synced = self.last_synced_block.as_ref()?;
+        // A revert names its target, which the consumer must hold: the last synced block or one
+        // below it. Targets below it can't be checked, since the consumer keeps no history.
+        let missed = if incoming.revert {
+            incoming.number > last_synced.number ||
+                (incoming.number == last_synced.number && incoming.hash != last_synced.hash)
+        } else {
+            incoming.parent_hash != last_synced.hash
+        };
+        missed.then_some(last_synced)
+    }
+
+    /// Whether `incoming` follows `last_synced_block`. Never true for a revert.
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
         // A revert to the block after `last_synced_block` has the right parent, but it carries
         // only the keys the reverted blocks above it changed, not the target block's own changes.
@@ -1293,6 +1638,7 @@ mod test {
 
     use std::{collections::HashSet, sync::Arc};
 
+    use rstest::rstest;
     use tycho_common::models::{
         blockchain::{
             AddressStorageLocation, Block, BlockAggregatedChanges, DCIUpdate, EntryPoint,
@@ -1311,6 +1657,8 @@ mod test {
         rpc::{MockRPCClient, Page},
         DeltasError, RPCError,
     };
+
+    mod catch_up_properties;
 
     // Required for mock client to implement clone
     struct ArcRPCClient<T>(Arc<T>);
@@ -1394,6 +1742,13 @@ mod test {
             self.0
                 .get_snapshots(request, chunk_size, concurrency)
                 .await
+        }
+
+        async fn get_delta_catch_up(
+            &self,
+            params: DeltaCatchUpParams,
+        ) -> Result<DeltaCatchUp, RPCError> {
+            self.0.get_delta_catch_up(params).await
         }
 
         fn compression(&self) -> bool {
@@ -4025,13 +4380,14 @@ mod test {
 
     impl RunningSync {
         /// Initializes `state_sync` and subscribes as if it had synced up to `last_synced`.
-        async fn start(
-            mut state_sync: ProtocolStateSynchronizer<
-                ArcRPCClient<MockRPCClient>,
-                ArcDeltasClient<MockDeltasClient>,
-            >,
+        async fn start<R, D>(
+            mut state_sync: ProtocolStateSynchronizer<R, D>,
             last_synced: Option<BlockHeader>,
-        ) -> Self {
+        ) -> Self
+        where
+            R: RPCClient + Clone + Send + Sync + 'static,
+            D: DeltasClient + Clone + Send + Sync + 'static,
+        {
             state_sync
                 .initialize()
                 .await
@@ -4053,6 +4409,13 @@ mod test {
                 .expect("Should emit a message")
                 .expect("Channel should be open")
                 .expect("Should not be an error")
+        }
+
+        /// Panics if the synchronizer emits a message within 100 ms.
+        async fn assert_quiet(&mut self) {
+            if let Ok(message) = timeout(Duration::from_millis(100), self.block_rx.recv()).await {
+                panic!("Unexpected message: {message:?}");
+            }
         }
 
         async fn stop(self) {
@@ -4768,6 +5131,2001 @@ mod test {
             Some(&Bytes::from(vec![3u8])),
             "Component3's snapshot misses the partial that fired it"
         );
+    }
+
+    /// A deltas client whose subscriptions all report `fingerprint`. `ArcDeltasClient` keeps the
+    /// trait's default, which reports none.
+    #[derive(Clone)]
+    struct FingerprintedDeltasClient {
+        inner: ArcDeltasClient<MockDeltasClient>,
+        fingerprint: Option<ExtractorFingerprint>,
+    }
+
+    #[async_trait]
+    impl DeltasClient for FingerprintedDeltasClient {
+        async fn subscribe(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+            self.inner
+                .subscribe(extractor_id, options)
+                .await
+        }
+
+        async fn subscribe_with_fingerprint(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<
+            (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>),
+            DeltasError,
+        > {
+            let (subscription_id, receiver) = self
+                .inner
+                .subscribe(extractor_id, options)
+                .await?;
+            Ok((subscription_id, receiver, self.fingerprint.clone()))
+        }
+
+        async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError> {
+            self.inner
+                .unsubscribe(subscription_id)
+                .await
+        }
+
+        async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+            self.inner.connect().await
+        }
+
+        async fn close(&self) -> Result<(), DeltasError> {
+            self.inner.close().await
+        }
+    }
+
+    fn fingerprint(byte: u8) -> ExtractorFingerprint {
+        ExtractorFingerprint(Bytes::from(vec![byte]))
+    }
+
+    /// A deltas client that forwards every method to the mock, `subscribe_with_fingerprint`
+    /// included, so each subscription's expectation sets the fingerprint it reports.
+    #[derive(Clone)]
+    struct ForwardingDeltasClient(Arc<MockDeltasClient>);
+
+    #[async_trait]
+    impl DeltasClient for ForwardingDeltasClient {
+        async fn subscribe(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+            self.0
+                .subscribe(extractor_id, options)
+                .await
+        }
+
+        async fn subscribe_with_fingerprint(
+            &self,
+            extractor_id: ExtractorIdentity,
+            options: SubscriptionOptions,
+        ) -> Result<
+            (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>),
+            DeltasError,
+        > {
+            self.0
+                .subscribe_with_fingerprint(extractor_id, options)
+                .await
+        }
+
+        async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError> {
+            self.0
+                .unsubscribe(subscription_id)
+                .await
+        }
+
+        async fn connect(&self) -> Result<JoinHandle<Result<(), DeltasError>>, DeltasError> {
+            self.0.connect().await
+        }
+
+        async fn close(&self) -> Result<(), DeltasError> {
+            self.0.close().await
+        }
+    }
+
+    /// Like `with_mocked_clients(true, false, ..)`, but with any deltas client.
+    fn with_deltas_client<D>(
+        rpc_client: MockRPCClient,
+        deltas_client: D,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, D>
+    where
+        D: DeltasClient + Clone + Send + Sync + 'static,
+    {
+        ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            true,
+            ComponentFilter::with_tvl_range(50.0, 50.0),
+            1,
+            Duration::from_secs(0),
+            true,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            deltas_client,
+            10_u64,
+        )
+    }
+
+    /// Like `with_mocked_clients(true, false, ..)`, but every subscription reports `fingerprint`.
+    fn with_fingerprinted_clients(
+        rpc_client: MockRPCClient,
+        deltas_client: MockDeltasClient,
+        fingerprint: Option<ExtractorFingerprint>,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, FingerprintedDeltasClient> {
+        with_deltas_client(
+            rpc_client,
+            FingerprintedDeltasClient {
+                inner: ArcDeltasClient(Arc::new(deltas_client)),
+                fingerprint,
+            },
+        )
+    }
+
+    #[rstest]
+    #[case::unchanged(Some(fingerprint(1)), Some(fingerprint(1)), vec![])]
+    #[case::upgraded(Some(fingerprint(1)), Some(fingerprint(2)), vec![6])]
+    #[case::server_predates_fingerprints(None, None, vec![])]
+    #[case::server_stopped_reporting_one(Some(fingerprint(1)), None, vec![6])]
+    #[case::server_started_reporting_one(None, Some(fingerprint(1)), vec![6])]
+    #[test_log::test(tokio::test)]
+    async fn test_restart_resumes_only_under_the_synced_fingerprint(
+        #[case] synced: Option<ExtractorFingerprint>,
+        #[case] reported: Option<ExtractorFingerprint>,
+        #[case] expected_snapshot_blocks: Vec<u64>,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = with_fingerprinted_clients(rpc_client, deltas_client, reported);
+        state_sync.synced_fingerprint = synced;
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(5, None)))).await;
+
+        // The restarted extractor replays blocks 4 and 5, which the consumer already applied,
+        // then block 6, which follows block 5. An upgraded extractor may have emitted other
+        // deltas for blocks 4 and 5 than the ones the consumer applied.
+        for block in [4, 5, 6] {
+            deltas_tx
+                .send(make_block_changes(block, None))
+                .await
+                .unwrap();
+        }
+        let first = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(first.header.number, 6);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), expected_snapshot_blocks);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_snapshot_delay_applies_when_the_fingerprint_changed() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let deltas_client = mock_deltas_emitting((10..=20).collect());
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let first = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        // Block 10 follows block 9, but the fingerprint changed. Blocks 10-15 arrive within the
+        // 300 ms delay, 50 ms apart.
+        let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
+        assert_eq!(snapshot_blocks.len(), 1, "Should request one snapshot");
+        assert!(
+            snapshot_blocks[0] >= 16,
+            "Snapshot at block {} is inside the delay",
+            snapshot_blocks[0]
+        );
+        assert_eq!(first.header.number, snapshot_blocks[0]);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_restart_after_a_resync_resumes_under_the_new_fingerprint() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        // Two subscriptions, each ending after one block.
+        for block in [6, 7] {
+            let (tx, rx) = channel(1);
+            tx.try_send(make_block_changes(block, None))
+                .unwrap();
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let ended = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The first subscription ends");
+        let (_, Some(end_rx)) = *ended else {
+            panic!("The close signal was never sent");
+        };
+        state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The second subscription ends");
+
+        let mut emitted = Vec::new();
+        while let Ok(message) = block_rx.try_recv() {
+            emitted.push(
+                message
+                    .expect("Should not be an error")
+                    .header
+                    .number,
+            );
+        }
+        assert_eq!(emitted, vec![6, 7]);
+        // The fingerprint changed before block 6, so the consumer resynced under the new one;
+        // block 7 then follows block 6 under the same fingerprint.
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![6]);
+    }
+
+    /// A resync the fingerprint forced, whose snapshot fails, leaves the consumer with the state
+    /// of the old fingerprint. The next subscription reports the new fingerprint again, and its
+    /// first block follows the consumer's last one: it must still resync, not resume.
+    #[test_log::test(tokio::test)]
+    async fn test_a_failed_resync_does_not_adopt_the_new_fingerprint() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                let mut recorded = recorded.lock().unwrap();
+                recorded.push(request.block_number);
+                if recorded.len() == 1 {
+                    return Err(RPCError::Fatal("snapshot endpoint unavailable".to_string()));
+                }
+                Ok(Snapshot::default())
+            });
+        let mut deltas_client = MockDeltasClient::new();
+        // The restarted, upgraded extractor sends block 6 on both subscriptions: the first
+        // subscription ends when its snapshot fails.
+        for _ in 0..2 {
+            let (tx, rx) = channel(1);
+            tx.try_send(make_block_changes(6, None))
+                .unwrap();
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(2)));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let failed = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The snapshot fails");
+        let (_, Some(end_rx)) = *failed else {
+            panic!("The close signal was never sent");
+        };
+        assert!(block_rx.try_recv().is_err(), "A failed resync emits nothing");
+        let _ = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await;
+
+        let first = block_rx
+            .try_recv()
+            .expect("The second subscription emits block 6")
+            .expect("Should not be an error");
+        assert_eq!(first.header.number, 6);
+        assert_eq!(
+            *snapshot_blocks.lock().unwrap(),
+            vec![6, 6],
+            "The consumer still holds the old fingerprint's state, so block 6 must come with a \
+             snapshot"
+        );
+    }
+
+    /// Runs a synchronizer through `start()` with a 5 s snapshot jitter. Its first subscription
+    /// delivers blocks 1 and 2 under fingerprint 1, then ends. The second reports
+    /// `second_fingerprint` and delivers block 3, which follows block 2, then a block per second.
+    /// Returns the blocks of the first three messages it emits and of every snapshot request.
+    async fn restart_reporting(second_fingerprint: ExtractorFingerprint) -> (Vec<u64>, Vec<u64>) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        let (first_tx, first_rx) = channel(2);
+        for block in [1, 2] {
+            first_tx
+                .try_send(make_block_changes(block, None))
+                .unwrap();
+        }
+        drop(first_tx);
+        deltas_client
+            .expect_subscribe_with_fingerprint()
+            .times(1)
+            .return_once(move |_, _| Ok((Uuid::default(), first_rx, Some(fingerprint(1)))));
+        let (second_tx, second_rx) = channel(16);
+        deltas_client
+            .expect_subscribe_with_fingerprint()
+            .times(1)
+            .return_once(move |_, _| {
+                tokio::spawn(async move {
+                    for block in 3..=10 {
+                        let _ = second_tx
+                            .send(make_block_changes(block, None))
+                            .await;
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                    second_tx.closed().await;
+                });
+                Ok((Uuid::default(), second_rx, Some(second_fingerprint)))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync =
+            with_deltas_client(rpc_client, ForwardingDeltasClient(Arc::new(deltas_client)))
+                .with_snapshot_jitter(MIN_SNAPSHOT_JITTER);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+        let mut emitted = Vec::new();
+        for _ in 0..3 {
+            let message = timeout(Duration::from_secs(30), block_rx.recv())
+                .await
+                .expect("Should emit a message")
+                .expect("Channel should be open")
+                .expect("Should not be an error");
+            emitted.push(message.header.number);
+        }
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
+        (emitted, snapshot_blocks)
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_restart_through_start_resumes_under_an_unchanged_fingerprint() {
+        let (emitted, snapshot_blocks) = restart_reporting(fingerprint(1)).await;
+
+        assert_eq!(emitted, vec![1, 2, 3]);
+        assert_eq!(snapshot_blocks, vec![1]);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_restart_through_start_takes_a_delayed_snapshot_after_an_upgrade() {
+        let (emitted, snapshot_blocks) = restart_reporting(fingerprint(2)).await;
+
+        assert_eq!(emitted[..2], [1, 2]);
+        // Block 3 follows block 2 but starts the delay instead; the snapshot comes at the first
+        // block at least the delay (at most 5 s, a block per second) after it.
+        let restarted_at = emitted[2];
+        assert!((4..=8).contains(&restarted_at), "Snapshot at block {restarted_at}");
+        assert_eq!(snapshot_blocks, vec![1, restarted_at]);
+    }
+
+    /// Hash of block `number` on fork `fork`. Fork 0 is the chain of `make_block_changes`.
+    fn fork_hash(number: u64, fork: u8) -> Bytes {
+        let mut hash = vec![number as u8; 32];
+        hash[31] ^= fork;
+        Bytes::from(hash)
+    }
+
+    /// Block `number` of fork `fork`, on top of block `number - 1` of fork `parent_fork`.
+    fn fork_block(number: u64, fork: u8, parent_fork: u8) -> BlockAggregatedChanges {
+        let mut block = make_block_changes(number, None);
+        block.block.hash = fork_hash(number, fork);
+        block.block.parent_hash = fork_hash(number - 1, parent_fork);
+        block
+    }
+
+    /// The revert to `target`: it carries the target block's header.
+    fn revert_to(target: BlockAggregatedChanges) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { revert: true, ..target }
+    }
+
+    /// `block`, also setting Component1's attribute `name` to `value`.
+    fn setting(
+        mut block: BlockAggregatedChanges,
+        name: &str,
+        value: &str,
+    ) -> BlockAggregatedChanges {
+        block
+            .state_deltas
+            .entry("Component1".to_string())
+            .or_insert_with(|| {
+                ProtocolComponentStateDelta::new("Component1", HashMap::new(), HashSet::new())
+            })
+            .updated_attributes
+            .insert(name.to_string(), Bytes::from(value));
+        block
+    }
+
+    fn attributes(pairs: &[(&str, &str)]) -> HashMap<String, Bytes> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), Bytes::from(*value)))
+            .collect()
+    }
+
+    /// The attributes of Component1 that `message` sets.
+    fn attributes_set(message: &StateSyncMessage<BlockHeader>) -> HashMap<String, Bytes> {
+        message
+            .deltas
+            .as_ref()
+            .and_then(|deltas| deltas.state_deltas.get("Component1"))
+            .map(|delta| delta.updated_attributes.clone())
+            .unwrap_or_default()
+    }
+
+    /// The requests the RPC mock of `mock_rpc_answering_catch_up` received.
+    struct RpcCalls {
+        catch_up_requests: Arc<std::sync::Mutex<Vec<DeltaCatchUpParams>>>,
+        snapshot_blocks: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl RpcCalls {
+        fn catch_up_requests(&self) -> Vec<DeltaCatchUpParams> {
+            self.catch_up_requests
+                .lock()
+                .unwrap()
+                .clone()
+        }
+
+        fn snapshot_blocks(&self) -> Vec<u64> {
+            self.snapshot_blocks
+                .lock()
+                .unwrap()
+                .clone()
+        }
+    }
+
+    /// Mocks an RPC that tracks Component1, knows every component asked for by id, serves a
+    /// snapshot with an empty state for every component it is asked for, and answers one catch-up
+    /// request with `answer`.
+    fn mock_rpc_answering_catch_up(
+        answer: Result<DeltaCatchUp, RPCError>,
+    ) -> (MockRPCClient, RpcCalls) {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|params| {
+                let ids = params
+                    .component_ids()
+                    .cloned()
+                    .unwrap_or_else(|| vec!["Component1".to_string()]);
+                let components: Vec<_> = ids
+                    .into_iter()
+                    .map(|id| ProtocolComponent { id, ..Default::default() })
+                    .collect();
+                let total = components.len() as i64;
+                Ok(Page::new(components, total, 0, 100))
+            });
+        let calls =
+            RpcCalls { catch_up_requests: Default::default(), snapshot_blocks: Default::default() };
+        let requests = calls.catch_up_requests.clone();
+        rpc_client
+            .expect_get_delta_catch_up()
+            .return_once(move |params| {
+                requests.lock().unwrap().push(params);
+                answer
+            });
+        let snapshot_blocks = calls.snapshot_blocks.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                snapshot_blocks
+                    .lock()
+                    .unwrap()
+                    .push(request.block_number);
+                Ok(snapshot_of_requested(request))
+            });
+        (rpc_client, calls)
+    }
+
+    /// A synchronizer that synced under fingerprint 1 and whose subscriptions report it again.
+    fn synced_under_an_unchanged_fingerprint(
+        rpc_client: MockRPCClient,
+        deltas_client: MockDeltasClient,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, FingerprintedDeltasClient> {
+        let mut state_sync =
+            with_fingerprinted_clients(rpc_client, deltas_client, Some(fingerprint(1)));
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+        state_sync
+    }
+
+    /// Starts a synchronizer that synced up to `last_synced` and resubscribes under an unchanged
+    /// fingerprint. Returns it and the sender of its new subscription.
+    async fn resubscribe(
+        rpc_client: MockRPCClient,
+        last_synced: &BlockAggregatedChanges,
+    ) -> (RunningSync, Sender<BlockAggregatedChanges>) {
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        (RunningSync::start(state_sync, Some(header_of(last_synced))).await, deltas_tx)
+    }
+
+    /// The catch-up request of a client at `last_synced`, under fingerprint 1, for block `to`.
+    fn catch_up_request(last_synced: &BlockAggregatedChanges, to: &Bytes) -> DeltaCatchUpParams {
+        DeltaCatchUpParams::new(
+            Chain::Ethereum,
+            "uniswap-v2",
+            last_synced.block.hash.clone(),
+            last_synced.block.number,
+            to.clone(),
+            fingerprint(1),
+        )
+    }
+
+    /// A client that synced up to `last_synced` resubscribes; its subscription delivers `live`,
+    /// and the server answers the catch-up request with `path`. The client must ask for the path
+    /// to block `to` and emit one message, with the last live message's header, that sets
+    /// `expected` on Component1.
+    struct CatchUpScenario {
+        last_synced: BlockAggregatedChanges,
+        path: Vec<BlockAggregatedChanges>,
+        live: Vec<BlockAggregatedChanges>,
+        to: Bytes,
+        expected: HashMap<String, Bytes>,
+    }
+
+    /// The client applied blocks 3 and 4. While it was away, the chain reverted to block 2 and
+    /// built 3', 4' and 5' (fork 1); its new subscription starts at 5'.
+    fn revert_below_the_client() -> CatchUpScenario {
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![
+                setting(revert_to(make_block_changes(2, None)), "x", "0x02"),
+                setting(fork_block(3, 1, 0), "y", "0x13"),
+                setting(fork_block(4, 1, 1), "z", "0x14"),
+            ],
+            live: vec![setting(fork_block(5, 1, 1), "w", "0x15")],
+            to: fork_hash(4, 1),
+            expected: attributes(&[("x", "0x02"), ("y", "0x13"), ("z", "0x14"), ("w", "0x15")]),
+        }
+    }
+
+    /// The client applied 3a of a branch (fork 1) that grew to 5a before the chain reverted to
+    /// block 2 and built 3' to 5' (fork 2). The revert also restores y, which only 4a, a block
+    /// the client never saw, changed.
+    fn client_mid_branch() -> CatchUpScenario {
+        CatchUpScenario {
+            last_synced: fork_block(3, 1, 0),
+            path: vec![
+                setting(setting(revert_to(make_block_changes(2, None)), "x", "0x02"), "y", "0x"),
+                setting(fork_block(3, 2, 0), "z", "0x23"),
+                setting(fork_block(4, 2, 2), "z", "0x24"),
+            ],
+            live: vec![setting(fork_block(5, 2, 2), "w", "0x25")],
+            to: fork_hash(4, 2),
+            expected: attributes(&[("x", "0x02"), ("y", "0x"), ("z", "0x24"), ("w", "0x25")]),
+        }
+    }
+
+    /// The client applied 3a and 4a (fork 1). While it was away, the chain reverted to 3a, built
+    /// 4b and 5b (fork 2), reverted to block 2 and built 3c to 5c (fork 3). The path walks
+    /// through the revert that orphaned 4a, then the one that orphaned 3a.
+    fn nested_reverts() -> CatchUpScenario {
+        CatchUpScenario {
+            last_synced: fork_block(4, 1, 1),
+            path: vec![
+                setting(revert_to(fork_block(3, 1, 0)), "x", "0x13"),
+                setting(revert_to(make_block_changes(2, None)), "x", "0x02"),
+                setting(fork_block(3, 3, 0), "y", "0x33"),
+                setting(fork_block(4, 3, 3), "z", "0x34"),
+            ],
+            live: vec![setting(fork_block(5, 3, 3), "w", "0x35")],
+            to: fork_hash(4, 3),
+            expected: attributes(&[("x", "0x02"), ("y", "0x33"), ("z", "0x34"), ("w", "0x35")]),
+        }
+    }
+
+    /// Like `revert_below_the_client`, but the new subscription starts with the revert, 3' and 4'.
+    /// They are at or below the client's block, so it skips them and catches up at 5'.
+    fn first_live_message_reverts_below_the_client() -> CatchUpScenario {
+        let scenario = revert_below_the_client();
+        let mut live = scenario.path.clone();
+        live.extend(scenario.live);
+        CatchUpScenario { live, ..scenario }
+    }
+
+    /// The client applied block 4. While it was away, the chain built 5 and 6, then reverted to
+    /// 5; the revert is the first message of its new subscription. The revert restores only what
+    /// 6 changed, so block 5's own changes come from the path.
+    fn first_live_message_reverts_to_the_block_after_the_client() -> CatchUpScenario {
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![setting(make_block_changes(5, None), "x", "0x05")],
+            live: vec![setting(revert_to(make_block_changes(5, None)), "y", "0x05")],
+            to: fork_hash(5, 0),
+            expected: attributes(&[("x", "0x05"), ("y", "0x05")]),
+        }
+    }
+
+    /// Like `first_live_message_reverts_to_the_block_after_the_client`, but the server's window
+    /// is ahead of the client: it already applied the revert the client receives live, so the
+    /// path ends with that revert.
+    fn path_ends_with_the_live_revert() -> CatchUpScenario {
+        let revert = setting(revert_to(make_block_changes(5, None)), "y", "0x05");
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![
+                setting(make_block_changes(5, None), "x", "0x05"),
+                setting(make_block_changes(6, None), "y", "0x06"),
+                revert.clone(),
+            ],
+            live: vec![revert],
+            to: fork_hash(5, 0),
+            expected: attributes(&[("x", "0x05"), ("y", "0x05")]),
+        }
+    }
+
+    /// The client stopped at block 4, the extractor's last committed block. The extractor
+    /// restarted unchanged and replayed from block 5, so the server's window starts there; the
+    /// client's new subscription starts at 8.
+    fn restart_at_the_last_committed_block() -> CatchUpScenario {
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![
+                setting(make_block_changes(5, None), "x", "0x05"),
+                setting(make_block_changes(6, None), "y", "0x06"),
+                setting(make_block_changes(7, None), "x", "0x07"),
+            ],
+            live: vec![setting(make_block_changes(8, None), "z", "0x08")],
+            to: fork_hash(7, 0),
+            expected: attributes(&[("x", "0x07"), ("y", "0x06"), ("z", "0x08")]),
+        }
+    }
+
+    /// The client applied block 4. While it was away, block 5 created Component9, then the chain
+    /// reverted to block 2, which deletes Component9, and built 3' and 4' (fork 1); its new
+    /// subscription starts at 5'.
+    fn deletion_of_a_component_the_client_never_had() -> CatchUpScenario {
+        let component9 = ProtocolComponent { id: "Component9".to_string(), ..Default::default() };
+        let revert = BlockAggregatedChanges {
+            deleted_protocol_components: HashMap::from([("Component9".to_string(), component9)]),
+            ..revert_to(make_block_changes(2, None))
+        };
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![revert, fork_block(3, 1, 0), fork_block(4, 1, 1)],
+            live: vec![setting(fork_block(5, 1, 1), "w", "0x15")],
+            to: fork_hash(4, 1),
+            expected: attributes(&[("w", "0x15")]),
+        }
+    }
+
+    #[rstest]
+    #[case::restart_at_the_last_committed_block(restart_at_the_last_committed_block())]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_emits_one_message_with_the_missed_deltas(
+        #[case] scenario: CatchUpScenario,
+    ) {
+        let CatchUpScenario { last_synced, path, live, to, expected } = scenario;
+        let first = live
+            .last()
+            .expect("A live message")
+            .clone();
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(path)));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &last_synced).await;
+
+        for message in live {
+            deltas_tx.send(message).await.unwrap();
+        }
+        let message = sync.next().await;
+        sync.assert_quiet().await;
+        sync.stop().await;
+
+        assert_eq!(calls.catch_up_requests(), vec![catch_up_request(&last_synced, &to)]);
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(message.header, header_of(&first));
+        assert!(message.snapshots.states.is_empty());
+        assert_eq!(attributes_set(&message), expected);
+    }
+
+    // Revert messages don't restore everything yet (see `catch_up_path`), so the client takes a
+    // snapshot at the first live message instead of catching up through one. Each scenario's
+    // `expected` is what catching up would emit once they do.
+    #[rstest]
+    #[case::revert_below_the_client(revert_below_the_client())]
+    #[case::client_mid_branch(client_mid_branch())]
+    #[case::nested_reverts(nested_reverts())]
+    #[case::first_live_message_reverts_below_the_client(
+        first_live_message_reverts_below_the_client()
+    )]
+    #[case::first_live_message_reverts_to_the_block_after_the_client(
+        first_live_message_reverts_to_the_block_after_the_client()
+    )]
+    #[case::path_ends_with_the_live_revert(path_ends_with_the_live_revert())]
+    #[case::deletion_of_a_component_the_client_never_had(
+        deletion_of_a_component_the_client_never_had()
+    )]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_through_a_revert_falls_back_to_a_snapshot(
+        #[case] scenario: CatchUpScenario,
+    ) {
+        let CatchUpScenario { last_synced, path, live, to, expected: _ } = scenario;
+        let first = live
+            .last()
+            .expect("A live message")
+            .clone();
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(path)));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &last_synced).await;
+
+        for message in live {
+            deltas_tx.send(message).await.unwrap();
+        }
+        let message = sync.next().await;
+        sync.assert_quiet().await;
+        sync.stop().await;
+
+        // A first live message that is a revert falls back without asking.
+        let expected_requests =
+            if first.revert { vec![] } else { vec![catch_up_request(&last_synced, &to)] };
+        assert_eq!(calls.catch_up_requests(), expected_requests);
+        assert_eq!(calls.snapshot_blocks(), vec![first.block.number]);
+        assert_eq!(message.header, header_of(&first));
+        assert!(message
+            .snapshots
+            .states
+            .contains_key("Component1"));
+        let set_by_first = first
+            .state_deltas
+            .get("Component1")
+            .map(|delta| delta.updated_attributes.clone())
+            .unwrap_or_default();
+        assert_eq!(attributes_set(&message), set_by_first, "A missed message was applied");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_merges_the_missed_blocks_into_the_first_message() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            setting(make_block_changes(5, None), "a", "0x05"),
+            setting(make_block_changes(6, None), "b", "0x06"),
+        ])));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(setting(make_block_changes(7, None), "c", "0x07"))
+            .await
+            .unwrap();
+        let first = sync.next().await;
+        sync.assert_quiet().await;
+        deltas_tx
+            .send(setting(make_block_changes(8, None), "d", "0x08"))
+            .await
+            .unwrap();
+        let second = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(first.header, header_of(&make_block_changes(7, None)));
+        assert_eq!(
+            attributes_set(&first),
+            attributes(&[("a", "0x05"), ("b", "0x06"), ("c", "0x07")])
+        );
+        assert_eq!(second.header.number, 8);
+        assert_eq!(attributes_set(&second), attributes(&[("d", "0x08")]));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_restart_after_a_catch_up_resumes_after_its_first_message() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let mut deltas_client = MockDeltasClient::new();
+        // Two subscriptions, each ending after one block.
+        for block in [7, 8] {
+            let (tx, rx) = channel(1);
+            tx.try_send(make_block_changes(block, None))
+                .unwrap();
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(4, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let ended = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The first subscription ends");
+        let (_, Some(end_rx)) = *ended else {
+            panic!("The close signal was never sent");
+        };
+        state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The second subscription ends");
+
+        let mut emitted = Vec::new();
+        while let Ok(message) = block_rx.try_recv() {
+            emitted.push(
+                message
+                    .expect("Should not be an error")
+                    .header
+                    .number,
+            );
+        }
+        assert_eq!(emitted, vec![7, 8]);
+        // Block 8 follows block 7, the first message of the subscription that caught up.
+        assert_eq!(calls.catch_up_requests().len(), 1);
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+    }
+
+    // The client applied block 4. Its subscription then delivers 5 and `after_the_gap` and ends:
+    // the deltas client lost block 6, which sets x to 0x06. The next subscription starts at block
+    // 10.
+    #[rstest]
+    #[case::a_later_block(make_block_changes(7, None))]
+    // Block 6 of another branch: the right number, but it extends a block the client never had.
+    #[case::a_block_on_another_parent(fork_block(6, 1, 1))]
+    #[test_log::test(tokio::test)]
+    async fn test_a_gap_in_the_live_stream_ends_the_subscription_before_the_gap(
+        #[case] after_the_gap: BlockAggregatedChanges,
+    ) {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            setting(make_block_changes(6, None), "x", "0x06"),
+            make_block_changes(7, None),
+            make_block_changes(8, None),
+            make_block_changes(9, None),
+        ])));
+        let mut deltas_client = MockDeltasClient::new();
+        for messages in
+            [vec![make_block_changes(5, None), after_the_gap], vec![make_block_changes(10, None)]]
+        {
+            let (tx, rx) = channel(4);
+            for message in messages {
+                tx.try_send(message).unwrap();
+            }
+            deltas_client
+                .expect_subscribe()
+                .times(1)
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+        }
+        deltas_client
+            .expect_unsubscribe()
+            .returning(|_| Ok(()));
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(4, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (_end_tx, end_rx) = oneshot::channel::<()>();
+        let ended = state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The first subscription ends");
+        let (_, Some(end_rx)) = *ended else {
+            panic!("The close signal was never sent");
+        };
+        let block_5 = make_block_changes(5, None);
+        assert_eq!(state_sync.last_synced_block, Some(header_of(&block_5)));
+        state_sync
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .await
+            .expect_err("The second subscription ends");
+
+        let mut emitted = Vec::new();
+        while let Ok(message) = block_rx.try_recv() {
+            emitted.push(message.expect("Should not be an error"));
+        }
+        let emitted_blocks: Vec<u64> = emitted
+            .iter()
+            .map(|message| message.header.number)
+            .collect();
+        assert_eq!(emitted_blocks, vec![5, 10]);
+        assert_eq!(calls.catch_up_requests(), vec![catch_up_request(&block_5, &fork_hash(9, 0))]);
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(attributes_set(&emitted[1]), attributes(&[("x", "0x06")]));
+    }
+
+    // The client resumes at block 5, then receives a revert to a block it never had: the
+    // subscription lost the messages that led to it.
+    #[rstest]
+    // The chain built 6 and 7, then reverted to 6.
+    #[case::revert_above_the_last_block(revert_to(make_block_changes(6, None)))]
+    // The chain replaced 5 with 5', built on it, then reverted to 5'.
+    #[case::revert_to_a_sibling_of_the_last_block(revert_to(fork_block(5, 1, 0)))]
+    #[test_log::test(tokio::test)]
+    async fn test_a_live_revert_to_a_block_the_client_never_had_ends_the_subscription(
+        #[case] revert: BlockAggregatedChanges,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+
+        deltas_tx
+            .send(make_block_changes(5, None))
+            .await
+            .unwrap();
+        deltas_tx.send(revert).await.unwrap();
+        let resumed = sync.next().await;
+        let RunningSync { mut block_rx, end_tx: _end_tx, task } = sync;
+        let ended = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("The subscription should end")
+            .expect("Task should not panic");
+
+        assert_eq!(resumed.header.number, 5);
+        assert!(ended.is_err(), "The subscription ended cleanly");
+        assert!(block_rx.try_recv().is_err(), "The revert was emitted");
+        assert_eq!(*snapshot_blocks.lock().unwrap(), Vec::<u64>::new());
+    }
+
+    // Each case's live messages include one whose parent is not the block before it, without a
+    // gap: a revert names its target's parent, and partials of one block share a parent. The
+    // subscription resumes at `live[resumes_at]` and must emit every message from there.
+    #[rstest]
+    #[case::blocks_with_a_revert(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            make_block_changes(7, None),
+            revert_to(make_block_changes(6, None)),
+            fork_block(7, 1, 0),
+            fork_block(8, 1, 1),
+        ],
+        0
+    )]
+    #[case::back_to_back_reverts(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            make_block_changes(7, None),
+            revert_to(make_block_changes(6, None)),
+            revert_to(make_block_changes(5, None)),
+            fork_block(6, 1, 0),
+            fork_block(7, 1, 1),
+        ],
+        0
+    )]
+    // The second revert goes back to a block of the branch the first one started.
+    #[case::nested_reverts(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(5, None)),
+            fork_block(6, 1, 0),
+            fork_block(7, 1, 1),
+            revert_to(fork_block(6, 1, 0)),
+            fork_block(7, 2, 1),
+        ],
+        0
+    )]
+    #[case::revert_to_the_current_block(
+        false,
+        make_block_changes(4, None),
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(6, None)),
+            make_block_changes(7, None),
+        ],
+        0
+    )]
+    // A partial-block subscription starts at the first partial of a new block.
+    #[case::partial_blocks(
+        true,
+        make_block_changes(5, Some(3)),
+        vec![
+            make_block_changes(5, Some(4)),
+            make_block_changes(6, Some(0)),
+            make_block_changes(6, Some(1)),
+            make_block_changes(7, Some(0)),
+        ],
+        1
+    )]
+    #[test_log::test(tokio::test)]
+    async fn test_live_messages_without_a_gap_keep_the_subscription(
+        #[case] partial_blocks: bool,
+        #[case] last_synced: BlockAggregatedChanges,
+        #[case] live: Vec<BlockAggregatedChanges>,
+        #[case] resumes_at: usize,
+    ) {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(partial_blocks);
+        let mut sync = RunningSync::start(state_sync, Some(header_of(&last_synced))).await;
+        let expected: Vec<BlockHeader> = live[resumes_at..]
+            .iter()
+            .map(header_of)
+            .collect();
+
+        for message in live {
+            deltas_tx.send(message).await.unwrap();
+        }
+        let mut emitted = Vec::new();
+        for _ in 0..expected.len() {
+            emitted.push(sync.next().await.header);
+        }
+        let RunningSync { end_tx, task, .. } = sync;
+        let _ = end_tx.send(());
+        let ended = task
+            .await
+            .expect("Task should not panic");
+
+        assert!(ended.is_ok(), "The subscription ended before the close signal");
+        assert_eq!(emitted, expected);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), Vec::<u64>::new());
+    }
+
+    fn contract_x() -> Bytes {
+        Bytes::from("0xc0ffee")
+    }
+
+    #[rstest]
+    #[case::by_the_first_message(
+        vec![make_block_changes(5, None), make_block_changes(6, None)],
+        block_tracing_contract(7, "Component1", &contract_x()),
+    )]
+    // The missed block traces the contract without changing it, so the first message carries the
+    // only change the caught-up message can hold for it.
+    #[case::by_a_missed_block(
+        vec![
+            BlockAggregatedChanges {
+                account_deltas: HashMap::new(),
+                ..block_tracing_contract(5, "Component1", &contract_x())
+            },
+            make_block_changes(6, None),
+        ],
+        block_changing_slot(7, &contract_x()),
+    )]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_keeps_the_deltas_of_a_newly_traced_contract(
+        #[case] path: Vec<BlockAggregatedChanges>,
+        #[case] first: BlockAggregatedChanges,
+    ) {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(path)));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let state_sync =
+            synced_under_an_unchanged_fingerprint(rpc_client, deltas_client).with_dci(true);
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+
+        deltas_tx.send(first).await.unwrap();
+        deltas_tx
+            .send(block_changing_slot(8, &contract_x()))
+            .await
+            .unwrap();
+        let caught_up = sync.next().await;
+        let next = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(caught_up.header.number, 7);
+        assert!(
+            has_account_delta(&caught_up, &contract_x()),
+            "The traced contract's delta is dropped"
+        );
+        assert_eq!(next.header.number, 8);
+        assert!(has_account_delta(&next, &contract_x()), "The traced contract is not tracked");
+    }
+
+    /// Component1's attributes as a consumer that applies `messages` in order holds them, the way
+    /// tycho-simulation's decoder applies one message: removals, then snapshots, then deltas, which
+    /// it drops for a component it does not hold. `None` when it does not hold Component1.
+    fn consumer_component1(
+        messages: &[StateSyncMessage<BlockHeader>],
+    ) -> Option<HashMap<String, Bytes>> {
+        let mut held: Option<HashMap<String, Bytes>> = Some(HashMap::new());
+        for message in messages {
+            if message
+                .removed_components
+                .contains_key("Component1")
+            {
+                held = None;
+            }
+            if let Some(snapshot) = message
+                .snapshots
+                .states
+                .get("Component1")
+            {
+                held = Some(snapshot.state.attributes.clone());
+            }
+            let delta = message
+                .deltas
+                .as_ref()
+                .and_then(|deltas| deltas.state_deltas.get("Component1"));
+            if let (Some(attributes), Some(delta)) = (held.as_mut(), delta) {
+                attributes.extend(delta.updated_attributes.clone());
+                for name in &delta.deleted_attributes {
+                    attributes.remove(name);
+                }
+            }
+        }
+        held
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_a_caught_up_message_merged_with_a_later_snapshot_keeps_the_snapshot() {
+        // The client applied block 4, tracking Component1. While it was away, block 5 set x to
+        // 0x05; block 6 dropped Component1 below the TVL threshold and set x to 0x06; block 7
+        // lifted it above the threshold again, which starts a background snapshot at block 7.
+        let block_7 = BlockAggregatedChanges {
+            component_tvl: HashMap::from([("Component1".to_string(), 100.0)]),
+            ..make_block_changes(7, None)
+        };
+        let path = vec![
+            setting(make_block_changes(5, None), "x", "0x05"),
+            setting(block_dropping_tvl(6, "Component1"), "x", "0x06"),
+            block_7,
+        ];
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_delta_catch_up()
+            .return_once(move |_| Ok(DeltaCatchUp::Available(path)));
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        // The server's state at block 7 holds block 6's x.
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(request.block_number);
+                let mut snapshot = snapshot_of_requested(request);
+                for state in snapshot.states.values_mut() {
+                    state
+                        .state
+                        .attributes
+                        .insert("x".to_string(), Bytes::from("0x06"));
+                }
+                Ok(snapshot)
+            });
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(make_block_changes(8, None))
+            .await
+            .unwrap();
+        let caught_up = sync.next().await;
+        timeout(Duration::from_secs(1), async {
+            while snapshot_blocks
+                .lock()
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("The background snapshot should be requested");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        deltas_tx
+            .send(make_block_changes(9, None))
+            .await
+            .unwrap();
+        let next = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![7]);
+        assert!(next
+            .snapshots
+            .states
+            .contains_key("Component1"));
+        let expected = Some(attributes(&[("x", "0x06")]));
+        // A consumer that receives the two messages one by one holds block 6's x.
+        assert_eq!(consumer_component1(&[caught_up.clone(), next.clone()]), expected);
+        // A stream that lags the others gets its queued messages merged by the BlockSynchronizer,
+        // which must not put the caught-up message's x of block 5 on top of the snapshot.
+        let merged = caught_up.merge(next);
+        assert_eq!(
+            consumer_component1(&[merged]),
+            expected,
+            "A stale delta overrides the snapshot"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_stops_tracking_a_component_a_missed_block_drops() {
+        // Block 6, the second missed block, drops Component1 below the TVL threshold.
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            block_dropping_tvl(6, "Component1"),
+        ])));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(setting(make_block_changes(7, None), "x", "0x07"))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(message.header.number, 7);
+        assert!(message
+            .removed_components
+            .contains_key("Component1"));
+        assert_eq!(attributes_set(&message), HashMap::new(), "An untracked component's change");
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_filters_the_missed_blocks_to_the_tracked_components() {
+        // Block 6, the second missed block, also changes Component2 and a contract, neither of
+        // which the client tracks.
+        let untracked_contract = Bytes::from("0xdead");
+        let mut block_6 = setting(block_changing_slot(6, &untracked_contract), "x", "0x06");
+        block_6.state_deltas.insert(
+            "Component2".to_string(),
+            ProtocolComponentStateDelta::new(
+                "Component2",
+                HashMap::from([("x".to_string(), Bytes::from("0x06"))]),
+                HashSet::new(),
+            ),
+        );
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            block_6,
+        ])));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+        assert_eq!(attributes_set(&message), attributes(&[("x", "0x06")]));
+        assert!(!message
+            .deltas
+            .as_ref()
+            .is_some_and(|deltas| deltas
+                .state_deltas
+                .contains_key("Component2")));
+        assert!(!has_account_delta(&message, &untracked_contract));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_brings_a_background_snapshot_from_before_the_gap_up_to_date() {
+        // Missed block 5 changes Component3, whose background snapshot block 3 started before the
+        // gap. The snapshot completes while the synchronizer is away.
+        let mut block_5 = make_block_changes(5, None);
+        block_5.state_deltas.insert(
+            "Component3".to_string(),
+            ProtocolComponentStateDelta::new(
+                "Component3",
+                HashMap::from([("x".to_string(), Bytes::from("0x05"))]),
+                HashSet::new(),
+            ),
+        );
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            block_5,
+            make_block_changes(6, None),
+        ])));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        let block_3 = make_block_changes(3, None);
+        state_sync.spawn_snapshot_task(
+            vec!["Component3".to_string()],
+            header_of(&block_3),
+            &block_3,
+        );
+        let mut sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+        timeout(Duration::from_secs(1), async {
+            while calls.snapshot_blocks().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("The background snapshot should complete");
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(calls.snapshot_blocks(), vec![3]);
+        let component3 = message
+            .snapshots
+            .states
+            .get("Component3")
+            .expect("The background snapshot is dropped");
+        assert_eq!(
+            component3.state.attributes,
+            HashMap::from([("x".to_string(), Bytes::from("0x05"))]),
+            "The snapshot misses the missed block's change"
+        );
+    }
+
+    #[rstest]
+    #[case::with_snapshots(true)]
+    #[case::without_snapshots(false)]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_asks_for_state_only_when_the_client_takes_snapshots(
+        #[case] include_snapshots: bool,
+    ) {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync.include_snapshots = include_snapshots;
+        let last_synced = make_block_changes(4, None);
+        let mut sync = RunningSync::start(state_sync, Some(header_of(&last_synced))).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(
+            calls.catch_up_requests(),
+            vec![catch_up_request(&last_synced, &fork_hash(6, 0))
+                .with_include_state(include_snapshots)]
+        );
+        assert_eq!(message.header.number, 7);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_asks_for_the_deltas_under_the_synced_fingerprint() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let mut state_sync = with_mocked_clients(true, false, Some(rpc_client), None);
+        state_sync.synced_fingerprint = Some(fingerprint(7));
+        let last_synced = make_block_changes(4, None);
+
+        state_sync
+            .catch_up_path(&header_of(&last_synced), &header_of(&make_block_changes(7, None)))
+            .await
+            .expect("The path leads from block 4 to block 6");
+
+        let expected = DeltaCatchUpParams::new(
+            Chain::Ethereum,
+            "uniswap-v2",
+            last_synced.block.hash,
+            4,
+            fork_hash(6, 0),
+            fingerprint(7),
+        );
+        assert_eq!(calls.catch_up_requests(), vec![expected]);
+    }
+
+    /// A message of `extractor` on `chain` dropping Component1 below the TVL threshold at block 5.
+    fn foreign_block_dropping_tvl(extractor: &str, chain: Chain) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            extractor: extractor.to_string(),
+            chain,
+            ..block_dropping_tvl(5, "Component1")
+        }
+    }
+
+    // Every path below starts with a block that drops Component1 below the TVL threshold, so a
+    // path message that went through `handle_block` would stop tracking it.
+    #[rstest]
+    #[case::no_window(Ok(DeltaCatchUp::Unavailable(DeltaCatchUpUnavailable::NoWindow)))]
+    #[case::fingerprint_changed(Ok(DeltaCatchUp::Unavailable(
+        DeltaCatchUpUnavailable::FingerprintChanged
+    )))]
+    #[case::empty_window(Ok(DeltaCatchUp::Unavailable(DeltaCatchUpUnavailable::EmptyWindow)))]
+    #[case::to_not_in_window(Ok(DeltaCatchUp::Unavailable(
+        DeltaCatchUpUnavailable::ToNotInWindow
+    )))]
+    #[case::below_floor(Ok(DeltaCatchUp::Unavailable(DeltaCatchUpUnavailable::BelowFloor)))]
+    #[case::unknown_hash(Ok(DeltaCatchUp::Unavailable(DeltaCatchUpUnavailable::UnknownHash)))]
+    #[case::to_not_ahead(Ok(DeltaCatchUp::Unavailable(DeltaCatchUpUnavailable::ToNotAhead)))]
+    #[case::reason_unknown_to_the_client(Ok(DeltaCatchUp::Unavailable(
+        DeltaCatchUpUnavailable::Unknown
+    )))]
+    #[case::old_server(Ok(DeltaCatchUp::Unsupported))]
+    #[case::plan_without_access(Err(RPCError::ParseResponse(
+        "plan has no access to uniswap-v2".to_string()
+    )))]
+    #[case::server_unreachable(Err(RPCError::ServerUnreachable("restarting".to_string())))]
+    #[case::message_of_another_extractor(Ok(DeltaCatchUp::Available(vec![
+        foreign_block_dropping_tvl("sushiswap-v2", Chain::Ethereum),
+        make_block_changes(6, None),
+    ])))]
+    #[case::message_of_another_chain(Ok(DeltaCatchUp::Available(vec![
+        foreign_block_dropping_tvl("uniswap-v2", Chain::Base),
+        make_block_changes(6, None),
+    ])))]
+    #[case::detached_block(Ok(DeltaCatchUp::Available(vec![
+        block_dropping_tvl(5, "Component1"),
+        fork_block(6, 0, 1),
+    ])))]
+    #[case::revert_to_a_block_the_path_did_not_pass(Ok(DeltaCatchUp::Available(vec![
+        block_dropping_tvl(5, "Component1"),
+        make_block_changes(6, None),
+        revert_to(fork_block(5, 1, 0)),
+        fork_block(6, 0, 1),
+    ])))]
+    #[case::path_short_of_the_first_message(Ok(DeltaCatchUp::Available(vec![
+        block_dropping_tvl(5, "Component1"),
+    ])))]
+    #[case::path_past_the_first_message(Ok(DeltaCatchUp::Available(vec![
+        block_dropping_tvl(5, "Component1"),
+        make_block_changes(6, None),
+        make_block_changes(7, None),
+    ])))]
+    #[case::empty_path(Ok(DeltaCatchUp::Available(vec![])))]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_falls_back_to_a_snapshot(
+        #[case] answer: Result<DeltaCatchUp, RPCError>,
+    ) {
+        let last_synced = make_block_changes(4, None);
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(answer);
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &last_synced).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(
+            calls.catch_up_requests(),
+            vec![catch_up_request(&last_synced, &fork_hash(6, 0))]
+        );
+        assert_eq!(calls.snapshot_blocks(), vec![7]);
+        assert_eq!(message.header.number, 7);
+        assert!(
+            message
+                .snapshots
+                .states
+                .contains_key("Component1"),
+            "A path message went through handle_block"
+        );
+        assert!(message.removed_components.is_empty());
+    }
+
+    /// An RPC client that forwards every request to `inner`, and holds back `inner`'s answer to a
+    /// catch-up request for `delay`.
+    #[derive(Clone)]
+    struct SlowCatchUpRPCClient {
+        inner: ArcRPCClient<MockRPCClient>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl RPCClient for SlowCatchUpRPCClient {
+        async fn get_tokens(
+            &self,
+            params: crate::rpc::TokensParams,
+        ) -> Result<crate::rpc::Page<Vec<Token>>, RPCError> {
+            self.inner.get_tokens(params).await
+        }
+
+        async fn get_contract_state(
+            &self,
+            params: crate::rpc::ContractStateParams,
+        ) -> Result<crate::rpc::Page<Vec<Account>>, RPCError> {
+            self.inner
+                .get_contract_state(params)
+                .await
+        }
+
+        async fn get_protocol_components(
+            &self,
+            params: crate::rpc::ProtocolComponentsParams,
+        ) -> Result<crate::rpc::Page<Vec<ProtocolComponent>>, RPCError> {
+            self.inner
+                .get_protocol_components(params)
+                .await
+        }
+
+        async fn get_protocol_states(
+            &self,
+            params: crate::rpc::ProtocolStatesParams,
+        ) -> Result<crate::rpc::Page<Vec<ProtocolComponentState>>, RPCError> {
+            self.inner
+                .get_protocol_states(params)
+                .await
+        }
+
+        async fn get_protocol_systems(
+            &self,
+            params: crate::rpc::ProtocolSystemsParams,
+        ) -> Result<crate::rpc::Page<crate::rpc::ProtocolSystems>, RPCError> {
+            self.inner
+                .get_protocol_systems(params)
+                .await
+        }
+
+        async fn get_component_tvl(
+            &self,
+            params: crate::rpc::ComponentTvlParams,
+        ) -> Result<crate::rpc::Page<HashMap<String, f64>>, RPCError> {
+            self.inner
+                .get_component_tvl(params)
+                .await
+        }
+
+        async fn get_traced_entry_points(
+            &self,
+            params: crate::rpc::TracedEntryPointsParams,
+        ) -> Result<
+            crate::rpc::Page<HashMap<String, Vec<(EntryPointWithTracingParams, TracingResult)>>>,
+            RPCError,
+        > {
+            self.inner
+                .get_traced_entry_points(params)
+                .await
+        }
+
+        async fn get_snapshots<'a>(
+            &self,
+            request: &SnapshotParameters<'a>,
+            chunk_size: Option<usize>,
+            concurrency: usize,
+        ) -> Result<Snapshot, RPCError> {
+            self.inner
+                .get_snapshots(request, chunk_size, concurrency)
+                .await
+        }
+
+        async fn get_delta_catch_up(
+            &self,
+            params: DeltaCatchUpParams,
+        ) -> Result<DeltaCatchUp, RPCError> {
+            let answer = self
+                .inner
+                .get_delta_catch_up(params)
+                .await;
+            sleep(self.delay).await;
+            answer
+        }
+
+        fn compression(&self) -> bool {
+            self.inner.compression()
+        }
+    }
+
+    /// A synchronizer whose timeout is `synchronizer_timeout` seconds, synced up to block 4 under
+    /// fingerprint 1, that resubscribes under the same fingerprint. Its RPC holds back the answer
+    /// to a catch-up request for the 120 s the RPC client waits for a restarting server. Returns
+    /// it running, with the sender of its new subscription.
+    async fn resubscribe_to_a_slow_server(
+        rpc_client: MockRPCClient,
+        synchronizer_timeout: u64,
+    ) -> (RunningSync, Sender<BlockAggregatedChanges>) {
+        let rpc_client = SlowCatchUpRPCClient {
+            inner: ArcRPCClient(Arc::new(rpc_client)),
+            delay: Duration::from_secs(120),
+        };
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let deltas_client = FingerprintedDeltasClient {
+            inner: ArcDeltasClient(Arc::new(deltas_client)),
+            fingerprint: Some(fingerprint(1)),
+        };
+        let mut state_sync = ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            true,
+            ComponentFilter::with_tvl_range(50.0, 50.0),
+            1,
+            Duration::from_secs(0),
+            true,
+            false,
+            true,
+            rpc_client,
+            deltas_client,
+            synchronizer_timeout,
+        );
+        state_sync.synced_fingerprint = Some(fingerprint(1));
+        let sync =
+            RunningSync::start(state_sync, Some(header_of(&make_block_changes(4, None)))).await;
+        (sync, deltas_tx)
+    }
+
+    #[rstest]
+    #[case::the_synchronizer_timeout(30, Duration::from_secs(30))]
+    #[case::raised_to_the_minimum(1, MIN_CATCH_UP_TIMEOUT)]
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_catch_up_falls_back_to_a_snapshot_when_the_server_answers_too_late(
+        #[case] synchronizer_timeout: u64,
+        #[case] expected_wait: Duration,
+    ) {
+        // A valid path, but only after the 120 s the RPC client waits for a restarting server.
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let (mut sync, deltas_tx) =
+            resubscribe_to_a_slow_server(rpc_client, synchronizer_timeout).await;
+
+        let sent_at = Instant::now();
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = timeout(Duration::from_secs(60), sync.block_rx.recv())
+            .await
+            .expect("Should fall back before the server answers")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let waited = sent_at.elapsed();
+        sync.stop().await;
+
+        assert_eq!(calls.catch_up_requests().len(), 1);
+        assert_eq!(calls.snapshot_blocks(), vec![7]);
+        assert!(message
+            .snapshots
+            .states
+            .contains_key("Component1"));
+        assert!(
+            waited >= expected_wait && waited < expected_wait + Duration::from_secs(1),
+            "Fell back after {waited:?}"
+        );
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_close_signal_during_catch_up_ends_the_synchronizer() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+        ])));
+        let (sync, deltas_tx) = resubscribe_to_a_slow_server(rpc_client, 10).await;
+        let RunningSync { mut block_rx, end_tx, task } = sync;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while calls.catch_up_requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Should ask to catch up");
+        let _ = end_tx.send(());
+        let ended = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Should end before the catch-up times out")
+            .expect("Task should not panic");
+
+        assert!(ended.is_ok(), "A close signal is a clean exit");
+        assert!(block_rx.try_recv().is_err(), "Nothing is emitted after the close signal");
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+    }
+
+    #[rstest]
+    #[case::partial_blocks(true, Some(fingerprint(1)), Some(fingerprint(1)), 6)]
+    #[case::no_fingerprint(false, None, None, 7)]
+    #[case::fingerprint_changed(false, Some(fingerprint(1)), Some(fingerprint(2)), 7)]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_is_not_attempted(
+        #[case] partial_blocks: bool,
+        #[case] synced: Option<ExtractorFingerprint>,
+        #[case] reported: Option<ExtractorFingerprint>,
+        #[case] expected_snapshot_block: u64,
+    ) {
+        let (mut rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        rpc_client
+            .expect_get_delta_catch_up()
+            .never();
+        let (deltas_client, deltas_tx) = mock_deltas_channel();
+        let mut state_sync = with_fingerprinted_clients(rpc_client, deltas_client, reported)
+            .with_partial_blocks(partial_blocks);
+        state_sync.synced_fingerprint = synced;
+        // A partial-block client last applied a partial block.
+        let last_synced = make_block_changes(4, partial_blocks.then_some(2));
+        let mut sync = RunningSync::start(state_sync, Some(header_of(&last_synced))).await;
+
+        deltas_tx
+            .send(make_block_changes(7, None))
+            .await
+            .unwrap();
+        let message = sync.next().await;
+        sync.stop().await;
+
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![expected_snapshot_block]);
+        assert_eq!(message.header.number, 7);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_catch_up_runs_before_the_snapshot_delay() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
+            make_block_changes(8, None),
+            make_block_changes(9, None),
+        ])));
+        let deltas_client = mock_deltas_emitting(vec![10, 11]);
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(7, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let msg = timeout(Duration::from_millis(10), block_rx.recv())
+            .await
+            .expect("Should catch up at the first block at once")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        assert_eq!(msg.header.number, 10);
+        assert!(msg.snapshots.states.is_empty());
+        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_failed_catch_up_waits_for_the_snapshot_delay() {
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Unavailable(
+            DeltaCatchUpUnavailable::BelowFloor,
+        )));
+        let deltas_client = mock_deltas_emitting((10..=20).collect());
+        let mut state_sync = synced_under_an_unchanged_fingerprint(rpc_client, deltas_client);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        let last_synced = make_block_changes(5, None);
+        state_sync.last_synced_block = Some(header_of(&last_synced));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let first = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        // Catch-up is asked for at block 10, the first block; blocks 10-15 then arrive within the
+        // 300 ms delay, 50 ms apart.
+        assert_eq!(
+            calls.catch_up_requests(),
+            vec![catch_up_request(&last_synced, &fork_hash(9, 0))]
+        );
+        let snapshot_blocks = calls.snapshot_blocks();
+        assert_eq!(snapshot_blocks.len(), 1, "Should request one snapshot");
+        assert!(
+            snapshot_blocks[0] >= 16,
+            "Snapshot at block {} is inside the delay",
+            snapshot_blocks[0]
+        );
+        assert_eq!(first.header.number, snapshot_blocks[0]);
+    }
+
+    #[rstest]
+    #[case::blocks(vec![make_block_changes(5, None), make_block_changes(6, None)], fork_hash(6, 0), true)]
+    #[case::reverts_then_blocks(
+        vec![revert_to(make_block_changes(2, None)), fork_block(3, 1, 0), fork_block(4, 1, 1)],
+        fork_hash(4, 1),
+        true
+    )]
+    #[case::ending_with_a_revert_to_the_target(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(5, None)),
+        ],
+        fork_hash(5, 0),
+        true
+    )]
+    #[case::nested_reverts(
+        vec![
+            revert_to(make_block_changes(3, None)),
+            revert_to(make_block_changes(2, None)),
+            fork_block(3, 1, 0),
+            fork_block(4, 1, 1),
+        ],
+        fork_hash(4, 1),
+        true
+    )]
+    #[case::revert_to_the_last_synced_block(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(4, None)),
+            fork_block(5, 1, 0),
+        ],
+        fork_hash(5, 1),
+        true
+    )]
+    #[case::empty_from_the_target(vec![], fork_hash(4, 0), true)]
+    #[case::empty_from_another_block(vec![], fork_hash(6, 0), false)]
+    #[case::short_of_the_target(vec![make_block_changes(5, None)], fork_hash(6, 0), false)]
+    #[case::past_the_target(
+        vec![make_block_changes(5, None), make_block_changes(6, None), make_block_changes(7, None)],
+        fork_hash(6, 0),
+        false
+    )]
+    #[case::detached_block(
+        vec![make_block_changes(5, None), fork_block(6, 0, 1)],
+        fork_hash(6, 0),
+        false
+    )]
+    #[case::block_at_the_wrong_height(
+        vec![BlockAggregatedChanges {
+            block: Block { number: 6, ..make_block_changes(5, None).block },
+            ..make_block_changes(5, None)
+        }],
+        fork_hash(5, 0),
+        false
+    )]
+    #[case::revert_ahead_of_the_walk(
+        vec![revert_to(make_block_changes(7, None))],
+        fork_hash(7, 0),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_the_last_synced_block(
+        vec![revert_to(fork_block(4, 1, 0))],
+        fork_hash(4, 1),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_a_passed_block(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(fork_block(5, 1, 0)),
+            fork_block(6, 1, 1),
+        ],
+        fork_hash(6, 1),
+        false
+    )]
+    #[case::revert_to_a_sibling_of_the_last_synced_block_after_blocks(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(fork_block(4, 1, 0)),
+            fork_block(5, 1, 1),
+        ],
+        fork_hash(5, 1),
+        false
+    )]
+    #[case::revert_ending_elsewhere(
+        vec![
+            make_block_changes(5, None),
+            make_block_changes(6, None),
+            revert_to(make_block_changes(5, None)),
+        ],
+        fork_hash(6, 0),
+        false
+    )]
+    #[case::message_of_another_extractor(
+        vec![foreign_block_dropping_tvl("sushiswap-v2", Chain::Ethereum), make_block_changes(6, None)],
+        fork_hash(6, 0),
+        false
+    )]
+    #[case::message_of_another_chain(
+        vec![foreign_block_dropping_tvl("uniswap-v2", Chain::Base), make_block_changes(6, None)],
+        fork_hash(6, 0),
+        false
+    )]
+    fn test_check_catch_up_path_from_block_4(
+        #[case] path: Vec<BlockAggregatedChanges>,
+        #[case] to: Bytes,
+        #[case] valid: bool,
+    ) {
+        let checked = check_catch_up_path(
+            &path,
+            &ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            &header_of(&make_block_changes(4, None)),
+            &to,
+        );
+
+        assert_eq!(checked.is_ok(), valid, "{checked:?}");
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
@@ -5530,5 +7888,128 @@ mod test {
         assert_eq!(account.native_balance, Bytes::from("0x20"));
         // Code updated
         assert_eq!(account.code, Bytes::from("0x0c0d"));
+    }
+
+    /// Block `number`, which sets attribute x, a token balance and the TVL of each of
+    /// `components`, and a slot and a token balance of each of `contracts`, all to `number`.
+    fn block_changing(
+        number: u64,
+        components: &[&str],
+        contracts: &[&Bytes],
+    ) -> BlockAggregatedChanges {
+        use tycho_common::models::{contract::AccountBalance, protocol::ComponentBalance};
+
+        let token = Bytes::from("0xbeef");
+        let value = Bytes::from(vec![number as u8]);
+        let mut block = make_block_changes(number, None);
+        for &component in components {
+            block.state_deltas.insert(
+                component.to_string(),
+                ProtocolComponentStateDelta::new(
+                    component,
+                    HashMap::from([("x".to_string(), value.clone())]),
+                    HashSet::new(),
+                ),
+            );
+            let balance = ComponentBalance::new(
+                token.clone(),
+                value.clone(),
+                number as f64,
+                Bytes::default(),
+                component,
+            );
+            block
+                .component_balances
+                .insert(component.to_string(), HashMap::from([(token.clone(), balance)]));
+            block
+                .component_tvl
+                .insert(component.to_string(), number as f64);
+        }
+        for &contract in contracts {
+            block.account_deltas.insert(
+                contract.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    contract.clone(),
+                    HashMap::from([(Bytes::from("0x01"), Some(value.clone()))]),
+                    None,
+                    None,
+                    ChangeType::Update,
+                ),
+            );
+            let balance = AccountBalance::new(
+                contract.clone(),
+                token.clone(),
+                value.clone(),
+                Bytes::default(),
+            );
+            block
+                .account_balances
+                .insert(contract.clone(), HashMap::from([(token.clone(), balance)]));
+        }
+        block
+    }
+
+    #[test]
+    fn test_merge_drops_the_older_deltas_of_what_the_later_message_snapshots() {
+        let snapshotted_contract = Bytes::from("0xc0ffee");
+        let other_contract = Bytes::from("0xdead");
+        let older = StateSyncMessage {
+            header: header_of(&make_block_changes(5, None)),
+            deltas: Some(block_changing(
+                5,
+                &["Component1", "Component2"],
+                &[&snapshotted_contract, &other_contract],
+            )),
+            ..Default::default()
+        };
+        // The later message snapshots Component1 and one of the contracts, and sets Component1's
+        // y, which the older message did not change.
+        let component1 = ProtocolComponent { id: "Component1".to_string(), ..Default::default() };
+        let snapshots = Snapshot {
+            states: HashMap::from([(
+                "Component1".to_string(),
+                ComponentWithState {
+                    state: ProtocolComponentState::new(
+                        "Component1",
+                        HashMap::from([("x".to_string(), Bytes::from("0x06"))]),
+                        HashMap::new(),
+                    ),
+                    component: component1,
+                    component_tvl: Some(6.0),
+                    entrypoints: vec![],
+                },
+            )]),
+            vm_storage: HashMap::from([(
+                snapshotted_contract.clone(),
+                Account::new(
+                    Chain::Ethereum,
+                    snapshotted_contract.clone(),
+                    String::new(),
+                    HashMap::from([(Bytes::from("0x01"), Bytes::from("0x06"))]),
+                    Bytes::default(),
+                    HashMap::new(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    None,
+                ),
+            )]),
+        };
+        let later = StateSyncMessage {
+            header: header_of(&make_block_changes(6, None)),
+            snapshots: snapshots.clone(),
+            deltas: Some(setting(make_block_changes(6, None), "y", "0x06")),
+            removed_components: HashMap::new(),
+        };
+
+        let merged = older.merge(later);
+
+        assert_eq!(merged.header, header_of(&make_block_changes(6, None)));
+        assert_eq!(merged.snapshots, snapshots);
+        let kept_of_the_older = block_changing(5, &["Component2"], &[&other_contract]);
+        let expected = kept_of_the_older.merge(setting(make_block_changes(6, None), "y", "0x06"));
+        assert_eq!(merged.deltas, Some(expected));
     }
 }

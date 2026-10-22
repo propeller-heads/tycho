@@ -60,7 +60,7 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, Command, Response, WebSocketMessage, WebsocketError},
-    models::{blockchain::BlockAggregatedChanges, ExtractorIdentity},
+    models::{blockchain::BlockAggregatedChanges, ExtractorFingerprint, ExtractorIdentity},
 };
 use uuid::Uuid;
 use zstd;
@@ -162,6 +162,25 @@ pub trait DeltasClient {
         options: SubscriptionOptions,
     ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>;
 
+    /// Subscribe like [`Self::subscribe`], also returning the fingerprint the server reported for
+    /// the extractor's deltas.
+    ///
+    /// Equal fingerprints on two subscriptions mean the extractor emits the same deltas for the
+    /// same blocks, so a consumer may continue one subscription's stream with the other's deltas.
+    /// `None` means the fingerprint is unknown, because the server or the client predates
+    /// fingerprints. The default implementation calls [`Self::subscribe`] and returns `None`.
+    async fn subscribe_with_fingerprint(
+        &self,
+        extractor_id: ExtractorIdentity,
+        options: SubscriptionOptions,
+    ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>), DeltasError>
+    {
+        let (subscription_id, receiver) = self
+            .subscribe(extractor_id, options)
+            .await?;
+        Ok((subscription_id, receiver, None))
+    }
+
     /// Unsubscribe from an subscription
     async fn unsubscribe(&self, subscription_id: Uuid) -> Result<(), DeltasError>;
 
@@ -201,6 +220,10 @@ pub struct WsDeltasClient {
 type WebSocketSink =
     SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, tungstenite::protocol::Message>;
 
+/// A subscription the server confirmed: its id, the receiver of its messages and the fingerprint
+/// the server reported for it.
+type ConfirmedSubscription = (Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>);
+
 /// Subscription State
 ///
 /// Subscription go through a lifecycle:
@@ -215,9 +238,7 @@ type WebSocketSink =
 #[derive(Debug)]
 enum SubscriptionInfo {
     /// Subscription was requested we wait for server confirmation and uuid assignment.
-    RequestedSubscription(
-        oneshot::Sender<Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>>,
-    ),
+    RequestedSubscription(oneshot::Sender<Result<ConfirmedSubscription, DeltasError>>),
     /// Subscription is active.
     Active,
     /// Unsubscription was requested, we wait for server confirmation.
@@ -260,7 +281,7 @@ impl Inner {
     fn new_subscription(
         &mut self,
         id: &ExtractorIdentity,
-        ready_tx: oneshot::Sender<Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError>>,
+        ready_tx: oneshot::Sender<Result<ConfirmedSubscription, DeltasError>>,
     ) -> Result<(), DeltasError> {
         if self.pending.contains_key(id) {
             return Err(DeltasError::SubscriptionAlreadyPending);
@@ -270,10 +291,16 @@ impl Inner {
         Ok(())
     }
 
-    /// Transitions a pending subscription to active.
+    /// Transitions a pending subscription to active and hands the subscriber the fingerprint the
+    /// server reported for it.
     ///
     /// Will ignore any request to do so for subscriptions that are not pending.
-    fn mark_active(&mut self, extractor_id: ExtractorIdentity, subscription_id: Uuid) {
+    fn mark_active(
+        &mut self,
+        extractor_id: ExtractorIdentity,
+        subscription_id: Uuid,
+        fingerprint: Option<ExtractorFingerprint>,
+    ) {
         if let Some(info) = self.pending.remove(&extractor_id) {
             if let SubscriptionInfo::RequestedSubscription(ready_tx) = info {
                 let (tx, rx) = mpsc::channel(self.buffer_size);
@@ -281,7 +308,7 @@ impl Inner {
                 self.subscriptions
                     .insert(subscription_id, SubscriptionInfo::Active);
                 let _ = ready_tx
-                    .send(Ok((subscription_id, rx)))
+                    .send(Ok((subscription_id, rx, fingerprint)))
                     .map_err(|_| {
                         warn!(
                             ?extractor_id,
@@ -306,8 +333,15 @@ impl Inner {
         }
     }
 
-    /// Sends a message to a subscription's receiver.
+    /// Sends a message to a subscription's receiver, unless the subscription is ending.
     fn send(&mut self, id: &Uuid, msg: BlockAggregatedChanges) -> Result<(), DeltasError> {
+        // The server keeps sending until it gets the unsubscribe request. When the subscription
+        // ends because the receiver's buffer overflowed, a message delivered after the dropped
+        // one would hand the subscriber a block whose parent it never received.
+        if let Some(SubscriptionInfo::RequestedUnsubscription(_)) = self.subscriptions.get(id) {
+            debug!(subscription_id = ?id, "Dropping a message of an ending subscription");
+            return Ok(());
+        }
         if let Some(sender) = self.sender.get_mut(id) {
             sender
                 .try_send(msg)
@@ -578,7 +612,11 @@ impl WsDeltasClient {
                             let inner = guard
                                 .as_mut()
                                 .ok_or_else(|| DeltasError::NotConnected)?;
-                            inner.mark_active(extractor_id.into(), subscription_id);
+                            inner.mark_active(
+                                extractor_id.into(),
+                                subscription_id,
+                                fingerprint.map(ExtractorFingerprint::from),
+                            );
                         }
                         WebSocketMessage::Response(Response::SubscriptionEnded {
                             subscription_id,
@@ -806,12 +844,26 @@ impl WsDeltasClient {
 
 #[async_trait]
 impl DeltasClient for WsDeltasClient {
-    #[instrument(skip(self))]
     async fn subscribe(
         &self,
         extractor_id: ExtractorIdentity,
         options: SubscriptionOptions,
     ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>), DeltasError> {
+        let (subscription_id, receiver, _) = self
+            .subscribe_with_fingerprint(extractor_id, options)
+            .await?;
+        Ok((subscription_id, receiver))
+    }
+
+    /// Returns the fingerprint from the server's `NewSubscription` confirmation, which servers
+    /// that predate fingerprints omit.
+    #[instrument(name = "subscribe", skip(self))]
+    async fn subscribe_with_fingerprint(
+        &self,
+        extractor_id: ExtractorIdentity,
+        options: SubscriptionOptions,
+    ) -> Result<(Uuid, Receiver<BlockAggregatedChanges>, Option<ExtractorFingerprint>), DeltasError>
+    {
         trace!("Starting subscribe");
         self.ensure_connection().await?;
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -1069,8 +1121,9 @@ impl DeltasClient for WsDeltasClient {
 mod tests {
     use std::{net::SocketAddr, str::FromStr};
 
+    use rstest::rstest;
     use tokio::{net::TcpListener, time::timeout};
-    use tycho_common::models::Chain;
+    use tycho_common::{models::Chain, Bytes};
 
     use super::*;
     use crate::stream::TychoStreamBuilder;
@@ -1354,6 +1407,52 @@ mod tests {
             .await
             .expect("awaiting message timeout out")
             .expect("receiving message failed");
+        timeout(Duration::from_millis(100), client.close())
+            .await
+            .expect("close timed out")
+            .expect("close failed");
+        jh.await
+            .expect("ws loop errored")
+            .unwrap();
+        server_thread.await.unwrap();
+    }
+
+    #[rstest]
+    #[case::reported(Some("0xabcdef"))]
+    #[case::server_predates_fingerprints(None)]
+    #[tokio::test]
+    async fn test_subscribe_with_fingerprint_returns_the_confirmed_fingerprint(
+        #[case] reported: Option<&str>,
+    ) {
+        let confirmation = match reported {
+            Some(fingerprint) => format!(
+                r#"{{"method":"newsubscription","extractor_id":{{"chain":"ethereum","name":"vm:ambient"}},"subscription_id":"{SUBSCRIPTION_ID}","fingerprint":"{fingerprint}"}}"#
+            ),
+            None => subscription_confirmation(),
+        };
+        let exp_comm = [
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(confirmation)),
+        ];
+        let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
+
+        let client = WsDeltasClient::new(&format!("ws://{addr}"), None).unwrap();
+        let jh = client
+            .connect()
+            .await
+            .expect("connect failed");
+        let (_, _rx, fingerprint) = timeout(
+            Duration::from_millis(100),
+            client.subscribe_with_fingerprint(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        assert_eq!(fingerprint, reported.map(|hex| ExtractorFingerprint(Bytes::from(hex))));
         timeout(Duration::from_millis(100), client.close())
             .await
             .expect("close timed out")
@@ -1925,6 +2024,61 @@ mod tests {
 
         let _ = jh.await;
         let _ = server_thread.await;
+    }
+
+    /// A block message of the `vm:ambient` subscription at `number`, whose parent is `number - 1`.
+    fn ambient_block(number: u64) -> String {
+        format!(
+            r#"{{"subscription_id":"30b740d1-cf09-4e0e-8cfe-b1434d447ece","deltas":{{"extractor":"vm:ambient","chain":"ethereum","block":{{"number":{number},"hash":"0x{hash:064x}","parent_hash":"0x{parent:064x}","chain":"ethereum","ts":"2023-09-14T00:00:00"}},"finalized_block_height":0,"revert":false,"new_tokens":{{}},"account_updates":{{}},"state_updates":{{}},"new_protocol_components":{{}},"deleted_protocol_components":{{}},"component_balances":{{}},"account_balances":{{}},"component_tvl":{{}},"dci_update":{{"new_entrypoints":{{}},"new_entrypoint_params":{{}},"trace_results":{{}}}}}}}}"#,
+            hash = number,
+            parent = number - 1,
+        )
+    }
+
+    /// The subscription buffer overflows on block 124, but the server had already sent block 125
+    /// when it got the unsubscribe. The subscriber must never receive 125 after missing 124: it
+    /// would apply 125 on top of 123 and later resume or catch up from 125.
+    #[test_log::test(tokio::test)]
+    async fn test_buffer_overflow_delivers_no_block_after_the_dropped_one() {
+        let exp_comm = [
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(123))),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(124))),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(ambient_block(125))),
+            ExpectedComm::Receive(1000, tungstenite::protocol::Message::Text(unsubscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_ended())),
+        ];
+        let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
+        let jh = client
+            .connect()
+            .await
+            .expect("connect failed");
+        let (_sub_id, mut rx) = timeout(
+            Duration::from_millis(100),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        // A slow consumer: block 124 arrives while 123 still fills the buffer.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut received = Vec::new();
+        while let Ok(Some(message)) = timeout(Duration::from_secs(8), rx.recv()).await {
+            received.push(message.block.number);
+        }
+        jh.abort();
+        server_thread.abort();
+
+        assert_eq!(received, vec![123], "Delivered a block after the one the buffer dropped");
     }
 
     #[tokio::test]
