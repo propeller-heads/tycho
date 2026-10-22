@@ -456,7 +456,8 @@ class DeltaCatchUpParams(BaseModel):
     from_block_hash: HexBytes
     from_block_number: int
     # The block the messages must lead to: the parent of the new subscription's first
-    # message, or that message's target when it is a revert.
+    # message, or that message's target when it is a revert. The Rust client doesn't ask in
+    # that case: it resyncs from a snapshot.
     to_block_hash: HexBytes
     # The fingerprint the subscription reported when the client synced
     # (`Response.NewSubscription.fingerprint`).
@@ -559,7 +560,8 @@ class DeltaCatchUp:
     ``Unavailable`` or ``Unsupported``, each with a ``status`` naming it. Only ``Available``
     lets the client continue without a snapshot, and only when none of its messages is a
     revert: revert messages don't restore everything the reverted blocks changed yet, so the
-    Rust client resyncs from a snapshot instead."""
+    Rust client resyncs from a snapshot instead. It also resyncs, without asking, when the new
+    subscription's first message is a revert."""
 
     class Available(BaseModel):
         """The missed messages: exactly the full-block and revert messages the WebSocket sent
