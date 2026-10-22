@@ -15,7 +15,7 @@ extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
   supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
-  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
+  factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types; extractor fingerprint
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
@@ -213,6 +213,54 @@ count moved during it.
 `--entity-cache-shadow-sample-rate` (default 0.0) sets the share. Metrics:
 `entity_cache_shadow_comparisons_total{endpoint,outcome}`,
 `entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
+
+## Extractor fingerprint
+
+`ExtractorFactory::create` reads the extractor's substreams package once, downloading it from S3
+when it is missing, and computes the extractor's `ExtractorFingerprint` from it
+(`extractor_fingerprint` in `factory.rs`): Keccak-256 over length-prefixed fields holding
+
+- the indexer version (`CARGO_PKG_VERSION`, the workspace version), which stands for the code;
+- the package's bytes, not its path;
+- the config fields that shape deltas: `name`, `chain`, `start_block`, `module_name`,
+  `initialized_accounts`, `initialized_accounts_block`, `dci_plugin` (the pool manager as parsed
+  address bytes; a value that is not hex fails startup) and `post_processor`. The function
+  destructures `ExtractorConfig` without `..` and binds every other field to `_` with the reason,
+  so a new field fails to compile until it is classified;
+- the inputs outside the config that shape deltas (`FingerprintInputs`, also destructured without
+  `..`): the `partial_blocks` flag (`--enable-partial-blocks`), the token pre-processor's
+  settlement contract (`--settlement-contract`, which sets new tokens' quality, tax and gas), the
+  chain's native token address and its wrapped (routable) token address, if any (built in, or
+  `native` and `wrapped_native` in `chains.yaml` for a custom chain; the storage stores and
+  prices both when it first sees the chain, which decides TVL and new tokens, a revert's database
+  lookup of account balances skips the native token's balances, and the hooks DCI's state
+  overrides read it), and, for extractors with a DCI plugin, the DCI blacklist
+  (`DCI_BLACKLIST_ADDRESSES`, as a set: it decides full versus traced-slot indexing).
+
+The version changes only at a release, so every release changes every extractor's fingerprint
+and every client resyncs from a snapshot once, even when the deltas did not change. This assumes
+production runs release builds: a build of unreleased code keeps the last release's version, and
+so its fingerprint, though its deltas may differ. A release's Docker image is built from the merge
+commit, before semantic-release's version bump, so it carries the previous release's version:
+every release still gets a distinct version, but an image and the GitHub-release binary with the
+same version run different code. Do not mix the two in one deployment.
+
+Equal fingerprints mean two runs use the same version, package and config, so they emit the same
+deltas for the same blocks as far as those decide them. What the runs read at startup or from
+the network can still differ: the database contents (token metadata already stored, the DCI's
+snapshot of ERC-20 addresses, and its trace retry counts, which are not persisted) and the RPC
+node's answers. A restart of the same build with the same package and config keeps the
+fingerprint. The factory keeps the decoded package, and every run it builds, in-process restarts
+included, streams that package, so an extractor's fingerprint is fixed for the process's lifetime.
+`ExtractorSupervisor::handle` puts it on the `ExtractorHandle` (`MessageSender::fingerprint`).
+
+Not in the fingerprint:
+
+- The `TRACE_*` variables: they pick the tracing node and its retry policy, not what is traced
+  (see `create_rpc_dci`).
+- The rest of a custom chain's config (`chains.yaml`): besides the native and wrapped native token
+  addresses, the indexer only reads its block time, which estimates the chain tip for
+  sync-progress metrics.
 
 ## Connections
 
