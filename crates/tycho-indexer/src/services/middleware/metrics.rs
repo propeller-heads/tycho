@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use actix_web::{
-    body::{BoxBody, MessageBody},
+    body::{BodySize, BoxBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
     middleware::Next,
 };
@@ -10,7 +10,8 @@ use tracing::{instrument, Span};
 
 use crate::services::client_metadata;
 
-/// Middleware to record metrics for RPC requests.
+/// Middleware to record metrics for RPC requests. `rpc_response_body_bytes{endpoint}` is the size
+/// of the response body before compression.
 #[instrument(skip_all, fields(user_identity))]
 pub(in crate::services) async fn rpc_metrics_middleware<B>(
     req: ServiceRequest,
@@ -86,6 +87,12 @@ where
                 ];
                 fail_labels.extend(metadata_labels.iter().cloned());
                 counter!("rpc_requests_failed", fail_labels).increment(1);
+            }
+
+            // Compression wraps this middleware, so the body is not compressed yet.
+            if let BodySize::Sized(bytes) = srv_res.response().body().size() {
+                histogram!("rpc_response_body_bytes", "endpoint" => endpoint.clone())
+                    .record(bytes as f64);
             }
 
             Ok(srv_res.map_into_boxed_body())
@@ -254,6 +261,10 @@ mod tests {
                 "rpc_request_duration_seconds",
                 &[("endpoint", "/v1/health")]
             ),
+            1
+        );
+        assert_eq!(
+            histogram_samples(&after, "rpc_response_body_bytes", &[("endpoint", "/v1/health")]),
             1
         );
 

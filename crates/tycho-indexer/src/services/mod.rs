@@ -25,7 +25,7 @@ use crate::{
     services::{
         api_docs::ApiDoc,
         deltas_buffer::PendingDeltas,
-        middleware::{compression_middleware, rpc_metrics_middleware},
+        middleware::{compression_middleware, response_metrics_middleware, rpc_metrics_middleware},
         state::{
             service::StateService,
             shadow::{self, Sampler, Shadow},
@@ -342,6 +342,8 @@ where
                 .wrap(actix_middleware::from_fn(rpc_metrics_middleware))
                 // Enable zstd compression while being backwards compatible with clients that do not
                 .wrap(compression_middleware())
+                // Outside compression, so it measures the compressed body as it is sent.
+                .wrap(actix_middleware::from_fn(response_metrics_middleware))
                 .wrap(RequestTracing::new())
                 .app_data(rpc_data.clone())
                 .service(
