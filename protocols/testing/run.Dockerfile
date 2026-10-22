@@ -40,7 +40,7 @@ RUN resolve_base() { \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
@@ -91,7 +91,7 @@ RUN resolve_base() { \
             robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
-            robinhood-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
+            robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
             robinhood-up-v3) echo "base-aerodrome-slipstreams" ;; \
             base-balancer-v3|arbitrum-balancer-v3|gnosis-balancer-v3) echo "ethereum-balancer-v3" ;; \
             arc-uniswap-v2) echo "ethereum-uniswap-v2" ;; \
@@ -113,6 +113,11 @@ RUN resolve_base() { \
             if [ -d "/source/$base_dir" ]; then \
                 echo "Including $base_dir (for protocol $protocol_clean)..."; \
                 cp -r "/source/$base_dir" "/filtered/"; \
+                for dep in $(sed -n 's#^ *- \.\./\([A-Za-z0-9_-]*\)/proto *$#\1#p' \
+                        "/source/$base_dir"/*.yaml | sort -u); do \
+                    echo "Including $dep (its protos are imported by $base_dir)..."; \
+                    cp -r "/source/$dep" "/filtered/"; \
+                done; \
                 base_wasm=$(echo "$base_dir" | tr '-' '_'); \
                 if [ -f "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" ]; then \
                     cp "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" \

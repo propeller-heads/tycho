@@ -10,6 +10,7 @@ use crate::encoding::{
         strategy_encoder::strategy_encoders::{
             SequentialSwapStrategyEncoder, SingleSwapStrategyEncoder, SplitSwapStrategyEncoder,
         },
+        subsidy::validate_subsidy,
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
         utils::map_on_threads,
     },
@@ -124,6 +125,8 @@ impl TychoEncoder for TychoRouterEncoder {
     ///   `expectedAmountOut`).
     /// * The token cannot appear more than once in the solution unless it is the first and last
     ///   token (i.e. a true cyclical swap).
+    /// * A subsidy names a swap that can carry it, its amounts fit the quote, and the chain has a
+    ///   subsidizing executor.
     fn validate_solution(&self, solution: &Solution) -> Result<(), EncodingError> {
         if solution.swaps().is_empty() {
             return Err(EncodingError::FatalError("No swaps found in solution".to_string()));
@@ -172,6 +175,7 @@ impl TychoEncoder for TychoRouterEncoder {
                 }
             }
         }
+        validate_subsidy(solution, &group_swaps(swaps), &self.swap_encoder_registry)?;
         Ok(())
     }
 }
@@ -253,10 +257,10 @@ mod tests {
     mod router_encoder {
         use std::time::{Duration, Instant};
 
-        use alloy::hex::encode;
+        use alloy::{hex::encode, primitives::B256};
 
         use super::*;
-        use crate::encoding::evm::testing_utils::delayed_bebop_swap;
+        use crate::encoding::{evm::testing_utils::delayed_bebop_swap, models::SubsidyTerms};
 
         /// Two solutions each hold one RFQ swap that waits 300ms for its quote. Encoded together
         /// they finish well before the 600ms a one-after-the-other encoding needs, and stay in
@@ -292,38 +296,58 @@ mod tests {
             assert!(encode(encoded_solutions[1].swaps()).contains(&encode(dai())[..]));
         }
 
-        /// A batch that holds one invalid solution fails before the valid solutions request their
-        /// signed quotes, so the 300ms RFQ round trip never runs.
-        #[test]
-        fn test_encode_solutions_rejects_an_invalid_solution_before_requesting_quotes() {
+        fn solution(token_in: Bytes, token_out: Bytes, swaps: Vec<Swap>) -> Solution {
+            Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::default(),
+                token_in,
+                token_out,
+                BigUint::from(1_000u64),
+                BigUint::from(1_000u64),
+                BigUint::from(900u64),
+                swaps,
+            )
+        }
+
+        fn with_subsidy(solution: Solution, subsidized_swap_index: usize) -> Solution {
+            solution.with_subsidy(SubsidyTerms {
+                amount: BigUint::from(100u32),
+                min_amount_in: BigUint::from(1u32),
+                nonce: B256::with_last_byte(7),
+                deadline: 1_700_000_000,
+                subsidized_swap_index,
+            })
+        }
+
+        /// One invalid solution fails the batch before any RFQ quote request.
+        #[rstest]
+        #[case::without_swaps(
+            solution(dai(), wbtc(), vec![]),
+            |error: &EncodingError| matches!(error, EncodingError::FatalError(message) if message.contains("No swaps"))
+        )]
+        #[case::subsidized_swap_index_out_of_range(
+            with_subsidy(solution(dai(), wbtc(), vec![univ2_swap(&dai(), &wbtc(), 0.0)]), 5),
+            |error: &EncodingError| matches!(error, EncodingError::InvalidInput(message) if message.contains("out of range"))
+        )]
+        #[case::subsidy_without_subsidizing_executor(
+            with_subsidy(solution(dai(), wbtc(), vec![univ2_swap(&dai(), &wbtc(), 0.0)]), 0),
+            |error: &EncodingError| matches!(error, EncodingError::FatalError(message) if message.contains("No subsidizing executor"))
+        )]
+        fn test_encode_solutions_rejects_an_invalid_solution_before_requesting_quotes(
+            #[case] invalid_solution: Solution,
+            #[case] is_expected_error: fn(&EncodingError) -> bool,
+        ) {
             let encoder = get_tycho_router_encoder();
             let delay = Duration::from_millis(300);
-            let delayed_solution = Solution::new(
-                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-                Bytes::default(),
-                usdc(),
-                weth(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![delayed_bebop_swap(usdc(), weth(), delay)],
-            );
-            let solution_without_swaps = Solution::new(
-                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-                Bytes::default(),
-                dai(),
-                wbtc(),
-                BigUint::from(1_000u64),
-                BigUint::from(1_000u64),
-                BigUint::from(900u64),
-                vec![],
-            );
+            let delayed_solution =
+                solution(usdc(), weth(), vec![delayed_bebop_swap(usdc(), weth(), delay)]);
 
             let start = Instant::now();
-            let result = encoder.encode_solutions(vec![delayed_solution, solution_without_swaps]);
+            let result = encoder.encode_solutions(vec![delayed_solution, invalid_solution]);
             let elapsed = start.elapsed();
 
-            assert!(matches!(result, Err(EncodingError::FatalError(_))), "{result:?}");
+            let error = result.unwrap_err();
+            assert!(is_expected_error(&error), "{error:?}");
             assert!(elapsed < delay, "encoding took {elapsed:?}");
         }
 

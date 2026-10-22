@@ -10,7 +10,7 @@ use tycho_common::{models::token::Token, Bytes};
 
 use super::{
     config::{
-        default_denied_pamms, default_served_pamms, PriceLevelStreamConfig,
+        canonical_pamm_address, default_denied_pamms, default_served_pamms, PriceLevelStreamConfig,
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
     titan::{self, ConnectionSettings, TITAN_PRICE_LEVEL_URL, TITAN_PRICE_LEVEL_URL_ENV},
@@ -41,7 +41,9 @@ pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
 /// [`without_fallback_router`](Self::without_fallback_router). The venue address is exposed
 /// through the [`PAMM_ADDRESS_ATTRIBUTE`] static attribute for downstream encoding.
 pub struct PriceLevelStreamBuilder {
+    /// The venues to serve, keyed by canonical public identity.
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
+    /// The venues not to serve, by canonical public identity.
     denied: HashSet<Bytes>,
     tokens: HashMap<Bytes, Token>,
     url: Option<String>,
@@ -139,12 +141,18 @@ impl PriceLevelStreamBuilder {
     }
 
     /// Registers a pAMM to be served under the given configuration, overriding any default,
-    /// denied, or auto-detected one for the same address.
+    /// denied, or auto-detected one for the same venue.
     ///
-    /// Between [`add_pamm`](Self::add_pamm) and [`deny_pamm`](Self::deny_pamm) for the same
-    /// address, the later call wins; the defaults applied by
+    /// The configured address may be either of a venue's addresses — the one Titan streams its
+    /// books under or its canonical public identity (see
+    /// [`PAMM_ADDRESS_ALIASES`](super::config::PAMM_ADDRESS_ALIASES)) — because it is normalized
+    /// to the public identity, which is what the emitted components then carry. Between
+    /// [`add_pamm`](Self::add_pamm) and [`deny_pamm`](Self::deny_pamm) for the same venue, the
+    /// later call wins, whichever of its addresses each named; the defaults applied by
     /// [`with_known_pamms`](Self::with_known_pamms) never override either, in any call order.
     pub fn add_pamm(mut self, config: PriceLevelStreamConfig) -> Self {
+        let config =
+            PriceLevelStreamConfig { address: canonical_pamm_address(&config.address), ..config };
         self.denied.remove(&config.address);
         self.registry
             .insert(config.address.clone(), config);
@@ -154,12 +162,15 @@ impl PriceLevelStreamBuilder {
     /// Excludes a venue from being served: drops its current registration (default or explicit)
     /// and blocks auto-detecting it.
     ///
-    /// Between [`add_pamm`](Self::add_pamm) and [`deny_pamm`](Self::deny_pamm) for the same
-    /// address, the later call wins; the defaults applied by
+    /// As for [`add_pamm`](Self::add_pamm), `address` may be either of the venue's addresses, so
+    /// denying a venue by its public identity also denies the books it streams under another
+    /// one. Between [`add_pamm`](Self::add_pamm) and [`deny_pamm`](Self::deny_pamm) for the same
+    /// venue, the later call wins; the defaults applied by
     /// [`with_known_pamms`](Self::with_known_pamms) never override either, in any call order —
     /// so denying a venue from the default set works whether the denial comes before or after
     /// [`with_known_pamms`](Self::with_known_pamms).
     pub fn deny_pamm(mut self, address: Bytes) -> Self {
+        let address = canonical_pamm_address(&address);
         self.registry.remove(&address);
         self.denied.insert(address);
         self
@@ -170,9 +181,13 @@ impl PriceLevelStreamBuilder {
     /// ([`default_denied_pamms`]) — venues that stream quotes but whose swaps are not executable.
     ///
     /// These defaults never override an explicit [`add_pamm`](Self::add_pamm) or
-    /// [`deny_pamm`](Self::deny_pamm) for the same address, regardless of call order.
+    /// [`deny_pamm`](Self::deny_pamm) for the same venue, regardless of call order.
     pub fn with_known_pamms(mut self) -> Self {
         for config in default_served_pamms() {
+            let config = PriceLevelStreamConfig {
+                address: canonical_pamm_address(&config.address),
+                ..config
+            };
             if self.denied.contains(&config.address) {
                 continue;
             }
@@ -181,6 +196,7 @@ impl PriceLevelStreamBuilder {
                 .or_insert(config);
         }
         for address in default_denied_pamms() {
+            let address = canonical_pamm_address(&address);
             if self.registry.contains_key(&address) {
                 continue;
             }
@@ -189,8 +205,10 @@ impl PriceLevelStreamBuilder {
         self
     }
 
-    /// Provides the token metadata used to build components and interpret amounts. Pairs whose
-    /// tokens are missing here are skipped.
+    /// Provides the token metadata used to build components and interpret amounts, and the set of
+    /// assets the stream may price at all: a book is served only if both addresses it names are
+    /// present here, and those tokens supply the decimals its ladders are converted with. Books
+    /// naming any other asset are skipped.
     pub fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
         self.tokens = tokens;
         self
@@ -257,7 +275,9 @@ impl PriceLevelStreamBuilder {
     /// re-added by the next accepted frame carrying it. Frames that are too old, from the
     /// future, out of order, or whose block regresses or jumps more than one block per elapsed
     /// slot plus 2 are rejected without effect. Frames that contain no served pAMM produce no
-    /// update. Pairs whose tokens are missing from the provided token metadata are skipped.
+    /// update. Books naming an address absent from the provided token metadata are skipped, as is
+    /// any one book side whose levels do not state a usable price function — leaving that
+    /// direction unquotable.
     ///
     /// Every update is stamped with the block its frame targets, a removal with the newest
     /// accepted block. Block numbers never decrease while something is served. Once every
@@ -286,7 +306,7 @@ impl PriceLevelStreamBuilder {
         }
         if tokens.is_empty() {
             tracing::warn!(
-                "No token metadata provided; every streamed pair will be skipped and the stream \
+                "No token metadata provided; every streamed book will be skipped and the stream \
                  will never produce an update"
             );
         }
@@ -388,8 +408,9 @@ mod tests {
                 RECONNECTS,
             },
             test_support::{
-                fermiswap, frame_text, frame_then_repeat, tokens, wall_nanos_now, FakeConnection,
-                FakeTitan, PAMM,
+                address, captured_frame_text, fermiswap, frame_text, frame_then_repeat, token,
+                token_map, tokens, wall_nanos_now, FakeConnection, FakeTitan, KIPSELI,
+                KIPSELI_STREAMED, PAMM, USDC, WBTC, WETH,
             },
         },
         *,
@@ -424,17 +445,22 @@ mod tests {
         );
     }
 
-    /// A builder with short timings: `stale_after` 2 s, `read_idle_timeout` 100 ms,
-    /// `max_backoff` 20 ms.
-    fn fast_builder(fake: &FakeTitan) -> PriceLevelStreamBuilder {
+    /// Short timings for a test: `stale_after` 2 s, `read_idle_timeout` 100 ms, `max_backoff`
+    /// 20 ms, reading from `fake`.
+    fn fast_timings(fake: &FakeTitan) -> PriceLevelStreamBuilder {
         PriceLevelStreamBuilder::new()
             .endpoint(fake.url())
-            .add_pamm(fermiswap())
-            .with_tokens(tokens())
             .stale_after(STALE_AFTER)
             .connect_timeout(Duration::from_secs(1))
             .read_idle_timeout(Duration::from_millis(100))
             .max_backoff(Duration::from_millis(20))
+    }
+
+    /// A [`fast_timings`] builder serving the FermiSwap venue with the bound assets' metadata.
+    fn fast_builder(fake: &FakeTitan) -> PriceLevelStreamBuilder {
+        fast_timings(fake)
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
     }
 
     /// The `stale_after` of [`fast_builder`]: long enough that a loaded runner does not reject
@@ -517,7 +543,7 @@ mod tests {
             .expect("removal");
 
         assert_removal_only(&removal, 1);
-        assert_eq!(removal.block_number_or_timestamp, 100);
+        assert_eq!(removal.block_number, 100);
         assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on idle timeout");
     }
 
@@ -620,7 +646,7 @@ mod tests {
         assert_removal_only(&removal, 1);
         assert_eq!(re_added.new_pairs.len(), 1);
         assert!(re_added.removed_pairs.is_empty());
-        assert_eq!(re_added.block_number_or_timestamp, 101);
+        assert_eq!(re_added.block_number, 101);
     }
 
     #[tokio::test]
@@ -843,6 +869,148 @@ mod tests {
 
         assert_eq!(format!("{PRICE_LEVEL_STREAM_FAMILY}:"), PRICE_LEVEL_STREAM_PREFIX);
         assert_eq!(format!("{FALLBACK_FAMILY}:"), FALLBACK_PREFIX);
+    }
+
+    /// A registration may name either of a venue's addresses: the streamed one normalizes to the
+    /// public identity, which the registry is keyed by and the configuration then carries, so the
+    /// components of an aliased venue execute against the public identity either way.
+    #[rstest]
+    #[case::by_public_identity(KIPSELI)]
+    #[case::by_streamed_address(KIPSELI_STREAMED)]
+    fn registering_a_venue_registers_its_public_identity(#[case] registered: &str) {
+        let public = address(KIPSELI);
+
+        let builder = PriceLevelStreamBuilder::new().add_pamm(PriceLevelStreamConfig::new(
+            "custom",
+            address(registered),
+            1u64.into(),
+        ));
+
+        assert_eq!(builder.registry[&public].protocol, "custom");
+        assert_eq!(builder.registry[&public].address, public);
+        assert_eq!(builder.registry.len(), 1);
+    }
+
+    /// Denial is on the public identity too, so denying a venue by the address its swaps go to
+    /// also drops the default registration of the books it streams under another address.
+    #[rstest]
+    #[case::by_public_identity(KIPSELI)]
+    #[case::by_streamed_address(KIPSELI_STREAMED)]
+    fn denying_a_venue_denies_its_public_identity(#[case] denied: &str) {
+        let public = address(KIPSELI);
+
+        let builder = PriceLevelStreamBuilder::new()
+            .with_known_pamms()
+            .deny_pamm(address(denied));
+
+        assert!(!builder.registry.contains_key(&public));
+        assert!(!builder
+            .registry
+            .contains_key(&address(KIPSELI_STREAMED)));
+        assert!(builder.denied.contains(&public));
+        // The other default venues are unaffected.
+        assert!(builder
+            .registry
+            .contains_key(&address(PAMM)));
+    }
+
+    /// Mixed calls naming different addresses of one venue land on one canonical key, so the
+    /// later call still wins — as it does when both name the same address.
+    #[rstest]
+    #[case::add_public_then_deny_streamed(KIPSELI, KIPSELI_STREAMED)]
+    #[case::add_streamed_then_deny_public(KIPSELI_STREAMED, KIPSELI)]
+    fn mixed_address_forms_are_last_wins(#[case] added: &str, #[case] denied: &str) {
+        let public = address(KIPSELI);
+        let custom = || PriceLevelStreamConfig::new("custom", address(added), 1u64.into());
+
+        let builder = PriceLevelStreamBuilder::new()
+            .add_pamm(custom())
+            .deny_pamm(address(denied));
+        assert!(builder.registry.is_empty());
+        assert!(builder.denied.contains(&public));
+
+        let builder = PriceLevelStreamBuilder::new()
+            .deny_pamm(address(denied))
+            .add_pamm(custom());
+        assert_eq!(builder.registry[&public].protocol, "custom");
+        assert!(builder.denied.is_empty());
+    }
+
+    /// Synthetic: a token that calls itself `WBTC` at an address no default binding names.
+    const IMPOSTOR_WBTC: &str = "0x00000000000000000000000000000000deadbeef";
+
+    /// Sends one freshly stamped frame of Kipseli's captured books on the first connection only.
+    /// The books arrive under the address Titan streams them by, so serving them at all also
+    /// exercises the alias on the live path.
+    async fn first_connection_sends_captured_books(index: usize, mut socket: FakeConnection) {
+        if index == 0 {
+            let frame = captured_frame_text("Kipseli", 100, wall_nanos_now());
+            let _ = socket
+                .send(Message::Text(frame.into()))
+                .await;
+        }
+        std::future::pending::<()>().await;
+    }
+
+    /// The address Titan streams is the identity, so an impostor token calling itself `WBTC` is
+    /// never priced and never blocks the real asset. Kipseli quoted WBTC/USDC and WETH/USDC in
+    /// the capture, so the WETH/USDC component must survive every case.
+    ///
+    /// Every case admits USDC and WETH plus the `WBTC`-named tokens of its first parameter, as
+    /// `(address, decimals)`; the second is the address expected to be priced for the book's
+    /// WBTC leg, or `None` when the book stays unserved.
+    #[rstest]
+    #[case::canonical_asset(vec![(WBTC, 8)], Some(WBTC))]
+    #[case::impostor_only(vec![(IMPOSTOR_WBTC, 18)], None)]
+    #[case::both_present(vec![(WBTC, 8), (IMPOSTOR_WBTC, 18)], Some(WBTC))]
+    #[tokio::test]
+    async fn an_impostor_symbol_is_never_priced(
+        #[case] bitcoins: Vec<(&str, u32)>,
+        #[case] expected_btc: Option<&str>,
+    ) {
+        let admitted = [token(USDC, "USDC", 6), token(WETH, "WETH", 18)]
+            .into_iter()
+            .chain(
+                bitcoins
+                    .into_iter()
+                    .map(|(address, decimals)| token(address, "WBTC", decimals)),
+            );
+        let fake = FakeTitan::spawn(first_connection_sends_captured_books).await;
+        let stream = fast_timings(&fake)
+            .add_pamm(PriceLevelStreamConfig::new("kipseli", address(KIPSELI), 1u64.into()))
+            .with_tokens(token_map(admitted))
+            .build();
+        tokio::pin!(stream);
+
+        let update = next_within(&mut stream, WAIT)
+            .await
+            .expect("first update");
+
+        // Every served component, as the addresses of its token pair in component order.
+        let mut served: Vec<Vec<String>> = update
+            .new_pairs
+            .values()
+            .map(|component| {
+                component
+                    .tokens
+                    .iter()
+                    .map(|token| token.address.to_string())
+                    .collect()
+            })
+            .collect();
+        served.sort();
+        let mut expected = vec![vec![USDC.to_string(), WETH.to_string()]];
+        if let Some(btc) = expected_btc {
+            let mut pair = vec![btc.to_string(), USDC.to_string()];
+            pair.sort();
+            expected.push(pair);
+        }
+        expected.sort();
+        assert_eq!(served, expected);
+        // Whichever assets were priced, the venue executes against its public identity.
+        for component in update.new_pairs.values() {
+            assert_eq!(component.static_attributes[PAMM_ADDRESS_ATTRIBUTE], address(KIPSELI));
+        }
     }
 
     /// Traffic that is not a parsed frame keeps neither the socket nor the component alive: the

@@ -1,9 +1,12 @@
 //! Book feeds: a provider's complete set of priced pairs, republished whenever it changes.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
@@ -18,39 +21,14 @@ use crate::{
     },
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
+pub mod all_pairs;
 pub(crate) mod component;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
+pub use component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE};
 pub(crate) mod levels;
 pub mod quote_tokens;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod sim;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub(crate) mod tvl;
+pub(crate) mod wire;
 
 /// One pair's book: the component that identifies the pair and the ready-to-simulate state
 /// holding the provider's price levels for it.
@@ -64,6 +42,47 @@ pub struct Book {
     /// When the provider last updated this book, on the provider's clock; `None` when the
     /// provider reports none. The snapshot's [`ReceivedAt`] anchor is the feed's own.
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// The books a source has decoded out of one answer from its venue, each under the id of the
+/// component it carries.
+#[derive(Debug, Default, derive_more::Deref)]
+pub(crate) struct Books(HashMap<String, Book>);
+
+impl Books {
+    pub fn new() -> Self {
+        Books::default()
+    }
+
+    /// Keeps `book` under its own component's id.
+    ///
+    /// Two books claiming one component leaves the one added last, and says so: they price the
+    /// same pair differently, and which of them a consumer quotes is the order they arrived in.
+    pub fn insert(&mut self, book: Book) {
+        match self
+            .0
+            .entry(book.component.id.to_string())
+        {
+            Entry::Occupied(mut taken) => {
+                warn!(
+                    component = %taken.key(),
+                    "two books price one component, keeping the last"
+                );
+                taken.insert(book);
+            }
+            Entry::Vacant(free) => {
+                free.insert(book);
+            }
+        }
+    }
+}
+
+impl Extend<Book> for Books {
+    fn extend<I: IntoIterator<Item = Book>>(&mut self, books: I) {
+        for book in books {
+            self.insert(book);
+        }
+    }
 }
 
 /// One provider's complete set of books at one instant, so a pair absent from a snapshot is one
@@ -86,8 +105,8 @@ pub struct BookSnapshot<A> {
 
 impl BookSnapshot<ReceivedAt> {
     /// `books` as the complete set a feed received just now.
-    pub fn received_now(books: HashMap<String, Book>) -> Self {
-        BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books) }
+    pub(crate) fn received_now(books: Books) -> Self {
+        BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books.0) }
     }
 }
 
@@ -116,27 +135,27 @@ pub struct BookFeedConfig {
 }
 
 impl BookFeedConfig {
+    /// The numeric chain id a venue's API addresses this chain by, or a [`FeedError::Fatal`]
+    /// naming the chain that has none.
+    pub(crate) fn chain_id(&self) -> Result<u64, FeedError> {
+        self.chain
+            .try_id()
+            .map_err(|error| FeedError::Fatal(format!("no chain id for {}: {error}", self.chain)))
+    }
+
     /// The two tokens of a pair, or `None` when either is outside the universe and the pair is
     /// therefore not served.
-    #[expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )]
     pub(crate) fn pair_tokens(&self, a: &Bytes, b: &Bytes) -> Option<(&Token, &Token)> {
         Some((self.tokens.get(a)?, self.tokens.get(b)?))
     }
 
-    /// Whether a book with `tvl_usd` clears the floor; names `book_label` in the log line when
-    /// it does not.
-    #[expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )]
-    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book_label: impl fmt::Display) -> bool {
+    /// Whether a book with `tvl_usd` clears the floor; names the component it would be
+    /// published under in the log line when it does not.
+    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, component_id: &Bytes) -> bool {
         let clears = tvl_usd >= self.min_tvl_usd;
         if !clears {
             debug!(
-                book = %book_label,
+                book = %component_id,
                 tvl_usd,
                 min_tvl_usd = self.min_tvl_usd,
                 "filtering out book below the TVL floor"
@@ -154,8 +173,7 @@ impl BookFeedConfig {
 ///
 /// ```
 /// # use futures::StreamExt as _;
-/// # use tycho_simulation::book::{BookFeedEvent, BookFeedStreams};
-/// # use tycho_simulation::snapshot_feed::SnapshotFeedOutcome;
+/// # use tycho_simulation::book::{BookFeedEvent, BookFeedOutcome, BookFeedStreams};
 /// # async fn consume() {
 /// // Anchored like the snapshots it carries; `add` infers this from the feed.
 /// let mut feeds: BookFeedStreams = BookFeedStreams::new();
@@ -165,8 +183,8 @@ impl BookFeedConfig {
 ///         BookFeedEvent::Published(snapshot) => { /* quote from `snapshot.books` */ }
 ///         BookFeedEvent::Withdrawn => { /* stop quoting `provider` until it publishes again */ }
 ///         // `provider` is out of the set now, whichever of the three ended it.
-///         BookFeedEvent::Ended(SnapshotFeedOutcome::Failed(error)) => { /* it gave up */ }
-///         BookFeedEvent::Ended(outcome) => { /* ran out, or died of a bug */ }
+///         BookFeedEvent::Ended(BookFeedOutcome::Failed(error)) => { /* it gave up */ }
+///         BookFeedEvent::Ended(outcome) => { /* ran out, or panicked */ }
 ///     }
 /// }
 /// # }
@@ -186,3 +204,61 @@ pub type BookFeedWatch<A = ReceivedAt> = SnapshotFeedWatch<BookSnapshot<A>, Feed
 
 /// How a book feed ended. See [`SnapshotFeedWatch::ended`].
 pub type BookFeedOutcome = SnapshotFeedOutcome<FeedError>;
+
+/// Builds the token map of a test [`BookFeedConfig`] from `(address, symbol, decimals)` entries.
+#[cfg(test)]
+pub(crate) fn test_token_map(entries: &[(&Bytes, &str, u32)]) -> HashMap<Bytes, Token> {
+    entries
+        .iter()
+        .map(|(address, symbol, decimals)| {
+            (
+                (*address).clone(),
+                Token::new(address, symbol, *decimals, 0, &[Some(10_000)], Chain::Ethereum, 100),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_common::models::Chain;
+
+    use super::*;
+    use crate::{book::component::pair_component, evm::decoder::MockProtocolSim};
+
+    fn book(base: &Bytes, quote: &Bytes) -> Book {
+        let token =
+            |address: &Bytes| Token::new(address, "T", 18, 0, &[Some(0)], Chain::Ethereum, 100);
+        Book {
+            component: pair_component(
+                component::pair_component_id("book:venue", base, quote),
+                "book:venue",
+                "venue_pool",
+                Chain::Ethereum,
+                token(base),
+                token(quote),
+            ),
+            state: Arc::new(MockProtocolSim::new()),
+            updated_at: None,
+        }
+    }
+
+    /// Two answers for one pair are one book, whichever way round the venue sent them.
+    #[test]
+    fn a_book_is_kept_under_its_own_component() {
+        let weth = Bytes::from(vec![0x11; 20]);
+        let usdc = Bytes::from(vec![0x22; 20]);
+        let mut books = Books::new();
+
+        books.insert(book(&weth, &usdc));
+        books.insert(book(&usdc, &weth));
+        books.insert(book(&weth, &usdc));
+
+        assert_eq!(books.len(), 2);
+        let ids: Vec<_> = books.keys().cloned().collect();
+        assert!(
+            ids.contains(&component::pair_component_id("book:venue", &weth, &usdc).to_string()),
+            "{ids:?}"
+        );
+    }
+}

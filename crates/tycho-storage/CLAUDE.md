@@ -7,6 +7,7 @@ PostgreSQL backend implementing the storage traits defined in `tycho-common`.
 ```
 postgres/
 ├── mod.rs              — PostgresGateway (internal); shared enum caches; DB init helpers
+├── pool.rs             — checkout helper (span, wait histogram) and `db_pool_*` status gauges
 ├── builder.rs          — GatewayBuilder: configures + constructs public gateways
 ├── cache.rs            — CachedGateway + DBCacheWriteExecutor: buffered write path
 ├── direct.rs           — DirectGateway: unbuffered read/write path (testing, auditing)
@@ -61,6 +62,14 @@ the `index` and `rpc` commands, on by default). Kept fresh by a 1 s poll of new 
 of `component_tvl` rows with a newer `modified_ts` (`idx_component_tvl_modified_ts`), and a full
 reload every hour. See the module docs for design and for the unexpected cases only the full
 reload corrects.
+
+Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
+`db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
+`pool` label is `extraction`, `rpc` or `direct`. A 1 s sampler sets
+`db_pool_connections{pool,state}`, `db_pool_waiting{pool}` and `db_pool_max_size{pool}`. Traced
+entry point reads load rows with a connection (`load_traced_entry_point_rows`) and return the
+connection before they decode the JSON (`decode_traced_entry_points`). Do not hold a connection
+during a decode.
 
 ## Write Order
 

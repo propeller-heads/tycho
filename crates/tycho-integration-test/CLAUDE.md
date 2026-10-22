@@ -26,8 +26,11 @@ cargo run -p tycho-integration-test -- \
   --tvl-threshold 100
 ```
 
-Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`,
-`--disable-price-level-stream`, `--disable-execution`, `--protocols uniswap_v2,curve`,
+Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
+`--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--protocols uniswap_v2,curve`,
+`--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
+each one must be enabled),
 `--max-blocks 100`, `--parallel-simulations 5`, `--always-test-components <id,...>`,
 `--price-level-stream-block-interval 1`, `--price-level-stream-stale-threshold-secs 10`,
 `--test-every-n-updates 10`, `--bypass-executor-timelock`.
@@ -51,22 +54,25 @@ shows up as a failure.
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution
-  - `rfq_stream_processor.rs`: Handles RFQ protocol updates — fetches live quotes, compares
-    against simulation
+  - `book_stream_processor.rs`: Handles the off-chain book feeds (the RFQ venues and Metric) —
+    fetches live quotes, compares against simulation
   - `price_level_stream_processor.rs`: Handles Titan pAMM price level stream updates (Ethereum
     only) — emits one sampled update per `--price-level-stream-block-interval` blocks, holding a
     chosen block's latest snapshot back until the stream moves to the next block (least drift to
     the finalized block), samples pair states, validates `get_limits` / `get_amount_out`. Marks
     the served venues stale in metrics when no Titan message arrives within
     `--price-level-stream-stale-threshold-secs`. Execution is simulated at the quoted block with
-    the overrides `oracle_overrides.rs` collected for it. Venues are served under `fallback:*`
-    and execute through `TychoFallbackRouter`, resolving through the single `fallback` entry in
-    `executor_addresses.json`. Without overrides for its venue a swap falls to the fallback pool
-    named in its `user_data`, counted per venue by
+    the overrides `oracle_overrides.rs` collected for it. The stream runs with
+    `without_fallback_router()`, so venues are served under `pricelevelstream:*` and execute
+    directly on the venue, resolving through the single `pricelevelstream` entry in
+    `executor_addresses.json` — not under the stream's default `fallback:*`, whose
+    `TychoFallbackRouter` needs `user_data` naming a fallback pool the test cannot supply. A swap
+    without overrides for its venue is counted per venue by
     `tycho_integration_price_level_oracle_override_misses_total` (Titan published none for that
     block) or `tycho_integration_price_level_oracle_override_unserved_total` (Titan serves no
-    channel for the venue); a venue called directly reverts `StaleUpdate`
-    (`tycho_integration_execution_stale_quotes_total`)
+    channel for the venue); when the venue's freshness guard then reverts (`StaleUpdate`, or
+    `FeedStalled` for Metric) the swap counts as a stale quote
+    (`tycho_integration_execution_stale_quotes_total`) instead of a revert
 - **`oracle_overrides.rs`**: `OracleOverrides` — keeps the storage overrides Titan's
   `pamm_quote_stream` publishes, per quoted block, for the venues Titan serves (`vm:fermiswap`,
   `vm:kipseli`, `vm:bopamm`). Each frame is a venue's whole override set, so a venue's newest

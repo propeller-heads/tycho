@@ -24,13 +24,46 @@ use tycho_common::{
     Bytes,
 };
 
-use super::config::PriceLevelStreamConfig;
+use super::{
+    config::PriceLevelStreamConfig,
+    titan::{TitanBook, TitanPriceLevelMessage},
+};
 
 /// The FermiSwapper router, one of the default venues.
 pub(super) const PAMM: &str = "0x5979458912f80b96d30d4220af8e2e4925a33320";
+/// The KipseliPropAMMWrapper router: Kipseli's canonical public identity, and one of the default
+/// venues.
+pub(super) const KIPSELI: &str = "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d";
+/// The address Titan streams Kipseli's books under, aliased onto [`KIPSELI`].
+pub(super) const KIPSELI_STREAMED: &str = "0xc9a956b5196dfe110debe8781857bc8b97d32091";
 pub(super) const WBTC: &str = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599";
 pub(super) const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 pub(super) const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+pub(super) const USDT: &str = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+pub(super) const CBBTC: &str = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
+/// Quoted by Bebop in the capture, and admitted by no token map these tests build, so a book
+/// naming it is skipped as `unadmitted_token`.
+pub(super) const NVDAX: &str = "0xc845b2894dbddd03858fd2d643b4ef725fe0849d";
+
+pub(super) fn address(hex: &str) -> Bytes {
+    Bytes::from_str(hex).expect("hex address")
+}
+
+/// The address Titan streams beside `symbol`, for the assets these tests build books from.
+///
+/// Test ergonomics only: a test names a pair the way a reader reads it, while the book it builds
+/// carries the address the parser resolves. Nothing in production resolves a symbol.
+pub(super) fn symbol_address(symbol: &str) -> &'static str {
+    match symbol {
+        "WBTC" => WBTC,
+        "USDC" => USDC,
+        "WETH" => WETH,
+        "USDT" => USDT,
+        "cbBTC" => CBBTC,
+        "NVDAx" => NVDAX,
+        other => panic!("no test address for {other}"),
+    }
+}
 
 pub(super) fn token(address: &str, symbol: &str, decimals: u32) -> Token {
     Token::new(
@@ -44,11 +77,17 @@ pub(super) fn token(address: &str, symbol: &str, decimals: u32) -> Token {
     )
 }
 
-pub(super) fn tokens() -> HashMap<Bytes, Token> {
-    [token(WBTC, "WBTC", 8), token(USDC, "USDC", 6), token(WETH, "WETH", 18)]
+pub(super) fn token_map(tokens: impl IntoIterator<Item = Token>) -> HashMap<Bytes, Token> {
+    tokens
         .into_iter()
         .map(|token| (token.address.clone(), token))
         .collect()
+}
+
+/// The bound assets of the streamed symbols the tests price, with the decimals of their Ethereum
+/// deployments, as a consumer's token metadata.
+pub(super) fn tokens() -> HashMap<Bytes, Token> {
+    token_map([token(WBTC, "WBTC", 8), token(USDC, "USDC", 6), token(WETH, "WETH", 18)])
 }
 
 pub(super) type FakeConnection = WebSocketStream<TcpStream>;
@@ -127,11 +166,7 @@ pub(super) fn wall_nanos_now() -> u64 {
 
 /// The FermiSwap venue at [`PAMM`], registered under the protocol name `fermiswap`.
 pub(super) fn fermiswap() -> PriceLevelStreamConfig {
-    PriceLevelStreamConfig::new(
-        "fermiswap",
-        Bytes::from_str(PAMM).unwrap(),
-        BigUint::from(120_000u64),
-    )
+    PriceLevelStreamConfig::new("fermiswap", address(PAMM), BigUint::from(120_000u64))
 }
 
 /// A [`FakeTitan`] handler that sends `first` once, then `repeat` every `interval` until the
@@ -159,12 +194,62 @@ pub(super) fn frame_then_repeat(
     }
 }
 
-/// A valid frame carrying the FermiSwap WBTC/USDC ladder in both directions.
-pub(super) fn frame_text(block: u64, timestamp: u64) -> String {
+/// A valid frame carrying the FermiSwap WBTC/USDC book two-sided: 1 WBTC sells for 99,900 USDC
+/// and 100,100 USDC buys 1 WBTC.
+pub(super) fn frame_text(block: u64, ts: u64) -> String {
     format!(
-        r#"{{"slot": 1, "blockNumber": {block}, "timestamp": {timestamp}, "pamms": [{{"pamm": "{PAMM}", "maker": 12, "pairs": [
-            {{"tokenIn": "{WBTC}", "tokenOut": "{USDC}", "orderBook": [{{"amountIn": "0x5f5e100", "amountOut": "0x174876e800", "variant": "Simulated"}}]}},
-            {{"tokenIn": "{USDC}", "tokenOut": "{WBTC}", "orderBook": [{{"amountIn": "0x174876e800", "amountOut": "0x5e69ec0", "variant": "Simulated"}}]}}
-        ]}}]}}"#
+        r#"{{"slot": 1, "block": {block}, "ts": {ts}, "books": [
+            {{"maker": "Fermi", "quoteAddress": "{PAMM}", "token1": "WBTC", "token2": "USDC",
+              "token1Address": "{WBTC}", "token2Address": "{USDC}",
+              "bids": [{{"price": 99900.0, "cumVolume": 1.0}}],
+              "asks": [{{"price": 100100.0, "cumVolume": 1.0}}]}}
+        ]}}"#
     )
+}
+
+/// A frame captured verbatim from the live stream (2026-10-16); the file name carries the frame's
+/// `ts` field.
+const CAPTURED_MESSAGE: &str =
+    include_str!("test_responses/pamm_price_levels_v2_1792115918290990905.json");
+
+/// The books of the captured live frame.
+pub(super) fn captured_books() -> Vec<TitanBook> {
+    serde_json::from_str::<TitanPriceLevelMessage>(CAPTURED_MESSAGE)
+        .expect("the captured frame parses")
+        .books
+}
+
+/// Every captured book `maker` quoted, in capture order.
+pub(super) fn captured_books_of(maker: &str) -> Vec<TitanBook> {
+    let books: Vec<TitanBook> = captured_books()
+        .into_iter()
+        .filter(|book| book.maker.as_deref() == Some(maker))
+        .collect();
+    assert!(!books.is_empty(), "no captured book of {maker}");
+    books
+}
+
+/// The captured book `maker` quoted for `token1`/`token2`.
+pub(super) fn captured_book(maker: &str, token1: &str, token2: &str) -> TitanBook {
+    captured_books_of(maker)
+        .into_iter()
+        .find(|book| book.token1 == token1 && book.token2 == token2)
+        .expect("captured book")
+}
+
+/// A frame stamped with `block`/`ts` carrying every captured book of `maker`, each verbatim from
+/// the capture — so a stream reading it parses what Titan actually sent, including the venue
+/// address Titan streams the books under.
+pub(super) fn captured_frame_text(maker: &str, block: u64, ts: u64) -> String {
+    let frame: serde_json::Value =
+        serde_json::from_str(CAPTURED_MESSAGE).expect("the captured frame parses");
+    let books: Vec<serde_json::Value> = frame["books"]
+        .as_array()
+        .expect("the capture carries books")
+        .iter()
+        .filter(|book| book["maker"] == maker)
+        .cloned()
+        .collect();
+    assert!(!books.is_empty(), "no captured book of {maker}");
+    serde_json::json!({ "slot": 1, "block": block, "ts": ts, "books": books }).to_string()
 }

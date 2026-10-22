@@ -1,0 +1,322 @@
+use std::{collections::HashSet, future::Future, sync::Arc};
+
+use tokio::time::Duration;
+use tycho_common::Bytes;
+
+use crate::{
+    book::{
+        all_pairs::{ComponentLayout, QuoteRule},
+        BookFeedConfig, BookSnapshot, ReceivedAt,
+    },
+    rfq::{
+        constants::DEFAULT_QUOTE_TIMEOUT,
+        protocols::hashflow::{
+            client::HashflowClient, source::HashflowBookSource, FALLBACK_PROTOCOL_SYSTEM,
+            PROTOCOL_SYSTEM,
+        },
+    },
+    snapshot_feed::{
+        errors::FeedError,
+        http::{default_http_feed_config, run_http_poll_feed, HttpFeedConfig},
+        Publisher, SnapshotFeed,
+    },
+};
+
+/// Hashflow's book feed: polls the market makers' price levels over Hashflow's taker API and
+/// publishes every poll as a complete [`BookSnapshot`]. Built through [`HashflowFeedBuilder`].
+#[derive(Clone, Debug)]
+pub struct HashflowFeed {
+    feed_config: HttpFeedConfig,
+    source: HashflowBookSource,
+}
+
+/// Builds a [`HashflowFeed`] from the shared [`BookFeedConfig`] and Hashflow's API credentials.
+pub struct HashflowFeedBuilder {
+    protocol_system: &'static str,
+    component_layout: ComponentLayout<QuoteRule>,
+    book_config: BookFeedConfig,
+    usd_quote_tokens: Arc<HashSet<Bytes>>,
+    auth_user: String,
+    auth_key: String,
+    feed_config: HttpFeedConfig,
+    quote_timeout: Duration,
+}
+
+impl HashflowFeedBuilder {
+    pub fn new(
+        book_config: BookFeedConfig,
+        usd_quote_tokens: impl Into<Arc<HashSet<Bytes>>>,
+        auth_user: String,
+        auth_key: String,
+    ) -> Self {
+        Self {
+            book_config,
+            usd_quote_tokens: usd_quote_tokens.into(),
+            auth_user,
+            auth_key,
+            feed_config: Self::default_feed_config(),
+            quote_timeout: DEFAULT_QUOTE_TIMEOUT,
+            component_layout: ComponentLayout::PerPair,
+            protocol_system: PROTOCOL_SYSTEM,
+        }
+    }
+
+    /// The feed tuning a new builder starts from: the set every HTTP feed shares, since nothing
+    /// about Hashflow's cadence or response times has been measured. Spread from it to change one
+    /// field:
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use tycho_simulation::rfq::protocols::hashflow::feed::HashflowFeedBuilder;
+    /// # use tycho_simulation::snapshot_feed::http::HttpFeedConfig;
+    /// let tuned = HttpFeedConfig {
+    ///     poll_interval: Duration::from_secs(10),
+    ///     ..HashflowFeedBuilder::default_feed_config()
+    /// };
+    /// ```
+    pub fn default_feed_config() -> HttpFeedConfig {
+        default_http_feed_config()
+    }
+
+    /// Settles this venue's swaps through Tycho's `HashflowFallbackRouter`, which retries
+    /// against a solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self
+    }
+
+    /// Tune the price feed loop (poll cadence, request timeout, failure limit)
+    pub fn feed_config(mut self, feed_config: HttpFeedConfig) -> Self {
+        self.feed_config = feed_config;
+        self
+    }
+
+    /// Publishes Hashflow as one component for every pair its market makers price, which a route
+    /// may quote as often as `rule` allows — once per maker, since a maker's second quote prices
+    /// as if the first had not happened, or once for the venue where that independence is not
+    /// worth relying on.
+    ///
+    /// One component per market maker and pair otherwise.
+    pub fn all_pairs(mut self, rule: QuoteRule) -> Self {
+        self.component_layout = ComponentLayout::AllPairs(rule);
+        self
+    }
+
+    /// Deadline for binding quote requests.
+    pub fn quote_timeout(mut self, timeout: Duration) -> Self {
+        self.quote_timeout = timeout;
+        self
+    }
+
+    /// Fails for a chain with no numeric chain id, which is all Hashflow's API is addressed by.
+    /// Whether the venue prices that chain is Hashflow's own answer, and the first poll carries
+    /// it.
+    pub fn build(self) -> Result<HashflowFeed, FeedError> {
+        let chain_id = self.book_config.chain_id()?;
+        Ok(HashflowFeed {
+            feed_config: self.feed_config,
+            source: HashflowBookSource {
+                component_layout: self.component_layout,
+                protocol_system: self.protocol_system,
+                client: Arc::new(HashflowClient::new(
+                    None,
+                    chain_id,
+                    self.auth_user,
+                    self.auth_key,
+                    self.quote_timeout,
+                )),
+                book_config: self.book_config,
+                usd_quote_tokens: self.usd_quote_tokens,
+            },
+        })
+    }
+}
+
+impl SnapshotFeed for HashflowFeed {
+    type Snapshot = BookSnapshot<ReceivedAt>;
+    type Error = FeedError;
+
+    fn run(
+        self,
+        publisher: Publisher<Self::Snapshot>,
+    ) -> impl Future<Output = Result<(), FeedError>> + Send + 'static {
+        run_http_poll_feed(self.feed_config, publisher, self.source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, str::FromStr, time::Duration};
+
+    use dotenv::dotenv;
+    use num_bigint::BigUint;
+    use tokio::time::timeout;
+    use tycho_common::models::{protocol::GetAmountOutParams, Chain};
+
+    use super::*;
+    use crate::{book::test_token_map, snapshot_feed::SnapshotFeed};
+
+    #[tokio::test]
+    #[ignore = "hits Hashflow's live API; requires HASHFLOW_USER and HASHFLOW_KEY"]
+    async fn hashflow_api_polling() {
+        dotenv().expect("Missing .env file");
+        let user = std::env::var("HASHFLOW_USER").expect("HASHFLOW_USER not set");
+        let key = std::env::var("HASHFLOW_KEY").expect("HASHFLOW_KEY not set");
+
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+
+        let tokens = test_token_map(&[(&wbtc, "WBTC", 8), (&weth, "WETH", 18)]);
+
+        let quote_tokens = HashSet::from([
+            Bytes::from_str("0xa0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(), // USDC
+            Bytes::from_str("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap(), // USDT
+        ]);
+
+        // $1 minimum TVL - very low to capture most pairs
+        let book_config =
+            BookFeedConfig { chain: Chain::Ethereum, tokens: Arc::new(tokens), min_tvl_usd: 1.0 };
+        let feed = HashflowFeedBuilder::new(book_config, quote_tokens, user, key)
+            .feed_config(HttpFeedConfig {
+                poll_interval: Duration::from_secs(1),
+                ..HashflowFeedBuilder::default_feed_config()
+            })
+            .quote_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let (publisher, mut rx) = Publisher::channel();
+        let _feed = tokio::spawn(feed.run(publisher));
+
+        let pairs = timeout(Duration::from_secs(10), async {
+            loop {
+                rx.changed().await.expect("feed ended");
+                if let Some(snapshot) = rx.borrow_and_update().clone() {
+                    assert!(snapshot.anchor.0.timestamp() > 0);
+                    return snapshot.books;
+                }
+            }
+        })
+        .await
+        .expect("no book received within 10 seconds");
+
+        assert!(
+            !pairs.is_empty(),
+            "Should have received at least 1 component with $1 TVL threshold"
+        );
+        println!("Received {} components in this book", pairs.len());
+        for pair in pairs.values() {
+            assert_eq!(pair.component.protocol_system, "rfq:hashflow");
+            // A streamed state carries a market maker's levels: it can quote a spot price.
+            let [base, quote] = pair.component.tokens.as_slice() else {
+                panic!("expected exactly two tokens")
+            };
+            assert!(
+                pair.state
+                    .spot_price(base, quote)
+                    .unwrap() >
+                    0.0
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "hits Hashflow's live API; requires HASHFLOW_KEY"]
+    async fn request_binding_quote() {
+        let wbtc = Bytes::from_str("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap();
+        let weth = Bytes::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+
+        let auth_user = String::from("propellerheads");
+        dotenv().expect("Missing .env file");
+        let auth_key = env::var("HASHFLOW_KEY").unwrap();
+
+        let book_config = BookFeedConfig {
+            chain: Chain::Ethereum,
+            tokens: Arc::new(test_token_map(&[(&weth, "WETH", 18), (&wbtc, "WBTC", 8)])),
+            min_tvl_usd: 10.0,
+        };
+        let feed = HashflowFeedBuilder::new(book_config, HashSet::new(), auth_user, auth_key)
+            .quote_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let router = Bytes::from_str("0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35").unwrap();
+
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from(1_000000000000000000u64),
+            token_in: weth.clone(),
+            token_out: wbtc.clone(),
+            sender: router.clone(),
+            receiver: router.clone(),
+            origin: None,
+        };
+        let client = &feed.source.client;
+        let market_makers = client
+            .fetch_market_makers()
+            .await
+            .unwrap();
+        // The request goes to one maker and the API substitutes no other, so it has to be a
+        // maker whose own ladder covers the amount; the deepest one leaves the most room for the
+        // book to move between the two calls.
+        let market_maker = client
+            .fetch_price_levels(&market_makers)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|(name, levels)| {
+                let (depth, _) = levels
+                    .iter()
+                    .find(|level| level.pair.base_token == weth && level.pair.quote_token == wbtc)?
+                    .levels
+                    .totals();
+                (depth >= 1.0).then_some((name, depth))
+            })
+            .max_by(|(_, deepest), (_, depth)| deepest.total_cmp(depth))
+            .expect("no market maker quotes one WETH into WBTC")
+            .0;
+        let quote = client
+            .request_binding_quote(&params, market_maker)
+            .await
+            .unwrap();
+
+        assert_eq!(quote.base_token, weth);
+        assert_eq!(quote.quote_token, wbtc);
+        assert_eq!(quote.amount_in, BigUint::from(1_000000000000000000u64));
+
+        // // Assuming the BTC - WETH price doesn't change too much at the time of running this
+        assert!(quote.amount_out > BigUint::from(3000000u64));
+
+        assert_eq!(quote.quote_attributes.len(), 12);
+        let expected_attributes = [
+            "pool",
+            "external_account",
+            "trader",
+            "effective_trader",
+            "base_token",
+            "quote_token",
+            "base_token_amount",
+            "quote_token_amount",
+            "quote_expiry",
+            "nonce",
+            "tx_id",
+            "signature",
+        ];
+        for attr in expected_attributes {
+            assert!(
+                quote
+                    .quote_attributes
+                    .contains_key(attr),
+                "Missing attribute: {attr}"
+            );
+        }
+        assert_eq!(
+            quote
+                .quote_attributes
+                .get("trader")
+                .unwrap(),
+            &router
+        );
+    }
+}

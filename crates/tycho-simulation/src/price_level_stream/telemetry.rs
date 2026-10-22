@@ -1,7 +1,7 @@
 //! Metrics of the price level stream, emitted through the `metrics` facade. A consumer that
 //! installs a `metrics` recorder receives them with no further setup; without a recorder every
 //! call is a no-op. Label values are registered venue names or the enumerations below, never
-//! values from the wire, with one exception: an auto-detected venue is named by its address, so
+//! values from the stream, with one exception: an auto-detected venue is named by its address, so
 //! its `venue` label carries the address the frame named it by.
 
 use metrics::{counter, gauge, histogram};
@@ -12,11 +12,11 @@ pub(super) const FRAMES_ACCEPTED: &str = "price_level_stream_frames_accepted_tot
 /// Counter, label `reason`, one of [`RejectReason`]. Incremented once per frame the stream drops.
 pub(super) const FRAMES_REJECTED: &str = "price_level_stream_frames_rejected_total";
 /// Histogram, no labels. The age of every accepted frame at acceptance, in seconds: the local
-/// wall clock minus the frame's wire `timestamp`, negative when the frame is stamped ahead of
+/// wall clock minus the frame's `timestamp`, negative when the frame is stamped ahead of
 /// the local clock. It measures Titan's lag plus delivery delay, and a clock skew between Titan
 /// and this host; a frame older than one slot yields states that refuse to quote.
 pub(super) const FRAME_AGE: &str = "price_level_stream_frame_age_seconds";
-/// Gauge, label `venue`. The wire `timestamp` of the newest accepted frame that carried the
+/// Gauge, label `venue`. The frame's `timestamp` of the newest accepted frame that carried the
 /// venue, in seconds since the Unix epoch; 0 until the first such frame. `venue` is the
 /// registered venue name, or the address of an auto-detected venue.
 pub(super) const LAST_SEEN: &str = "price_level_stream_last_seen_timestamp_seconds";
@@ -32,10 +32,21 @@ pub(super) const SERVING_STATE: &str = "price_level_stream_serving_state";
 /// Counter, label `reason`, one of [`ReconnectReason`]. Incremented once per Titan connection
 /// the stream gives up on, or fails to establish, before backing off.
 pub(super) const RECONNECTS: &str = "price_level_stream_reconnects_total";
-/// Counter, no labels. Incremented once per pAMM entry in an accepted frame that names a venue
-/// which is neither registered nor served under auto-detection.
+/// Counter, no labels. Incremented once per venue an accepted frame carries books of that is
+/// neither registered nor served under auto-detection — once per venue and frame, however many
+/// books the frame carried for it.
 pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
     "price_level_stream_unregistered_pamm_entries_total";
+/// Counter, label `reason`, one of [`SkipReason`]. Incremented once per book of a served venue
+/// whose token addresses do not name a pair this consumer can serve, so the book is not priced at
+/// all. Every reason starts at zero. The address itself is never a label — it appears only in the
+/// accompanying DEBUG log.
+pub(super) const SKIPPED_BOOKS: &str = "price_level_stream_skipped_books_total";
+/// Counter, label `reason`, one of [`SideRejectReason`]. Incremented once per book side whose
+/// levels are not a usable price function and which is therefore dropped whole, leaving that one
+/// trade direction unquotable while the opposite one is still served. Every reason starts at
+/// zero.
+pub(super) const REJECTED_SIDES: &str = "price_level_stream_rejected_sides_total";
 
 /// The `reason` label of [`FRAMES_REJECTED`]: why the stream dropped a frame. The label value
 /// is the variant name in snake case.
@@ -44,11 +55,11 @@ pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
 pub(super) enum RejectReason {
     /// The text did not parse as a frame.
     ParseError,
-    /// The wire `timestamp` is `stale_after` old or older.
+    /// The frame's `timestamp` is `stale_after` old or older.
     TooOld,
-    /// The wire `timestamp` is more than one slot ahead of the local wall clock.
+    /// The frame's `timestamp` is more than one slot ahead of the local wall clock.
     InFuture,
-    /// The wire `timestamp` is older than the newest accepted frame's.
+    /// The frame's `timestamp` is older than the newest accepted frame's.
     OutOfOrder,
     /// The block is below the newest accepted block.
     BlockRegression,
@@ -74,6 +85,49 @@ pub(super) enum ReconnectReason {
     ConnectFailed,
     /// The handshake did not complete within the connect timeout.
     ConnectTimeout,
+}
+
+/// The `reason` label of [`SKIPPED_BOOKS`]: why a book named no pair this consumer can serve.
+/// The label value is the variant name in snake case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub(super) enum SkipReason {
+    /// One of the two addresses is not 20 bytes, so it identifies no asset. A producer-side
+    /// fault, kept apart from an unadmitted token so it cannot hide inside the ordinary miss rate.
+    MalformedAddress,
+    /// The consumer's token metadata does not carry one of the two addresses.
+    UnadmittedToken,
+    /// Both addresses name one asset, so the book names no pair to quote.
+    OneAssetPair,
+}
+
+impl SkipReason {
+    /// Every reason, so [`init_book_counters`] can register all of them. A new variant belongs
+    /// here too.
+    const ALL: [Self; 3] = [Self::MalformedAddress, Self::UnadmittedToken, Self::OneAssetPair];
+}
+
+/// The `reason` label of [`REJECTED_SIDES`]: why a book side was dropped whole. The label value
+/// is the variant name in snake case. Mirrors the conversion's own rejection reasons, which
+/// [`tracker`](super::tracker) maps onto these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub(super) enum SideRejectReason {
+    /// A level's stream price or volume is not a finite positive number.
+    UnsupportedLevel,
+    /// A level's amount overflowed `f64` to infinity.
+    NonFiniteAmount,
+    /// A level rounds to a zero amount, which is not a quote.
+    ZeroAmount,
+    /// Two levels round to the same input amount but disagree on the output.
+    ConflictingKnots,
+}
+
+impl SideRejectReason {
+    /// Every reason, so [`init_book_counters`] can register all of them. A new variant belongs
+    /// here too.
+    const ALL: [Self; 4] =
+        [Self::UnsupportedLevel, Self::NonFiniteAmount, Self::ZeroAmount, Self::ConflictingKnots];
 }
 
 /// The stream's serving state, exported as the numeric value of `SERVING_STATE`.
@@ -109,6 +163,13 @@ pub(super) fn record_stale_removal(venue: &str) {
     counter!(STALE_REMOVALS, "venue" => venue.to_string()).increment(1);
 }
 
+/// Registers the [`STALE_REMOVALS`] series of `venue` at zero, so a venue that never loses a
+/// component to staleness reads as a visible zero rather than a missing series — matching the
+/// per-venue gauges, which are set to zero for the same reason.
+pub(super) fn init_stale_removals(venue: &str) {
+    counter!(STALE_REMOVALS, "venue" => venue.to_string()).increment(0);
+}
+
 pub(super) fn record_serving_state(state: ServingState) {
     gauge!(SERVING_STATE).set(state as u8 as f64);
 }
@@ -119,6 +180,26 @@ pub(super) fn record_reconnect(reason: ReconnectReason) {
 
 pub(super) fn record_unregistered_pamm() {
     counter!(UNREGISTERED_PAMM_ENTRIES).increment(1);
+}
+
+pub(super) fn record_skipped_book(reason: SkipReason) {
+    counter!(SKIPPED_BOOKS, "reason" => <&'static str>::from(reason)).increment(1);
+}
+
+pub(super) fn record_rejected_side(reason: SideRejectReason) {
+    counter!(REJECTED_SIDES, "reason" => <&'static str>::from(reason)).increment(1);
+}
+
+/// Registers every `reason` series of [`SKIPPED_BOOKS`] and [`REJECTED_SIDES`] at zero, so a
+/// reason that never fires reads as a visible zero instead of a missing series — as the
+/// per-venue gauges do for a venue that never appears.
+pub(super) fn init_book_counters() {
+    for reason in SkipReason::ALL {
+        counter!(SKIPPED_BOOKS, "reason" => <&'static str>::from(reason)).increment(0);
+    }
+    for reason in SideRejectReason::ALL {
+        counter!(REJECTED_SIDES, "reason" => <&'static str>::from(reason)).increment(0);
+    }
 }
 
 /// Reads a `DebuggingRecorder` snapshot back into plain values for assertions.
@@ -185,6 +266,26 @@ pub(super) mod recorded {
         }
     }
 
+    /// Whether the counter series was registered at all, whatever its value. A series registered
+    /// at zero and a series that was never touched both read as 0 through [`counter_value`], so
+    /// only this tells a visible zero from a missing series.
+    pub(in super::super) fn counter_registered(
+        snapshot: &SnapshotMap,
+        name: &str,
+        label_pairs: &[(&str, &str)],
+    ) -> bool {
+        snapshot.contains_key(&(MetricKind::Counter, name.to_string(), labels(label_pairs)))
+    }
+
+    /// Every label value recorded on any metric, for checking that no value from the stream became
+    /// a label.
+    pub(in super::super) fn all_label_values(snapshot: &SnapshotMap) -> Vec<&str> {
+        snapshot
+            .keys()
+            .flat_map(|(_kind, _name, labels)| labels.values().map(String::as_str))
+            .collect()
+    }
+
     pub(in super::super) fn gauge_value(
         snapshot: &SnapshotMap,
         name: &str,
@@ -232,6 +333,8 @@ mod tests {
             record_serving_state(ServingState::Serving);
             record_reconnect(ReconnectReason::IdleTimeout);
             record_unregistered_pamm();
+            record_skipped_book(SkipReason::MalformedAddress);
+            record_rejected_side(SideRejectReason::ConflictingKnots);
         });
         assert_eq!(counter_value(&snapshot, "price_level_stream_frames_accepted_total", &[]), 1);
         assert_eq!(
@@ -283,5 +386,47 @@ mod tests {
             counter_value(&snapshot, "price_level_stream_unregistered_pamm_entries_total", &[]),
             1
         );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_skipped_books_total",
+                &[("reason", "malformed_address")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                "price_level_stream_rejected_sides_total",
+                &[("reason", "conflicting_knots")]
+            ),
+            1
+        );
+    }
+
+    /// The `reason` label values of the two book counters are the contract with dashboards, so
+    /// they are spelled out here rather than derived from the enums that emit them. Every one
+    /// exists at zero before anything is skipped, so a reason that never fires is a visible zero.
+    #[test]
+    fn book_counters_start_at_zero_under_every_reason() {
+        let ((), snapshot) = record_async(async { init_book_counters() });
+
+        for reason in ["malformed_address", "unadmitted_token", "one_asset_pair"] {
+            let labels = [("reason", reason)];
+            assert!(
+                counter_registered(&snapshot, SKIPPED_BOOKS, &labels),
+                "skipped_books {reason} is a missing series"
+            );
+            assert_eq!(counter_value(&snapshot, SKIPPED_BOOKS, &labels), 0);
+        }
+        for reason in ["unsupported_level", "non_finite_amount", "zero_amount", "conflicting_knots"]
+        {
+            let labels = [("reason", reason)];
+            assert!(
+                counter_registered(&snapshot, REJECTED_SIDES, &labels),
+                "rejected_sides {reason} is a missing series"
+            );
+            assert_eq!(counter_value(&snapshot, REJECTED_SIDES, &labels), 0);
+        }
     }
 }

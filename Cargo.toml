@@ -20,7 +20,7 @@ members = [
 exclude = ["crates/tycho-execution/substreams"]
 
 [workspace.package]
-version = "0.461.1"
+version = "0.480.0"
 edition = "2021"
 license-file = "LICENSE.md"
 repository = "https://github.com/propeller-heads/tycho"
@@ -32,21 +32,22 @@ readme = "README.md"
 
 [workspace.dependencies]
 # --- Internal crates (path deps) ---
-tycho                  = { path = "crates/tycho",                  version = "0.461.1" }
-tycho-common           = { path = "crates/tycho-common",           version = "0.461.1" }
-tycho-client           = { path = "crates/tycho-client",           version = "0.461.1" }
-tycho-protobuf         = { path = "crates/tycho-protobuf",         version = "0.461.1" }
-tycho-storage          = { path = "crates/tycho-storage",          version = "0.461.1" }
-tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.461.1" }
-tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.461.1" }
-tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.461.1" }
-tycho-test             = { path = "crates/tycho-test",             version = "0.461.1" }
-tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.461.1" }
-tycho-execution        = { path = "crates/tycho-execution",        version = "0.461.1" }
+tycho                  = { path = "crates/tycho",                  version = "0.480.0" }
+tycho-common           = { path = "crates/tycho-common",           version = "0.480.0" }
+tycho-client           = { path = "crates/tycho-client",           version = "0.480.0" }
+tycho-protobuf         = { path = "crates/tycho-protobuf",         version = "0.480.0" }
+tycho-storage          = { path = "crates/tycho-storage",          version = "0.480.0" }
+tycho-ethereum         = { path = "crates/tycho-ethereum",         version = "0.480.0" }
+tycho-indexer          = { path = "crates/tycho-indexer",          version = "0.480.0" }
+tycho-simulation       = { path = "crates/tycho-simulation",       version = "0.480.0" }
+tycho-test             = { path = "crates/tycho-test",             version = "0.480.0" }
+tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.480.0" }
+tycho-execution        = { path = "crates/tycho-execution",        version = "0.480.0" }
 
 # --- Serialization/Deserialization ---
 serde = { version = "1.0.204", features = ["rc", "derive"] }
 serde_json = "1.0.120"
+serde_with = "3.16.1"
 toml = "0.8"
 typetag = "0.2.21"
 uuid = { version = "1.4.1", features = ["serde", "macro-diagnostics"] }
@@ -57,7 +58,7 @@ futures = "0.3.31"
 futures03 = { package = "futures", version = "0.3.31", features = ["compat"] }
 async-trait = "0.1.88"
 async-stream = "0.3.6"
-# Pinned at 0.20 for tycho-client; simulation's rfq feature uses 0.28 directly (separate semver)
+# Pinned at 0.20 for tycho-client; simulation's book-feeds feature uses 0.28 directly (separate semver)
 tokio-tungstenite = { version = "0.20.0", features = ["native-tls"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
@@ -79,7 +80,7 @@ ethabi = "18.0.0"
 base64 = "0.22.1"
 bytes = "1.11.1"
 chrono = { version = "0.4.26", default-features = false, features = ["serde", "clock", "std"] }
-derive_more = { version = "2.0", features = ["debug", "deref"] }
+derive_more = { version = "2.0", features = ["debug", "deref", "from"] }
 hex = "0.4.3"
 hex-literal = "0.4.1"
 rand = "0.8.5"

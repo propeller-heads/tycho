@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.5
+
+- Add `bsc-ekubo-v3.yaml` and `base-ekubo-v3.yaml` manifests that pass the
+  chains' SignedExclusiveSwap address (`0x550CFe…1D09`) to `map_components`, so
+  their exclusive pools get the `is_exclusive` attribute. Neither chain has a
+  Ve33 deployment.
+
 ## v0.2.4
 
 - Read the SignedExclusiveSwap extension address from the `map_components`
