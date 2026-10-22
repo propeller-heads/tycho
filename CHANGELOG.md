@@ -1,3 +1,23 @@
+## [0.478.0](https://github.com/propeller-heads/tycho/compare/0.477.0...0.478.0) (2026-10-22)
+
+
+### Features
+
+* **execution:** encode pancakeswap_infinity_cl_hooks swaps ([1245f79](https://github.com/propeller-heads/tycho/commit/1245f79384f2883637bfe8d1d79a08057159bfa1))
+* PancakeSwap Infinity CLAlphaHook pools on BSC ([#1605](https://github.com/propeller-heads/tycho/issues/1605)) ([9b6fa4e](https://github.com/propeller-heads/tycho/commit/9b6fa4e9b896c1839665b418ccfe2fe028309c9b))
+* **simulation:** add a native CLAlphaHook handler for Infinity pools ([d527b7d](https://github.com/propeller-heads/tycho/commit/d527b7d89c33e7d7cbffd0194dce146a9b84d9c4))
+* **simulation:** charge CLAlphaHook swaps the measured hook gas ([3b0ce22](https://github.com/propeller-heads/tycho/commit/3b0ce225acbf842c45d670fae7ed759e5e667f0e))
+* **substreams:** index CLAlphaHook pools on BSC ([8664ced](https://github.com/propeller-heads/tycho/commit/8664ced908a00e12e3c0e9138ec0ba8aa5b77631))
+* **testing:** register pancakeswap_infinity_cl_hooks in test consumers ([db457e0](https://github.com/propeller-heads/tycho/commit/db457e06ad4cb3415ff2338680428adf3cf2172c))
+
+
+### Bug Fixes
+
+* **simulation:** gate CLAlphaHook pools on the last block's timestamp ([4a46830](https://github.com/propeller-heads/tycho/commit/4a46830321c71ffc5c90045d5c8515f1fc6273c7))
+* **simulation:** never decode an Infinity hooks pool as hookless ([bb29a84](https://github.com/propeller-heads/tycho/commit/bb29a84868757de1aaa10ac809c9056c44cca1a2))
+* **simulation:** refuse query_pool_swap while a hook disables swaps ([16156a3](https://github.com/propeller-heads/tycho/commit/16156a32553665cfd6b1a715755c5a7952233f74))
+* **testing:** copy sibling proto dirs into the harness image ([c19e204](https://github.com/propeller-heads/tycho/commit/c19e20439d887fc8a6467892a5d01c21d1074cff))
+
 ## [0.477.0](https://github.com/propeller-heads/tycho/compare/0.476.0...0.477.0) (2026-10-22)
 
 

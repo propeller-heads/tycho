@@ -18,7 +18,8 @@ struct Params {
     vault: String,
 }
 
-fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
+/// Decodes a 20-byte address given as hex without the `0x` prefix.
+pub fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
     let bytes =
         hex::decode(value).map_err(|err| anyhow::anyhow!("Invalid {name} {value:?}: {err}"))?;
     if bytes.len() != 20 {
@@ -85,7 +86,20 @@ fn pool_created(
     if parameters::has_swap_hooks(&event.parameters) || parameters::is_dynamic_fee(fee) {
         return None;
     }
+    Some(pool_component(event, tx, log, pool_manager, vault))
+}
 
+/// The component, attributes and zero balances of one initialized pool, without any filtering.
+///
+/// `hooks` is the zero address, so `UniswapV4State` treats the pool as hookless; the real hook,
+/// if any, is `hook_address`. A package that simulates the hook overrides `hooks`.
+pub fn pool_component(
+    event: Initialize,
+    tx: &eth::TransactionTrace,
+    log: &eth::Log,
+    pool_manager: &[u8],
+    vault: &[u8],
+) -> TransactionEntityChanges {
     let component_id = event.id.to_vec().to_hex();
     let (fee_zero2one, fee_one2zero) = initial_protocol_fees(&event, tx, log, pool_manager);
 
@@ -113,7 +127,7 @@ fn pool_created(
         static_att.push(attribute("hook_address", event.hooks.to_vec()));
     }
 
-    Some(TransactionEntityChanges {
+    TransactionEntityChanges {
         tx: Some(tx.into()),
         entity_changes: vec![EntityChanges {
             component_id: component_id.clone(),
@@ -158,7 +172,7 @@ fn pool_created(
                 component_id: component_id.as_bytes().to_vec(),
             })
             .collect(),
-    })
+    }
 }
 
 /// Protocol fee halves from the slot0 write `initialize` makes just before emitting the log, since

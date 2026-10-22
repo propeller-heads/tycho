@@ -6,18 +6,21 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::Balances,
+        protocol_sim::{Balances, BlockContext},
     },
     Bytes,
 };
 
 use crate::evm::{
     protocol::uniswap_v4::{
-        hooks::models::{
-            AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
-            BeforeSwapParameters, SwapParams, WithGasEstimate,
+        hooks::{
+            models::{
+                AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
+                BeforeSwapParameters, SwapParams, WithGasEstimate,
+            },
+            utils::{has_permission, HookOptions},
         },
-        state::UniswapV4State,
+        state::{UniswapV4State, PM_PER_HOOK_CALL_OVERHEAD},
     },
     simulation::PendingOverrides,
 };
@@ -29,6 +32,39 @@ use crate::evm::{
 /// including spot price adjustments, swap constraints, and state transitions.
 pub trait HookHandler: Debug + Send + Sync + 'static {
     fn address(&self) -> Address;
+
+    /// Whether the pool manager calls the hook for `option`.
+    ///
+    /// Uniswap V4 encodes a hook's permissions in the low bits of its address, which is what the
+    /// default reads. A hook whose pool manager takes the permissions from somewhere else, such as
+    /// the `parameters` bitmap of a PancakeSwap Infinity pool key, overrides this.
+    fn has_permission(&self, option: HookOptions) -> bool {
+        has_permission(self.address(), option)
+    }
+
+    /// Advances the hook to the block a quote is expected to execute in.
+    ///
+    /// Returns `true` when the hook's quoting behavior changed, so the pool must be re-emitted.
+    /// Hooks whose behavior does not depend on the block keep the default, which does nothing.
+    fn apply_block(&mut self, _block: &BlockContext) -> bool {
+        false
+    }
+
+    /// Whether the hook lets the pool swap at all in the current execution block. While this is
+    /// `false` the pool offers no liquidity.
+    fn swaps_enabled(&self) -> bool {
+        true
+    }
+
+    /// Gas the pool manager spends on each call to this hook beyond what the hook's own gas
+    /// estimates cover: encoding the call, the call itself and decoding the result.
+    ///
+    /// The default is the overhead measured for the Uniswap V4 PoolManager dispatching to a
+    /// VM-simulated hook. A hook whose estimates already cover the whole call returns zero.
+    fn pool_manager_call_overhead(&self) -> u64 {
+        PM_PER_HOOK_CALL_OVERHEAD
+    }
+
     /// Simulates the beforeSwap Solidity behaviour
     fn before_swap(
         &self,
