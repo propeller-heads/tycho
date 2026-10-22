@@ -1843,10 +1843,11 @@ pub struct DeltaCatchUpRequestBody {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ToSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DeltaCatchUpRequestResponse {
-    /// The missed messages, oldest first, as the WebSocket sent them: revert messages and full
-    /// blocks. Applied in order to the client's state at `from_block_hash`, they give the state at
-    /// `to_block_hash`; the last one may be a revert to that block. Empty when the two blocks are
-    /// the same.
+    /// The missed messages, in order, each exactly as the WebSocket sent it to a full-block
+    /// subscriber with the same `include_state`. Blocks the gap held that a revert orphaned are
+    /// left out. The last message may be a revert to `to_block_hash`. Empty when the two blocks
+    /// are the same. A path containing a revert inherits what revert messages don't restore, so
+    /// tycho-client takes a snapshot instead of applying it.
     Available {
         #[schema(value_type = Vec<Object>)]
         messages: Vec<BlockAggregatedChanges>,
