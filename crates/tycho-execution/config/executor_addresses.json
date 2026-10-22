@@ -31,7 +31,9 @@
     "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9",
     "fallback:rfq:metric": "0x3067880b419209FC6e961F08E0cDFfC1F21d2873",
     "fallback:rfq:bebop": "0x4dC7b66A563cEB85D3cD5998294c72ce7026894a",
-    "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28"
+    "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28",
+    "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
+    "fallback:rfq:liquorice": "0xCe74a3c15cE5d86c30aD1f02CD0b18582Fbb1C65"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -50,7 +52,8 @@
     "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De",
     "fallback:rfq:metric": "0x8e0d294fC45fdFb6De21ae533132872E37F22B5b",
     "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B",
-    "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25"
+    "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
+    "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -68,7 +71,8 @@
     "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
     "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
     "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF",
-    "fallback:rfq:metric": "0x918335AF35DdDFad0C6E0d3beF95A6F9a0F02C3c"
+    "fallback:rfq:metric": "0x918335AF35DdDFad0C6E0d3beF95A6F9a0F02C3c",
+    "fallback:rfq:native": "0x9BAC15444f4ec473f045D47C03701469B59D7F9e"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -82,7 +86,8 @@
     "ring_swap_v2": "0x5De5D17985716AB919b806023Bd0Ed294450FFd7",
     "fallback:rfq:metric": "0x78FddACdd167d25efb81d5a45a9A3003Fd8c0643",
     "lunarbase": "0x99576B7C64Fe225785bd69E91fc9dC857Dd7AaA5",
-    "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d"
+    "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d",
+    "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -113,7 +118,8 @@
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
     "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
     "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D",
-    "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C"
+    "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C",
+    "fallback:rfq:native": "0xcfa779974cCDaDD36A0D5dF6Ca61020C74aa038D"
   },
   "arc": {
     "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
