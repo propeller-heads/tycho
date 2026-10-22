@@ -67,9 +67,11 @@ TychoStreamBuilder (stream.rs)
    included); and the walk ends at the target (so an empty path only when the last synced block is
    the target, and a path may end with a revert to it). A verified path that contains a revert falls
    back too. Revert messages don't restore native balances, code, tokens, TVL or DCI data, and can
-   restore attributes wrongly, so for now a client that missed a reorg resyncs from a snapshot; once
-   reverts restore everything, dropping the two revert checks in `catch_up_path` lets catch-up run
-   through them (a revert `T` then needs the path to its own block). `apply_catch_up` then runs each
+   restore attributes wrongly, so for now a client resyncs from a snapshot when a reorg replaced a
+   block it had delivered (its path starts with a revert) or `T` is a revert; a reorg of blocks it
+   never had still catches up; once reverts restore everything, dropping the two revert checks in
+   `catch_up_path` lets catch-up run through them (a revert `T` then needs the path to its own
+   block). `apply_catch_up` then runs each
    message, then `T`, through `handle_block` and merges the results into one message with `T`'s
    header, which leaves like any first message (setting `last_synced_block` and
    `synced_fingerprint`). Any failure is logged once with a `CatchUpSkipped` reason, at warn for an
