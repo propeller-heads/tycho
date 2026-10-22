@@ -78,7 +78,7 @@ async fn main() {
 
 ### Snapshot jitter
 
-When the Tycho server or one of its extractors restarts, every client restarts its synchronizers at the same moment. To spread the load, a restarted synchronizer waits a random time in `[0, jitter]` before it requests a new snapshot. It discards deltas during the wait and takes the snapshot at the next block. The first start has no delay. A stream with `no_state(true)` requests no snapshot and has no delay. Neither does a restart that continues from the next expected block, as long as the server reports the same extractor fingerprint as before. After an extractor upgrade the fingerprint differs, so the client waits and then takes a snapshot.
+When the Tycho server or one of its extractors restarts, every client restarts its synchronizers at the same moment. To spread the load, a restarted synchronizer waits a random time in `[0, jitter]` before it requests a new snapshot. It discards deltas during the wait and takes the snapshot at the next block. The first start has no delay. A stream with `no_state(true)` requests no snapshot and has no delay. Neither does a restart that continues from the next expected block, as long as the server reports the same extractor fingerprint as before. After an extractor upgrade the fingerprint differs, so the client waits and then takes a snapshot. Every Tycho indexer release changes the fingerprint, so each release makes every client take one snapshot.
 
 The default jitter is 60 seconds. Use `snapshot_jitter` on the builder to change it. The client raises a value below 5 seconds to 5 seconds:
 
