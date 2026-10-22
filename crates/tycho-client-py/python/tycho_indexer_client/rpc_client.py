@@ -299,7 +299,8 @@ class TychoRPCClient:
             ``DeltaCatchUp.Available`` with the messages, ``DeltaCatchUp.Unavailable`` with
             the reason the server cannot serve them, or ``DeltaCatchUp.Unsupported`` when the
             server answers 404 (it predates the endpoint). Resync from a snapshot unless the
-            answer is ``Available``.
+            answer is ``Available`` and none of its messages is a revert, as the Rust client
+            does: revert messages don't restore everything the reverted blocks changed yet.
 
         Raises:
             TychoRPCError: On any other failed request, e.g. 400 for an extractor the server

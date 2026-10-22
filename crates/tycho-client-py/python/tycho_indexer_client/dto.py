@@ -557,7 +557,9 @@ class DeltaCatchUpUnavailable(str, Enum):
 class DeltaCatchUp:
     """Answer of ``TychoRPCClient.get_delta_catch_up``: an instance of ``Available``,
     ``Unavailable`` or ``Unsupported``, each with a ``status`` naming it. Only ``Available``
-    lets the client continue without a snapshot."""
+    lets the client continue without a snapshot, and only when none of its messages is a
+    revert: revert messages don't restore everything the reverted blocks changed yet, so the
+    Rust client resyncs from a snapshot instead."""
 
     class Available(BaseModel):
         """The missed messages, oldest first, as the WebSocket sent them: revert messages
