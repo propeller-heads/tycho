@@ -75,8 +75,9 @@ TychoStreamBuilder (stream.rs)
    `synced_fingerprint`). Any failure is logged once with a `CatchUpSkipped` reason, at warn for an
    RPC error or an answer that is not a path to the target and at info otherwise, and takes the
    snapshot path, delay included.
-   In full-block mode, a later live message that is not a revert and whose parent is not the last
-   synced block shows that the subscription lost messages (e.g. on a full buffer; `WsDeltasClient`
+   In full-block mode, a later live block whose parent is not the last synced block, or a revert
+   to a block the client never had (above the last synced block, or at its height with another
+   hash), shows that the subscription lost messages (e.g. on a full buffer; `WsDeltasClient`
    delivers nothing once a subscription is ending). It ends the subscription before it is applied,
    so the next one catches up, or snapshots, from the last synced block.
    On a restart after a synced block that requests a snapshot (snapshots on and at least one
