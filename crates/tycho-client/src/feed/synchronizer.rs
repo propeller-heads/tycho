@@ -6012,10 +6012,17 @@ mod test {
         assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
     }
 
+    // The client applied block 4. Its subscription then delivers 5 and `after_the_gap` and ends:
+    // the deltas client lost block 6, which sets x to 0x06. The next subscription starts at block
+    // 10.
+    #[rstest]
+    #[case::a_later_block(make_block_changes(7, None))]
+    // Block 6 of another branch: the right number, but it extends a block the client never had.
+    #[case::a_block_on_another_parent(fork_block(6, 1, 1))]
     #[test_log::test(tokio::test)]
-    async fn test_a_gap_in_the_live_stream_ends_the_subscription_before_the_gap() {
-        // The client applied block 4. Its subscription then delivers 5 and 7 and ends: the deltas
-        // client lost block 6, which sets x to 0x06. The next subscription starts at block 10.
+    async fn test_a_gap_in_the_live_stream_ends_the_subscription_before_the_gap(
+        #[case] after_the_gap: BlockAggregatedChanges,
+    ) {
         let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
             setting(make_block_changes(6, None), "x", "0x06"),
             make_block_changes(7, None),
@@ -6023,11 +6030,12 @@ mod test {
             make_block_changes(9, None),
         ])));
         let mut deltas_client = MockDeltasClient::new();
-        for blocks in [vec![5, 7], vec![10]] {
+        for messages in
+            [vec![make_block_changes(5, None), after_the_gap], vec![make_block_changes(10, None)]]
+        {
             let (tx, rx) = channel(4);
-            for block in blocks {
-                tx.try_send(make_block_changes(block, None))
-                    .unwrap();
+            for message in messages {
+                tx.try_send(message).unwrap();
             }
             deltas_client
                 .expect_subscribe()
