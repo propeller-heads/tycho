@@ -1,3 +1,46 @@
+## [0.478.0](https://github.com/propeller-heads/tycho/compare/0.477.0...0.478.0) (2026-10-22)
+
+
+### Features
+
+* **execution:** encode pancakeswap_infinity_cl_hooks swaps ([1245f79](https://github.com/propeller-heads/tycho/commit/1245f79384f2883637bfe8d1d79a08057159bfa1))
+* PancakeSwap Infinity CLAlphaHook pools on BSC ([#1605](https://github.com/propeller-heads/tycho/issues/1605)) ([9b6fa4e](https://github.com/propeller-heads/tycho/commit/9b6fa4e9b896c1839665b418ccfe2fe028309c9b))
+* **simulation:** add a native CLAlphaHook handler for Infinity pools ([d527b7d](https://github.com/propeller-heads/tycho/commit/d527b7d89c33e7d7cbffd0194dce146a9b84d9c4))
+* **simulation:** charge CLAlphaHook swaps the measured hook gas ([3b0ce22](https://github.com/propeller-heads/tycho/commit/3b0ce225acbf842c45d670fae7ed759e5e667f0e))
+* **substreams:** index CLAlphaHook pools on BSC ([8664ced](https://github.com/propeller-heads/tycho/commit/8664ced908a00e12e3c0e9138ec0ba8aa5b77631))
+* **testing:** register pancakeswap_infinity_cl_hooks in test consumers ([db457e0](https://github.com/propeller-heads/tycho/commit/db457e06ad4cb3415ff2338680428adf3cf2172c))
+
+
+### Bug Fixes
+
+* **simulation:** gate CLAlphaHook pools on the last block's timestamp ([4a46830](https://github.com/propeller-heads/tycho/commit/4a46830321c71ffc5c90045d5c8515f1fc6273c7))
+* **simulation:** never decode an Infinity hooks pool as hookless ([bb29a84](https://github.com/propeller-heads/tycho/commit/bb29a84868757de1aaa10ac809c9056c44cca1a2))
+* **simulation:** refuse query_pool_swap while a hook disables swaps ([16156a3](https://github.com/propeller-heads/tycho/commit/16156a32553665cfd6b1a715755c5a7952233f74))
+* **testing:** copy sibling proto dirs into the harness image ([c19e204](https://github.com/propeller-heads/tycho/commit/c19e20439d887fc8a6467892a5d01c21d1074cff))
+
+## [0.477.0](https://github.com/propeller-heads/tycho/compare/0.476.0...0.477.0) (2026-10-22)
+
+
+### Features
+
+* **execution:** add TychoSubsidizingExecutor ([26a304c](https://github.com/propeller-heads/tycho/commit/26a304c6f2acc16324b396f2dbab144af844d954))
+* **execution:** add TychoSubsidizingExecutor ([#1642](https://github.com/propeller-heads/tycho/issues/1642)) ([b246422](https://github.com/propeller-heads/tycho/commit/b246422d90bb95ad6d5f2d67d4ccf1fd8149ab1c))
+* **execution:** model TychoSubsidizingExecutor ([a44e521](https://github.com/propeller-heads/tycho/commit/a44e5216b884c71f5c7cc368f4f64f09b8a94a7f))
+
+
+### Bug Fixes
+
+* **execution:** address subsidy wrapper contract review ([90f92d3](https://github.com/propeller-heads/tycho/commit/90f92d3897daa6226bade258fe998a0f7b4ae54d))
+* **execution:** address subsidy wrapper model review ([da5dc27](https://github.com/propeller-heads/tycho/commit/da5dc2760eb60a8c077ff47cb4471ba67733fc32))
+
+## [0.476.0](https://github.com/propeller-heads/tycho/compare/0.475.1...0.476.0) (2026-10-22)
+
+
+### Features
+
+* **execution:** prepare Metric fallbacks on Polygon ([a5c8342](https://github.com/propeller-heads/tycho/commit/a5c8342253d041a12d27e8e5aec11575a12bc45a))
+* **execution:** support Metric fallbacks on Polygon ([#1655](https://github.com/propeller-heads/tycho/issues/1655)) ([7d3673a](https://github.com/propeller-heads/tycho/commit/7d3673a72fe97601bfe1aee92b45d64d11ffb659))
+
 ## [0.475.1](https://github.com/propeller-heads/tycho/compare/0.475.0...0.475.1) (2026-10-21)
 
 
