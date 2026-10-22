@@ -117,8 +117,9 @@ jobs:
         # - test(evm), test(fork): require RPC/anvil
         # - protocol-testing rpc/test_token_balance_validation: require ETH_RPC_URL
         # These tycho-simulation tests live under evm but have no RPC dependency: LunarBase's
-        # native simulator, the Uniswap tick list, and the transitions that delete a key a
-        # Uniswap v3 or Ekubo pool never held.
+        # native simulator, the Uniswap tick list, the transitions that delete a key a
+        # Uniswap v3 or Ekubo pool never held, and the Ekubo transitions that add a one-sided
+        # order.
         run: |
           cargo nextest run --workspace --all-features --locked \
             -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation))))
@@ -127,6 +128,8 @@ jobs:
                     | test(evm::protocol::utils::uniswap::tick_list::)
                     | test(=evm::protocol::uniswap_v3::state::tests::test_delta_transition_deleting_an_absent_tick_leaves_the_ticks_unchanged)
                     | test(/^evm::protocol::ekubo(_v3)?::state::tests::test_delta_transition_deleting_an_absent_key_leaves_the_state_unchanged::/)
+                    | test(=evm::protocol::ekubo::state::tests::test_delta_transition_adds_one_sided_sale_rate_deltas)
+                    | test(=evm::protocol::ekubo_v3::state::tests::test_delta_transition_adds_one_sided_rate_deltas)
                   ))'
 
   test-unit-skip:
