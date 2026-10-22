@@ -65,7 +65,8 @@ use tycho_indexer::{
         ExtractionError,
     },
     services::{
-        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
+        thread_stats, EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder,
+        WindowConfig,
     },
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
@@ -239,12 +240,14 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
     // We spawn a dedicated runtime for extraction
     let extraction_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(extraction_threads)
+        .thread_name(thread_stats::EXTRACTION_THREAD_NAME)
         .enable_all()
         .build()
         .unwrap();
 
     let main_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(main_threads)
+        .thread_name(thread_stats::MAIN_THREAD_NAME)
         .enable_all()
         .build()
         .unwrap();
@@ -257,6 +260,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
             let _metrics_task = create_metrics_exporter();
             #[cfg(feature = "jemalloc")]
             spawn_jemalloc_stats_reporter();
+            thread_stats::spawn_thread_cpu_reporter();
 
             info!("Starting Tycho");
             debug!("{} CPUs detected", num_cpus::get());

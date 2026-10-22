@@ -45,7 +45,7 @@ mod middleware;
 mod off_worker;
 mod rpc;
 mod state;
-mod thread_stats;
+pub mod thread_stats;
 mod ws;
 
 pub use cache::RpcCacheKind;
