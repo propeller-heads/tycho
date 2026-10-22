@@ -90,7 +90,9 @@
     "uniswap_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "ramses_v3": "0x4C409a96DE96E06f061cE55B15Cd318D3Dd2239c",
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
-    "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3"
+    "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
+    "rfq:metric": "0x43434DE43d53bA6D9D8437fd1fb2Ac7be3c70CCf",
+    "fallback:rfq:metric": "0x5c001b91691aF146b9D220C9425827e19690DCE0"
   },
   "plasma": {
     "uniswap_v3": "0xA6D43EFEc7870ac6e27c81232C2B5E11b17d40d4",

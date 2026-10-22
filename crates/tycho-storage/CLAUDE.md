@@ -8,7 +8,6 @@ PostgreSQL backend implementing the storage traits defined in `tycho-common`.
 postgres/
 ├── mod.rs              — PostgresGateway (internal); shared enum caches; DB init helpers
 ├── pool.rs             — checkout helper (span, wait histogram) and `db_pool_*` status gauges
-├── raw_json.rs         — RawJson: a JSONB column loaded as unparsed text
 ├── builder.rs          — GatewayBuilder: configures + constructs public gateways
 ├── cache.rs            — CachedGateway + DBCacheWriteExecutor: buffered write path
 ├── direct.rs           — DirectGateway: unbuffered read/write path (testing, auditing)

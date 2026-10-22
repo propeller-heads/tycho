@@ -45,7 +45,7 @@ use tycho_common::{
 
 use super::{
     is_transaction_conflict,
-    pool::{self, PoolRole, PooledConnection},
+    pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
     PostgresError, PostgresGateway,
 };
@@ -369,7 +369,7 @@ impl DBCacheWriteExecutor {
             tracing::Span::current().record("extractor_id", extractor_id);
         }
 
-        let mut conn = pool::checkout(&self.pool, PoolRole::Extraction)
+        let mut conn = pool::checkout(&self.pool, EXTRACTION_POOL)
             .await
             .expect("pool should be connected");
 
@@ -588,7 +588,7 @@ pub struct CachedGateway {
     flushed_block_height: AtomicU64,
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
-    pool_role: PoolRole,
+    pool_label: &'static str,
     state_gateway: PostgresGateway,
     lru_cache: Arc<Mutex<DeltasCache>>,
 }
@@ -602,7 +602,7 @@ impl Clone for CachedGateway {
             flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
             pool: self.pool.clone(),
-            pool_role: self.pool_role,
+            pool_label: self.pool_label,
             state_gateway: self.state_gateway.clone(),
             lru_cache: self.lru_cache.clone(),
         }
@@ -714,7 +714,7 @@ impl CachedGateway {
             open_tx: Arc::new(Mutex::new(None)),
             flushed_block_height: AtomicU64::new(0),
             pool,
-            pool_role: PoolRole::Extraction,
+            pool_label: EXTRACTION_POOL,
             state_gateway,
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
@@ -732,7 +732,7 @@ impl CachedGateway {
             // a fresh writer has not flushed anything yet
             flushed_block_height: AtomicU64::new(0),
             pool: self.pool.clone(),
-            pool_role: self.pool_role,
+            pool_label: self.pool_label,
             state_gateway: self.state_gateway.clone(),
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
@@ -740,12 +740,12 @@ impl CachedGateway {
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
     /// connections from `pool`.
-    pub(crate) fn with_pool(&self, pool: Pool<AsyncPgConnection>, role: PoolRole) -> Self {
-        CachedGateway { pool, pool_role: role, ..self.new_instance() }
+    pub(crate) fn with_pool(&self, pool: Pool<AsyncPgConnection>, label: &'static str) -> Self {
+        CachedGateway { pool, pool_label: label, ..self.new_instance() }
     }
 
     async fn checkout(&self) -> Result<PooledConnection, StorageError> {
-        pool::checkout(&self.pool, self.pool_role).await
+        pool::checkout(&self.pool, self.pool_label).await
     }
 
     #[cfg(test)]

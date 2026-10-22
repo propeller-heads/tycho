@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "base_pancakeswap_infinity_cl"
-  version: v0.1.0
+  version: v0.1.1
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-pancakeswap-infinity-cl"
 
 protobuf:

@@ -27,6 +27,7 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "uniswap_v4",
     "uniswap_v4_hooks",
     "pancakeswap_infinity_cl",
+    "pancakeswap_infinity_cl_hooks",
     "pancakeswap_infinity_bin",
     "ekubo_v2",
     "ekubo_v3",

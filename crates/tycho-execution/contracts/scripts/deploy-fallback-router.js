@@ -46,6 +46,7 @@ const ROUTERS = {
 const STATIC_QUOTERS = {
     ethereum: "0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE",
     base: "0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb",
+    polygon: "0x7637Aaeb5BD58269B782726680d83f72C651aE74",
 };
 
 async function main() {
