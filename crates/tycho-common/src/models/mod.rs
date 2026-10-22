@@ -685,6 +685,18 @@ impl From<dto::ExtractorIdentity> for ExtractorIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractorFingerprint(pub Bytes);
 
+impl From<ExtractorFingerprint> for dto::ExtractorFingerprint {
+    fn from(value: ExtractorFingerprint) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<dto::ExtractorFingerprint> for ExtractorFingerprint {
+    fn from(value: dto::ExtractorFingerprint) -> Self {
+        Self(value.0)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct ExtractionState {
     pub name: String,

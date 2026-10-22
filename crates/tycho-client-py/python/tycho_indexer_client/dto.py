@@ -95,6 +95,7 @@ class Response(BaseModel):
     class NewSubscription(BaseModel):
         extractor_id: ExtractorIdentity
         subscription_id: UUID
+        fingerprint: Optional[HexBytes] = None
 
     class SubscriptionEnded(BaseModel):
         subscription_id: UUID
