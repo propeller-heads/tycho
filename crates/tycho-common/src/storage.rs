@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
+use deepsize::{Context, DeepSizeOf};
 use thiserror::Error;
 
 use crate::{
@@ -825,6 +826,13 @@ impl WriteTimestamp {
 
     pub fn block_ts(&self) -> NaiveDateTime {
         self.0
+    }
+}
+
+// Manual impl as `NaiveDateTime` does not implement DeepSizeOf; it owns no heap data.
+impl DeepSizeOf for WriteTimestamp {
+    fn deep_size_of_children(&self, _context: &mut Context) -> usize {
+        0
     }
 }
 
