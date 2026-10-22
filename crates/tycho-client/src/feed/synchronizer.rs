@@ -244,6 +244,11 @@ enum CatchUpSkipped {
     /// so the server cannot check that its deltas match the ones the client applied.
     #[error("the subscription reported no extractor fingerprint")]
     NoFingerprint,
+    /// The first live message, or one of the missed ones, is a revert to block `number`. A revert
+    /// message does not restore everything the reverted blocks changed, so replaying one can
+    /// leave the consumer with another state than a snapshot gives.
+    #[error("catching up would replay a revert to block {number}")]
+    Revert { number: u64 },
     /// The server predates delta catch-up.
     #[error("the server does not support delta catch-up")]
     Unsupported,
@@ -286,6 +291,7 @@ impl CatchUpSkipped {
             CatchUpSkipped::WrongEnd { .. } => true,
             CatchUpSkipped::PartialBlocks |
             CatchUpSkipped::NoFingerprint |
+            CatchUpSkipped::Revert { .. } |
             CatchUpSkipped::Unsupported |
             CatchUpSkipped::Unavailable(_) |
             CatchUpSkipped::TimedOut(_) => false,
@@ -622,10 +628,11 @@ where
     /// The returned `end_rx` (if any) should be reused for retry attempts since the close
     /// signal may still arrive and we want to remain cancellable across retries.
     ///
-    /// If the first block does not follow `last_synced_block`, the synchronizer first asks the
-    /// server for the messages it missed and, when they lead from `last_synced_block` to that
-    /// block, emits them merged with the block as one message. Otherwise it discards deltas for
-    /// `snapshot_delay` and requests a snapshot at the first block after the delay.
+    /// If the first block does not follow `last_synced_block` and is not a revert, the
+    /// synchronizer first asks the server for the messages it missed and, when they lead from
+    /// `last_synced_block` to that block without a revert, emits them merged with the block as one
+    /// message. Otherwise it discards deltas for `snapshot_delay` and requests a snapshot at the
+    /// first block after the delay.
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
@@ -1130,17 +1137,15 @@ where
         StateSyncMessage { header, snapshots, deltas: Some(deltas), removed_components }
     }
 
-    /// Asks the server for the messages that take the consumer from `last_synced` to the block the
-    /// new subscription's first message `first` continues from, and checks that they do. Runs
-    /// nothing through [`Self::handle_block`], so a failure leaves the synchronizer untouched.
-    ///
-    /// The target is `first`'s parent, or `first`'s own block when it is a revert: a revert
-    /// carries its target block's header but not that block's own changes, which the path brings.
+    /// Asks the server for the messages that take the consumer from `last_synced` to the parent of
+    /// the new subscription's first message `first`, and checks that they do. Runs nothing
+    /// through [`Self::handle_block`], so a failure leaves the synchronizer untouched.
     ///
     /// # Errors
     ///
-    /// The [`CatchUpSkipped`] reason when catch-up is not possible or the answer is not a path
-    /// from `last_synced` to the target; the caller then resyncs from a snapshot.
+    /// The [`CatchUpSkipped`] reason when catch-up is not possible, when `first` or a missed
+    /// message is a revert, or when the answer is not a path from `last_synced` to `first`'s
+    /// parent; the caller then resyncs from a snapshot.
     async fn catch_up_path(
         &self,
         last_synced: &BlockHeader,
@@ -1153,7 +1158,17 @@ where
         let Some(fingerprint) = fingerprint else {
             return Err(CatchUpSkipped::NoFingerprint);
         };
-        let to = if first.revert { &first.hash } else { &first.parent_hash };
+        // A revert message doesn't restore native balances, code, most account token balances,
+        // tokens, TVL or DCI data, and can delete or restore an attribute wrongly (deferred bugs
+        // 1, 2, 24 and 25), so a consumer that replays one can end up with another state than a
+        // snapshot gives. Fixing those bugs lifts both revert checks here: the server already
+        // serves reverts, and `check_catch_up_path` already verifies them. A revert `first` then
+        // needs the path to its own block, since it carries its target's header but not that
+        // block's own changes.
+        if first.revert {
+            return Err(CatchUpSkipped::Revert { number: first.number });
+        }
+        let to = &first.parent_hash;
         let params = DeltaCatchUpParams::new(
             self.extractor_id.chain,
             self.extractor_id.name.clone(),
@@ -1185,6 +1200,12 @@ where
             DeltaCatchUp::Unsupported => return Err(CatchUpSkipped::Unsupported),
         };
         check_catch_up_path(&path, &self.extractor_id, last_synced, to)?;
+        if let Some(revert) = path
+            .iter()
+            .find(|message| message.revert)
+        {
+            return Err(CatchUpSkipped::Revert { number: revert.block.number });
+        }
         Ok(path)
     }
 
@@ -5758,17 +5779,25 @@ mod test {
         }
     }
 
+    /// The client applied block 4. While it was away, block 5 created Component9, then the chain
+    /// reverted to block 2, which deletes Component9, and built 3' and 4' (fork 1); its new
+    /// subscription starts at 5'.
+    fn deletion_of_a_component_the_client_never_had() -> CatchUpScenario {
+        let component9 = ProtocolComponent { id: "Component9".to_string(), ..Default::default() };
+        let revert = BlockAggregatedChanges {
+            deleted_protocol_components: HashMap::from([("Component9".to_string(), component9)]),
+            ..revert_to(make_block_changes(2, None))
+        };
+        CatchUpScenario {
+            last_synced: make_block_changes(4, None),
+            path: vec![revert, fork_block(3, 1, 0), fork_block(4, 1, 1)],
+            live: vec![setting(fork_block(5, 1, 1), "w", "0x15")],
+            to: fork_hash(4, 1),
+            expected: attributes(&[("w", "0x15")]),
+        }
+    }
+
     #[rstest]
-    #[case::revert_below_the_client(revert_below_the_client())]
-    #[case::client_mid_branch(client_mid_branch())]
-    #[case::nested_reverts(nested_reverts())]
-    #[case::first_live_message_reverts_below_the_client(
-        first_live_message_reverts_below_the_client()
-    )]
-    #[case::first_live_message_reverts_to_the_block_after_the_client(
-        first_live_message_reverts_to_the_block_after_the_client()
-    )]
-    #[case::path_ends_with_the_live_revert(path_ends_with_the_live_revert())]
     #[case::restart_at_the_last_committed_block(restart_at_the_last_committed_block())]
     #[test_log::test(tokio::test)]
     async fn test_catch_up_emits_one_message_with_the_missed_deltas(
@@ -5794,6 +5823,60 @@ mod test {
         assert_eq!(message.header, header_of(&first));
         assert!(message.snapshots.states.is_empty());
         assert_eq!(attributes_set(&message), expected);
+    }
+
+    // Revert messages don't restore everything yet (see `catch_up_path`), so the client takes a
+    // snapshot at the first live message instead of catching up through one. Each scenario's
+    // `expected` is what catching up would emit once they do.
+    #[rstest]
+    #[case::revert_below_the_client(revert_below_the_client())]
+    #[case::client_mid_branch(client_mid_branch())]
+    #[case::nested_reverts(nested_reverts())]
+    #[case::first_live_message_reverts_below_the_client(
+        first_live_message_reverts_below_the_client()
+    )]
+    #[case::first_live_message_reverts_to_the_block_after_the_client(
+        first_live_message_reverts_to_the_block_after_the_client()
+    )]
+    #[case::path_ends_with_the_live_revert(path_ends_with_the_live_revert())]
+    #[case::deletion_of_a_component_the_client_never_had(
+        deletion_of_a_component_the_client_never_had()
+    )]
+    #[test_log::test(tokio::test)]
+    async fn test_catch_up_through_a_revert_falls_back_to_a_snapshot(
+        #[case] scenario: CatchUpScenario,
+    ) {
+        let CatchUpScenario { last_synced, path, live, to, expected: _ } = scenario;
+        let first = live
+            .last()
+            .expect("A live message")
+            .clone();
+        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(path)));
+        let (mut sync, deltas_tx) = resubscribe(rpc_client, &last_synced).await;
+
+        for message in live {
+            deltas_tx.send(message).await.unwrap();
+        }
+        let message = sync.next().await;
+        sync.assert_quiet().await;
+        sync.stop().await;
+
+        // A first live message that is a revert falls back without asking.
+        let expected_requests =
+            if first.revert { vec![] } else { vec![catch_up_request(&last_synced, &to)] };
+        assert_eq!(calls.catch_up_requests(), expected_requests);
+        assert_eq!(calls.snapshot_blocks(), vec![first.block.number]);
+        assert_eq!(message.header, header_of(&first));
+        assert!(message
+            .snapshots
+            .states
+            .contains_key("Component1"));
+        let set_by_first = first
+            .state_deltas
+            .get("Component1")
+            .map(|delta| delta.updated_attributes.clone())
+            .unwrap_or_default();
+        assert_eq!(attributes_set(&message), set_by_first, "A missed message was applied");
     }
 
     #[test_log::test(tokio::test)]
@@ -5933,47 +6016,6 @@ mod test {
         );
         assert_eq!(next.header.number, 8);
         assert!(has_account_delta(&next, &contract_x()), "The traced contract is not tracked");
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn test_catch_up_over_the_deletion_of_a_component_the_client_never_had() {
-        // The client applied block 4. While it was away, block 5 created Component9, then the
-        // chain reverted to block 2, which deletes Component9, and built 3' and 4' (fork 1).
-        let component9 = ProtocolComponent { id: "Component9".to_string(), ..Default::default() };
-        let revert = BlockAggregatedChanges {
-            deleted_protocol_components: HashMap::from([("Component9".to_string(), component9)]),
-            ..revert_to(make_block_changes(2, None))
-        };
-        let (rpc_client, calls) = mock_rpc_answering_catch_up(Ok(DeltaCatchUp::Available(vec![
-            revert,
-            fork_block(3, 1, 0),
-            fork_block(4, 1, 1),
-        ])));
-        let (mut sync, deltas_tx) = resubscribe(rpc_client, &make_block_changes(4, None)).await;
-
-        deltas_tx
-            .send(fork_block(5, 1, 1))
-            .await
-            .unwrap();
-        deltas_tx
-            .send(setting(fork_block(6, 1, 1), "x", "0x16"))
-            .await
-            .unwrap();
-        let caught_up = sync.next().await;
-        let next = sync.next().await;
-        sync.stop().await;
-
-        assert_eq!(calls.snapshot_blocks(), Vec::<u64>::new());
-        assert_eq!(caught_up.header.number, 5);
-        // The consumer learns of the deletion, as a consumer that stayed connected does.
-        assert!(caught_up
-            .deltas
-            .as_ref()
-            .is_some_and(|deltas| deltas
-                .deleted_protocol_components
-                .contains_key("Component9")));
-        assert!(caught_up.removed_components.is_empty());
-        assert_eq!(attributes_set(&next), attributes(&[("x", "0x16")]));
     }
 
     #[test_log::test(tokio::test)]
