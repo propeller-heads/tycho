@@ -970,6 +970,21 @@ async fn test_resubscriptions_match_the_delta_history_model() {
                         let corruption =
                             CORRUPTIONS[corruption_rng.gen_range(0..CORRUPTIONS.len())];
                         let corrupted = corrupt(owned(&path), case.first(), corruption);
+                        // The synchronizer refuses every path through a revert, so the resync
+                        // alone would not show that the path check rejects a revert to a sibling.
+                        if corruption == Corruption::RevertToASibling {
+                            let checked = check_catch_up_path(
+                                &corrupted,
+                                &ExtractorIdentity::new(CHAIN, EXTRACTOR),
+                                &header_of(case.last()),
+                                &case.first().block.parent_hash,
+                            );
+                            assert!(
+                                matches!(checked, Err(CatchUpSkipped::RevertToNonAncestor { .. })),
+                                "{}: the path check accepts a revert to a sibling: {checked:?}",
+                                case.context()
+                            );
+                        }
                         check_resync(&case, DeltaCatchUp::Available(corrupted), true).await;
                         *outcomes
                             .rejected_answers
