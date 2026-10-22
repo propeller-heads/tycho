@@ -19,14 +19,7 @@ COPY . .
 WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
 COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
 RUN chmod +x /usr/local/bin/forge
-# The forge libraries come from the lib/ submodules in the build context, so the image compiles
-# the versions the repository pins, the same ones the adapter's Forge CI job builds.
-RUN test -f lib/forge-std/src/Test.sol && test -f lib/openzeppelin-contracts/package.json || { \
-        echo "protocols/adapter-integration/evm/lib is empty. Run" \
-            "'git submodule update --init --recursive protocols/adapter-integration/evm/lib'" \
-            "before building this image." >&2; \
-        exit 1; \
-    }
+# The forge libraries come from the lib/ submodules in the build context.
 RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)
