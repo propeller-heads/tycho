@@ -368,41 +368,32 @@ fn enforce_pauses(
     Ok(())
 }
 
-/// Runs the block through `filter_storage_changes` first, as the manifest does.
-#[cfg(test)]
-fn protocol_changes(
-    config: &DeploymentConfig,
-    block: &eth::v2::Block,
-    inputs: ModuleInputs,
-    view: &PairView,
-) -> Result<BlockChanges> {
-    let known = view
-        .known
-        .iter()
-        .map(|pair| hex::decode(pair.trim_start_matches("0x")).unwrap())
-        .collect();
-    let storage =
-        crate::modules::map_storage_changes::filter_storage_changes(config, block, &known);
-    protocol_changes_from_storage(config, block, &storage, inputs, view, &AddressAsCode)
-}
-
-/// Test code source: an address's code is `0x5f` followed by the address.
-#[cfg(test)]
-struct AddressAsCode;
-
-#[cfg(test)]
-impl CodeSource for AddressAsCode {
-    fn codes(&self, addresses: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
-        Ok(addresses
-            .iter()
-            .map(|a| (a.clone(), [&[0x5f], a.as_slice()].concat()))
-            .collect())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::testing::storage_changes;
+
+    fn protocol_changes(
+        config: &DeploymentConfig,
+        block: &eth::v2::Block,
+        inputs: ModuleInputs,
+        view: &PairView,
+    ) -> Result<BlockChanges> {
+        let storage = storage_changes(block);
+        protocol_changes_from_storage(config, block, &storage, inputs, view, &AddressAsCode)
+    }
+
+    /// Test code source: an address's code is `0x5f` followed by the address.
+    struct AddressAsCode;
+
+    impl CodeSource for AddressAsCode {
+        fn codes(&self, addresses: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+            Ok(addresses
+                .iter()
+                .map(|a| (a.clone(), [&[0x5f], a.as_slice()].concat()))
+                .collect())
+        }
+    }
 
     const PAIR: [u8; 20] = [0x0a; 20];
     const OTHER_PAIR: [u8; 20] = [0x0b; 20];

@@ -49,3 +49,33 @@ pub fn storage_transaction(
         .as_ref()
         .ok_or_else(|| anyhow!("map_storage_changes emitted writes without a transaction"))
 }
+
+#[cfg(test)]
+pub mod testing {
+    use crate::pb::tessera::v1::{BlockStorageChanges, StorageChange, TransactionStorageChanges};
+    use substreams_ethereum::pb::eth;
+
+    /// Every write in `block`, grouped by transaction in call order, without the filtering
+    /// `map_storage_changes` applies.
+    pub fn storage_changes(block: &eth::v2::Block) -> BlockStorageChanges {
+        let mut transactions = vec![];
+        for tx in &block.transaction_traces {
+            let writes: Vec<_> = tx
+                .calls
+                .iter()
+                .flat_map(|call| &call.storage_changes)
+                .map(|w| StorageChange {
+                    address: w.address.clone(),
+                    key: w.key.clone(),
+                    old_value: w.old_value.clone(),
+                    new_value: w.new_value.clone(),
+                    ordinal: w.ordinal,
+                })
+                .collect();
+            if !writes.is_empty() {
+                transactions.push(TransactionStorageChanges { tx: Some(tx.into()), writes });
+            }
+        }
+        BlockStorageChanges { transactions }
+    }
+}

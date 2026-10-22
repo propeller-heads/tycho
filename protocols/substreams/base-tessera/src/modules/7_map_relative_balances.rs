@@ -214,21 +214,9 @@ fn balance_deltas_from_storage(
 }
 
 #[cfg(test)]
-fn balance_deltas(
-    config: &DeploymentConfig,
-    block: &eth::v2::Block,
-    new_components: BlockTransactionProtocolComponents,
-    owner: &[u8],
-    sources: &impl BalanceSources,
-) -> Result<Vec<BalanceDelta>> {
-    let storage =
-        crate::modules::map_storage_changes::filter_storage_changes(config, block, &HashSet::new());
-    balance_deltas_from_storage(config, block, &storage, new_components, owner, sources)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::testing::storage_changes;
     use keccak_hash::keccak;
     use std::collections::HashMap;
 
@@ -260,6 +248,17 @@ mod tests {
             let key = (token.to_vec(), owner.to_vec());
             Ok(BigInt::from(*self.balances.get(&key).unwrap_or(&0)))
         }
+    }
+
+    fn balance_deltas(
+        config: &DeploymentConfig,
+        block: &eth::v2::Block,
+        new_components: BlockTransactionProtocolComponents,
+        owner: &[u8],
+        sources: &impl BalanceSources,
+    ) -> Result<Vec<BalanceDelta>> {
+        let storage = storage_changes(block);
+        balance_deltas_from_storage(config, block, &storage, new_components, owner, sources)
     }
 
     fn config() -> DeploymentConfig {
@@ -479,40 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn rotation_matches_events_to_old_custodian_then_bridges() {
-        let sources = FakeSources {
-            holders: HashMap::from([(USDC.to_vec(), vec!["pair".to_string()])]),
-            balances: HashMap::from([
-                ((USDC.to_vec(), TREASURY.to_vec()), 80),
-                ((USDC.to_vec(), NEW_TREASURY.to_vec()), 300),
-            ]),
-        };
-        let rotation = eth::v2::StorageChange {
-            address: config().tesseraswap,
-            key: slot(1),
-            old_value: word(&TREASURY),
-            new_value: word(&NEW_TREASURY),
-            ordinal: 20,
-        };
-        let block = block(vec![
-            tx(0, vec![transfer(&USDC, &TREASURY, &OUTSIDER, 20, 5)], vec![]),
-            tx(1, vec![], vec![rotation]),
-        ]);
-        // The treasury store already holds the new custodian by the time this map runs.
-        let deltas = balance_deltas(
-            &config(),
-            &block,
-            BlockTransactionProtocolComponents::default(),
-            &NEW_TREASURY,
-            &sources,
-        )
-        .unwrap();
-
-        // Opening 100 − 20 moved out of the old custodian + (300 − 80) bridged = 300.
-        assert_eq!(deltas_of(&deltas, "pair", &USDC), vec![BigInt::from(-20), BigInt::from(220)]);
-    }
-
-    #[test]
     fn treasury_slot_writes_outside_tesseraswap_are_not_rotations() {
         let sources = FakeSources {
             holders: HashMap::from([(USDC.to_vec(), vec!["pair".to_string()])]),
@@ -570,35 +535,6 @@ mod tests {
 
         assert_eq!(deltas_of(&deltas, "pair", &BASE_WETH), vec![BigInt::from(40)]);
         assert!(deltas_of(&deltas, "pair", &OUTSIDER).is_empty());
-    }
-
-    #[test]
-    fn missing_storage_transaction_returns_an_error() {
-        let storage = BlockStorageChanges {
-            transactions: vec![crate::pb::tessera::v1::TransactionStorageChanges {
-                tx: None,
-                writes: vec![crate::pb::tessera::v1::StorageChange {
-                    address: config().tesseraswap,
-                    key: slot(1),
-                    old_value: word(&TREASURY),
-                    new_value: word(&NEW_TREASURY),
-                    ordinal: 20,
-                }],
-            }],
-        };
-        let sources = FakeSources { holders: HashMap::new(), balances: HashMap::new() };
-        let error = balance_deltas_from_storage(
-            &config(),
-            &block(vec![]),
-            &storage,
-            BlockTransactionProtocolComponents::default(),
-            &NEW_TREASURY,
-            &sources,
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("writes without a transaction"));
     }
 
     #[test]

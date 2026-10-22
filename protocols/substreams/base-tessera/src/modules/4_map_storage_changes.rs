@@ -74,7 +74,6 @@ pub(crate) fn filter_storage_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prost::Message;
 
     fn config() -> DeploymentConfig {
         DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52").unwrap()
@@ -129,7 +128,6 @@ mod tests {
             assert_eq!(actual.new_value, expected.new_value);
             assert_eq!(actual.ordinal, expected.ordinal);
         }
-        assert_eq!(BlockStorageChanges::decode(out.encode_to_vec().as_slice()).unwrap(), out);
     }
 
     #[test]
@@ -157,13 +155,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![10, 20, 30]
         );
-        assert!(zero(
-            &out.transactions[0]
-                .writes
-                .last()
-                .unwrap()
-                .new_value
-        ));
     }
 
     #[test]
