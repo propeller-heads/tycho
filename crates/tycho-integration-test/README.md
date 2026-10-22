@@ -97,8 +97,9 @@ cargo run --package tycho-integration-test -- \
 It runs a second stream of the same protocols, with the protocol stream's TVL filter and component
 blocklist, next to the tests. About every `N` blocks (at least 50), each of its subscriptions drops
 its next 10 messages and ends, so the client resubscribes having missed those blocks. A server with
-the delta catch-up endpoint lets the client apply the missed blocks without a snapshot; otherwise
-the client falls back to a snapshot.
+the delta catch-up endpoint lets the client apply the missed blocks without a snapshot. The client
+falls back to a snapshot when the server can't serve them, or when the chain reorganized during the
+gap: revert messages don't restore everything yet, so the client doesn't catch up through one.
 
 When a protocol has recovered, the check compares the state the client holds for it with a snapshot
 of the same components at the same block: component attributes and balances, and the storage,
@@ -148,8 +149,8 @@ cargo run --package tycho-integration-test -- \
 
 - **The check proves nothing unless `outcome="caught_up"` grows.** If only `outcome="snapshot"`
   grows, the client never catches up: the server or its gateway does not serve the catch-up endpoint,
-  or the server cannot serve the gap. `tycho-client` logs the reason at info or warn
-  (`Delta catch-up not possible` / `Delta catch-up failed`, target
+  the server cannot serve the gap, or every gap held a reorg. `tycho-client` logs the reason at info
+  or warn (`Delta catch-up not possible` / `Delta catch-up failed`, target
   `tycho_client::feed::synchronizer`), and the server counts `delta_catch_up_responses` by
   extractor and outcome. A high share of unchanged recoveries also means the gaps prove little.
 - **`result="mismatch"` with `resync="caught_up"`** means the state after a catch-up differs from the

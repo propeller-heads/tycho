@@ -6,7 +6,8 @@
 //! `TychoStreamBuilder::build` but over a [`GapInjector`]. Every `every_n_blocks` blocks, each
 //! subscription drops its next [`GAP_BLOCKS`] messages and ends. The synchronizers resubscribe
 //! having missed those blocks, which they catch up on through the server's delta catch-up
-//! endpoint, or recover from with a snapshot when the server cannot serve them.
+//! endpoint, or recover from with a snapshot when the server cannot serve them or they hold a
+//! revert.
 //!
 //! Every resubscription is classified, forced or not. After each recovery of a protocol that
 //! tracks components, the state held for it is compared with a snapshot of its components at that
