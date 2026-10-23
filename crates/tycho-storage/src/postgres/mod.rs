@@ -152,6 +152,7 @@ mod contract;
 pub mod direct;
 mod entry_point;
 mod extraction_state;
+pub mod leader_lock;
 mod orm;
 mod pool;
 mod protocol;
@@ -478,6 +479,8 @@ pub(crate) struct PostgresGateway {
     /// be updated once an extractor has crossed it, but has not yet crossed the new
     /// horizon (aka it should never move faster than an extractor).
     retention_horizon: NaiveDateTime,
+    /// Writer epoch claimed by this process; shared by every clone of this gateway.
+    pub(crate) claimed_epoch: writer_epoch::ClaimedEpoch,
 }
 
 impl PostgresGateway {
@@ -496,7 +499,19 @@ impl PostgresGateway {
             token_cache,
             component_index,
             retention_horizon,
+            claimed_epoch: writer_epoch::ClaimedEpoch::default(),
         }
+    }
+
+    /// Increments the writer epoch in the database and fences this process's writes on the new
+    /// value. See [`writer_epoch::ClaimedEpoch::increment_writer_epoch`].
+    pub(crate) async fn increment_writer_epoch(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<i64, StorageError> {
+        self.claimed_epoch
+            .increment_writer_epoch(conn)
+            .await
     }
 
     #[allow(dead_code)]

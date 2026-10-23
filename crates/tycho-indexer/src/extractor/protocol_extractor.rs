@@ -5473,6 +5473,10 @@ mod test_serial_db {
             .build()
             .await
             .expect("failed to build postgres gateway");
+        cached_gw
+            .increment_writer_epoch()
+            .await
+            .expect("the epoch increment should succeed");
 
         let gw = ExtractorPgGateway::new("test", Chain::Ethereum, 1000, cached_gw);
         (gw, chain_id)
@@ -5874,6 +5878,11 @@ mod test_serial_db {
                 .await
                 .unwrap();
 
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
+
             let gw = ExtractorPgGateway::new(
                 "native_name",
                 Chain::Ethereum,
@@ -6059,6 +6068,11 @@ mod test_serial_db {
                 .build()
                 .await
                 .unwrap();
+
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             let gw = ExtractorPgGateway::new(
                 "vm_name",
@@ -6268,6 +6282,11 @@ mod test_serial_db {
                 .build()
                 .await
                 .unwrap();
+
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             let gw = ExtractorPgGateway::new("vm_name", Chain::Ethereum, 0, cached_gw.clone());
             let protocol_types = HashMap::from([

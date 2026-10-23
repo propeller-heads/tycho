@@ -503,6 +503,10 @@ async fn create_indexing_tasks(
         .set_component_index(global_args.component_index)
         .build_with_rpc_gateway()
         .await?;
+    let epoch = cached_gw
+        .increment_writer_epoch()
+        .await?;
+    info!(epoch, "Became the database writer");
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
@@ -824,8 +828,8 @@ async fn run_analyze_tokens(
     let rpc_client = global_args.rpc.build_client()?;
 
     create_tracing_subscriber();
-    // No write executor: `build` would claim the writer epoch and fence the running indexer.
-    // The analysis writes only through `update_tokens`, which does not use the executor.
+    // No write executor: the analysis writes only through `update_tokens`, which bypasses it, so
+    // it never becomes the database writer and never fences the running indexer.
     let cached_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[analyzer_args.chain])
         .build_gw()
@@ -883,6 +887,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
@@ -914,6 +922,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
@@ -944,6 +956,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
             let accounts =
@@ -979,6 +995,10 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
+            cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
 
             initialize_accounts(accounts, block_id, &rpc, chain, &cached_gw).await;
         })
