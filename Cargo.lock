@@ -3315,9 +3315,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -7013,7 +7013,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-testing"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "alloy",
  "clap",
@@ -9958,7 +9958,7 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "tycho"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "tokio",
  "tycho-client",
@@ -9969,7 +9969,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "async-trait",
  "backoff",
@@ -10003,7 +10003,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -10037,7 +10037,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10061,7 +10061,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -10087,7 +10087,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-indexer"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "actix",
  "actix-cors",
@@ -10157,7 +10157,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-integration-test"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "actix-web",
  "alloy",
@@ -10185,7 +10185,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-protobuf"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "chrono",
  "num-bigint",
@@ -10209,7 +10209,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -10279,7 +10279,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10305,7 +10305,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-test"
-version = "0.482.0"
+version = "0.482.1"
 dependencies = [
  "alloy",
  "alloy-chains",

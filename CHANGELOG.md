@@ -1,3 +1,11 @@
+## [0.482.1](https://github.com/propeller-heads/tycho/compare/0.482.0...0.482.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **substreams:** skip Arc V4 account initialization ([09c2227](https://github.com/propeller-heads/tycho/commit/09c22279b0598e3962d38d2a99914b5641349c38))
+* **substreams:** skip Arc V4 account initialization ([#1672](https://github.com/propeller-heads/tycho/issues/1672)) ([e63ef36](https://github.com/propeller-heads/tycho/commit/e63ef3674b01ca5eff5f314fa8181590f610b53f))
+
 ## [0.482.0](https://github.com/propeller-heads/tycho/compare/0.481.0...0.482.0) (2026-10-23)
 
 
