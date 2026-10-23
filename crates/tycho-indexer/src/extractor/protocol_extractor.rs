@@ -68,12 +68,17 @@ type DrainedBlock = Arc<BlockUpdateWithCursor<BlockChanges>>;
 
 /// Most chain time the drained blocks of a following extractor may cover while they wait for the
 /// leader to commit them. At this span it stops taking blocks until the leader's commits release
-/// some, so its memory stays bounded when the leader does not commit for this extractor, e.g.
-/// while it runs an older configuration. Chain time and not a block count, so the limit means the
-/// same on chains with very different block times. Larger than the finality delay of every chain
-/// (about 13 minutes on Ethereum): the leader commits only finalized blocks, so a follower at the
-/// head retains about one finality delay of blocks.
-const FOLLOWER_RETENTION_SPAN: Duration = Duration::hours(1);
+/// some, so its memory stays bounded when the leader stops committing for this extractor after
+/// the follower opened its stream, e.g. while the leader's extractor waits in a restart backoff.
+/// Chain time and not a block count, so the limit means the same on chains with very different
+/// block times. Larger than the finality delay of every chain (about 13 minutes on Ethereum):
+/// the leader commits only finalized blocks, so a follower at the head retains about one finality
+/// delay of blocks.
+///
+/// A follower opens an extractor's stream only while the leader's newest committed block is
+/// younger than this span (`WriterStatus::needs_stream`). So it can retain every block from the
+/// leader's commit to the head, and it does not pause before it reaches the head.
+pub(crate) const FOLLOWER_RETENTION_SPAN: Duration = Duration::hours(1);
 
 /// How often a following extractor at its retention limit checks whether it can continue.
 const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -2608,6 +2613,7 @@ mod test {
     use futures03::FutureExt;
     use mockall::mock;
     use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_storage::postgres::cache::CommittedBlock;
 
     use super::*;
     use crate::{
@@ -2682,10 +2688,10 @@ mod test {
         create_extractor_with_batch_size(gw, 1).await
     }
 
-    /// Writer status channels a test drives: the role and the leader's committed heights.
+    /// Writer status channels a test drives: the role and the leader's committed blocks.
     struct WriterChannels {
         role: tokio::sync::watch::Sender<Role>,
-        heights: tokio::sync::watch::Sender<HashMap<String, u64>>,
+        heights: tokio::sync::watch::Sender<HashMap<String, CommittedBlock>>,
     }
 
     impl WriterChannels {
@@ -2698,7 +2704,10 @@ mod test {
 
         fn leader_committed(&self, height: u64) {
             self.heights
-                .send(HashMap::from([(EXTRACTOR_NAME.to_string(), height)]))
+                .send(HashMap::from([(
+                    EXTRACTOR_NAME.to_string(),
+                    CommittedBlock { number: height, ts: crate::testing::block(height).ts },
+                )]))
                 .unwrap();
         }
 

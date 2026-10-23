@@ -19,7 +19,10 @@ use tycho_common::{
 use uuid::Uuid;
 
 use crate::{
-    extractor::{runner::MessageSender, DeltaCommand},
+    extractor::{
+        runner::{MessageSender, SubscribeError},
+        DeltaCommand,
+    },
     services::client_metadata,
 };
 
@@ -322,7 +325,16 @@ impl WsActor {
                 Err(err) => {
                     let elapsed = start_time.elapsed();
                     debug!(actor_id = %actor_id, elapsed_ms = elapsed.as_millis(), "subscribe failed");
-                    error!(error = %err, "Failed to subscribe to the extractor");
+                    match err {
+                        // Expected while this follower waits for the leader to sync the
+                        // extractor's history.
+                        SubscribeError::NotStreaming => {
+                            info!(error = %err, "Subscription rejected by the extractor")
+                        }
+                        SubscribeError::ControlChannelClosed | SubscribeError::Timeout(_) => {
+                            error!(error = %err, "Failed to subscribe to the extractor")
+                        }
+                    }
                     None
                 }
             }
@@ -655,7 +667,7 @@ mod tests {
     use serde::Deserialize;
     use tokio::{
         net::TcpStream,
-        sync::mpsc::{self, error::SendError, Receiver},
+        sync::mpsc::{self, Receiver},
     };
     use tokio_stream::StreamExt;
     use tokio_tungstenite::{
@@ -676,7 +688,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::extractor::runner::ControlMessage;
 
     pub struct MyMessageSender {
         extractor_id: ExtractorIdentity,
@@ -718,7 +729,7 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for MyMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
             let (tx, rx) = mpsc::channel::<DeltaCommand>(1);
             let extractor_id = self.extractor_id.clone();
             let block_template = self.block_template.clone();
@@ -1180,7 +1191,7 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for SlowMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
             debug!("SlowMessageSender::subscribe() starting 200ms delay");
             // Add a delay to increase the window for deadlock
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1525,9 +1536,9 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for FailingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
             // Always return an error to simulate subscription failure
-            Err(SendError(ControlMessage::Stop))
+            Err(SubscribeError::NotStreaming)
         }
     }
 
@@ -1718,7 +1729,7 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for ClosingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
             let (_tx, rx) = mpsc::channel::<DeltaCommand>(1);
             // _tx is dropped here, closing the channel immediately.
             Ok(rx)
@@ -1827,7 +1838,7 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for RestartingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
             let (tx, rx) = mpsc::channel::<DeltaCommand>(2);
             let name = self.extractor_id.name.clone();
             tokio::spawn(async move {

@@ -1,7 +1,7 @@
 //! Election of the process that writes extraction results to the database.
 //!
 //! Every `index` process extracts and serves; only the leader commits. A process that starts
-//! while another holds the leader lock follows: it publishes the leader's committed heights to
+//! while another holds the leader lock follows: it publishes the leader's committed blocks to
 //! its extractors and retries the lock until it gets it. A leader that loses its lock session
 //! ends with an error, so the process exits instead of writing next to a new leader.
 use std::{collections::HashMap, time::Duration};
@@ -9,14 +9,17 @@ use std::{collections::HashMap, time::Duration};
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
 use tracing::{error, info, warn};
 use tycho_common::models::Chain;
-use tycho_storage::postgres::{cache::CachedGateway, leader_lock::LeaderLock};
+use tycho_storage::postgres::{
+    cache::{CachedGateway, CommittedBlock},
+    leader_lock::LeaderLock,
+};
 
 use crate::extractor::{
     writer_status::{Role, WriterStatus},
     ExtractionError,
 };
 
-/// How often a follower polls the committed heights and retries the lock, and how often a
+/// How often a follower polls the committed blocks and retries the lock, and how often a
 /// leader checks its lock session.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -30,7 +33,7 @@ const LOCK_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Returns the [`WriterStatus`] for the extractors and the background task. A process that gets
 /// the lock at once increments the writer epoch on `gateway` and is leader from the start.
-/// Otherwise it is a follower: the task polls the committed heights of `chain` and retries the
+/// Otherwise it is a follower: the task polls the committed blocks of `chain` and retries the
 /// lock. When it gets the lock, it increments the writer epoch and only then switches the role, so
 /// no extractor commits before the former leader is fenced. The lock checks start with the epoch
 /// increment. The task only ends when the leader's lock session is lost or fails.
@@ -40,7 +43,7 @@ pub async fn elect(
     chain: Chain,
 ) -> Result<(WriterStatus, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
     let mut lock = LeaderLock::connect(database_url).await?;
-    let (heights_tx, heights_rx) = watch::channel(HashMap::new());
+    let (committed_tx, committed_rx) = watch::channel(HashMap::new());
     let (confirmed_tx, confirmed_rx) = watch::channel(Instant::now());
 
     if lock.try_acquire().await? {
@@ -50,16 +53,16 @@ pub async fn elect(
         let (_role_tx, role_rx) = watch::channel(Role::Leader);
         confirmed_tx.send_replace(Instant::now());
         let task = tokio::spawn(hold_lead(lock, confirmed_tx));
-        return Ok((WriterStatus::new(role_rx, heights_rx, confirmed_rx), task));
+        return Ok((WriterStatus::new(role_rx, committed_rx, confirmed_rx), task));
     }
 
     info!("Another process writes the database; following it");
     metrics::gauge!("tycho_leader").set(0.0);
-    publish_committed_heights(&gateway, &chain, &heights_tx).await?;
+    publish_committed_blocks(&gateway, &chain, &committed_tx).await?;
     let (role_tx, role_rx) = watch::channel(Role::Follower);
     let database_url = database_url.to_string();
     let task = tokio::spawn(async move {
-        let lock = follow_until_elected(lock, &database_url, &gateway, &chain, &heights_tx).await;
+        let lock = follow_until_elected(lock, &database_url, &gateway, &chain, &committed_tx).await;
         let epoch = gateway.increment_writer_epoch().await?;
         info!(epoch, "Elected database writer; taking over commits");
         confirmed_tx.send_replace(Instant::now());
@@ -69,21 +72,21 @@ pub async fn elect(
             .map_err(|_| ExtractionError::Unknown("Every writer status was dropped".into()))?;
         hold_lead(lock, confirmed_tx).await
     });
-    Ok((WriterStatus::new(role_rx, heights_rx, confirmed_rx), task))
+    Ok((WriterStatus::new(role_rx, committed_rx, confirmed_rx), task))
 }
 
-/// Publishes the committed heights and retries the lock until this process holds it.
+/// Publishes the committed blocks and retries the lock until this process holds it.
 async fn follow_until_elected(
     mut lock: LeaderLock,
     database_url: &str,
     gateway: &CachedGateway,
     chain: &Chain,
-    heights_tx: &watch::Sender<HashMap<String, u64>>,
+    committed_tx: &watch::Sender<HashMap<String, CommittedBlock>>,
 ) -> LeaderLock {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        if let Err(err) = publish_committed_heights(gateway, chain, heights_tx).await {
-            warn!(error = %err, "Failed to poll the leader's committed heights");
+        if let Err(err) = publish_committed_blocks(gateway, chain, committed_tx).await {
+            warn!(error = %err, "Failed to poll the leader's committed blocks");
         }
         match lock.try_acquire().await {
             Ok(true) => return lock,
@@ -99,15 +102,15 @@ async fn follow_until_elected(
     }
 }
 
-async fn publish_committed_heights(
+async fn publish_committed_blocks(
     gateway: &CachedGateway,
     chain: &Chain,
-    heights_tx: &watch::Sender<HashMap<String, u64>>,
+    committed_tx: &watch::Sender<HashMap<String, CommittedBlock>>,
 ) -> Result<(), ExtractionError> {
-    let heights = gateway
-        .get_committed_heights(chain)
+    let committed = gateway
+        .get_committed_blocks(chain)
         .await?;
-    heights_tx.send_replace(heights);
+    committed_tx.send_replace(committed);
     Ok(())
 }
 

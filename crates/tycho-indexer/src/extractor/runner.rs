@@ -5,7 +5,7 @@ use metrics::gauge;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc::{self, error::SendError, Receiver, Sender},
+        mpsc::{self, Receiver, Sender},
         oneshot, Mutex,
     },
     task::JoinHandle,
@@ -90,7 +90,38 @@ impl<AE: AccountExtractor + Send + Sync> ExtractorExtension for DCIPlugin<AE> {
 
 pub enum ControlMessage {
     Stop,
-    Subscribe(Sender<DeltaCommand>),
+    Subscribe(SubscribeRequest),
+}
+
+/// A request to receive an extractor's [`DeltaCommand`]s.
+pub struct SubscribeRequest {
+    /// Receives the extractor's messages once the request is accepted.
+    pub sender: Sender<DeltaCommand>,
+    /// Receives whether the extractor accepted the subscriber.
+    pub reply: oneshot::Sender<SubscribeReply>,
+}
+
+/// The answer of an extractor to a [`SubscribeRequest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscribeReply {
+    Accepted,
+    /// The extractor's stream is not open on this process: it follows a leader that syncs the
+    /// extractor's history, and it opens the stream once the leader gets near the chain head.
+    NotStreaming,
+}
+
+/// Why a subscription to an extractor failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SubscribeError {
+    #[error("The extractor's control channel is closed")]
+    ControlChannelClosed,
+    #[error("The extractor did not answer the subscription within {0:?}")]
+    Timeout(std::time::Duration),
+    #[error(
+        "The extractor does not stream on this instance yet: the leader syncs its history. \
+         Subscribe again later or on another instance."
+    )]
+    NotStreaming,
 }
 
 /// A trait for a message sender that can be used to subscribe to messages.
@@ -98,7 +129,7 @@ pub enum ControlMessage {
 /// Extracted out of [`ExtractorHandle`] to allow for easier testing.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError>;
 }
 
 #[derive(Clone)]
@@ -128,24 +159,25 @@ impl ExtractorHandle {
 #[async_trait]
 impl MessageSender for ExtractorHandle {
     #[instrument(skip(self))]
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
-        let (tx, rx) = mpsc::channel(16);
-        // Define a timeout duration
-        let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
-
-        // Wrap the send operation with a timeout
-        let send_result = tokio::time::timeout(
-            timeout_duration,
+    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
+        let timeout = std::time::Duration::from_secs(5);
+        let (sender, rx) = mpsc::channel(16);
+        let (reply, reply_rx) = oneshot::channel();
+        let request = ControlMessage::Subscribe(SubscribeRequest { sender, reply });
+        let reply = tokio::time::timeout(timeout, async {
             self.control_tx
-                .send(ControlMessage::Subscribe(tx)),
-        )
-        .await;
-
-        match send_result {
-            Ok(Ok(())) => Ok(rx),
-            Ok(Err(e)) => Err(e),
-            // TODO: use a better error type that lets us return this as an error.
-            Err(_) => panic!("Subscription timed out!"),
+                .send(request)
+                .await
+                .map_err(|_| SubscribeError::ControlChannelClosed)?;
+            reply_rx
+                .await
+                .map_err(|_| SubscribeError::ControlChannelClosed)
+        })
+        .await
+        .map_err(|_| SubscribeError::Timeout(timeout))??;
+        match reply {
+            SubscribeReply::Accepted => Ok(rx),
+            SubscribeReply::NotStreaming => Err(SubscribeError::NotStreaming),
         }
     }
 }

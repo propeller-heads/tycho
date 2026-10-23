@@ -235,6 +235,11 @@ impl ExtractorFactory {
         self
     }
 
+    /// Returns the writer status the extractors of this factory commit or follow by.
+    pub(super) fn writer_status(&self) -> &WriterStatus {
+        &self.writer_status
+    }
+
     /// Builds a fresh, ready-to-run [`ExtractorRunner`].
     ///
     /// Creates a fresh gateway instance, constructs the DCI plugin if configured, and establishes
