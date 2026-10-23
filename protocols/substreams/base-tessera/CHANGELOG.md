@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.1
+## v0.1.0
 
 Tessera V integration on Base as `vm:tessera`, indexed from block 37518600.
 

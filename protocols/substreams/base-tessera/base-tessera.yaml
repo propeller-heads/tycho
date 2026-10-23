@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "base_tessera"
-  version: v0.1.1
+  version: v0.1.0
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-tessera"
 
 protobuf:
