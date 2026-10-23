@@ -6,7 +6,7 @@ use substreams_ethereum::pb::eth::v2::{self as eth};
 
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 
-use ethereum_uniswap_v4_shared::{abi::pool_manager::events::Initialize, HookPermissionsDetector};
+use ethereum_uniswap_v4_shared::abi::pool_manager::events::Initialize;
 
 use tycho_substreams::prelude::*;
 
@@ -23,8 +23,18 @@ pub fn map_pools_created(
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
 
+/// `LPFeeLibrary.DYNAMIC_FEE_FLAG`: the pool's hook sets the LP fee.
+const DYNAMIC_FEE_FLAG: u64 = 0x800000;
+
+/// A pool this package can quote: no hook contract and a static LP fee. A hook without swap
+/// permissions can still call `updateDynamicLPFee` on a dynamic-fee pool and move its fee (up to
+/// 100%) between the indexed state and a swap, so any hook or dynamic fee excludes the pool.
+fn is_hookless_static_fee(hooks: &[u8], fee: &BigInt) -> bool {
+    hooks.iter().all(|b| *b == 0) && fee.to_u64() & DYNAMIC_FEE_FLAG == 0
+}
+
 // Extract new pools initialized on the pool manager contract
-// Only includes pools WITHOUT swap hooks
+// Only includes pools without a hook and with a static fee
 fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
@@ -32,10 +42,8 @@ fn get_new_pools(
 ) {
     // Extract new pools from Initialize events
     let mut on_pool_created = |event: Initialize, _tx: &eth::TransactionTrace, _log: &eth::Log| {
-        // Filter: only include pools WITHOUT swap hooks
-        let hook_address = Address::from_slice(&event.hooks);
-        if HookPermissionsDetector::has_swap_hooks(&hook_address) {
-            return; // Skip pools with swap hooks
+        if !is_hookless_static_fee(&event.hooks, &event.fee) {
+            return;
         }
 
         let tycho_tx: tycho_substreams::prelude::Transaction = _tx.into();
@@ -151,4 +159,22 @@ fn get_new_pools(
 
     eh.on::<Initialize, _>(&mut on_pool_created);
     eh.handle_events();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexes_only_hookless_static_fee_pools() {
+        let zero = [0u8; 20];
+        let mut hook = [0u8; 20];
+        hook[19] = 0x01; // no swap permission bits
+        assert!(is_hookless_static_fee(&zero, &BigInt::from(500)));
+        assert!(!is_hookless_static_fee(&zero, &BigInt::from(DYNAMIC_FEE_FLAG)));
+        assert!(!is_hookless_static_fee(&hook, &BigInt::from(500)));
+        assert!(!is_hookless_static_fee(&hook, &BigInt::from(DYNAMIC_FEE_FLAG)));
+        hook[19] = 0x80; // beforeSwap
+        assert!(!is_hookless_static_fee(&hook, &BigInt::from(500)));
+    }
 }
