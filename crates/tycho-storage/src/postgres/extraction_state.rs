@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use diesel::{ExpressionMethods, QueryDsl};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::models::{Chain, ExtractionState};
@@ -27,6 +29,38 @@ impl PostgresGateway {
             Ok(None) => Err(StorageError::NotFound("ExtractionState".to_owned(), name.to_owned())),
             Err(err) => Err(storage_error_from_diesel(err, "ExtractionState", name, None).into()),
         }
+    }
+
+    /// Returns the number of the block each extraction state of `chain` last saved, keyed by
+    /// the state's name.
+    ///
+    /// A state is saved in the same transaction as the block data it covers, so this is the
+    /// newest block whose data is in the database for that extractor.
+    pub async fn get_committed_heights(
+        &self,
+        chain: &Chain,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<HashMap<String, u64>, StorageError> {
+        let chain_id = self.get_chain_id(chain)?;
+        let rows: Vec<(String, i64)> = schema::extraction_state::table
+            .inner_join(schema::block::table)
+            .filter(schema::extraction_state::chain_id.eq(chain_id))
+            .select((schema::extraction_state::name, schema::block::number))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(err, "ExtractionState", &chain.to_string(), None)
+            })?;
+        let mut heights = HashMap::with_capacity(rows.len());
+        for (name, number) in rows {
+            let number = u64::try_from(number).map_err(|_| {
+                StorageError::Unexpected(format!(
+                    "Extraction state {name} points to a block with negative number {number}"
+                ))
+            })?;
+            heights.insert(name, number);
+        }
+        Ok(heights)
     }
 
     pub async fn save_state(
