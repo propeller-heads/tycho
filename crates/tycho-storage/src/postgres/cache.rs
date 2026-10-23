@@ -1369,13 +1369,13 @@ impl StateSnapshotGateway for CachedGateway {
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
-    use diesel::{sql_query, QueryableByName};
+    use diesel::{sql_query, ExpressionMethods, QueryDsl, QueryableByName};
     use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
     use crate::postgres::{
-        builder::GatewayBuilder, db_fixtures, db_fixtures::yesterday_one_am, orm,
+        builder::GatewayBuilder, db_fixtures, db_fixtures::yesterday_one_am, orm, schema,
         testing::run_against_db,
     };
 
@@ -1558,6 +1558,123 @@ mod test_serial_db {
                 .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
                 .await;
             assert!(stored.is_err(), "a fenced write must not reach the database");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_writes_fail_until_the_writer_epoch_is_incremented() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let handle = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await
+            .run();
+            let cached_gw = CachedGateway::new(tx.clone(), connection_pool.clone(), gateway.clone());
+            let block = get_sample_block(1);
+
+            let before_claim =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block.clone()])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            let epoch = cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
+            let after_claim =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block.clone()])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            handle.abort();
+
+            assert!(
+                matches!(before_claim, Err(StorageError::Unexpected(ref msg)) if msg.contains("not claimed")),
+                "unexpected result before the claim: {before_claim:?}"
+            );
+            assert!(epoch > 0);
+            assert_eq!(after_claim, Ok(()));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("the block written after the claim should be stored");
+            assert_eq!(stored, block);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_cache_tokens_serves_tokens_without_writing_them() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let cached_gw = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .enable_token_cache()
+                .build_gw()
+                .await
+                .expect("gateway should build");
+            let address = Bytes::from_str("6b175474e89094c44da98b954eedeac495271d0f").unwrap();
+            let token = models::token::Token::new(
+                &address,
+                "DAI",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+
+            cached_gw.cache_tokens(slice::from_ref(&token));
+
+            let served = cached_gw
+                .get_tokens(Chain::Ethereum, Some(&[&address]), QualityRange::None(), None, None)
+                .await
+                .expect("tokens should be served")
+                .entity;
+            assert_eq!(served, vec![token]);
+            let stored: i64 = schema::token::table
+                .inner_join(schema::account::table)
+                .filter(schema::account::address.eq(&address))
+                .count()
+                .get_result(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(stored, 0, "cached tokens must not be written to the database");
         })
         .await;
     }
