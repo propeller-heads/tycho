@@ -51,8 +51,9 @@ component balances, and contract storage.
 
 `token_cache` holds an in-memory copy of the token tables so `get_tokens` never touches SQL.
 Opt-in via `GatewayBuilder::enable_token_cache()` (the `index` and `rpc` commands enable it;
-the token-analysis job does not). Kept fresh by write-through on token/balance writes plus a
-periodic `modified_ts` delta poll for out-of-process writers. See the module docs for design.
+the token-analysis job does not). Kept fresh by write-through on token/balance writes plus
+periodic delta polls (`token.modified_ts` and `component_balance_default.valid_from`) for
+out-of-process writers. See the module docs for design.
 
 `component_index` holds the id and TVL of every component, per protocol system, so
 `get_protocol_components` requests with a protocol system and no ids skip the SQL `COUNT` and
