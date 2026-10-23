@@ -221,6 +221,66 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_get_committed_heights() {
+        let mut conn = setup_db().await;
+        let gateway = get_dgw(&mut conn).await;
+        let blocks: Vec<(i64, i64)> = schema::block::table
+            .select((schema::block::id, schema::block::number))
+            .order_by(schema::block::number)
+            .load(&mut conn)
+            .await
+            .unwrap();
+        let (first_block_id, first_block_number) = blocks[0];
+        let (_, last_block_number) = *blocks.last().unwrap();
+        let chain_id = gateway
+            .get_chain_id(&Chain::Ethereum)
+            .unwrap();
+        diesel::insert_into(schema::extraction_state::table)
+            .values(&orm::NewExtractionState {
+                name: "lagging_extractor",
+                chain_id,
+                attributes: None,
+                cursor: None,
+                version: "0.1.0",
+                modified_ts: chrono::Utc::now().naive_utc(),
+                block_id: first_block_id,
+            })
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let heights = gateway
+            .get_committed_heights(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            heights,
+            HashMap::from([
+                ("setup_extractor".to_string(), last_block_number as u64),
+                ("lagging_extractor".to_string(), first_block_number as u64),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_committed_heights_of_chain_without_states() {
+        let mut conn = setup_db().await;
+        let gateway = get_dgw(&mut conn).await;
+        diesel::delete(schema::extraction_state::table)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let heights = gateway
+            .get_committed_heights(&Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        assert!(heights.is_empty());
+    }
+
+    #[tokio::test]
 
     async fn test_get_state() {
         // Tests the get_state method of the gateway by loading the state named "setup_extractor"
