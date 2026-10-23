@@ -4,6 +4,7 @@ use crate::{
     config::DeploymentConfig,
     pb::tessera::v1::BlockStorageChanges,
 };
+use alloy_primitives::{Address, B256};
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use substreams::{
@@ -33,7 +34,7 @@ struct StoreState {
     treasury: Vec<u8>,
     pause_inputs: PauseInputs,
     /// Engine registry slot of each known pair's token pair, keyed by pair id.
-    registry: HashMap<String, Vec<u8>>,
+    registry: HashMap<String, B256>,
 }
 
 /// The block's new pairs and treasury balance deltas, as the upstream modules emit them.
@@ -70,7 +71,7 @@ pub fn map_protocol_changes(
         .collect();
     let treasury = safety_store
         .get_last("treasury")
-        .unwrap_or_else(|| config.treasury.clone());
+        .unwrap_or_else(|| config.treasury.to_vec());
     let pause_inputs = read_pause_inputs(&safety_store, &pairs);
     let registry = registry_slots(&config, &component_store, &pairs);
     let state = StoreState { pairs, treasury, pause_inputs, registry };
@@ -89,11 +90,12 @@ fn registry_slots(
     config: &DeploymentConfig,
     store: &StoreGetProto<ProtocolComponent>,
     known: &HashSet<String>,
-) -> HashMap<String, Vec<u8>> {
+) -> HashMap<String, B256> {
     let mut slots = HashMap::new();
     for pair in known {
         if let Some(component) = store.get_last(pair) {
             if let [a, b] = component.tokens.as_slice() {
+                let (a, b) = (Address::from_slice(a), Address::from_slice(b));
                 slots.insert(pair.clone(), registry_slot(a, b, config.pair_map_slot));
             }
         }
@@ -164,7 +166,7 @@ fn protocol_changes_from_storage(
     extract_contract_changes_builder(
         block,
         |addr| {
-            addr == config.tesseraswap || addr == config.engine || state.pairs.contains(&id(addr))
+            config.tesseraswap == *addr || config.engine == *addr || state.pairs.contains(&id(addr))
         },
         &mut changes,
     );
@@ -200,8 +202,8 @@ fn record_pair_writes(
     // The VM loads the published code when one of these addresses changes; a change alone
     // does not pause the pair.
     let dependency_slots = [
-        IMPLEMENTATION_SLOT.to_vec(), // Pair EIP-1967 slot: implementation, attribute 0.
-        slot(config.pair_lib_slot),   // Pair slot 51: pricing library, attribute 1.
+        IMPLEMENTATION_SLOT,        // Pair EIP-1967 slot: implementation, attribute 0.
+        slot(config.pair_lib_slot), // Pair slot 51: pricing library, attribute 1.
         slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
     ];
     // state.pairs includes end-block discoveries; never attach changes to a Pair in a transaction
@@ -216,9 +218,12 @@ fn record_pair_writes(
     for group in &storage.transactions {
         let transaction = group.tx()?;
         for w in &group.writes {
-            if w.address == config.engine {
-                let replaced = id(&address(&w.old_value));
-                if state.registry.get(&replaced) == Some(&w.key) &&
+            if *w.address == config.engine {
+                let replaced = id(address(&w.old_value));
+                if state
+                    .registry
+                    .get(&replaced)
+                    .is_some_and(|slot| *slot == *w.key) &&
                     address(&w.new_value) != address(&w.old_value)
                 {
                     changes
@@ -226,10 +231,10 @@ fn record_pair_writes(
                         .or_insert_with(|| TransactionChangesBuilder::new(transaction))
                         .change_component_pause_state(&replaced, true);
                 }
-            } else if w.address == config.tesseraswap {
-                let name = if w.key == engine_slot {
+            } else if *w.address == config.tesseraswap {
+                let name = if *w.key == engine_slot {
                     "engine"
-                } else if w.key == treasury_slot {
+                } else if *w.key == treasury_slot {
                     // map_relative_balances emits the matching balance bridge.
                     "balance_owner"
                 } else {
@@ -240,7 +245,7 @@ fn record_pair_writes(
                     .or_insert_with(|| TransactionChangesBuilder::new(transaction));
                 for pair in &state.pairs {
                     if exists_at(pair, transaction.index) {
-                        attribute(builder, pair, name, address(&w.new_value));
+                        attribute(builder, pair, name, address(&w.new_value).to_vec());
                     }
                 }
             } else {
@@ -250,7 +255,7 @@ fn record_pair_writes(
                 }
                 let Some(i) = dependency_slots
                     .iter()
-                    .position(|key| *key == w.key)
+                    .position(|key| *key == *w.key)
                 else {
                     continue;
                 };
@@ -262,7 +267,7 @@ fn record_pair_writes(
                     changes
                         .entry(transaction.index)
                         .or_insert_with(|| TransactionChangesBuilder::new(transaction));
-                    dependencies.push((transaction.index, pair, i, address(&w.new_value)));
+                    dependencies.push((transaction.index, pair, i, address(&w.new_value).to_vec()));
                 }
             }
         }
@@ -312,7 +317,6 @@ fn enforce_pauses(
 ) -> Result<()> {
     // Always enforce persisted signals on emitted component updates. Fee-table writes can
     // occur without a Pair write, so include their transaction explicitly as a trigger.
-    let fee_key = fee_tag_zero_slot();
     let helpers: HashSet<&[u8]> = state
         .pause_inputs
         .helpers
@@ -323,7 +327,7 @@ fn enforce_pauses(
         if group
             .writes
             .iter()
-            .any(|w| w.key == fee_key && helpers.contains(w.address.as_slice()))
+            .any(|w| *w.key == FEE_TAG_ZERO_SLOT && helpers.contains(w.address.as_slice()))
         {
             let tx = group.tx()?;
             changes
@@ -338,7 +342,7 @@ fn enforce_pauses(
         .pause_inputs
         .engine
         .as_ref()
-        .is_some_and(|e| *e != config.engine);
+        .is_some_and(|e| config.engine != e[..]);
     for (index, builder) in changes.iter_mut() {
         for pair in &state.pairs {
             if created
@@ -413,10 +417,15 @@ mod tests {
         w
     }
 
-    fn write(address: &[u8], key: Vec<u8>, old: Vec<u8>, new: Vec<u8>) -> eth::v2::StorageChange {
+    fn write(
+        address: impl AsRef<[u8]>,
+        key: impl AsRef<[u8]>,
+        old: Vec<u8>,
+        new: Vec<u8>,
+    ) -> eth::v2::StorageChange {
         eth::v2::StorageChange {
-            address: address.to_vec(),
-            key,
+            address: address.as_ref().to_vec(),
+            key: key.as_ref().to_vec(),
             old_value: old,
             new_value: new,
             ..Default::default()
@@ -465,21 +474,21 @@ mod tests {
 
     fn store_state(pairs: &[&[u8]], pause_inputs: PauseInputs) -> StoreState {
         StoreState {
-            pairs: pairs.iter().map(|p| id(p)).collect(),
+            pairs: pairs.iter().map(id).collect(),
             treasury: TREASURY.to_vec(),
             pause_inputs,
             registry: HashMap::new(),
         }
     }
 
-    const PAIR_REGISTRY_SLOT: [u8; 32] = [0x99; 32];
+    const PAIR_REGISTRY_SLOT: B256 = B256::repeat_byte(0x99);
 
     /// A state where PAIR's token pair sits at `PAIR_REGISTRY_SLOT` in the Engine registry.
     fn registered_state() -> StoreState {
         let mut state = store_state(&[&PAIR, &OTHER_PAIR], safe());
         state
             .registry
-            .insert(id(&PAIR), PAIR_REGISTRY_SLOT.to_vec());
+            .insert(id(PAIR), PAIR_REGISTRY_SLOT);
         state
     }
 
@@ -488,7 +497,7 @@ mod tests {
         let engine = config().engine;
         let block = block(vec![tx(
             0,
-            vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), word(&OTHER_PAIR))],
+            vec![write(engine, PAIR_REGISTRY_SLOT, word(&PAIR), word(&OTHER_PAIR))],
         )]);
         let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
@@ -499,10 +508,8 @@ mod tests {
     #[test]
     fn pauses_pair_removed_from_registry() {
         let engine = config().engine;
-        let block = block(vec![tx(
-            0,
-            vec![write(&engine, PAIR_REGISTRY_SLOT.to_vec(), word(&PAIR), vec![0; 32])],
-        )]);
+        let block =
+            block(vec![tx(0, vec![write(engine, PAIR_REGISTRY_SLOT, word(&PAIR), vec![0; 32])])]);
         let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
@@ -512,7 +519,7 @@ mod tests {
     fn pair_address_outside_its_registry_slot_does_not_pause() {
         let engine = config().engine;
         let block =
-            block(vec![tx(0, vec![write(&engine, slot(77), word(&PAIR), word(&OTHER_PAIR))])]);
+            block(vec![tx(0, vec![write(engine, slot(77), word(&PAIR), word(&OTHER_PAIR))])]);
         let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
 
         assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
@@ -543,26 +550,21 @@ mod tests {
             tx(
                 0,
                 vec![
-                    write(
-                        &PAIR,
-                        IMPLEMENTATION_SLOT.to_vec(),
-                        word(&[0x70; 20]),
-                        word(&implementation),
-                    ),
-                    write(&PAIR, slot(51), vec![0; 32], word(&library)),
-                    write(&PAIR, slot(52), vec![0; 32], word(&HELPER)),
+                    write(PAIR, IMPLEMENTATION_SLOT, word(&[0x70; 20]), word(&implementation)),
+                    write(PAIR, slot(51), vec![0; 32], word(&library)),
+                    write(PAIR, slot(52), vec![0; 32], word(&HELPER)),
                 ],
             ),
-            tx(1, vec![write(&PAIR, slot(52), word(&HELPER), vec![0; 32])]),
+            tx(1, vec![write(PAIR, slot(52), word(&HELPER), vec![0; 32])]),
         ]);
         let out =
             protocol_changes(&config(), &block, no_upstream(), &store_state(&[&PAIR], safe()))
                 .unwrap();
 
         let first = attrs_in(&out, 0, &PAIR);
-        assert_eq!(first["stateless_contract_addr_0"], id(&implementation).into_bytes());
-        assert_eq!(first["stateless_contract_addr_1"], id(&library).into_bytes());
-        assert_eq!(first["stateless_contract_addr_2"], id(&HELPER).into_bytes());
+        assert_eq!(first["stateless_contract_addr_0"], id(implementation).into_bytes());
+        assert_eq!(first["stateless_contract_addr_1"], id(library).into_bytes());
+        assert_eq!(first["stateless_contract_addr_2"], id(HELPER).into_bytes());
         assert_eq!(
             first["stateless_contract_code_0"],
             [&[0x5f], implementation.as_slice()].concat()
@@ -618,20 +620,12 @@ mod tests {
     fn reads_each_dependency_code_once_per_block() {
         let implementation = [0x71; 20];
         let block = block(vec![
-            tx(
-                0,
-                vec![write(
-                    &PAIR,
-                    IMPLEMENTATION_SLOT.to_vec(),
-                    word(&[0x70; 20]),
-                    word(&implementation),
-                )],
-            ),
+            tx(0, vec![write(PAIR, IMPLEMENTATION_SLOT, word(&[0x70; 20]), word(&implementation))]),
             tx(
                 1,
                 vec![write(
-                    &OTHER_PAIR,
-                    IMPLEMENTATION_SLOT.to_vec(),
+                    OTHER_PAIR,
+                    IMPLEMENTATION_SLOT,
                     word(&[0x70; 20]),
                     word(&implementation),
                 )],
@@ -647,7 +641,7 @@ mod tests {
 
     #[test]
     fn failed_code_read_fails_the_block() {
-        let block = block(vec![tx(0, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
         let code = RecordingCode { batches: Default::default(), fail: true };
         let error = changes_with(&block, &[&PAIR], &code).unwrap_err();
         assert!(error.to_string().contains("rpc down"));
@@ -655,7 +649,7 @@ mod tests {
 
     #[test]
     fn pair_writes_touch_only_their_own_pair() {
-        let block = block(vec![tx(0, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
         let out = protocol_changes(
             &config(),
             &block,
@@ -664,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"], id(&HELPER).into_bytes());
+        assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"], id(HELPER).into_bytes());
         assert!(attrs_in(&out, 0, &OTHER_PAIR).is_empty());
     }
 
@@ -675,8 +669,8 @@ mod tests {
         let block = block(vec![tx(
             0,
             vec![
-                write(&tesseraswap, slot(0), word(&[0x22; 20]), word(&engine)),
-                write(&tesseraswap, slot(1), word(&TREASURY), word(&treasury)),
+                write(tesseraswap, slot(0), word(&[0x22; 20]), word(&engine)),
+                write(tesseraswap, slot(1), word(&TREASURY), word(&treasury)),
             ],
         )]);
         let out = protocol_changes(
@@ -698,14 +692,14 @@ mod tests {
     fn pauses_only_the_pair_whose_helper_charges_tag_zero() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
+            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
         };
         let block = block(vec![tx(
             0,
             vec![
-                write(&PAIR, slot(0), vec![1; 32], vec![2; 32]),
-                write(&OTHER_PAIR, slot(0), vec![1; 32], vec![2; 32]),
+                write(PAIR, slot(0), vec![1; 32], vec![2; 32]),
+                write(OTHER_PAIR, slot(0), vec![1; 32], vec![2; 32]),
             ],
         )]);
         let out = protocol_changes(
@@ -724,10 +718,10 @@ mod tests {
     fn zero_tag_zero_fee_does_not_pause() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
+            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
             fees: HashMap::from([(HELPER.to_vec(), vec![0; 32])]),
         };
-        let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
             &config(),
             &block,
@@ -742,7 +736,7 @@ mod tests {
     #[test]
     fn engine_replacement_pauses_every_pair() {
         let pause_inputs = PauseInputs { engine: Some([0x23; 20].to_vec()), ..safe() };
-        let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
             &config(),
             &block,
@@ -758,7 +752,7 @@ mod tests {
     #[test]
     fn unchanged_engine_does_not_pause() {
         let pause_inputs = PauseInputs { engine: Some([0x22; 20].to_vec()), ..safe() };
-        let block = block(vec![tx(0, vec![write(&PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
             &config(),
             &block,
@@ -774,12 +768,12 @@ mod tests {
     fn helper_fee_write_alone_emits_the_pause() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
+            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
         };
         let block = block(vec![tx(
             3,
-            vec![write(&HELPER, fee_tag_zero_slot(), vec![0; 32], slot(10_000))],
+            vec![write(HELPER, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(10_000).to_vec())],
         )]);
         let out = protocol_changes(
             &config(),
@@ -796,12 +790,14 @@ mod tests {
     fn fee_write_outside_assigned_helpers_emits_nothing() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(&PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000))]),
+            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
+            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
         };
         let stranger = [0x0f; 20];
-        let block =
-            block(vec![tx(3, vec![write(&stranger, fee_tag_zero_slot(), vec![0; 32], slot(1))])]);
+        let block = block(vec![tx(
+            3,
+            vec![write(stranger, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(1).to_vec())],
+        )]);
         let out = protocol_changes(
             &config(),
             &block,
@@ -819,14 +815,14 @@ mod tests {
             new_components: BlockTransactionProtocolComponents {
                 tx_components: vec![TransactionProtocolComponents {
                     tx: Some(Transaction { index: 5, ..Default::default() }),
-                    components: vec![ProtocolComponent { id: id(&PAIR), ..Default::default() }],
+                    components: vec![ProtocolComponent { id: id(PAIR), ..Default::default() }],
                 }],
             },
             ..no_upstream()
         };
         let block = block(vec![
-            tx(2, vec![write(&PAIR, slot(52), vec![0; 32], word(&HELPER))]),
-            tx(5, vec![write(&PAIR, slot(0), vec![0; 32], vec![1; 32])]),
+            tx(2, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))]),
+            tx(5, vec![write(PAIR, slot(0), vec![0; 32], vec![1; 32])]),
         ]);
         let out =
             protocol_changes(&config(), &block, upstream, &store_state(&[&PAIR], safe())).unwrap();

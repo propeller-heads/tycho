@@ -31,7 +31,6 @@ pub(crate) fn filter_storage_changes(
     block: &eth::v2::Block,
     known: &HashSet<Vec<u8>>,
 ) -> BlockStorageChanges {
-    let fee_key = fee_tag_zero_slot();
     let transactions = block
         .transactions()
         .filter_map(|tx| {
@@ -41,9 +40,9 @@ pub(crate) fn filter_storage_changes(
                 .filter(|call| !call.state_reverted)
                 .flat_map(|call| &call.storage_changes)
                 .filter(|w| {
-                    w.address == config.tesseraswap ||
-                        w.address == config.engine ||
-                        w.key == fee_key ||
+                    *w.address == config.tesseraswap ||
+                        *w.address == config.engine ||
+                        *w.key == FEE_TAG_ZERO_SLOT ||
                         known.contains(&w.address)
                 })
                 .collect();
@@ -79,8 +78,18 @@ mod tests {
         DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52").unwrap()
     }
 
-    fn write(address: Vec<u8>, key: Vec<u8>, ordinal: u64) -> eth::v2::StorageChange {
-        eth::v2::StorageChange { address, key, ordinal, old_value: slot(7), new_value: slot(0) }
+    fn write(
+        address: impl AsRef<[u8]>,
+        key: impl AsRef<[u8]>,
+        ordinal: u64,
+    ) -> eth::v2::StorageChange {
+        eth::v2::StorageChange {
+            address: address.as_ref().to_vec(),
+            key: key.as_ref().to_vec(),
+            ordinal,
+            old_value: slot(7).to_vec(),
+            new_value: slot(0).to_vec(),
+        }
     }
 
     fn transaction(calls: Vec<eth::v2::Call>) -> eth::v2::TransactionTrace {
@@ -102,10 +111,10 @@ mod tests {
             .map(|n| write(unknown.clone(), slot(n), n))
             .collect();
         let relevant = vec![
-            write(c.tesseraswap.clone(), slot(1), 101),
-            write(c.engine.clone(), slot(999), 102),
+            write(c.tesseraswap, slot(1), 101),
+            write(c.engine, slot(999), 102),
             write(pair.clone(), slot(888), 103),
-            write(unknown, fee_tag_zero_slot(), 104),
+            write(unknown, FEE_TAG_ZERO_SLOT, 104),
         ];
         writes.extend(relevant.clone());
         let block = eth::v2::Block {
@@ -133,7 +142,7 @@ mod tests {
     #[test]
     fn preserves_nested_write_order_and_clears_but_excludes_reverts() {
         let c = config();
-        let w = |n| write(c.tesseraswap.clone(), slot(1), n);
+        let w = |n| write(c.tesseraswap, slot(1), n);
         let block = eth::v2::Block {
             transaction_traces: vec![transaction(vec![
                 eth::v2::Call { storage_changes: vec![w(10), w(30)], ..Default::default() },
@@ -161,7 +170,7 @@ mod tests {
     fn omits_failed_and_irrelevant_transactions() {
         let c = config();
         let mut failed = transaction(vec![eth::v2::Call {
-            storage_changes: vec![write(c.tesseraswap.clone(), slot(1), 1)],
+            storage_changes: vec![write(c.tesseraswap, slot(1), 1)],
             ..Default::default()
         }]);
         failed.status = 2;

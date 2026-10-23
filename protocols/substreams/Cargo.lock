@@ -406,10 +406,10 @@ dependencies = [
 name = "base-tessera"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "getrandom 0.2.17",
  "hex",
- "keccak-hash",
  "prost 0.11.9",
  "serde",
  "serde_qs 0.13.0",

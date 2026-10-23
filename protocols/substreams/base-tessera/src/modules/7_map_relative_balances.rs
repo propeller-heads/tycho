@@ -114,7 +114,7 @@ pub fn map_relative_balances(
     // Rotation accounting below recovers the opening custodian from the first slot write.
     let owner = safety_store
         .get_last("treasury")
-        .unwrap_or_else(|| config.treasury.clone());
+        .unwrap_or_else(|| config.treasury.to_vec());
     let inputs = StoreInputs { components: &components, pair_store: &pair_store };
     let balance_deltas =
         balance_deltas_from_storage(&config, &block, &storage, new_components, &owner, &inputs)?;
@@ -141,7 +141,7 @@ fn balance_deltas_from_storage(
     for group in &storage.transactions {
         let tx = group.tx()?;
         for w in &group.writes {
-            if w.address == config.tesseraswap && w.key == treasury_slot {
+            if *w.address == config.tesseraswap && *w.key == treasury_slot {
                 rotations.push((tx, w));
             }
         }
@@ -150,7 +150,7 @@ fn balance_deltas_from_storage(
     // Account the entire block against its opening custodian, then bridge end-of-block balances.
     let old_owner = rotations
         .first()
-        .map(|(_, w)| address(&w.old_value))
+        .map(|(_, w)| address(&w.old_value).to_vec())
         .unwrap_or_else(|| owner.to_vec());
     let mut seeded = HashSet::new();
     let mut deltas = vec![];
@@ -226,7 +226,7 @@ fn balance_deltas_from_storage(
 mod tests {
     use super::*;
     use crate::common::testing::storage_changes;
-    use keccak_hash::keccak;
+    use alloy_primitives::keccak256;
     use std::collections::HashMap;
 
     const TREASURY: [u8; 20] = [0x31; 20];
@@ -292,13 +292,11 @@ mod tests {
         eth::v2::Log {
             address: token.to_vec(),
             topics: vec![
-                keccak(b"Transfer(address,address,uint256)")
-                    .as_bytes()
-                    .to_vec(),
+                keccak256(b"Transfer(address,address,uint256)").to_vec(),
                 word(from),
                 word(to),
             ],
-            data: slot(value),
+            data: slot(value).to_vec(),
             ordinal,
             ..Default::default()
         }
@@ -307,13 +305,8 @@ mod tests {
     fn deposit(token: &[u8], dst: &[u8], value: u64, ordinal: u64) -> eth::v2::Log {
         eth::v2::Log {
             address: token.to_vec(),
-            topics: vec![
-                keccak(b"Deposit(address,uint256)")
-                    .as_bytes()
-                    .to_vec(),
-                word(dst),
-            ],
-            data: slot(value),
+            topics: vec![keccak256(b"Deposit(address,uint256)").to_vec(), word(dst)],
+            data: slot(value).to_vec(),
             ordinal,
             ..Default::default()
         }
@@ -506,8 +499,8 @@ mod tests {
         };
         // The Engine's writes reach this module, and its slot 1 is not the treasury.
         let engine_write = eth::v2::StorageChange {
-            address: config().engine,
-            key: slot(1),
+            address: config().engine.to_vec(),
+            key: slot(1).to_vec(),
             old_value: word(&TREASURY),
             new_value: word(&NEW_TREASURY),
             ordinal: 20,
@@ -567,8 +560,8 @@ mod tests {
             ]),
         };
         let rotation = |old: &[u8], new: &[u8], ordinal| eth::v2::StorageChange {
-            address: config().tesseraswap,
-            key: slot(1),
+            address: config().tesseraswap.to_vec(),
+            key: slot(1).to_vec(),
             old_value: word(old),
             new_value: word(new),
             ordinal,

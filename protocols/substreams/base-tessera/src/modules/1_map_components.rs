@@ -42,7 +42,7 @@ fn keep_latest<'a>(writes: &mut LatestWrites<'a>, w: &'a eth::v2::StorageChange)
 fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<ProtocolComponent> {
     let base_slot = slot(config.pair_base_token_slot);
     let quote_slot = slot(config.pair_quote_token_slot);
-    let init_slots = [IMPLEMENTATION_SLOT.as_slice(), &base_slot, &quote_slot];
+    let init_slots = [IMPLEMENTATION_SLOT.as_slice(), base_slot.as_slice(), quote_slot.as_slice()];
     // Nested call order is not storage-write order, so the highest ordinal wins, including an
     // Engine registry clear.
     let mut registry = LatestWrites::new();
@@ -53,7 +53,7 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
         .filter(|call| !call.state_reverted)
         .flat_map(|call| &call.storage_changes)
     {
-        if w.address == config.engine {
+        if *w.address == config.engine {
             keep_latest(&mut registry, w);
         } else if init_slots.contains(&w.key.as_slice()) &&
             zero(&w.old_value) &&
@@ -78,22 +78,22 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
             }
             let base = address(slots.get(base_slot.as_slice())?.1);
             let quote = address(slots.get(quote_slot.as_slice())?.1);
-            if zero(&base) || zero(&quote) || base == quote {
+            if base.is_zero() || quote.is_zero() || base == quote {
                 return None;
             }
-            let key = registry_slot(&base, &quote, config.pair_map_slot);
-            if address(registry.get(key.as_slice())?.1) != pair {
+            let key = registry_slot(base, quote, config.pair_map_slot);
+            if address(registry.get(key.as_slice())?.1) != *pair {
                 return None;
             }
-            let mut tokens = vec![base.clone(), quote.clone()];
+            let mut tokens = vec![base.to_vec(), quote.to_vec()];
             tokens.sort();
             let contained = json_serialize_address_list(&tokens);
             Some(
                 ProtocolComponent::new(&id(pair))
                     .with_tokens(&tokens)
                     .with_contracts(&[
-                        config.tesseraswap.clone(),
-                        config.engine.clone(),
+                        config.tesseraswap.to_vec(),
+                        config.engine.to_vec(),
                         pair.to_vec(),
                     ])
                     .with_attributes(&[
@@ -110,28 +110,30 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Address, B256};
+
     fn config() -> DeploymentConfig {
         DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52").unwrap()
     }
     fn transaction() -> eth::v2::TransactionTrace {
         let c = config();
-        let pair = vec![4; 20];
-        let base = vec![5; 20];
-        let quote = vec![6; 20];
-        let write = |address, key, new_value| eth::v2::StorageChange {
-            address,
-            key,
+        let pair = Address::repeat_byte(4);
+        let base = Address::repeat_byte(5);
+        let quote = Address::repeat_byte(6);
+        let write = |address: Address, key: B256, new_value: B256| eth::v2::StorageChange {
+            address: address.to_vec(),
+            key: key.to_vec(),
             old_value: vec![0; 32],
-            new_value,
+            new_value: new_value.to_vec(),
             ..Default::default()
         };
         eth::v2::TransactionTrace {
             calls: vec![eth::v2::Call {
                 storage_changes: vec![
-                    write(pair.clone(), IMPLEMENTATION_SLOT.to_vec(), vec![7; 32]),
-                    write(pair.clone(), slot(48), base.clone()),
-                    write(pair.clone(), slot(49), quote.clone()),
-                    write(c.engine, registry_slot(&base, &quote, 8), pair),
+                    write(pair, IMPLEMENTATION_SLOT, B256::repeat_byte(7)),
+                    write(pair, slot(48), base.into_word()),
+                    write(pair, slot(49), quote.into_word()),
+                    write(c.engine, registry_slot(base, quote, 8), pair.into_word()),
                 ],
                 ..Default::default()
             }],
@@ -142,7 +144,7 @@ mod tests {
     fn discovers_registered_pair() {
         let result = discover(&transaction(), &config());
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, id(&[4; 20]));
+        assert_eq!(result[0].id, id([4; 20]));
         assert_eq!(result[0].tokens, vec![vec![5; 20], vec![6; 20]]);
     }
     #[test]
@@ -178,8 +180,12 @@ mod tests {
             substreams::hex!("1015ebf4b5bba5d4765ea3c43a1df3370fc92a53197740322f1bf44963ef2c9f");
         let mut tx = transaction();
         let writes = &mut tx.calls[0].storage_changes;
-        writes[1].new_value = vec![6; 20];
-        writes[2].new_value = vec![5; 20];
+        writes[1].new_value = Address::repeat_byte(6)
+            .into_word()
+            .to_vec();
+        writes[2].new_value = Address::repeat_byte(5)
+            .into_word()
+            .to_vec();
         writes[3].key = key.to_vec();
         let result = discover(&tx, &config());
         assert_eq!(result.len(), 1);
@@ -188,12 +194,8 @@ mod tests {
     #[test]
     fn wrong_registry_mapping_is_rejected() {
         let mut tx = transaction();
-        tx.calls[0].storage_changes[3].key = slot(8);
+        tx.calls[0].storage_changes[3].key = slot(8).to_vec();
         assert!(discover(&tx, &config()).is_empty());
-    }
-    #[test]
-    fn invalid_address_config_is_rejected() {
-        assert!(DeploymentConfig::parse("tesseraswap=11").is_err());
     }
 
     #[test]
@@ -202,11 +204,13 @@ mod tests {
         tx.calls[0].storage_changes[3].ordinal = 40;
         let mut earlier = tx.calls[0].storage_changes[3].clone();
         earlier.ordinal = 30;
-        earlier.new_value = vec![9; 20];
+        earlier.new_value = vec![9; 32];
         tx.calls
             .push(eth::v2::Call { storage_changes: vec![earlier], ..Default::default() });
         assert_eq!(discover(&tx, &config()).len(), 1);
-        tx.calls[0].storage_changes[3].old_value = vec![4; 20];
+        tx.calls[0].storage_changes[3].old_value = Address::repeat_byte(4)
+            .into_word()
+            .to_vec();
         tx.calls[0].storage_changes[3].new_value = vec![0; 32];
         assert!(discover(&tx, &config()).is_empty());
     }

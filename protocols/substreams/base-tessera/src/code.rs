@@ -8,8 +8,8 @@
 //! An `eth_call` on a Flashblocks partial block stalls the stream for about three minutes, so a
 //! package using this module must run without partial blocks.
 
+use alloy_primitives::keccak256;
 use anyhow::{anyhow, Result};
-use keccak_hash::keccak;
 use std::collections::HashMap;
 use substreams::hex;
 use substreams_ethereum::pb::eth::rpc::{RpcCall, RpcCalls};
@@ -73,8 +73,8 @@ fn reader_address() -> Vec<u8> {
     let mut preimage = vec![0xff];
     preimage.extend_from_slice(&DEPLOYER);
     preimage.extend_from_slice(&[0; 32]);
-    preimage.extend_from_slice(keccak(READER_INIT).as_bytes());
-    keccak(preimage).as_bytes()[12..].to_vec()
+    preimage.extend_from_slice(keccak256(READER_INIT).as_slice());
+    keccak256(preimage)[12..].to_vec()
 }
 
 /// ABI-encodes one `(address target, bool allowFailure, bytes callData)` tuple.
