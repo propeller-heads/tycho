@@ -223,6 +223,10 @@ the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
+A natively indexed `IPropAMM` venue uses the same pAMM lane: tycho-simulation publishes its
+components as `fallback:{protocol}` (`via_fallback_router`), the family `fallback` entry resolves
+the executor, and the encoder reads the component's `pamm_address`.
+
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
 fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
 calls `PropAMMFallbackRouter.swap()`.

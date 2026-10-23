@@ -446,6 +446,62 @@ mod tests {
         assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"));
     }
 
+    /// A natively indexed IPropAMM venue published as `fallback:biconomy`: one component per
+    /// venue, its id the venue address, `pamm_address` the venue.
+    #[test]
+    fn test_encode_native_venue_fallback_on_base() {
+        let venue = "0000009e5f98cdb4dd1e1d2e15b220217c88b3b8";
+        let weth = "4200000000000000000000000000000000000006";
+        let usdc = "833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        let weth_usdc_usv3 = "d0b53d9277642d899df5c87a3966a349a798f224";
+        let component = ProtocolComponent {
+            id: format!("0x{venue}"),
+            protocol_system: String::from("fallback:biconomy"),
+            static_attributes: HashMap::from([(
+                PAMM_ADDRESS_ATTRIBUTE.to_string(),
+                Bytes::from(format!("0x{venue}").as_str()),
+            )]),
+            ..Default::default()
+        };
+        let token_in = Bytes::from(format!("0x{weth}").as_str());
+        let token_out = Bytes::from(format!("0x{usdc}").as_str());
+        let swap = |user_data: String| {
+            Swap::new(
+                component.clone(),
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+            .with_user_data(Bytes::from(user_data.as_bytes()))
+        };
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in.clone(),
+            group_token_out: token_out.clone(),
+            origin: None,
+        };
+
+        let encoded = encoder(Chain::Base)
+            .encode_swap(
+                &swap(format!(
+                    r#"{{"fallback_protocol":"uniswap_v3","pool":"0x{weth_usdc_usv3}"}}"#
+                )),
+                &encoding_context,
+            )
+            .unwrap();
+        assert_eq!(encode(&encoded), format!("{weth}{usdc}{venue}01{weth_usdc_usv3}"));
+
+        // Base has no Curve fallback.
+        assert!(encoder(Chain::Base)
+            .encode_swap(
+                &swap(format!(
+                    r#"{{"fallback_protocol":"curve","pool":"0x{weth_usdc_usv3}","pool_type":"stable","i":0,"j":1}}"#
+                )),
+                &encoding_context,
+            )
+            .is_err());
+    }
+
     #[test]
     fn test_encode_uniswap_v2_fallback() {
         let pair = "b4e16d0168e52d35cacd2c6185b44281ec28c9dc";

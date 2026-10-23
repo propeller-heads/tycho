@@ -385,6 +385,23 @@ mod tests {
             .is_none());
     }
 
+    /// A native IPropAMM venue published as `fallback:biconomy` resolves to Base's deployed
+    /// fallback executor through the family entry.
+    #[test]
+    fn test_native_venue_fallback_resolves_on_base() {
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(None)
+            .unwrap();
+        let resolved = registry
+            .get_encoder("fallback:biconomy")
+            .expect("no encoder resolved for fallback:biconomy");
+
+        assert_eq!(
+            resolved.executor_address(),
+            &Bytes::from_str("0x08f22285d13533d68aA8bE5949536322DB3538De").unwrap()
+        );
+    }
+
     /// An exact entry wins over the `fallback` family entry.
     #[test]
     fn test_rfq_fallback_routers_resolve_before_the_family() {
