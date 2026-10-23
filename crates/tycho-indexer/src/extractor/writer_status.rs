@@ -1,7 +1,11 @@
 //! Whether this process writes extraction results, and what the writer has committed.
 use std::{collections::HashMap, time::Duration};
 
+use chrono::NaiveDateTime;
 use tokio::{sync::watch, time::Instant};
+use tycho_storage::postgres::cache::CommittedBlock;
+
+use crate::extractor::protocol_extractor::FOLLOWER_RETENTION_SPAN;
 
 /// The part this process plays in writing extraction results to the database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,13 +16,13 @@ pub enum Role {
     Follower,
 }
 
-/// Shared view of this process's [`Role`] and of the block heights the leader has committed.
+/// Shared view of this process's [`Role`] and of the blocks the leader has committed.
 ///
 /// A role only ever changes from [`Role::Follower`] to [`Role::Leader`].
 #[derive(Clone, Debug)]
 pub struct WriterStatus {
     role: watch::Receiver<Role>,
-    committed_heights: watch::Receiver<HashMap<String, u64>>,
+    committed_blocks: watch::Receiver<HashMap<String, CommittedBlock>>,
     lead_confirmed_at: Option<watch::Receiver<Instant>>,
 }
 
@@ -26,19 +30,19 @@ impl WriterStatus {
     /// A process that is the leader for its whole lifetime.
     pub fn leader() -> Self {
         let (_, role) = watch::channel(Role::Leader);
-        let (_, committed_heights) = watch::channel(HashMap::new());
-        Self { role, committed_heights, lead_confirmed_at: None }
+        let (_, committed_blocks) = watch::channel(HashMap::new());
+        Self { role, committed_blocks, lead_confirmed_at: None }
     }
 
-    /// Follows `role`, reads the leader's committed heights, keyed by extractor name, from
-    /// `committed_heights`, and reads from `lead_confirmed_at` when this process last confirmed
+    /// Follows `role`, reads the leader's committed blocks, keyed by extractor name, from
+    /// `committed_blocks`, and reads from `lead_confirmed_at` when this process last confirmed
     /// that it still holds the leader lock.
     pub fn new(
         role: watch::Receiver<Role>,
-        committed_heights: watch::Receiver<HashMap<String, u64>>,
+        committed_blocks: watch::Receiver<HashMap<String, CommittedBlock>>,
         lead_confirmed_at: watch::Receiver<Instant>,
     ) -> Self {
-        Self { role, committed_heights, lead_confirmed_at: Some(lead_confirmed_at) }
+        Self { role, committed_blocks, lead_confirmed_at: Some(lead_confirmed_at) }
     }
 
     /// Returns the current role of this process.
@@ -61,10 +65,28 @@ impl WriterStatus {
     /// Returns the newest block the leader has committed for `extractor`, or `None` when it has
     /// not committed any block for it yet.
     pub fn committed_height(&self, extractor: &str) -> Option<u64> {
-        self.committed_heights
+        self.committed_blocks
             .borrow()
             .get(extractor)
-            .copied()
+            .map(|block| block.number)
+    }
+
+    /// Returns whether this process needs the stream of `extractor` at `now`.
+    ///
+    /// A leader always needs it. A follower needs it only while the leader's newest committed
+    /// block for `extractor` is younger than [`FOLLOWER_RETENTION_SPAN`]. An older block means
+    /// that the leader syncs history for the extractor: a follower would pay a second time for the
+    /// same history, it cannot serve history, and its retained blocks could not reach the head.
+    /// Without a committed block, the leader syncs the extractor for the first time, so a follower
+    /// does not need it.
+    pub fn needs_stream(&self, extractor: &str, now: NaiveDateTime) -> bool {
+        if self.role() == Role::Leader {
+            return true;
+        }
+        self.committed_blocks
+            .borrow()
+            .get(extractor)
+            .is_some_and(|block| now.signed_duration_since(block.ts) < FOLLOWER_RETENTION_SPAN)
     }
 }
 
@@ -74,9 +96,9 @@ mod tests {
 
     fn status(role: Role, confirmed_at: Instant) -> WriterStatus {
         let (_, role) = watch::channel(role);
-        let (_, heights) = watch::channel(HashMap::new());
+        let (_, committed) = watch::channel(HashMap::new());
         let (_, confirmed_at) = watch::channel(confirmed_at);
-        WriterStatus::new(role, heights, confirmed_at)
+        WriterStatus::new(role, committed, confirmed_at)
     }
 
     fn ago(duration: Duration) -> Instant {

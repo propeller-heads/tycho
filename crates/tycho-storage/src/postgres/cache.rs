@@ -635,6 +635,14 @@ type DeltasCache = LruCache<
 
 type OpenTx = (DBTransaction, oneshot::Receiver<Result<(), StorageError>>);
 
+/// The newest block an extractor has committed to the database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedBlock {
+    pub number: u64,
+    /// Chain timestamp of the block.
+    pub ts: NaiveDateTime,
+}
+
 pub struct CachedGateway {
     // Can we batch multiple block in here without breaking things?
     // Assuming we are still syncing?
@@ -747,19 +755,19 @@ impl CachedGateway {
             .await
     }
 
-    /// Returns the number of the newest block each extractor of `chain` has committed to the
-    /// database, keyed by extractor name.
-    pub async fn get_committed_heights(
+    /// Returns the newest block each extractor of `chain` has committed to the database, keyed
+    /// by extractor name.
+    pub async fn get_committed_blocks(
         &self,
         chain: &Chain,
-    ) -> Result<HashMap<String, u64>, StorageError> {
+    ) -> Result<HashMap<String, CommittedBlock>, StorageError> {
         let mut conn = self
             .pool
             .get()
             .await
             .map_err(|err| StorageError::Unexpected(err.to_string()))?;
         self.state_gateway
-            .get_committed_heights(chain, &mut conn)
+            .get_committed_blocks(chain, &mut conn)
             .await
     }
 

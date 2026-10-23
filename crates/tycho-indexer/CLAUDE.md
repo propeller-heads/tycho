@@ -15,7 +15,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; on a follower, waits to build the extractor while the leader syncs history
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -23,7 +23,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
-  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed heights as watch receivers
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed blocks as watch receivers; `needs_stream`
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -175,7 +175,7 @@ tries the `LeaderLock` once:
   `Leader` from the start. `main.rs` then runs `initialize_accounts`. This is the single-replica
   path and behaves as before.
 - **Lock held elsewhere**: role `Follower`. A background task polls
-  `CachedGateway::get_committed_heights` into the `WriterStatus` every second and retries the lock.
+  `CachedGateway::get_committed_blocks` into the `WriterStatus` every second and retries the lock.
   On success it increments the writer epoch (fencing the former leader, see "Writer fencing" in
   `crates/tycho-storage/CLAUDE.md`) and only then switches the role to `Leader`, so no extractor
   commits before the fence. A promoted process does not run `initialize_accounts`: the initialized
@@ -214,6 +214,26 @@ set by `ExtractorFactory::with_writer_status`; without it the extractor is the o
   `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
   and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
   extractor from its cursor.
+- **No stream while the leader syncs**: before it builds an extractor (at start and on each
+  restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
+  follows and the leader's newest committed block for the extractor is missing (first sync) or
+  older than `FOLLOWER_RETENTION_SPAN`. So only the leader pays Substreams for history, a follower
+  cannot serve history anyway, and a follower that opens its stream can retain every block from the
+  leader's commit to the head. The wait
+  polls every second and still serves `Stop`. During the wait the supervisor publishes
+  `StreamState::WaitingForLeader` on a `watch` channel, and `ExtractorHandle::subscribe` returns
+  `SubscribeError::NotStreaming` at once, which the WS client receives as `SubscribeError`. In
+  every other state `subscribe` queues the request and returns without waiting for the supervisor,
+  which can be busy for a long time, for example while it builds the extractor. The wait drops a
+  `Subscribe` queued before it started, which closes that subscriber's channel. It logs
+  `FollowerWaitsForLeaderSync`, `SubscriptionRejected` and `FollowerStreamStarts`. It ends when
+  the leader gets near the head or this process becomes leader. `/v1/health` stays 200 during the
+  wait, because the wait can last hours and a readiness gate would block a rollout. tycho-client
+  retries a rejected subscription on the same WS connection, so a client that the load balancer
+  keeps on such a follower uses up its retries; a client-side reconnect is follow-up work. A
+  process that is already leader builds the extractor with `CommitMode::Committing` from the
+  database cursor, as at a normal start. Once the stream is open, the wait does not
+  apply again until the next restart; `FOLLOWER_RETENTION_SPAN` bounds memory instead.
 
 ## Why extractor messages must be broadcast to the RPC service
 
