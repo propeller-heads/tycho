@@ -362,7 +362,10 @@ fn enforce_pauses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::{slot, storage_changes};
+    use crate::{
+        common::testing::{slot, storage_changes},
+        config::TEST_CONFIG,
+    };
 
     fn protocol_changes(
         config: &DeploymentConfig,
@@ -389,17 +392,7 @@ mod tests {
     const PAIR: [u8; 20] = [0x0a; 20];
     const OTHER_PAIR: [u8; 20] = [0x0b; 20];
     const HELPER: [u8; 20] = [0x0c; 20];
-    const TREASURY: [u8; 20] = [0x33; 20];
-
-    fn config() -> DeploymentConfig {
-        DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}",
-            hex::encode([0x11; 20]),
-            hex::encode([0x22; 20]),
-            hex::encode(TREASURY),
-        ))
-        .unwrap()
-    }
+    const TREASURY: [u8; 20] = TEST_CONFIG.treasury.into_array();
 
     fn word(addr: &[u8]) -> Vec<u8> {
         let mut w = vec![0; 32];
@@ -484,12 +477,13 @@ mod tests {
 
     #[test]
     fn pauses_pair_moved_out_of_registry() {
-        let engine = config().engine;
+        let engine = TEST_CONFIG.engine;
         let block = block(vec![tx(
             0,
             vec![write(engine, PAIR_REGISTRY_SLOT, word(&PAIR), word(&OTHER_PAIR))],
         )]);
-        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
+        let out =
+            protocol_changes(&TEST_CONFIG, &block, no_upstream(), &registered_state()).unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
         assert!(!attrs_in(&out, 0, &OTHER_PAIR).contains_key("paused"));
@@ -497,20 +491,22 @@ mod tests {
 
     #[test]
     fn pauses_pair_removed_from_registry() {
-        let engine = config().engine;
+        let engine = TEST_CONFIG.engine;
         let block =
             block(vec![tx(0, vec![write(engine, PAIR_REGISTRY_SLOT, word(&PAIR), vec![0; 32])])]);
-        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
+        let out =
+            protocol_changes(&TEST_CONFIG, &block, no_upstream(), &registered_state()).unwrap();
 
         assert_eq!(attrs_in(&out, 0, &PAIR)["paused"], vec![1]);
     }
 
     #[test]
     fn pair_address_outside_its_registry_slot_does_not_pause() {
-        let engine = config().engine;
+        let engine = TEST_CONFIG.engine;
         let block =
             block(vec![tx(0, vec![write(engine, slot(77), word(&PAIR), word(&OTHER_PAIR))])]);
-        let out = protocol_changes(&config(), &block, no_upstream(), &registered_state()).unwrap();
+        let out =
+            protocol_changes(&TEST_CONFIG, &block, no_upstream(), &registered_state()).unwrap();
 
         assert!(!attrs_in(&out, 0, &PAIR).contains_key("paused"));
     }
@@ -548,7 +544,7 @@ mod tests {
             tx(1, vec![write(PAIR, slot(52), word(&HELPER), vec![0; 32])]),
         ]);
         let out =
-            protocol_changes(&config(), &block, no_upstream(), &store_state(&[&PAIR], safe()))
+            protocol_changes(&TEST_CONFIG, &block, no_upstream(), &store_state(&[&PAIR], safe()))
                 .unwrap();
 
         let first = attrs_in(&out, 0, &PAIR);
@@ -597,7 +593,7 @@ mod tests {
     ) -> Result<BlockChanges> {
         let storage = storage_changes(block);
         protocol_changes_from_storage(
-            &config(),
+            &TEST_CONFIG,
             block,
             &storage,
             no_upstream(),
@@ -641,7 +637,7 @@ mod tests {
     fn pair_writes_touch_only_their_own_pair() {
         let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR, &OTHER_PAIR], safe()),
@@ -655,7 +651,7 @@ mod tests {
     #[test]
     fn tesseraswap_writes_reach_every_pair() {
         let (engine, treasury) = ([0x23; 20], [0x34; 20]);
-        let tesseraswap = config().tesseraswap;
+        let tesseraswap = TEST_CONFIG.tesseraswap;
         let block = block(vec![tx(
             0,
             vec![
@@ -664,7 +660,7 @@ mod tests {
             ],
         )]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR, &OTHER_PAIR], safe()),
@@ -693,7 +689,7 @@ mod tests {
             ],
         )]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR, &OTHER_PAIR], pause_inputs),
@@ -713,7 +709,7 @@ mod tests {
         };
         let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR], pause_inputs),
@@ -728,7 +724,7 @@ mod tests {
         let pause_inputs = PauseInputs { engine: Some([0x23; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR, &OTHER_PAIR], pause_inputs),
@@ -744,7 +740,7 @@ mod tests {
         let pause_inputs = PauseInputs { engine: Some([0x22; 20].to_vec()), ..safe() };
         let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR], pause_inputs),
@@ -766,7 +762,7 @@ mod tests {
             vec![write(HELPER, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(10_000).to_vec())],
         )]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR], pause_inputs),
@@ -789,7 +785,7 @@ mod tests {
             vec![write(stranger, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(1).to_vec())],
         )]);
         let out = protocol_changes(
-            &config(),
+            &TEST_CONFIG,
             &block,
             no_upstream(),
             &store_state(&[&PAIR], pause_inputs),
@@ -814,8 +810,8 @@ mod tests {
             tx(2, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))]),
             tx(5, vec![write(PAIR, slot(0), vec![0; 32], vec![1; 32])]),
         ]);
-        let out =
-            protocol_changes(&config(), &block, upstream, &store_state(&[&PAIR], safe())).unwrap();
+        let out = protocol_changes(&TEST_CONFIG, &block, upstream, &store_state(&[&PAIR], safe()))
+            .unwrap();
 
         assert!(attrs_in(&out, 2, &PAIR).is_empty(), "tx 2 precedes the pair");
         assert_eq!(attrs_in(&out, 5, &PAIR)["balance_owner"], TREASURY.to_vec());
@@ -836,7 +832,7 @@ mod tests {
             }],
         };
         let error = protocol_changes_from_storage(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![]),
             &storage,
             no_upstream(),

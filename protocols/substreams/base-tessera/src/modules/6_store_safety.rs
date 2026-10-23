@@ -64,22 +64,13 @@ mod tests {
     use super::*;
     use crate::{
         common::testing::slot,
+        config::TEST_CONFIG,
         pb::tessera::v1::{StorageChange, TransactionStorageChanges},
     };
 
     const PAIR: [u8; 20] = [0x0a; 20];
     const STRANGER: [u8; 20] = [0x0f; 20];
     const HELPER: [u8; 20] = [0x0c; 20];
-
-    fn config() -> DeploymentConfig {
-        DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}",
-            hex::encode([0x11; 20]),
-            hex::encode([0x22; 20]),
-            hex::encode([0x33; 20]),
-        ))
-        .unwrap()
-    }
 
     fn write(
         address: impl AsRef<[u8]>,
@@ -115,11 +106,11 @@ mod tests {
     #[test]
     fn records_helper_only_for_known_pairs() {
         let writes = safety_writes(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![
                 write(PAIR, slot(52), word(&HELPER), 1),
                 // Retained upstream as an Engine write, but the Engine is not a pair.
-                write(config().engine, slot(52), word(&HELPER), 2),
+                write(TEST_CONFIG.engine, slot(52), word(&HELPER), 2),
             ]),
             &known(),
         );
@@ -130,7 +121,7 @@ mod tests {
     fn records_tag_zero_fee_for_any_writer() {
         let fee = slot(10_000);
         let writes = safety_writes(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![write(STRANGER, FEE_TAG_ZERO_SLOT, fee, 3)]),
             &known(),
         );
@@ -141,10 +132,10 @@ mod tests {
     fn records_engine_only_from_tesseraswap_slot_zero() {
         let engine = [0x23; 20];
         let writes = safety_writes(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![
-                write(config().tesseraswap, slot(0), word(&engine), 4),
-                write(config().engine, slot(0), word(&engine), 5),
+                write(TEST_CONFIG.tesseraswap, slot(0), word(&engine), 4),
+                write(TEST_CONFIG.engine, slot(0), word(&engine), 5),
                 write(PAIR, slot(0), word(&engine), 6),
             ]),
             &known(),
@@ -156,10 +147,10 @@ mod tests {
     fn records_treasury_only_from_tesseraswap_treasury_slot() {
         let treasury = [0x34; 20];
         let writes = safety_writes(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![
-                write(config().tesseraswap, slot(1), word(&treasury), 7),
-                write(config().engine, slot(1), word(&treasury), 8),
+                write(TEST_CONFIG.tesseraswap, slot(1), word(&treasury), 7),
+                write(TEST_CONFIG.engine, slot(1), word(&treasury), 8),
             ]),
             &known(),
         );

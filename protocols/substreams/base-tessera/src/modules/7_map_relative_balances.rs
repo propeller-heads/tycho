@@ -224,11 +224,14 @@ fn balance_deltas_from_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::{slot, storage_changes};
+    use crate::{
+        common::testing::{slot, storage_changes},
+        config::TEST_CONFIG,
+    };
     use alloy_primitives::keccak256;
     use std::collections::HashMap;
 
-    const TREASURY: [u8; 20] = [0x31; 20];
+    const TREASURY: [u8; 20] = TEST_CONFIG.treasury.into_array();
     const NEW_TREASURY: [u8; 20] = [0x32; 20];
     const OUTSIDER: [u8; 20] = [0x39; 20];
     const USDC: [u8; 20] = [0x0c; 20];
@@ -267,16 +270,6 @@ mod tests {
     ) -> Result<Vec<BalanceDelta>> {
         let storage = storage_changes(block);
         balance_deltas_from_storage(config, block, &storage, new_components, owner, inputs)
-    }
-
-    fn config() -> DeploymentConfig {
-        DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}",
-            hex::encode([0x11; 20]),
-            hex::encode([0x22; 20]),
-            hex::encode(TREASURY),
-        ))
-        .unwrap()
     }
 
     fn word(addr: &[u8]) -> Vec<u8> {
@@ -411,7 +404,7 @@ mod tests {
             ),
         ]);
         let deltas = balance_deltas(
-            &config(),
+            &TEST_CONFIG,
             &block,
             created("new", &[&USDC, &BASE_TOKEN], 0),
             &TREASURY,
@@ -454,7 +447,7 @@ mod tests {
             ..tx(47, vec![transfer(&USDC, &OUTSIDER, &TREASURY, 6, 110)], vec![])
         };
         let deltas = balance_deltas(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![swap, creation]),
             created("new", &[&USDC], 47),
             &TREASURY,
@@ -473,7 +466,7 @@ mod tests {
     fn seed_for_transaction_missing_from_block_returns_an_error() {
         let inputs = FakeInputs { holders: HashMap::new(), balances: HashMap::new() };
         let error = balance_deltas(
-            &config(),
+            &TEST_CONFIG,
             &block(vec![tx(0, vec![], vec![])]),
             created("new", &[&USDC], 5),
             &TREASURY,
@@ -496,7 +489,7 @@ mod tests {
         };
         // The Engine's writes reach this module, and its slot 1 is not the treasury.
         let engine_write = eth::v2::StorageChange {
-            address: config().engine.to_vec(),
+            address: TEST_CONFIG.engine.to_vec(),
             key: slot(1).to_vec(),
             old_value: word(&TREASURY),
             new_value: word(&NEW_TREASURY),
@@ -507,7 +500,7 @@ mod tests {
             tx(1, vec![], vec![engine_write]),
         ]);
         let deltas = balance_deltas(
-            &config(),
+            &TEST_CONFIG,
             &block,
             BlockTransactionProtocolComponents::default(),
             &TREASURY,
@@ -533,7 +526,7 @@ mod tests {
             vec![],
         )]);
         let deltas = balance_deltas(
-            &config(),
+            &TEST_CONFIG,
             &block,
             BlockTransactionProtocolComponents::default(),
             &TREASURY,
@@ -557,7 +550,7 @@ mod tests {
             ]),
         };
         let rotation = |old: &[u8], new: &[u8], ordinal| eth::v2::StorageChange {
-            address: config().tesseraswap.to_vec(),
+            address: TEST_CONFIG.tesseraswap.to_vec(),
             key: slot(1).to_vec(),
             old_value: word(old),
             new_value: word(new),
@@ -568,9 +561,14 @@ mod tests {
             tx(1, vec![], vec![rotation(&TREASURY, &OUTSIDER, 20)]),
             tx(2, vec![], vec![rotation(&OUTSIDER, &NEW_TREASURY, 30)]),
         ]);
-        let deltas =
-            balance_deltas(&config(), &block, created("new", &[&USDC], 1), &NEW_TREASURY, &inputs)
-                .unwrap();
+        let deltas = balance_deltas(
+            &TEST_CONFIG,
+            &block,
+            created("new", &[&USDC], 1),
+            &NEW_TREASURY,
+            &inputs,
+        )
+        .unwrap();
         assert_eq!(
             deltas_of(&deltas, "existing", &USDC),
             vec![BigInt::from(-20), BigInt::from(220)]

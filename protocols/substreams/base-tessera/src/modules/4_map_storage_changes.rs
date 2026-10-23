@@ -73,11 +73,7 @@ pub(crate) fn filter_storage_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::slot;
-
-    fn config() -> DeploymentConfig {
-        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333").unwrap()
-    }
+    use crate::{common::testing::slot, config::TEST_CONFIG};
 
     fn write(
         address: impl AsRef<[u8]>,
@@ -105,7 +101,7 @@ mod tests {
 
     #[test]
     fn filters_noise_and_keeps_all_stateful_writes_and_unassigned_helper_fee() {
-        let c = config();
+        let c = TEST_CONFIG;
         let pair = vec![4; 20];
         let unknown = vec![5; 20];
         let mut writes: Vec<_> = (0..100)
@@ -142,7 +138,7 @@ mod tests {
 
     #[test]
     fn preserves_nested_write_order_and_clears_but_excludes_reverts() {
-        let c = config();
+        let c = TEST_CONFIG;
         let w = |n| write(c.tesseraswap, slot(1), n);
         let block = eth::v2::Block {
             transaction_traces: vec![transaction(vec![
@@ -169,7 +165,7 @@ mod tests {
 
     #[test]
     fn omits_failed_and_irrelevant_transactions() {
-        let c = config();
+        let c = TEST_CONFIG;
         let mut failed = transaction(vec![eth::v2::Call {
             storage_changes: vec![write(c.tesseraswap, slot(1), 1)],
             ..Default::default()

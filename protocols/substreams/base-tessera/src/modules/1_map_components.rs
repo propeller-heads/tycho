@@ -112,14 +112,11 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::slot;
+    use crate::{common::testing::slot, config::TEST_CONFIG};
     use alloy_primitives::Address;
 
-    fn config() -> DeploymentConfig {
-        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333").unwrap()
-    }
     fn transaction() -> eth::v2::TransactionTrace {
-        let c = config();
+        let c = TEST_CONFIG;
         let pair = Address::repeat_byte(4);
         let base = Address::repeat_byte(5);
         let quote = Address::repeat_byte(6);
@@ -145,7 +142,7 @@ mod tests {
     }
     #[test]
     fn discovers_registered_pair() {
-        let result = discover(&transaction(), &config());
+        let result = discover(&transaction(), &TEST_CONFIG);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, id([4; 20]));
         assert_eq!(result[0].tokens, vec![vec![5; 20], vec![6; 20]]);
@@ -154,7 +151,7 @@ mod tests {
     fn pair_updates_on_any_change_to_its_contracts_or_balances() {
         // With `manual_updates`, consumers drop a balance-only change unless it is marked, and
         // a swap on one Pair moves the treasury balance of every Pair sharing a token.
-        let result = discover(&transaction(), &config());
+        let result = discover(&transaction(), &TEST_CONFIG);
         assert!(!result[0]
             .static_att
             .iter()
@@ -164,16 +161,16 @@ mod tests {
     fn rejects_unregistered_proxy_and_reverted_calls() {
         let mut tx = transaction();
         tx.calls[0].storage_changes.pop();
-        assert!(discover(&tx, &config()).is_empty());
+        assert!(discover(&tx, &TEST_CONFIG).is_empty());
         let mut tx = transaction();
         tx.calls[0].state_reverted = true;
-        assert!(discover(&tx, &config()).is_empty());
+        assert!(discover(&tx, &TEST_CONFIG).is_empty());
     }
     #[test]
     fn upgrade_does_not_create_component() {
         let mut tx = transaction();
         tx.calls[0].storage_changes[0].old_value = vec![8; 32];
-        assert!(discover(&tx, &config()).is_empty());
+        assert!(discover(&tx, &TEST_CONFIG).is_empty());
     }
     #[test]
     fn discovers_pair_whose_base_token_sorts_above_its_quote_token() {
@@ -190,7 +187,7 @@ mod tests {
             .into_word()
             .to_vec();
         writes[3].key = key.to_vec();
-        let result = discover(&tx, &config());
+        let result = discover(&tx, &TEST_CONFIG);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].tokens, vec![vec![5; 20], vec![6; 20]]);
     }
@@ -198,7 +195,7 @@ mod tests {
     fn wrong_registry_mapping_is_rejected() {
         let mut tx = transaction();
         tx.calls[0].storage_changes[3].key = slot(8).to_vec();
-        assert!(discover(&tx, &config()).is_empty());
+        assert!(discover(&tx, &TEST_CONFIG).is_empty());
     }
 
     #[test]
@@ -210,11 +207,11 @@ mod tests {
         earlier.new_value = vec![9; 32];
         tx.calls
             .push(eth::v2::Call { storage_changes: vec![earlier], ..Default::default() });
-        assert_eq!(discover(&tx, &config()).len(), 1);
+        assert_eq!(discover(&tx, &TEST_CONFIG).len(), 1);
         tx.calls[0].storage_changes[3].old_value = Address::repeat_byte(4)
             .into_word()
             .to_vec();
         tx.calls[0].storage_changes[3].new_value = vec![0; 32];
-        assert!(discover(&tx, &config()).is_empty());
+        assert!(discover(&tx, &TEST_CONFIG).is_empty());
     }
 }
