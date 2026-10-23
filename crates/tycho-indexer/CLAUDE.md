@@ -214,6 +214,15 @@ count moved during it.
 `entity_cache_shadow_comparisons_total{endpoint,outcome}`,
 `entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
 
+## Request CPU metrics
+
+- `off_worker_job_ms`, `off_worker_job_cpu_ns_total`, `off_worker_job_runqueue_wait_ns_total`
+  `{endpoint, step}`: wall time, on-CPU time and run-queue wait of each off-worker job.
+- `rpc_response_body_bytes{endpoint}` (before compression); `rpc_response_encode_wait_ms` and
+  `rpc_response_wire_bytes{endpoint}` for compressed bodies, measured outside `Compress`.
+- `rpc_worker_poll_lag_ms`: how late a 100 ms sleep on a request worker wakes.
+- DB pool metrics are in `tycho-storage` (see its `CLAUDE.md`).
+
 ## Connections
 
 ```
