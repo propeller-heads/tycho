@@ -49,6 +49,10 @@ mod u256_num;
 
 #[cfg(test)]
 mod protobuf_conversion_tests;
+#[cfg(test)]
+mod recorded_extractors;
+#[cfg(test)]
+mod replay_determinism_tests;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ExtractionError {
