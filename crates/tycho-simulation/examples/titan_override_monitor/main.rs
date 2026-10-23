@@ -107,9 +107,9 @@ async fn main() {
     println!("Loaded {} tokens", all_tokens.len());
 
     // Obtain the production default Titan provider (one shared WS connection, including the
-    // TITAN_PAMM_STREAM_URL env override), but keep a handle so this monitor can subscribe to the
-    // same frames the pools consume. Registering it explicitly below prevents the builder from
-    // spawning a second default provider.
+    // TITAN_PAMM_QUOTE_STREAM_URL env override), but keep a handle so this monitor can subscribe to
+    // the same frames the pools consume. Registering it explicitly below prevents the builder
+    // from spawning a second default provider.
     let providers = titan::default_providers(cli.protocols.iter().cloned());
     if providers.is_empty() {
         eprintln!(
