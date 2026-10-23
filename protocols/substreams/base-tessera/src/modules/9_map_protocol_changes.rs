@@ -73,7 +73,7 @@ pub fn map_protocol_changes(
         .get_last("treasury")
         .unwrap_or_else(|| config.treasury.to_vec());
     let pause_inputs = read_pause_inputs(&safety_store, &pairs);
-    let registry = registry_slots(&config, &component_store, &pairs);
+    let registry = registry_slots(&component_store, &pairs);
     let state = StoreState { pairs, treasury, pause_inputs, registry };
     protocol_changes_from_storage(
         &config,
@@ -87,7 +87,6 @@ pub fn map_protocol_changes(
 
 /// Engine registry slot of each known pair's token pair.
 fn registry_slots(
-    config: &DeploymentConfig,
     store: &StoreGetProto<ProtocolComponent>,
     known: &HashSet<String>,
 ) -> HashMap<String, B256> {
@@ -96,7 +95,7 @@ fn registry_slots(
         if let Some(component) = store.get_last(pair) {
             if let [a, b] = component.tokens.as_slice() {
                 let (a, b) = (Address::from_slice(a), Address::from_slice(b));
-                slots.insert(pair.clone(), registry_slot(a, b, config.pair_map_slot));
+                slots.insert(pair.clone(), registry_slot(a, b));
             }
         }
     }
@@ -195,17 +194,10 @@ fn record_pair_writes(
     code: &impl CodeSource,
     changes: &mut HashMap<u64, TransactionChangesBuilder>,
 ) -> Result<()> {
-    // These slots belong to TesseraSwap, not the Pair: Engine at 0, Treasury at 1.
-    let engine_slot = slot(0);
-    let treasury_slot = slot(config.treasury_slot);
     // Array order is the consumer's stateless_contract_addr_<i> attribute index.
     // The VM loads the published code when one of these addresses changes; a change alone
     // does not pause the pair.
-    let dependency_slots = [
-        IMPLEMENTATION_SLOT,        // Pair EIP-1967 slot: implementation, attribute 0.
-        slot(config.pair_lib_slot), // Pair slot 51: pricing library, attribute 1.
-        slot(config.pair_write_helper_slot), // Pair slot 52: write helper, attribute 2.
-    ];
+    let dependency_slots = [IMPLEMENTATION_SLOT, PAIR_LIB_SLOT, PAIR_WRITE_HELPER_SLOT];
     // state.pairs includes end-block discoveries; never attach changes to a Pair in a transaction
     // earlier than the one that created it.
     let exists_at = |pair: &String, tx_index: u64| {
@@ -232,9 +224,9 @@ fn record_pair_writes(
                         .change_component_pause_state(&replaced, true);
                 }
             } else if *w.address == config.tesseraswap {
-                let name = if *w.key == engine_slot {
+                let name = if *w.key == TESSERASWAP_ENGINE_SLOT {
                     "engine"
-                } else if *w.key == treasury_slot {
+                } else if *w.key == TESSERASWAP_TREASURY_SLOT {
                     // map_relative_balances emits the matching balance bridge.
                     "balance_owner"
                 } else {
@@ -370,7 +362,7 @@ fn enforce_pauses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::storage_changes;
+    use crate::common::testing::{slot, storage_changes};
 
     fn protocol_changes(
         config: &DeploymentConfig,
@@ -401,9 +393,7 @@ mod tests {
 
     fn config() -> DeploymentConfig {
         DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}&treasury_slot=1&pair_map_slot=8\
-             &pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51\
-             &pair_write_helper_slot=52",
+            "tesseraswap={}&engine={}&treasury={}",
             hex::encode([0x11; 20]),
             hex::encode([0x22; 20]),
             hex::encode(TREASURY),

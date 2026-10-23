@@ -136,12 +136,11 @@ fn balance_deltas_from_storage(
     owner: &[u8],
     inputs: &impl TreasuryInputs,
 ) -> Result<Vec<BalanceDelta>> {
-    let treasury_slot = slot(config.treasury_slot);
     let mut rotations = vec![];
     for group in &storage.transactions {
         let tx = group.tx()?;
         for w in &group.writes {
-            if *w.address == config.tesseraswap && *w.key == treasury_slot {
+            if *w.address == config.tesseraswap && *w.key == TESSERASWAP_TREASURY_SLOT {
                 rotations.push((tx, w));
             }
         }
@@ -225,7 +224,7 @@ fn balance_deltas_from_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::testing::storage_changes;
+    use crate::common::testing::{slot, storage_changes};
     use alloy_primitives::keccak256;
     use std::collections::HashMap;
 
@@ -272,9 +271,7 @@ mod tests {
 
     fn config() -> DeploymentConfig {
         DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}&treasury_slot=1&pair_map_slot=8\
-             &pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51\
-             &pair_write_helper_slot=52",
+            "tesseraswap={}&engine={}&treasury={}",
             hex::encode([0x11; 20]),
             hex::encode([0x22; 20]),
             hex::encode(TREASURY),

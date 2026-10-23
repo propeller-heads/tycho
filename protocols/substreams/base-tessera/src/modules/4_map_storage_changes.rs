@@ -73,9 +73,10 @@ pub(crate) fn filter_storage_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::testing::slot;
 
     fn config() -> DeploymentConfig {
-        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52").unwrap()
+        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333").unwrap()
     }
 
     fn write(

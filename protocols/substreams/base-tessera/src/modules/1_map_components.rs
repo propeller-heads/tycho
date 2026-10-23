@@ -1,4 +1,5 @@
 use crate::{common::*, config::DeploymentConfig};
+use alloy_primitives::B256;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use substreams_ethereum::pb::eth;
@@ -40,9 +41,7 @@ fn keep_latest<'a>(writes: &mut LatestWrites<'a>, w: &'a eth::v2::StorageChange)
 /// in one transaction that sets the implementation and both token slots and writes the registry
 /// entry. Recheck it if Tessera deploys Pairs differently.
 fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<ProtocolComponent> {
-    let base_slot = slot(config.pair_base_token_slot);
-    let quote_slot = slot(config.pair_quote_token_slot);
-    let init_slots = [IMPLEMENTATION_SLOT.as_slice(), base_slot.as_slice(), quote_slot.as_slice()];
+    let init_slots = [IMPLEMENTATION_SLOT, PAIR_BASE_TOKEN_SLOT, PAIR_QUOTE_TOKEN_SLOT];
     // Nested call order is not storage-write order, so the highest ordinal wins, including an
     // Engine registry clear.
     let mut registry = LatestWrites::new();
@@ -55,7 +54,9 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
     {
         if *w.address == config.engine {
             keep_latest(&mut registry, w);
-        } else if init_slots.contains(&w.key.as_slice()) &&
+        } else if init_slots
+            .iter()
+            .any(|key| *key == *w.key) &&
             zero(&w.old_value) &&
             !zero(&w.new_value)
         {
@@ -76,12 +77,13 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
             if !slots.contains_key(IMPLEMENTATION_SLOT.as_slice()) {
                 return None;
             }
-            let base = address(slots.get(base_slot.as_slice())?.1);
-            let quote = address(slots.get(quote_slot.as_slice())?.1);
+            let token = |key: B256| Some(address(slots.get(key.as_slice())?.1));
+            let base = token(PAIR_BASE_TOKEN_SLOT)?;
+            let quote = token(PAIR_QUOTE_TOKEN_SLOT)?;
             if base.is_zero() || quote.is_zero() || base == quote {
                 return None;
             }
-            let key = registry_slot(base, quote, config.pair_map_slot);
+            let key = registry_slot(base, quote);
             if address(registry.get(key.as_slice())?.1) != *pair {
                 return None;
             }
@@ -110,10 +112,11 @@ fn discover(tx: &eth::v2::TransactionTrace, config: &DeploymentConfig) -> Vec<Pr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, B256};
+    use crate::common::testing::slot;
+    use alloy_primitives::Address;
 
     fn config() -> DeploymentConfig {
-        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333&treasury_slot=1&pair_map_slot=8&pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51&pair_write_helper_slot=52").unwrap()
+        DeploymentConfig::parse("tesseraswap=1111111111111111111111111111111111111111&engine=2222222222222222222222222222222222222222&treasury=3333333333333333333333333333333333333333").unwrap()
     }
     fn transaction() -> eth::v2::TransactionTrace {
         let c = config();
@@ -133,7 +136,7 @@ mod tests {
                     write(pair, IMPLEMENTATION_SLOT, B256::repeat_byte(7)),
                     write(pair, slot(48), base.into_word()),
                     write(pair, slot(49), quote.into_word()),
-                    write(c.engine, registry_slot(base, quote, 8), pair.into_word()),
+                    write(c.engine, registry_slot(base, quote), pair.into_word()),
                 ],
                 ..Default::default()
             }],

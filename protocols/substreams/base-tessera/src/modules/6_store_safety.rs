@@ -33,16 +33,10 @@ fn safety_writes(
     changes: &BlockStorageChanges,
     known: &HashSet<String>,
 ) -> Vec<(u64, String, Vec<u8>)> {
-    // Pair slot 52 links a Pair to the helper whose fee must be checked.
-    let helper_slot = slot(config.pair_write_helper_slot);
-    // TesseraSwap slot 0 links all Pairs to the Engine; replacement crosses our
-    // configured discovery/state-indexing boundary and is evaluated by enforce_pauses.
-    let engine_slot = slot(0);
-    let treasury_slot = slot(config.treasury_slot);
     let mut writes = vec![];
     for tx in &changes.transactions {
         for w in &tx.writes {
-            if *w.key == helper_slot && known.contains(&id(&w.address)) {
+            if *w.key == PAIR_WRITE_HELPER_SLOT && known.contains(&id(&w.address)) {
                 writes.push((
                     w.ordinal,
                     format!("helper:{}", id(&w.address)),
@@ -53,9 +47,11 @@ fn safety_writes(
                 // Otherwise an already-configured helper could be adopted with a nonzero
                 // tag-0 fee and look safe. No other candidate storage/code is indexed.
                 writes.push((w.ordinal, format!("fee:{}", id(&w.address)), w.new_value.clone()));
-            } else if *w.address == config.tesseraswap && *w.key == engine_slot {
+            } else if *w.address == config.tesseraswap && *w.key == TESSERASWAP_ENGINE_SLOT {
+                // An Engine replacement crosses the configured discovery and state-indexing
+                // boundary; enforce_pauses evaluates it.
                 writes.push((w.ordinal, "engine".to_string(), address(&w.new_value).to_vec()));
-            } else if *w.address == config.tesseraswap && *w.key == treasury_slot {
+            } else if *w.address == config.tesseraswap && *w.key == TESSERASWAP_TREASURY_SLOT {
                 writes.push((w.ordinal, "treasury".to_string(), address(&w.new_value).to_vec()));
             }
         }
@@ -66,7 +62,10 @@ fn safety_writes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pb::tessera::v1::{StorageChange, TransactionStorageChanges};
+    use crate::{
+        common::testing::slot,
+        pb::tessera::v1::{StorageChange, TransactionStorageChanges},
+    };
 
     const PAIR: [u8; 20] = [0x0a; 20];
     const STRANGER: [u8; 20] = [0x0f; 20];
@@ -74,9 +73,7 @@ mod tests {
 
     fn config() -> DeploymentConfig {
         DeploymentConfig::parse(&format!(
-            "tesseraswap={}&engine={}&treasury={}&treasury_slot=1&pair_map_slot=8\
-             &pair_base_token_slot=48&pair_quote_token_slot=49&pair_lib_slot=51\
-             &pair_write_helper_slot=52",
+            "tesseraswap={}&engine={}&treasury={}",
             hex::encode([0x11; 20]),
             hex::encode([0x22; 20]),
             hex::encode([0x33; 20]),

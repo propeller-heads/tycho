@@ -2,18 +2,32 @@ use crate::pb::tessera::v1::TransactionStorageChanges;
 use alloy_primitives::{b256, keccak256, Address, B256};
 use anyhow::{anyhow, Result};
 
+// Storage layout of the compiled contracts. A layout change needs code that switches at the
+// upgrade block, so these are not deployment parameters.
+
+/// TesseraSwap slot 0: the Engine every Pair quotes through.
+pub const TESSERASWAP_ENGINE_SLOT: B256 = B256::ZERO;
+/// TesseraSwap slot 1: the treasury holding every Pair's inventory, published as `balance_owner`.
+pub const TESSERASWAP_TREASURY_SLOT: B256 = B256::with_last_byte(1);
+/// Engine slot 8: base of the mapping from a sorted token pair to its registered Pair.
+pub const ENGINE_PAIR_MAP_SLOT: B256 = B256::with_last_byte(8);
+/// Pair EIP-1967 implementation slot, published as `stateless_contract_addr_0`.
 pub const IMPLEMENTATION_SLOT: B256 =
     b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
+/// Pair slot 48: the base-token address.
+pub const PAIR_BASE_TOKEN_SLOT: B256 = B256::with_last_byte(48);
+/// Pair slot 49: the quote-token address in the low 20 bytes, its decimals above it.
+pub const PAIR_QUOTE_TOKEN_SLOT: B256 = B256::with_last_byte(49);
+/// Pair slot 51: the pricing library, published as `stateless_contract_addr_1`.
+pub const PAIR_LIB_SLOT: B256 = B256::with_last_byte(51);
+/// Pair slot 52: the write helper, published as `stateless_contract_addr_2`.
+pub const PAIR_WRITE_HELPER_SLOT: B256 = B256::with_last_byte(52);
 
 /// Storage key of the write helper's integrator fee A[0], used by empty swapData:
 /// keccak256(uint256(0) ++ uint256(1)), as `cast index uint256 0 1` computes it.
 /// The mapping base slot (1) is a helper-layout assumption, not a deployment parameter.
 pub const FEE_TAG_ZERO_SLOT: B256 =
     b256!("a6eef7e35abe7026729641147f7915573c7e97b47efa546f5f6e3230263bcb49");
-
-pub fn slot(n: u64) -> B256 {
-    B256::left_padding_from(&n.to_be_bytes())
-}
 
 /// The address in the low 20 bytes of a storage word.
 ///
@@ -31,12 +45,12 @@ pub fn id(addr: impl AsRef<[u8]>) -> String {
     format!("0x{}", hex::encode(addr))
 }
 
-/// Engine registry slot of the token pair `a`/`b` in the mapping at `base`, keyed by the sorted
-/// pair: keccak256(keccak256(abi.encode(lo, hi)) ++ uint256(base)).
-pub fn registry_slot(a: Address, b: Address, base: u64) -> B256 {
+/// Engine registry slot of the token pair `a`/`b`, keyed by the sorted pair:
+/// keccak256(keccak256(abi.encode(lo, hi)) ++ ENGINE_PAIR_MAP_SLOT).
+pub fn registry_slot(a: Address, b: Address) -> B256 {
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
     let pair = keccak256([lo.into_word(), hi.into_word()].concat());
-    keccak256([pair, slot(base)].concat())
+    keccak256([pair, ENGINE_PAIR_MAP_SLOT].concat())
 }
 
 impl TransactionStorageChanges {
@@ -51,7 +65,13 @@ impl TransactionStorageChanges {
 #[cfg(test)]
 pub mod testing {
     use crate::pb::tessera::v1::{BlockStorageChanges, StorageChange, TransactionStorageChanges};
+    use alloy_primitives::B256;
     use substreams_ethereum::pb::eth;
+
+    /// `n` as a 32-byte word, for storage keys and values.
+    pub fn slot(n: u64) -> B256 {
+        B256::left_padding_from(&n.to_be_bytes())
+    }
 
     /// Every write in `block`, grouped by transaction in call order, without the filtering
     /// `map_storage_changes` applies.
