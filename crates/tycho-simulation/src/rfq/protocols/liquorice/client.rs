@@ -5,7 +5,9 @@ use std::{
     time::SystemTime,
 };
 
+use alloy::sol_types::SolValue;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use itertools::Itertools;
 use num_bigint::BigUint;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tokio::time::{timeout, Duration};
@@ -19,8 +21,8 @@ use crate::{
     rfq::{
         errors::RFQError,
         protocols::liquorice::models::{
-            LiquoricePriceLevelsResponse, LiquoriceQuoteRequest, LiquoriceQuoteResponse,
-            LiquoriceTokenPairPrice,
+            LiquoricePriceLevelsResponse, LiquoriceQuoteLevel, LiquoriceQuoteRequest,
+            LiquoriceQuoteResponse, LiquoriceTokenPairPrice,
         },
     },
     snapshot_feed::{errors::FeedError, http::read_json},
@@ -305,9 +307,9 @@ impl LiquoriceClient {
         debug!(levels = quote_response.levels.len(), "received quote response");
 
         // The best valid level the maker that priced the swap offers.
-        let best_level = quote_response
+        let (quote_level, amount_out) = quote_response
             .levels
-            .iter()
+            .into_iter()
             .filter_map(|level| {
                 if level.maker != market_maker || level.validate(params).is_err() {
                     return None;
@@ -315,28 +317,46 @@ impl LiquoriceClient {
                 let amount = BigUint::from_str(&level.quote_token_amount).ok()?;
                 Some((level, amount))
             })
-            .max_by_key(|(_, amount)| amount.clone());
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .ok_or_else(|| {
+                RFQError::QuoteNotFound(format!(
+                    "No valid Liquorice quote levels from {market_maker} for {} {} ->{}",
+                    params.amount_in, params.token_in, params.token_out,
+                ))
+            })?;
 
-        let (quote_level, _) = best_level.ok_or_else(|| {
-            RFQError::QuoteNotFound(format!(
-                "No valid Liquorice quote levels from {market_maker} for {} {} ->{}",
-                params.amount_in, params.token_in, params.token_out,
+        let LiquoriceQuoteLevel { tx, base_token_amount, allowances, partial_fill, .. } =
+            quote_level;
+
+        let amount_in = BigUint::from_str(&base_token_amount).map_err(|_| {
+            RFQError::ParsingError(format!(
+                "Failed to parse base token amount: {base_token_amount}"
             ))
         })?;
-
         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
+
+        // The settlement contract the calldata is addressed to. Liquorice redeploys settlement
+        // versions rather than upgrading in place, so the target moves with the quote.
+        quote_attributes.insert(
+            "settlement".to_string(),
+            Bytes::from_str(&tx.to).map_err(|e| {
+                RFQError::ParsingError(format!("Failed to parse settlement address: {e}"))
+            })?,
+        );
+
+        let allowances = allowances
+            .into_iter()
+            .map(|allowance| (allowance.token, allowance.spender, allowance.amount))
+            .collect_vec();
+        quote_attributes.insert("allowances".to_string(), Bytes::from(allowances.abi_encode()));
 
         // calldata (pre-encoded by Liquorice API)
         quote_attributes.insert(
             "calldata".to_string(),
             Bytes::from(
-                hex::decode(
-                    quote_level
-                        .tx
-                        .data
-                        .trim_start_matches("0x"),
-                )
-                .map_err(|e| RFQError::ParsingError(format!("Failed to parse calldata: {e}")))?,
+                hex::decode(tx.data.trim_start_matches("0x")).map_err(|e| {
+                    RFQError::ParsingError(format!("Failed to parse calldata: {e}"))
+                })?,
             ),
         );
 
@@ -344,21 +364,14 @@ impl LiquoriceClient {
         quote_attributes.insert(
             "base_token_amount".to_string(),
             Bytes::from(
-                biguint_to_u256(&BigUint::from_str(&quote_level.base_token_amount).map_err(
-                    |_| {
-                        RFQError::ParsingError(format!(
-                            "Failed to parse base token amount: {}",
-                            quote_level.base_token_amount
-                        ))
-                    },
-                )?)
-                .to_be_bytes::<32>()
-                .to_vec(),
+                biguint_to_u256(&amount_in)
+                    .to_be_bytes::<32>()
+                    .to_vec(),
             ),
         );
 
         // partial fill info (if present)
-        if let Some(pf) = &quote_level.partial_fill {
+        if let Some(pf) = partial_fill {
             quote_attributes.insert(
                 "partial_fill_offset".to_string(),
                 Bytes::from(pf.offset.to_be_bytes().to_vec()),
@@ -383,18 +396,8 @@ impl LiquoriceClient {
         Ok(SignedQuote {
             base_token: params.token_in.clone(),
             quote_token: params.token_out.clone(),
-            amount_in: BigUint::from_str(&quote_level.base_token_amount).map_err(|_| {
-                RFQError::ParsingError(format!(
-                    "Failed to parse amount in string: {}",
-                    quote_level.base_token_amount
-                ))
-            })?,
-            amount_out: BigUint::from_str(&quote_level.quote_token_amount).map_err(|_| {
-                RFQError::ParsingError(format!(
-                    "Failed to parse amount out string: {}",
-                    quote_level.quote_token_amount
-                ))
-            })?,
+            amount_in,
+            amount_out,
             quote_attributes,
         })
     }
@@ -502,6 +505,7 @@ mod tests {
             base_token_amount: base_token_amount.to_string(),
             quote_token_amount: quote_token_amount.to_string(),
             partial_fill,
+            allowances: vec![],
         }
     }
 

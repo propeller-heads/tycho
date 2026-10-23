@@ -324,7 +324,8 @@ Constraints:
   `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`). An entry holds the zero address until its router is
   deployed; the executor constructor rejects it. A Bebop, Hashflow, Native or Liquorice router also needs its
   address as `fallback_router` under its protocol in `protocol_specific_addresses.json`; the Native entry also needs
-  `router_v6`. Liquorice must allow a deployed `LiquoriceFallbackRouter` as a solver before it can settle.
+  `router_v6`, and the Liquorice entry `settlement_address` and `balance_manager_address`. Liquorice must allow a
+  deployed `LiquoriceFallbackRouter` as a solver before it can settle.
 - The pAMM router and executor are deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`,
   executor `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router
   `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
@@ -528,8 +529,10 @@ same `FallbackSwapData` `user_data`:
 - `NativeFallbackSwapEncoder` and `LiquoriceFallbackSwapEncoder` request the signed quote with the chain's fallback
   router as recipient (and, for Liquorice, trader), read from `fallback_router` under their protocol. The Native one
   also reads `router_v6` there, and rejects a swap in or out of the chain's native token, which the router cannot
-  trade. Each inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the
-  partial-fill fields and keeps the settlement calldata.
+  trade. The Liquorice one passes its config to the inner `LiquoriceSwapEncoder`, which checks the quote's
+  settlement and approvals against `settlement_address` and `balance_manager_address` in the same entry. Each
+  inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
+  fields and keeps the settlement calldata.
 
 The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.

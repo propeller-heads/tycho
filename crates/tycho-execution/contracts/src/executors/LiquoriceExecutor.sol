@@ -26,7 +26,7 @@ contract LiquoriceExecutor is IExecutor {
     error LiquoriceExecutor__InvalidSelector();
 
     bytes4 private constant _SETTLE_SINGLE_SELECTOR = 0x9935c868;
-    bytes4 private constant _SETTLE_SELECTOR = 0xcba673a7;
+    bytes4 private constant _SETTLE_SELECTOR = 0x053b4100;
 
     /// @notice The Liquorice settlement contract address
     address public immutable liquoriceSettlement;
