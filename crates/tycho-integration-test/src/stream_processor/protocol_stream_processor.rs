@@ -291,6 +291,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_v2".to_string(),
                 "uniswap_v3".to_string(),
                 "pancakeswap_v3".to_string(),
+                "communityv3".to_string(),
                 "vm:balancer_v2".to_string(),
                 "uniswap_v4".to_string(),
                 "ekubo_v2".to_string(),
@@ -414,6 +415,9 @@ impl ProtocolStreamProcessor {
             }
             "gigadex_v3" => {
                 stream = stream.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None);
+            }
+            "communityv3" => {
+                stream = stream.exchange::<UniswapV3State>("communityv3", tvl_filter.clone(), None);
             }
             "pancakeswap_v3" => {
                 stream =

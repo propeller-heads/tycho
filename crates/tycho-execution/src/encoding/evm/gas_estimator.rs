@@ -25,6 +25,7 @@ pub const USER_PERMIT2_TRANSFER: u64 = 80_000;
 pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "uniswap_v3",
     "pancakeswap_v3",
+    "communityv3",
     "uniswap_v4",
     "uniswap_v4_hooks",
     "pancakeswap_infinity_cl",

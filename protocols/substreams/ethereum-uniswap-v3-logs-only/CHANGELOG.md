@@ -23,6 +23,12 @@
   leaves the trader's amount out and the event-derived balances unchanged. The wasm is unchanged,
   so this manifest ships on the v0.1.4 build and needs its `protocol_type_name` parameter;
   components are emitted as `robinswap_v3_pool`.
+- Add the Ethereum CommunityV3 manifest, `ethereum-communityv3.yaml` (factory
+  `0x00a38533c68327aBE0Cc265436e036066E2D6B38`, deployed at block `25895766`). The deployment is
+  canonical Uniswap V3: same contracts, pool init code hash, factory and pool event layouts,
+  immutable per-pool fee, and the `uniswapV3SwapCallback` family. Its factory owner is burned, so
+  `feeProtocol` stays 0. The wasm is unchanged, so this manifest ships on the v0.1.4 build and
+  needs its `protocol_type_name` parameter; components are emitted as `communityv3_pool`.
 
 
 ## v0.1.3
