@@ -35,7 +35,8 @@ fn map_filtered_events(
                             Event::PositionUpdated(_) |
                             Event::VirtualExecution(_) |
                             Event::RateUpdated(_) |
-                            Event::SwapFeeUpdated(_) => {
+                            Event::SwapFeeUpdated(_) |
+                            Event::ExtensionStateUpdated(_) => {
                                 pool_details_store.has_last(log.pool_id.to_hex())
                             }
                         }

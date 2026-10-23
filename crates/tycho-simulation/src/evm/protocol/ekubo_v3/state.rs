@@ -33,7 +33,8 @@ use crate::evm::protocol::{
     ekubo_v3::{
         addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
         pool::{
-            boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
+            boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool,
+            mev_capture_v21::MevCaptureV21Pool, stableswap::StableswapPool,
         },
     },
     u256_num::u256_to_f64,
@@ -56,6 +57,7 @@ pub enum EkuboV3State {
     Oracle(OraclePool),
     Twamm(TwammPool),
     MevCapture(MevCapturePool),
+    MevCaptureV21(MevCaptureV21Pool),
     BoostedFees(BoostedFeesPool),
     Ve33(Ve33Pool),
 }

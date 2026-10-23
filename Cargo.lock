@@ -3784,9 +3784,9 @@ dependencies = [
 
 [[package]]
 name = "ekubo_sdk"
-version = "3.1.2"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa1080f5ab48d30a0221e764e51bb7de756251834b639fa1bbd187a60c04608"
+checksum = "103896a0ad8abb2beee70f138c1e40e54e174ad31579f340933c477659efc514"
 dependencies = [
  "alloy-primitives 0.6.4",
  "alloy-primitives 1.6.1",

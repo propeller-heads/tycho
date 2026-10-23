@@ -2,7 +2,7 @@ specVersion: v0.1.0
 package:
   name: "base_ekubo_v3"
   description: "Ekubo V3 indexing on Base"
-  version: v0.2.5
+  version: v0.3.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-ekubo-v3"
 
 protobuf:
@@ -136,6 +136,13 @@ modules:
     inputs:
       - map: map_tick_deltas
 
+  - name: store_tick_liquidity_gross
+    kind: store
+    valueType: bigint
+    updatePolicy: add
+    inputs:
+      - map: map_tick_deltas
+
   # Stage 6
   - name: store_active_liquidities
     kind: store
@@ -165,6 +172,9 @@ modules:
       - map: map_tick_deltas
       - store: store_tick_deltas
         mode: deltas
+      - store: store_tick_liquidity_gross
+        mode: deltas
+      - store: store_pool_details
       - map: map_rate_deltas
       - store: store_rate_deltas
         mode: deltas

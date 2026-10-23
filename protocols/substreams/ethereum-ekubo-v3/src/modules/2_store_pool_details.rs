@@ -50,5 +50,6 @@ fn maybe_pool_details(event: Event) -> Option<PoolDetails> {
             config.pool_type_config,
             EvmPoolTypeConfig::FullRange(_) | EvmPoolTypeConfig::Stableswap(_)
         ),
+        is_mev_capture_v21: pi.is_mev_capture_v21,
     })
 }

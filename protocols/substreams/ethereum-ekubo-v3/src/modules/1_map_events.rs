@@ -4,7 +4,10 @@ use ekubo_sdk::chain::evm::{
 };
 use itertools::Itertools;
 use substreams_ethereum::{
-    pb::eth::{self, v2::Log},
+    pb::eth::{
+        self,
+        v2::{Log, TransactionTrace},
+    },
     Event as _,
 };
 
@@ -20,8 +23,8 @@ use crate::{
         block_transaction_events::{
             transaction_events::{
                 pool_log::{
-                    Event, PoolInitialized, PositionUpdated, RateUpdated, SwapFeeUpdated, Swapped,
-                    VirtualExecution,
+                    Event, ExtensionStateUpdated, PoolInitialized, PositionUpdated, RateUpdated,
+                    SwapFeeUpdated, Swapped, VirtualExecution,
                 },
                 PoolLog,
             },
@@ -34,6 +37,7 @@ use crate::{
 #[substreams::handlers::map]
 fn map_events(params: String, block: eth::v2::Block) -> BlockTransactionEvents {
     let ve33_address = crate::params::ve33_address(&params);
+    let mev_capture_v21_address = crate::params::mev_capture_v21_address(&params);
 
     BlockTransactionEvents {
         block_transaction_events: block
@@ -41,7 +45,15 @@ fn map_events(params: String, block: eth::v2::Block) -> BlockTransactionEvents {
             .flat_map(|trace| {
                 let pool_logs = trace
                     .logs_with_calls()
-                    .filter_map(|(log, _)| maybe_pool_log(log, ve33_address))
+                    .filter_map(|(log, _)| {
+                        maybe_pool_log(log, ve33_address, mev_capture_v21_address)
+                    })
+                    .chain(
+                        mev_capture_v21_address
+                            .map(|extension| extension_state_updates(trace, extension))
+                            .unwrap_or_default(),
+                    )
+                    .sorted_unstable_by_key(|log| log.ordinal)
                     .collect_vec();
 
                 (!pool_logs.is_empty())
@@ -61,7 +73,40 @@ fn map_events(params: String, block: eth::v2::Block) -> BlockTransactionEvents {
     }
 }
 
-fn maybe_pool_log(log: &Log, ve33_address: Option<Address>) -> Option<PoolLog> {
+/// The MEVCapture v2.1 extension keeps its per-pool state in the storage slot
+/// keyed by the pool ID and emits no event when it changes, so track the last
+/// value written in the transaction to each slot.
+fn extension_state_updates(trace: &TransactionTrace, extension: Address) -> Vec<PoolLog> {
+    trace
+        .calls
+        .iter()
+        .filter(|call| !call.state_reverted)
+        .flat_map(|call| call.storage_changes.iter())
+        .filter(|change| change.address == extension.as_slice())
+        .into_group_map_by(|change| change.key.clone())
+        .into_iter()
+        .map(|(pool_id, changes)| {
+            let last = changes
+                .into_iter()
+                .max_by_key(|change| change.ordinal)
+                .unwrap();
+
+            PoolLog {
+                ordinal: last.ordinal,
+                pool_id,
+                event: Some(Event::ExtensionStateUpdated(ExtensionStateUpdated {
+                    state: last.new_value.clone(),
+                })),
+            }
+        })
+        .collect()
+}
+
+fn maybe_pool_log(
+    log: &Log,
+    ve33_address: Option<Address>,
+    mev_capture_v21_address: Option<Address>,
+) -> Option<PoolLog> {
     let emitter = Address::from_slice(&log.address);
 
     let (pool_id, ev) = if emitter == CORE_ADDRESS {
@@ -131,6 +176,7 @@ fn maybe_pool_log(log: &Log, ve33_address: Option<Address>) -> Option<PoolLog> {
                         BOOSTED_FEES_CONCENTRATED_ADDRESS,
                     ]
                     .contains(&extension),
+                    is_mev_capture_v21: Some(extension) == mev_capture_v21_address,
                 }),
             )
         }
@@ -216,4 +262,60 @@ fn maybe_pool_log(log: &Log, ve33_address: Option<Address>) -> Option<PoolLog> {
     };
 
     Some(PoolLog { ordinal: log.ordinal, pool_id, event: Some(ev) })
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::address;
+    use substreams_ethereum::pb::eth::v2::{Call, StorageChange};
+
+    use super::*;
+
+    const EXTENSION: Address = address!("0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49");
+
+    fn change(address: Address, key: u8, value: u8, ordinal: u64) -> StorageChange {
+        StorageChange {
+            address: address.to_vec(),
+            key: vec![key; 32],
+            old_value: vec![0; 32],
+            new_value: vec![value; 32],
+            ordinal,
+        }
+    }
+
+    #[test]
+    fn test_extension_state_updates_take_the_last_write_per_pool() {
+        let trace = TransactionTrace {
+            calls: vec![
+                Call {
+                    storage_changes: vec![
+                        change(EXTENSION, 1, 10, 5),
+                        change(EXTENSION, 2, 20, 6),
+                        change(CORE_ADDRESS, 1, 99, 7),
+                    ],
+                    ..Default::default()
+                },
+                Call {
+                    state_reverted: true,
+                    storage_changes: vec![change(EXTENSION, 1, 66, 9)],
+                    ..Default::default()
+                },
+                Call { storage_changes: vec![change(EXTENSION, 1, 11, 8)], ..Default::default() },
+            ],
+            ..Default::default()
+        };
+
+        let updates: Vec<_> = extension_state_updates(&trace, EXTENSION)
+            .into_iter()
+            .sorted_unstable_by_key(|log| log.ordinal)
+            .map(|log| {
+                let Some(Event::ExtensionStateUpdated(ev)) = log.event else {
+                    panic!("unexpected event");
+                };
+                (log.pool_id[0], ev.state[0], log.ordinal)
+            })
+            .collect();
+
+        assert_eq!(updates, vec![(2, 20, 6), (1, 11, 8)]);
+    }
 }

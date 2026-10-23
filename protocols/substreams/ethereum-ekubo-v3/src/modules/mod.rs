@@ -37,6 +37,8 @@ mod store_active_rates;
 mod store_rate_deltas;
 #[path = "5_store_tick_deltas.rs"]
 mod store_tick_deltas;
+#[path = "5_store_tick_liquidity_gross.rs"]
+mod store_tick_liquidity_gross;
 
 // Stage 6
 #[path = "6_store_active_liquidities.rs"]

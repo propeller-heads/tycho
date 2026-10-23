@@ -5,6 +5,7 @@ use serde::Deserialize;
 struct Params {
     ve33_address: Option<Address>,
     signed_exclusive_swap_address: Option<Address>,
+    mev_capture_v21_address: Option<Address>,
 }
 
 fn parse(params: &str) -> Params {
@@ -23,4 +24,12 @@ pub fn ve33_address(params: &str) -> Option<Address> {
 /// pool gets the `is_exclusive` attribute.
 pub fn signed_exclusive_swap_address(params: &str) -> Option<Address> {
     parse(params).signed_exclusive_swap_address
+}
+
+/// Parses the deployment-specific MEVCapture v2.1 extension address from the
+/// module params (`mev_capture_v21_address=0x...`). Its pools get the
+/// extension's configuration as static attributes and its per-pool state word
+/// as the `anchor_state` attribute. Omitting it disables this tracking.
+pub fn mev_capture_v21_address(params: &str) -> Option<Address> {
+    parse(params).mev_capture_v21_address
 }
