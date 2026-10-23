@@ -20,12 +20,13 @@ pub const PAIR_BASE_TOKEN_SLOT: B256 = B256::with_last_byte(48);
 pub const PAIR_QUOTE_TOKEN_SLOT: B256 = B256::with_last_byte(49);
 /// Pair slot 51: the pricing library, published as `stateless_contract_addr_1`.
 pub const PAIR_LIB_SLOT: B256 = B256::with_last_byte(51);
-/// Pair slot 52: the write helper, published as `stateless_contract_addr_2`.
-pub const PAIR_WRITE_HELPER_SLOT: B256 = B256::with_last_byte(52);
+/// Pair slot 52: the integrator-fee module, a view contract that returns the Pair's fee for a
+/// `swapData` tag; published as `stateless_contract_addr_2`.
+pub const PAIR_FEE_MODULE_SLOT: B256 = B256::with_last_byte(52);
 
-/// Storage key of the write helper's integrator fee A[0], used by empty swapData:
+/// Storage key of the fee module's integrator fee A[0], used by empty swapData:
 /// keccak256(uint256(0) ++ uint256(1)), as `cast index uint256 0 1` computes it.
-/// The mapping base slot (1) is a helper-layout assumption, not a deployment parameter.
+/// The mapping base slot (1) is a fee-module layout assumption, not a deployment parameter.
 pub const FEE_TAG_ZERO_SLOT: B256 =
     b256!("a6eef7e35abe7026729641147f7915573c7e97b47efa546f5f6e3230263bcb49");
 

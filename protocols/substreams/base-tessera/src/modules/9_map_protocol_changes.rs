@@ -20,9 +20,9 @@ use tycho_substreams::{
 struct PauseInputs {
     /// Engine last recorded in TesseraSwap slot 0.
     engine: Option<Vec<u8>>,
-    /// Write helper address of each pair, keyed by pair id.
-    helpers: HashMap<String, Vec<u8>>,
-    /// Tag-0 fee word of each write helper, keyed by helper address.
+    /// Fee module address of each pair, keyed by pair id.
+    fee_modules: HashMap<String, Vec<u8>>,
+    /// Tag-0 fee word of each fee module, keyed by fee-module address.
     fees: HashMap<Vec<u8>, Vec<u8>>,
 }
 
@@ -102,35 +102,35 @@ fn registry_slots(
     slots
 }
 
-/// Closing-block engine, helper assignments and tag-0 fees for `known` pairs.
+/// Closing-block engine, fee-module assignments and tag-0 fees for `known` pairs.
 /// These get_last reads are not an ordinal-by-ordinal reconstruction of the recorded state.
 fn read_pause_inputs(store: &StoreGetRaw, known: &HashSet<String>) -> PauseInputs {
-    let mut helpers = HashMap::new();
+    let mut fee_modules = HashMap::new();
     let mut fees = HashMap::new();
     for pair in known {
-        let Some(helper) = store.get_last(format!("helper:{pair}")) else {
+        let Some(fee_module) = store.get_last(format!("fee_module:{pair}")) else {
             continue;
         };
-        if let Some(fee) = store.get_last(format!("fee:{}", id(&helper))) {
-            fees.insert(helper.clone(), fee);
+        if let Some(fee) = store.get_last(format!("fee:{}", id(&fee_module))) {
+            fees.insert(fee_module.clone(), fee);
         }
-        helpers.insert(pair.clone(), helper);
+        fee_modules.insert(pair.clone(), fee_module);
     }
-    PauseInputs { engine: store.get_last("engine"), helpers, fees }
+    PauseInputs { engine: store.get_last("engine"), fee_modules, fees }
 }
 
 /// The block's Tycho changes: new pairs, balances, raw storage of TesseraSwap, the Engine and
 /// every known pair, and the attributes derived from their writes.
 ///
-/// A pair write to the implementation, pricing-library or write-helper slot publishes that
+/// A pair write to the implementation, pricing-library or fee-module slot publishes that
 /// address as `stateless_contract_addr_0`, `_1` or `_2` and its closing-block code as
 /// `stateless_contract_code_0`, `_1` or `_2`; a zero address is not published.
 /// TesseraSwap writes publish `engine` and `balance_owner` on every pair. An Engine registry write
 /// that moves a pair's token pair away from it pauses that pair, since TesseraSwap routes by token
 /// pair and the old pair would otherwise quote its successor. A pair is never touched
 /// by a transaction ordered before its creation. Every emitted transaction pauses a pair whose
-/// helper charges a nonzero tag-0 fee, and pauses every pair once the recorded Engine differs from
-/// the configured one.
+/// fee module charges a nonzero tag-0 fee, and pauses every pair once the recorded Engine differs
+/// from the configured one.
 fn protocol_changes_from_storage(
     config: &DeploymentConfig,
     block: &eth::v2::Block,
@@ -197,7 +197,7 @@ fn record_pair_writes(
     // Array order is the consumer's stateless_contract_addr_<i> attribute index.
     // The VM loads the published code when one of these addresses changes; a change alone
     // does not pause the pair.
-    let dependency_slots = [IMPLEMENTATION_SLOT, PAIR_LIB_SLOT, PAIR_WRITE_HELPER_SLOT];
+    let dependency_slots = [IMPLEMENTATION_SLOT, PAIR_LIB_SLOT, PAIR_FEE_MODULE_SLOT];
     // state.pairs includes end-block discoveries; never attach changes to a Pair in a transaction
     // earlier than the one that created it.
     let exists_at = |pair: &String, tx_index: u64| {
@@ -309,9 +309,9 @@ fn enforce_pauses(
 ) -> Result<()> {
     // Always enforce persisted signals on emitted component updates. Fee-table writes can
     // occur without a Pair write, so include their transaction explicitly as a trigger.
-    let helpers: HashSet<&[u8]> = state
+    let fee_modules: HashSet<&[u8]> = state
         .pause_inputs
-        .helpers
+        .fee_modules
         .values()
         .map(Vec::as_slice)
         .collect();
@@ -319,7 +319,7 @@ fn enforce_pauses(
         if group
             .writes
             .iter()
-            .any(|w| *w.key == FEE_TAG_ZERO_SLOT && helpers.contains(w.address.as_slice()))
+            .any(|w| *w.key == FEE_TAG_ZERO_SLOT && fee_modules.contains(w.address.as_slice()))
         {
             let tx = group.tx()?;
             changes
@@ -345,11 +345,11 @@ fn enforce_pauses(
             }
             let fee = state
                 .pause_inputs
-                .helpers
+                .fee_modules
                 .get(pair)
-                .and_then(|helper| state.pause_inputs.fees.get(helper));
-            // Empty swapData selects helper fee A[0] (mapping base slot 1). The VM loads
-            // the helper's bytecode but not its storage, so it reads the fee as zero; a
+                .and_then(|fee_module| state.pause_inputs.fees.get(fee_module));
+            // Empty swapData selects the fee module's A[0] (mapping base slot 1). The VM loads
+            // the fee module's bytecode but not its storage, so it reads the fee as zero; a
             // nonzero on-chain fee would make simulation over-quote execution.
             if epoch_changed || fee.is_some_and(|value| !zero(value)) {
                 builder.change_component_pause_state(pair, true);
@@ -391,7 +391,7 @@ mod tests {
 
     const PAIR: [u8; 20] = [0x0a; 20];
     const OTHER_PAIR: [u8; 20] = [0x0b; 20];
-    const HELPER: [u8; 20] = [0x0c; 20];
+    const FEE_MODULE: [u8; 20] = [0x0c; 20];
     const TREASURY: [u8; 20] = TEST_CONFIG.treasury.into_array();
 
     fn word(addr: &[u8]) -> Vec<u8> {
@@ -452,7 +452,7 @@ mod tests {
     }
 
     fn safe() -> PauseInputs {
-        PauseInputs { engine: None, helpers: HashMap::new(), fees: HashMap::new() }
+        PauseInputs { engine: None, fee_modules: HashMap::new(), fees: HashMap::new() }
     }
 
     fn store_state(pairs: &[&[u8]], pause_inputs: PauseInputs) -> StoreState {
@@ -538,10 +538,10 @@ mod tests {
                 vec![
                     write(PAIR, IMPLEMENTATION_SLOT, word(&[0x70; 20]), word(&implementation)),
                     write(PAIR, slot(51), vec![0; 32], word(&library)),
-                    write(PAIR, slot(52), vec![0; 32], word(&HELPER)),
+                    write(PAIR, slot(52), vec![0; 32], word(&FEE_MODULE)),
                 ],
             ),
-            tx(1, vec![write(PAIR, slot(52), word(&HELPER), vec![0; 32])]),
+            tx(1, vec![write(PAIR, slot(52), word(&FEE_MODULE), vec![0; 32])]),
         ]);
         let out =
             protocol_changes(&TEST_CONFIG, &block, no_upstream(), &store_state(&[&PAIR], safe()))
@@ -550,13 +550,13 @@ mod tests {
         let first = attrs_in(&out, 0, &PAIR);
         assert_eq!(first["stateless_contract_addr_0"], id(implementation).into_bytes());
         assert_eq!(first["stateless_contract_addr_1"], id(library).into_bytes());
-        assert_eq!(first["stateless_contract_addr_2"], id(HELPER).into_bytes());
+        assert_eq!(first["stateless_contract_addr_2"], id(FEE_MODULE).into_bytes());
         assert_eq!(
             first["stateless_contract_code_0"],
             [&[0x5f], implementation.as_slice()].concat()
         );
         assert_eq!(first["stateless_contract_code_1"], [&[0x5f], library.as_slice()].concat());
-        assert_eq!(first["stateless_contract_code_2"], [&[0x5f], HELPER.as_slice()].concat());
+        assert_eq!(first["stateless_contract_code_2"], [&[0x5f], FEE_MODULE.as_slice()].concat());
         let cleared = attrs_in(&out, 1, &PAIR);
         assert!(
             !cleared.contains_key("stateless_contract_addr_2") &&
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn failed_code_read_fails_the_block() {
-        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&FEE_MODULE))])]);
         let code = RecordingCode { batches: Default::default(), fail: true };
         let error = changes_with(&block, &[&PAIR], &code).unwrap_err();
         assert!(error.to_string().contains("rpc down"));
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn pair_writes_touch_only_their_own_pair() {
-        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))])]);
+        let block = block(vec![tx(0, vec![write(PAIR, slot(52), vec![0; 32], word(&FEE_MODULE))])]);
         let out = protocol_changes(
             &TEST_CONFIG,
             &block,
@@ -644,7 +644,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"], id(HELPER).into_bytes());
+        assert_eq!(
+            attrs_in(&out, 0, &PAIR)["stateless_contract_addr_2"],
+            id(FEE_MODULE).into_bytes()
+        );
         assert!(attrs_in(&out, 0, &OTHER_PAIR).is_empty());
     }
 
@@ -675,11 +678,11 @@ mod tests {
     }
 
     #[test]
-    fn pauses_only_the_pair_whose_helper_charges_tag_zero() {
+    fn pauses_only_the_pair_whose_fee_module_charges_tag_zero() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
+            fee_modules: HashMap::from([(id(PAIR), FEE_MODULE.to_vec())]),
+            fees: HashMap::from([(FEE_MODULE.to_vec(), slot(10_000).to_vec())]),
         };
         let block = block(vec![tx(
             0,
@@ -704,8 +707,8 @@ mod tests {
     fn zero_tag_zero_fee_does_not_pause() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), vec![0; 32])]),
+            fee_modules: HashMap::from([(id(PAIR), FEE_MODULE.to_vec())]),
+            fees: HashMap::from([(FEE_MODULE.to_vec(), vec![0; 32])]),
         };
         let block = block(vec![tx(0, vec![write(PAIR, slot(0), vec![1; 32], vec![2; 32])])]);
         let out = protocol_changes(
@@ -751,15 +754,15 @@ mod tests {
     }
 
     #[test]
-    fn helper_fee_write_alone_emits_the_pause() {
+    fn tag_zero_fee_write_alone_emits_the_pause() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
+            fee_modules: HashMap::from([(id(PAIR), FEE_MODULE.to_vec())]),
+            fees: HashMap::from([(FEE_MODULE.to_vec(), slot(10_000).to_vec())]),
         };
         let block = block(vec![tx(
             3,
-            vec![write(HELPER, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(10_000).to_vec())],
+            vec![write(FEE_MODULE, FEE_TAG_ZERO_SLOT, vec![0; 32], slot(10_000).to_vec())],
         )]);
         let out = protocol_changes(
             &TEST_CONFIG,
@@ -773,11 +776,11 @@ mod tests {
     }
 
     #[test]
-    fn fee_write_outside_assigned_helpers_emits_nothing() {
+    fn fee_write_outside_assigned_fee_modules_emits_nothing() {
         let pause_inputs = PauseInputs {
             engine: None,
-            helpers: HashMap::from([(id(PAIR), HELPER.to_vec())]),
-            fees: HashMap::from([(HELPER.to_vec(), slot(10_000).to_vec())]),
+            fee_modules: HashMap::from([(id(PAIR), FEE_MODULE.to_vec())]),
+            fees: HashMap::from([(FEE_MODULE.to_vec(), slot(10_000).to_vec())]),
         };
         let stranger = [0x0f; 20];
         let block = block(vec![tx(
@@ -807,7 +810,7 @@ mod tests {
             ..no_upstream()
         };
         let block = block(vec![
-            tx(2, vec![write(PAIR, slot(52), vec![0; 32], word(&HELPER))]),
+            tx(2, vec![write(PAIR, slot(52), vec![0; 32], word(&FEE_MODULE))]),
             tx(5, vec![write(PAIR, slot(0), vec![0; 32], vec![1; 32])]),
         ]);
         let out = protocol_changes(&TEST_CONFIG, &block, upstream, &store_state(&[&PAIR], safe()))
@@ -826,7 +829,7 @@ mod tests {
                     address: PAIR.to_vec(),
                     key: IMPLEMENTATION_SLOT.to_vec(),
                     old_value: vec![],
-                    new_value: word(&HELPER),
+                    new_value: word(&FEE_MODULE),
                     ordinal: 20,
                 }],
             }],

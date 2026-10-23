@@ -10,7 +10,7 @@ component, and consumers quote it by executing Tessera's own bytecode in the Tyc
    committed transaction. Nested-call writes are folded by execution ordinal.
 2. The component ID is the Pair address; tokens are sorted. TesseraSwap, the Engine and the
    Pair are stateful contracts, and their raw storage and code changes are indexed.
-3. The implementation, pricing library and write helper are published as UTF-8 address
+3. The implementation, pricing library and fee module are published as UTF-8 address
    attributes `stateless_contract_addr_0/1/2` and follow their slot writes. Each address comes
    with its closing-block code as `stateless_contract_code_0/1/2`, read with one batched
    `eth_call` per block (see `src/code.rs`), so consumers load dependencies without RPC. A
@@ -24,8 +24,9 @@ component, and consumers quote it by executing Tessera's own bytecode in the Tyc
    Both reads are `eth_call`s. On a Flashblocks partial block an `eth_call` stalls the stream
    for about three minutes, so this package must run without `--enable-partial-blocks`.
 
-Execution sends empty `swapData`, which selects fee tag 0: the helper fee the pause rules below
-watch.
+The fee module at Pair slot 52 is a view contract that returns a Pair's integrator fee for the
+tag in the first byte of `swapData`. Execution sends empty `swapData`, which selects tag 0: the
+fee the pause rules below watch.
 
 ## Storage-change map
 
@@ -44,27 +45,29 @@ changes.
 | Engine | Fixed address, raw state/code | Sorted-token registry mapping at slot 8, registration in the discovery transaction; `getTesseraPool`, `swapAmountView` and `fastPullBlock` ABI, compiled into the adapter |
 | Pair implementation | EIP-1967 slot → attribute 0 + code | Pair proxy template, token slots 48/49; `poolState()`, `baseToken()` and `quoteToken()` ABI and the `poolState()` layout, compiled into the adapter from the SDK Tessera provides |
 | Pricing library | Pair slot 51 → attribute 1 + code | Staticcalled by the implementation; reads no storage |
-| Write helper | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
+| Fee module | Pair slot 52 → attribute 2 + code | Tag-0 fee is zero |
 | Treasury | TesseraSwap slot 1 → `balance_owner` and balance bridge; adapter constructor argument | Standard ERC20 and canonical WETH events; a rotation needs a new adapter runtime, or limits are capped by the old treasury |
 
-A component is marked `paused` when its write helper's tag-0 fee is nonzero (the VM loads the
-helper's code but not its storage, so it would read that fee as zero), and every component is
-paused once TesseraSwap points to a different Engine. A Pair is also paused when an Engine
+A component is marked `paused` when its fee module's tag-0 fee is nonzero (the VM loads the
+fee module's code but not its storage, so it would read that fee as zero), and every component
+is paused once TesseraSwap points to a different Engine. A Pair is also paused when an Engine
 registry write moves its token pair to another Pair or clears it. `paused` is never cleared.
 Consumers do not act on `paused` yet.
 
-The package pauses on a tag-0 fee rather than indexing the helper's storage, which would let a
-simulation price the fee, because the helper cannot be linked to the component. A component's
+The package pauses on a tag-0 fee rather than indexing the fee module's storage, which would let
+a simulation price the fee, because the fee module cannot be linked to the component. A
+component's
 contracts are fixed when it is created, and tycho-client requests and forwards only component
-contracts and DCI-traced accounts. A helper assigned later, which can also rotate, would need
+contracts and DCI-traced accounts. A fee module assigned later, which can also rotate, would need
 DCI, which Tycho does not run on Base.
 
-The safety store records the tag-0 fee slot at every address from block 37,518,600, so a helper
-configured before it is assigned is still caught. A fee set before that block is not recorded and
-reads as zero; the current helper was deployed later, at 48,160,230. The store covers every
-address because helper assignments are themselves derived from `map_storage_changes`, so no
-module before it knows which addresses are helpers. The cost is a few forwarded writes per block
-from other contracts with the same mapping layout, such as Uniswap V4's PoolManager.
+The safety store records the tag-0 fee slot at every address from block 37,518,600, so a fee
+module configured before it is assigned is still caught. A fee set before that block is not
+recorded and reads as zero; the current fee module was deployed later, at 48,160,230. The store
+covers every address because fee-module assignments are themselves derived from
+`map_storage_changes`, so no module before it knows which addresses are fee modules. The cost is a
+few forwarded writes per block from other contracts with the same mapping layout, such as Uniswap
+V4's PoolManager.
 
 TesseraSwap routes by token pair, not by Pair address, so a Pair the registry no longer points at
 would quote and settle against its successor. The adapter therefore checks

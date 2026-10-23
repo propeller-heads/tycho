@@ -24,7 +24,7 @@ pub fn map_storage_changes(
 }
 
 /// Retain all stateful-contract writes, not only dependency slots: arbitrary Pair/Engine
-/// writes invalidate quotes. Keep candidate fee writes before a helper is assigned too.
+/// writes invalidate quotes. Keep candidate fee writes before a fee module is assigned too.
 /// Filtering uses storage owners (including delegatecalls), never transaction destinations.
 pub(crate) fn filter_storage_changes(
     config: &DeploymentConfig,
@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_noise_and_keeps_all_stateful_writes_and_unassigned_helper_fee() {
+    fn filters_noise_and_keeps_all_stateful_writes_and_unassigned_tag_zero_fee() {
         let c = TEST_CONFIG;
         let pair = vec![4; 20];
         let unknown = vec![5; 20];

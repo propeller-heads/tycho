@@ -2,7 +2,7 @@ use crate::{common::*, config::DeploymentConfig, pb::tessera::v1::BlockStorageCh
 use std::collections::HashSet;
 use substreams::store::{StoreGet, StoreGetArray, StoreNew, StoreSet, StoreSetRaw};
 
-/// Persist TesseraSwap's Engine and treasury, each Pair's write helper and the tag-0 fee words,
+/// Persist TesseraSwap's Engine and treasury, each Pair's fee module and the tag-0 fee words,
 /// even when the affected pair has no price update.
 #[substreams::handlers::store]
 pub fn store_safety(
@@ -24,7 +24,7 @@ pub fn store_safety(
 
 /// Values to persist from one block, as `(ordinal, key, value)`.
 ///
-/// Produces each known pair's write-helper address under `helper:0x<pair>`, the tag-0 fee word
+/// Produces each known pair's fee-module address under `fee_module:0x<pair>`, the tag-0 fee word
 /// of every address writing that mapping slot under `fee:0x<address>`, and the Engine and
 /// treasury held in TesseraSwap slots 0 and 1 under `engine` and `treasury`. Values are raw
 /// bytes: 20-byte addresses and 32-byte fee words.
@@ -36,15 +36,15 @@ fn safety_writes(
     let mut writes = vec![];
     for tx in &changes.transactions {
         for w in &tx.writes {
-            if *w.key == PAIR_WRITE_HELPER_SLOT && known.contains(&id(&w.address)) {
+            if *w.key == PAIR_FEE_MODULE_SLOT && known.contains(&id(&w.address)) {
                 writes.push((
                     w.ordinal,
-                    format!("helper:{}", id(&w.address)),
+                    format!("fee_module:{}", id(&w.address)),
                     address(&w.new_value).to_vec(),
                 ));
             } else if *w.key == FEE_TAG_ZERO_SLOT {
-                // Remember this single candidate slot even before helper assignment.
-                // Otherwise an already-configured helper could be adopted with a nonzero
+                // Remember this single candidate slot even before a fee module is assigned.
+                // Otherwise an already-configured fee module could be adopted with a nonzero
                 // tag-0 fee and look safe. No other candidate storage/code is indexed.
                 writes.push((w.ordinal, format!("fee:{}", id(&w.address)), w.new_value.clone()));
             } else if *w.address == config.tesseraswap && *w.key == TESSERASWAP_ENGINE_SLOT {
@@ -70,7 +70,7 @@ mod tests {
 
     const PAIR: [u8; 20] = [0x0a; 20];
     const STRANGER: [u8; 20] = [0x0f; 20];
-    const HELPER: [u8; 20] = [0x0c; 20];
+    const FEE_MODULE: [u8; 20] = [0x0c; 20];
 
     fn write(
         address: impl AsRef<[u8]>,
@@ -104,17 +104,17 @@ mod tests {
     }
 
     #[test]
-    fn records_helper_only_for_known_pairs() {
+    fn records_fee_module_only_for_known_pairs() {
         let writes = safety_writes(
             &TEST_CONFIG,
             &block(vec![
-                write(PAIR, slot(52), word(&HELPER), 1),
+                write(PAIR, slot(52), word(&FEE_MODULE), 1),
                 // Retained upstream as an Engine write, but the Engine is not a pair.
-                write(TEST_CONFIG.engine, slot(52), word(&HELPER), 2),
+                write(TEST_CONFIG.engine, slot(52), word(&FEE_MODULE), 2),
             ]),
             &known(),
         );
-        assert_eq!(writes, vec![(1, format!("helper:{}", id(PAIR)), HELPER.to_vec())]);
+        assert_eq!(writes, vec![(1, format!("fee_module:{}", id(PAIR)), FEE_MODULE.to_vec())]);
     }
 
     #[test]
