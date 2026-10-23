@@ -40,6 +40,7 @@ use tycho_simulation::{
             token::Token,
             Chain,
         },
+        simulation::protocol_sim::ProtocolSim,
         Bytes,
     },
 };
@@ -469,18 +470,11 @@ impl TestRunner {
                     };
 
                     // Step 1: Run simulation get amount out
-                    let execution_data = match self.run_simulation(
+                    let execution_data = self.simulate_each_component(
                         &update,
                         &protocol_components,
-                        &[], // No skip filters for live testing
                         &config.protocol_system,
-                    ) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!("Failed to run simulation: {:#}", e);
-                            continue;
-                        }
-                    };
+                    );
 
                     if execution_data.is_empty() {
                         info!("No simulation data to execute for this update");
@@ -728,7 +722,10 @@ impl TestRunner {
 
         // Step 4: Run Tycho Simulation
         let execution_data = self.run_simulation(
-            &update,
+            update
+                .states
+                .iter()
+                .map(|(id, state)| (id, state.as_ref())),
             &protocol_components_simulation,
             &test.expected_components,
             &config.protocol_system,
@@ -1192,7 +1189,7 @@ impl TestRunner {
     /// transaction data for subsequent execution testing.
     ///
     /// # Arguments
-    /// * `update` - The decoded protocol state containing all component data
+    /// * `states` - The decoded states to simulate, by component id
     /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
     /// * `expected_components` - Test configuration to determine which components to skip
     /// * `protocol_system` - The protocol system identifier
@@ -1207,9 +1204,12 @@ impl TestRunner {
     /// - Transaction encoding fails
     ///
     /// Components can be skipped using `skip_simulation` flag in the test configuration.
-    fn run_simulation(
+    ///
+    /// Any component that fails fails the whole call; [`Self::simulate_each_component`] instead
+    /// leaves it out.
+    fn run_simulation<'a>(
         &self,
-        update: &Update,
+        states: impl IntoIterator<Item = (&'a String, &'a dyn ProtocolSim)>,
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &String,
@@ -1228,7 +1228,7 @@ impl TestRunner {
 
         let mut execution_data = HashMap::new();
 
-        for (id, state) in update.states.iter() {
+        for (id, state) in states {
             if skip_simulation.contains(id) {
                 info!("Skipping simulation for component {id}");
                 continue;
@@ -1403,6 +1403,35 @@ impl TestRunner {
         }
 
         Ok(execution_data)
+    }
+
+    /// Simulates each component of `update` on its own, as [`Self::run_simulation`] does, and
+    /// returns the swaps of those that succeed.
+    ///
+    /// A component that fails is logged and left out rather than failing the update. A live
+    /// stream keeps running, and one component that cannot be quoted, such as a pool just created
+    /// holding only dust, would otherwise block simulation and execution of every other component
+    /// in each update it appears in.
+    fn simulate_each_component(
+        &self,
+        update: &Update,
+        protocol_components: &HashMap<String, ProtocolComponentModel>,
+        protocol_system: &String,
+    ) -> HashMap<String, TychoExecutionInput> {
+        let mut execution_data = HashMap::new();
+        for (id, state) in &update.states {
+            let simulated = self.run_simulation(
+                [(id, state.as_ref())],
+                protocol_components,
+                &[], // No skip filters for live testing
+                protocol_system,
+            );
+            match simulated {
+                Ok(data) => execution_data.extend(data),
+                Err(e) => error!("Skipping component {id} for this update: {e:#}"),
+            }
+        }
+        execution_data
     }
 
     /// Simulates executing trades through RPC requests using historical block data
@@ -1679,7 +1708,10 @@ mod tests {
 
     use dotenv::dotenv;
     use glob::glob;
-    use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_common::{models::protocol::ProtocolComponentState, Bytes},
+    };
 
     use super::*;
 
@@ -1881,6 +1913,61 @@ mod tests {
                 "manifest must exist for {protocol}",
             );
         }
+    }
+
+    /// An update holding one pool with no liquidity, which reports a zero limit in every
+    /// direction and so cannot be simulated.
+    fn update_with_an_empty_pool() -> (Update, HashMap<String, ProtocolComponentModel>) {
+        let id = "0x0000000000000000000000000000000000000001".to_string();
+        let tokens = [
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000003",
+        ]
+        .map(|address| {
+            Token::new(&Bytes::from_str(address).unwrap(), "TKN", 18, 0, &[], Chain::Ethereum, 100)
+        })
+        .to_vec();
+        let component = ProtocolComponentModel::new(
+            Bytes::from_str(&id).unwrap(),
+            "uniswap_v2".to_string(),
+            "uniswap_v2_pool".to_string(),
+            Chain::Ethereum,
+            tokens,
+            vec![],
+            HashMap::new(),
+            Bytes::default(),
+            Default::default(),
+        );
+        let state: Box<dyn ProtocolSim> = Box::new(UniswapV2State::new(U256::ZERO, U256::ZERO));
+        let update = Update::new(1, HashMap::from([(id.clone(), state)]), HashMap::new());
+        (update, HashMap::from([(id, component)]))
+    }
+
+    /// A range test fails on any component that cannot be simulated.
+    #[test]
+    fn a_failing_component_fails_a_range_simulation() {
+        let runner =
+            get_mocked_runner_for(Chain::Ethereum, "test-protocol", "http://localhost".into());
+        let (update, components) = update_with_an_empty_pool();
+        let states = update
+            .states
+            .iter()
+            .map(|(id, state)| (id, state.as_ref()));
+        let error = runner
+            .run_simulation(states, &components, &[], &"uniswap_v2".to_string())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("No tradable direction"), "{error:#}");
+    }
+
+    /// A live stream leaves out the component that fails instead of failing the update.
+    #[test]
+    fn a_failing_component_is_left_out_of_a_live_simulation() {
+        let runner =
+            get_mocked_runner_for(Chain::Ethereum, "test-protocol", "http://localhost".into());
+        let (update, components) = update_with_an_empty_pool();
+        let execution_data =
+            runner.simulate_each_component(&update, &components, &"uniswap_v2".to_string());
+        assert!(execution_data.is_empty());
     }
 
     fn get_mocked_runner() -> TestRunner {
