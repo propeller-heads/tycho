@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5
+
+- Join tick and pool-liquidity store deltas by store key and ordinal instead of position.
+  Writers and consumers share store-key helpers, preserving the unprefixed V3 address format.
+- Aggregate tick writes per transaction before building attribute updates. Preserve Creation
+  across subsequent updates, omit ticks created then deleted in the same transaction, and
+  classify deletion then recreation of an existing tick as Update.
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding
