@@ -6,7 +6,7 @@ serves it over HTTP/WebSocket.
 ## Module Map
 
 ```
-main.rs                     CLI entry point; account initialisation; extractor startup
+main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
 testing.rs                  Test utilities

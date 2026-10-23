@@ -25,6 +25,11 @@ use chrono::{NaiveDateTime, Utc};
 use clap::Parser;
 use futures03::future::select_all;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use pyroscope::{
+    backend::{pprof_backend, BackendConfig, PprofConfig},
+    pyroscope::{PyroscopeAgentBuilder, PyroscopeAgentRunning},
+    PyroscopeAgent,
+};
 use serde::Deserialize;
 use tokio::{
     runtime::Handle,
@@ -219,6 +224,53 @@ fn spawn_jemalloc_stats_reporter() {
     });
 }
 
+/// Starts continuous CPU profiling if `PYROSCOPE_SERVER_URL` is set and not empty, and returns
+/// `Ok(None)` otherwise. Samples all threads `PYROSCOPE_SAMPLE_RATE` times per CPU-second
+/// (default 100) and pushes the profiles to the server every 10 s, with the pod name as tag.
+/// Profiling stops when the agent is dropped.
+///
+/// The application name is `PYROSCOPE_APPLICATION_NAME`, else `OTEL_SERVICE_NAME` (the service
+/// name of the traces), else `tycho-indexer-<chain>` with the first chain, the one the indexer
+/// uses.
+///
+/// # Panics
+///
+/// Panics if `PYROSCOPE_SAMPLE_RATE` is not a number.
+fn start_cpu_profiler(
+    chains: &[String],
+) -> Result<Option<PyroscopeAgent<PyroscopeAgentRunning>>, pyroscope::PyroscopeError> {
+    let Some(url) = env::var("PYROSCOPE_SERVER_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(None);
+    };
+    let application = env::var("PYROSCOPE_APPLICATION_NAME")
+        .or_else(|_| env::var("OTEL_SERVICE_NAME"))
+        .unwrap_or_else(|_| match chains.first() {
+            Some(chain) => format!("tycho-indexer-{chain}"),
+            None => "tycho-indexer".to_string(),
+        });
+    let sample_rate = env::var("PYROSCOPE_SAMPLE_RATE")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse()
+        .expect("PYROSCOPE_SAMPLE_RATE must be a number");
+    let pod = env::var("HOSTNAME").unwrap_or_default();
+    let backend = pprof_backend(PprofConfig { sample_rate }, BackendConfig::default());
+    let agent = PyroscopeAgentBuilder::new(
+        url,
+        application,
+        sample_rate,
+        "pyroscope-rs",
+        env!("CARGO_PKG_VERSION"),
+        backend,
+    )
+    .tags(vec![("pod", pod.as_str())])
+    .build()?
+    .start()?;
+    Ok(Some(agent))
+}
+
 /// Executes all extractors configured in the extractor configuration file and starts the server.
 ///
 /// Note: This function utilizes two distinct runtimes: one for extraction tasks and another
@@ -236,6 +288,8 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
         .unwrap_or_else(|_| "3".to_string())
         .parse()
         .expect("MAIN_WORKER_THREADS must be a number");
+    // Kept until the indexer exits; dropping the agent stops profiling.
+    let cpu_profiler = start_cpu_profiler(&index_args.chains);
     // We spawn a dedicated runtime for extraction
     let extraction_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(extraction_threads)
@@ -257,6 +311,11 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
             let _metrics_task = create_metrics_exporter();
             #[cfg(feature = "jemalloc")]
             spawn_jemalloc_stats_reporter();
+            match &cpu_profiler {
+                Ok(Some(_)) => info!("Continuous CPU profiling started"),
+                Ok(None) => {}
+                Err(err) => warn!(%err, "Continuous CPU profiling failed to start"),
+            }
 
             info!("Starting Tycho");
             debug!("{} CPUs detected", num_cpus::get());
