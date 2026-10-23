@@ -1,0 +1,155 @@
+# dev-base: the dev base host, through its public auth-proxy (runs from anywhere)
+
+[target]
+name = "dev-base"
+chain = "base"
+url = "https://tycho-base-dev.propellerheads.xyz"
+# plan_header: not set, the auth-proxy in front of this host sets X-User-Plan from the key
+pod_selector = 'namespace="dev-tycho", pod=~"base-tycho-indexer-[0-9a-f]+-[a-z0-9]+"'
+live_pod_selector = 'namespace="prod-tycho", pod=~"base-tycho-indexer-.*"'   # the live pod, to measure how far the target falls behind
+rds_instance = "dev-base"
+
+[rules]   # what the target's plan lets these clients do; profiles and scenarios stay inside
+tvl_floor = 0.1
+max_version_age_s = 600
+version_age_slack_s = 240   # "max" version age = limit minus this, so the version stays allowed until the startup ends
+
+[[profiles]]
+# Fynd: current tycho-client, Fynd's TVL filter.
+name = "fynd"
+weight = 2
+tvl_gt = 0.4545
+protocols = "all"
+exclude = ["lunarbase"]
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# A client reading 6 pages of uniswap_v3, everything, at the floor.
+name = "low_tvl_broad"
+weight = 2
+tvl_gt = 0.1
+protocols = "all"
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# Most solvers: one page per protocol.
+name = "high_tvl"
+weight = 5
+tvl_gt = 5.0
+protocols = "all"
+page_size = 2550
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+[[profiles]]
+# A solver on slipstreams only, pages of 500.
+name = "solver_pages_500"
+weight = 1
+tvl_gt = 10.0
+protocols = ["aerodrome_slipstreams"]
+page_size = 500
+state_chunk = 360
+contract_chunk = 100
+ep_chunk = 100
+
+# Scenarios run in this order. A scenario whose result file exists is skipped. A wave that restarts the pod is
+# recorded as such and the run waits for the pod to come back before the next one.
+[[scenarios]]
+# one client, the baseline
+name = "mix_n1"
+set = "realistic"
+startups = 1
+
+[[scenarios]]
+name = "mix_n8"
+set = "realistic"
+startups = 8
+
+[[scenarios]]
+name = "mix_n16"
+set = "realistic"
+startups = 16
+
+[[scenarios]]
+name = "mix_n32"
+set = "realistic"
+startups = 32
+
+[[scenarios]]
+name = "mix_n64"
+set = "realistic"
+startups = 64
+
+[[scenarios]]
+# 32 clients starting over one minute
+name = "staggered_n32_60s"
+set = "realistic"
+startups = 32
+spread_s = 60
+
+[[scenarios]]
+# 64 clients starting over five minutes
+name = "staggered_n64_300s"
+set = "realistic"
+startups = 64
+spread_s = 300
+
+[[scenarios]]
+# the broadest client the plan allows: every protocol at the TVL floor
+name = "broad_floor_n4"
+set = "worst"
+startups = 4
+profile = "low_tvl_broad"
+
+[[scenarios]]
+name = "broad_floor_n8"
+set = "worst"
+startups = 8
+profile = "low_tvl_broad"
+
+[[scenarios]]
+name = "broad_floor_n16"
+set = "worst"
+startups = 16
+profile = "low_tvl_broad"
+
+[[scenarios]]
+# versions as old as the plan allows: below the delta window on fast chains
+name = "old_version_n16"
+set = "worst"
+startups = 16
+version_age = "max"
+
+[[scenarios]]
+# the same wave three times with 20 s between them, without waiting for idle
+name = "crashloop_a_n16"
+set = "worst"
+startups = 16
+
+[[scenarios]]
+name = "crashloop_b_n16"
+set = "worst"
+startups = 16
+wait_idle = false
+delay_s = 20
+
+[[scenarios]]
+name = "crashloop_c_n16"
+set = "worst"
+startups = 16
+wait_idle = false
+delay_s = 20
+
+[[scenarios]]
+# pollers: 50 one-id components + one-id state request pairs per protocol per client
+name = "hammer_n16"
+set = "worst"
+startups = 16
+single_id_calls = 50

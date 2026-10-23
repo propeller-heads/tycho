@@ -1,0 +1,20 @@
+[package]
+name = "startup-loadgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../LICENSE.md"
+description = "Replays concurrent tycho client startups (tokens, components, entry points, state) against an RPC host and records per-request timings"
+
+# Standalone on purpose: the benchmark pod builds this crate alone, without the main workspace.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "json"] }
+
+[profile.release]
+debug = false
