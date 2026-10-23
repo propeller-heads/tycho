@@ -133,8 +133,8 @@ use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
@@ -152,6 +152,7 @@ mod contract;
 pub mod direct;
 mod entry_point;
 mod extraction_state;
+pub mod leader_lock;
 mod orm;
 mod pool;
 mod protocol;
@@ -159,11 +160,17 @@ mod schema;
 mod snapshot;
 pub mod token_cache;
 mod versioning;
+mod writer_epoch;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
 // +262142-12-31T23:59:59.999999999
 const MAX_TS: NaiveDateTime = NaiveDateTime::MAX;
+
+/// Server-side TCP keepalive settings of every database session: Postgres drops a session about
+/// 25 seconds (10 + 3 × 5) after its peer stops answering.
+const SESSION_KEEPALIVES: &str =
+    "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3;";
 
 lazy_static! {
     /// Simplifies querying current and historical versions by introducing a special marker version.
@@ -472,6 +479,8 @@ pub(crate) struct PostgresGateway {
     /// be updated once an extractor has crossed it, but has not yet crossed the new
     /// horizon (aka it should never move faster than an extractor).
     retention_horizon: NaiveDateTime,
+    /// Writer epoch claimed by this process; shared by every clone of this gateway.
+    pub(crate) claimed_epoch: writer_epoch::ClaimedEpoch,
 }
 
 impl PostgresGateway {
@@ -490,7 +499,19 @@ impl PostgresGateway {
             token_cache,
             component_index,
             retention_horizon,
+            claimed_epoch: writer_epoch::ClaimedEpoch::default(),
         }
+    }
+
+    /// Increments the writer epoch in the database and fences this process's writes on the new
+    /// value. See [`writer_epoch::ClaimedEpoch::increment_writer_epoch`].
+    pub(crate) async fn increment_writer_epoch(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<i64, StorageError> {
+        self.claimed_epoch
+            .increment_writer_epoch(conn)
+            .await
     }
 
     #[allow(dead_code)]
@@ -649,11 +670,30 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 }
 
 /// Creates a connection pool without running migrations.
+///
+/// Every session of the pool sets [`SESSION_KEEPALIVES`]. A write transaction holds a share lock
+/// on the writer epoch row until it ends. If the writer's host disappears with a transaction
+/// open, Postgres keeps that session and its lock until it notices that the peer is gone, and no
+/// new writer can increment the epoch until then. With the operating system defaults that can
+/// take hours; with these settings Postgres drops the session about 25 seconds after the peer
+/// stops answering.
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
-    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(db_url);
+    let mut manager_config = ManagerConfig::default();
+    manager_config.custom_setup =
+        Box::new(|url| Box::pin(establish_with_keepalives(url.to_string())));
+    let config =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, manager_config);
     Pool::builder(config)
         .build()
         .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
+async fn establish_with_keepalives(url: String) -> ConnectionResult<AsyncPgConnection> {
+    let mut conn = AsyncPgConnection::establish(&url).await?;
+    conn.batch_execute(SESSION_KEEPALIVES)
+        .await
+        .map_err(ConnectionError::CouldntSetupConfiguration)?;
+    Ok(conn)
 }
 
 /// Ensures the given chain is present in the database, inserting it if absent.
@@ -784,9 +824,24 @@ async fn ensure_protocol_systems(protocol_systems: &[String], conn: &mut AsyncPg
     debug!("Ensured protocol system enum presence for: {:?}", protocol_systems);
 }
 
+/// Postgres advisory lock key held while migrations run.
+const MIGRATION_LOCK_KEY: i64 = 0x7479_6368_6f5f_6d67;
+
+/// Applies pending migrations, waiting for any other process that is migrating the same database.
+///
+/// Several instances can start against one database at the same time, e.g. during a rolling
+/// deploy. Without the lock both would apply the same migration concurrently.
 fn run_migrations(db_url: &str) {
     info!("Upgrading database...");
     let mut conn = PgConnection::establish(db_url).expect("Connection to database should succeed");
+    // Session-scoped lock: closing `conn` at the end of this function releases it, also when a
+    // migration panics.
+    diesel::RunQueryDsl::execute(
+        diesel::sql_query("SELECT pg_advisory_lock($1)")
+            .bind::<diesel::sql_types::BigInt, _>(MIGRATION_LOCK_KEY),
+        &mut conn,
+    )
+    .expect("Acquiring the migration lock should succeed");
     conn.run_pending_migrations(MIGRATIONS)
         .expect("migrations should execute without errors");
 }
@@ -1532,6 +1587,80 @@ mod tests_transaction_conflict {
         for (message, expected) in cases {
             assert_eq!(is_transaction_conflict(message), expected, "{message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod test_serial_db_pool {
+    use diesel::{sql_types::Text, QueryableByName};
+
+    use super::*;
+
+    #[derive(QueryableByName)]
+    struct Setting {
+        #[diesel(sql_type = Text)]
+        value: String,
+    }
+
+    #[tokio::test]
+    async fn test_pool_sessions_set_server_side_keepalives() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect(&db_url).await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+
+        let mut settings = Vec::new();
+        for name in ["tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"] {
+            let setting: Setting =
+                diesel::sql_query(format!("SELECT current_setting('{name}') AS value"))
+                    .get_result(&mut conn)
+                    .await
+                    .unwrap();
+            settings.push(setting.value);
+        }
+
+        assert_eq!(settings, ["10", "5", "3"]);
+    }
+}
+
+#[cfg(test)]
+mod tests_migration_lock {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    use diesel::{sql_query, sql_types::BigInt, Connection, PgConnection, RunQueryDsl};
+
+    use super::{run_migrations, MIGRATION_LOCK_KEY};
+
+    fn call_on_migration_lock(conn: &mut PgConnection, function: &str) {
+        sql_query(format!("SELECT {function}($1)"))
+            .bind::<BigInt, _>(MIGRATION_LOCK_KEY)
+            .execute(conn)
+            .unwrap_or_else(|e| panic!("{function} on the migration lock failed: {e}"));
+    }
+
+    #[test]
+    fn test_serial_db_run_migrations_waits_for_migration_lock() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let mut holder = PgConnection::establish(&db_url).expect("holder should connect");
+        call_on_migration_lock(&mut holder, "pg_advisory_lock");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let migrator = thread::spawn(move || {
+            run_migrations(&db_url);
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_millis(500))
+                .is_err(),
+            "migrations must wait while another session holds the migration lock"
+        );
+
+        call_on_migration_lock(&mut holder, "pg_advisory_unlock");
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("migrations should finish once the lock is released");
+        migrator.join().unwrap();
     }
 }
 
