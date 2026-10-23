@@ -15,7 +15,12 @@ categories.workspace = true
 
 [features]
 default = ["jemalloc"]
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:jemalloc_pprof"]
+jemalloc = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-ctl",
+    "dep:jemalloc_pprof",
+    "pyroscope/backend-jemalloc",
+]
 
 [[bin]]
 name = "tycho-indexer"
@@ -87,9 +92,9 @@ tracing-opentelemetry = { version = "0.23", default-features = false }
 tycho-protobuf.workspace = true
 utoipa = { version = "4.2.0", features = ["chrono"] }
 utoipa-swagger-ui = { version = "6.0.0", features = ["actix-web"] }
-tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }
-tikv-jemalloc-ctl = { version = "0.6", features = ["stats"], optional = true }
-jemalloc_pprof = { version = "0.8", features = ["symbolize"], optional = true }
+tikv-jemallocator = { version = "0.7", features = ["profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"], optional = true }
+jemalloc_pprof = { version = "0.9", features = ["symbolize"], optional = true }
 # Continuous CPU profiling, started only when PYROSCOPE_SERVER_URL is set. Plain HTTP to an
 # in-cluster server, so no TLS backend.
 pyroscope = { version = "2.1.2", default-features = false, features = ["backend-pprof-rs"] }
