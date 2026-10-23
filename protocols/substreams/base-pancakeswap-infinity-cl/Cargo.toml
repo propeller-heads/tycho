@@ -1,11 +1,12 @@
 [package]
 name = "base-pancakeswap-infinity-cl"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [lib]
 name = "base_pancakeswap_infinity_cl"
-crate-type = ["cdylib"]
+# rlib so sibling packages can reuse the modules and their handlers.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 substreams = "0.5.22"

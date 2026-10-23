@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1
+
+The crate also builds as an rlib and exports `pool_component` and `decode_address`, so
+`bsc-pancakeswap-infinity-cl-hooks` can reuse its modules. The output is unchanged; the wasm hash
+is not.
+
 ## v0.1.0
 
 Initial PancakeSwap Infinity concentrated-liquidity integration on Base (`CLPoolManager`

@@ -24,7 +24,7 @@ use tycho_simulation::evm::protocol::u256_num::u256_to_biguint;
 use crate::{
     execution::{
         encoding::{detect_token_slots, setup_router_overwrites},
-        execution_simulator::ExecutionSimulator,
+        execution_simulator::{ExecutionSimulator, SimulationBase},
         models::{
             RouterOverwritesData, SimulationInput, SimulationResult, TychoExecutionInput,
             TychoExecutionResult,
@@ -46,8 +46,9 @@ const MAX_CALLS_PER_BATCH: usize = 30;
 /// Keeps the per-block throughput of a single batch without flooding the RPC.
 const MAX_CONCURRENT_BATCHES: usize = 4;
 
-/// Simulates every encoded swap in `execution_info` against `block` via `debug_traceCall` and
-/// returns one result per simulation id.
+/// Simulates every encoded swap in `execution_info` on the state after `block`, in `block`'s own
+/// context, via `debug_traceCall`, and returns one result per simulation id. A pending block, whose
+/// hash is zero, simulates on the pending state instead.
 ///
 /// `router_overwrites_data` decides which contracts are simulated as deployed and which are
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
@@ -65,10 +66,56 @@ pub async fn simulate_swap_transaction(
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
     oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
-) -> Result<
+) -> SwapSimulationResult {
+    simulate_swap_transaction_on(
+        rpc_tools,
+        execution_info,
+        block,
+        router_overwrites_data,
+        oracle_overwrites,
+        SimulationBase::AfterBlock,
+    )
+    .await
+}
+
+/// [`simulate_swap_transaction`], but on the state `block` was built on — its parent's — with
+/// `block`'s number and timestamp: the call a client makes before `block` exists, such as one
+/// simulating a quote for the block a builder is building. The FermiSwap and BopAMM registry lanes
+/// are read from the parent's state too. A pending block, whose hash is zero, simulates on the
+/// pending state as [`simulate_swap_transaction`] does.
+pub async fn simulate_swap_transaction_before_block(
+    rpc_tools: &RPCTools,
+    execution_info: HashMap<String, TychoExecutionInput>,
+    block: &Block,
+    router_overwrites_data: RouterOverwritesData,
+    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
+) -> SwapSimulationResult {
+    simulate_swap_transaction_on(
+        rpc_tools,
+        execution_info,
+        block,
+        router_overwrites_data,
+        oracle_overwrites,
+        SimulationBase::BeforeBlock,
+    )
+    .await
+}
+
+/// What [`simulate_swap_transaction`] returns: one result per simulation id, or the error that
+/// failed the whole batch with the overwrites and metadata built for it so far.
+pub type SwapSimulationResult = Result<
     HashMap<String, TychoExecutionResult>,
     (miette::Error, Option<AddressHashMap<AccountOverride>>, Option<tenderly::OverwriteMetadata>),
-> {
+>;
+
+async fn simulate_swap_transaction_on(
+    rpc_tools: &RPCTools,
+    execution_info: HashMap<String, TychoExecutionInput>,
+    block: &Block,
+    router_overwrites_data: RouterOverwritesData,
+    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
+    base: SimulationBase,
+) -> SwapSimulationResult {
     let mut inputs: HashMap<String, SimulationInput> = HashMap::new();
     let mut tycho_execution_results: HashMap<String, TychoExecutionResult> = HashMap::new();
 
@@ -100,9 +147,14 @@ pub async fn simulate_swap_transaction(
         None
     } else {
         Some(
-            encoding::setup_fermiswap_overwrites(rpc_tools, block, &fermiswap_pairs)
-                .await
-                .map_err(|e| (e, None, None))?,
+            encoding::setup_fermiswap_overwrites(
+                rpc_tools,
+                block,
+                base.state_block_id(block),
+                &fermiswap_pairs,
+            )
+            .await
+            .map_err(|e| (e, None, None))?,
         )
     };
 
@@ -112,9 +164,14 @@ pub async fn simulate_swap_transaction(
         None
     } else {
         Some(
-            encoding::setup_bopamm_overwrites(rpc_tools, block, &bopamm_asset_ids)
-                .await
-                .map_err(|e| (e, None, None))?,
+            encoding::setup_bopamm_overwrites(
+                rpc_tools,
+                block,
+                base.state_block_id(block),
+                &bopamm_asset_ids,
+            )
+            .await
+            .map_err(|e| (e, None, None))?,
         )
     };
 
@@ -205,7 +262,7 @@ pub async fn simulate_swap_transaction(
         return Ok(tycho_execution_results);
     }
 
-    let execution_results = simulate_in_batches(&rpc_tools.rpc_url, &inputs, block)
+    let execution_results = simulate_in_batches(&rpc_tools.rpc_url, &inputs, block, base)
         .await
         .map_err(|e| (e, None, None))?;
 
@@ -270,13 +327,14 @@ async fn simulate_in_batches(
     rpc_url: &str,
     inputs: &HashMap<String, SimulationInput>,
     block: &Block,
+    base: SimulationBase,
 ) -> miette::Result<HashMap<String, SimulationResult>> {
     let batches = split_into_batches(inputs, MAX_CALLS_PER_BATCH);
     let n_batches = batches.len();
 
     let mut pending = stream::iter(batches.into_iter().enumerate())
         .map(|(index, batch)| async move {
-            (index, simulate_batch_with_retry(rpc_url, batch, block).await)
+            (index, simulate_batch_with_retry(rpc_url, batch, block, base).await)
         })
         .buffer_unordered(MAX_CONCURRENT_BATCHES);
 
@@ -299,6 +357,7 @@ async fn simulate_batch_with_retry(
     rpc_url: &str,
     inputs: HashMap<String, SimulationInput>,
     block: &Block,
+    base: SimulationBase,
 ) -> Result<HashMap<String, SimulationResult>, String> {
     let retry_strategy = ExponentialFactorBackoff::from_millis(1000, 2.)
         .max_delay_millis(5000)
@@ -310,7 +369,7 @@ async fn simulate_batch_with_retry(
         let inputs = inputs.clone();
         async move {
             simulator
-                .batch_simulate_with_trace(inputs, block)
+                .batch_simulate_with_trace(inputs, block, base)
                 .await
                 .map_err(|e| RetryError::transient(e.to_string()))
         }
@@ -416,10 +475,14 @@ fn collect_bopamm_asset_ids(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use alloy::{
+        eips::BlockNumberOrTag,
         primitives::{address, b256},
-        rpc::types::TransactionRequest,
+        rpc::types::{BlockId, BlockOverrides, TransactionRequest},
     };
+    use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
     use mockito::{Mock, Request, ServerGuard};
     use serde_json::{json, Value};
 
@@ -478,24 +541,24 @@ mod tests {
             .collect()
     }
 
-    fn batch_len(request: &Request) -> usize {
-        let body: Value = serde_json::from_slice(
+    fn request_json(request: &Request) -> Value {
+        serde_json::from_slice(
             request
                 .body()
                 .expect("request has a body"),
         )
-        .expect("request body is JSON");
-        body.as_array().map_or(1, Vec::len)
+        .expect("request body is JSON")
+    }
+
+    fn batch_len(request: &Request) -> usize {
+        request_json(request)
+            .as_array()
+            .map_or(1, Vec::len)
     }
 
     /// Answers every call of a JSON-RPC batch with a successful call trace returning `1`.
     fn successful_traces(request: &Request) -> Vec<u8> {
-        let body: Value = serde_json::from_slice(
-            request
-                .body()
-                .expect("request has a body"),
-        )
-        .expect("request body is JSON");
+        let body = request_json(request);
         let calls = body
             .as_array()
             .expect("request is a JSON-RPC batch");
@@ -582,9 +645,14 @@ mod tests {
         let (rejected, answered) = rpc_rejecting_batches_over(&mut server, 30).await;
         let inputs = simulation_inputs(70);
 
-        let results = simulate_in_batches(&server.url(), &inputs, &Block::default())
-            .await
-            .expect("every batch fits the RPC limit");
+        let results = simulate_in_batches(
+            &server.url(),
+            &inputs,
+            &Block::default(),
+            SimulationBase::AfterBlock,
+        )
+        .await
+        .expect("every batch fits the RPC limit");
 
         assert_eq!(results.len(), inputs.len());
         for simulation_id in inputs.keys() {
@@ -608,13 +676,107 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let (_rejected, _answered) = rpc_rejecting_batches_over(&mut server, 0).await;
 
-        let error = simulate_in_batches(&server.url(), &simulation_inputs(5), &Block::default())
-            .await
-            .expect_err("the RPC rejects every batch");
+        let error = simulate_in_batches(
+            &server.url(),
+            &simulation_inputs(5),
+            &Block::default(),
+            SimulationBase::AfterBlock,
+        )
+        .await
+        .expect_err("the RPC rejects every batch");
 
         assert!(
             format!("{error:?}").contains("Failed to simulate batch 1 of 1 after retries"),
             "unexpected error: {error:?}"
         );
+    }
+
+    const PARENT_HASH: B256 =
+        b256!("00000000000000000000000000000000000000000000000000000000000000bb");
+    const NUMBER: u64 = 26_201_954;
+    const TIMESTAMP: u64 = 1_792_115_927;
+
+    /// A block numbered [`NUMBER`] at [`TIMESTAMP`], built on [`PARENT_HASH`]: mined when it has a
+    /// hash, pending when its hash is zero, as for a flashblock.
+    fn block(mined: bool) -> Block {
+        let mut block: Block = Block::default();
+        if mined {
+            block.header.hash =
+                b256!("00000000000000000000000000000000000000000000000000000000000000aa");
+        }
+        block.header.parent_hash = PARENT_HASH;
+        block.header.number = NUMBER;
+        block.header.timestamp = TIMESTAMP;
+        block
+    }
+
+    /// The block's number and timestamp, the overrides of a simulation before a mined block.
+    fn number_and_time() -> Option<BlockOverrides> {
+        Some(BlockOverrides {
+            number: Some(U256::from(NUMBER)),
+            time: Some(TIMESTAMP),
+            ..Default::default()
+        })
+    }
+
+    /// Simulates one input for `block(mined)` on `base` against a mock RPC, and returns the block
+    /// id and the block overrides the `debug_traceCall` request carried.
+    async fn traced_call(base: SimulationBase, mined: bool) -> (BlockId, Option<BlockOverrides>) {
+        let mut server = mockito::Server::new_async().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let _answered = server
+            .mock("POST", "/")
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                recorded
+                    .lock()
+                    .expect("the lock is not poisoned")
+                    .push(request_json(request));
+                successful_traces(request)
+            })
+            .create_async()
+            .await;
+
+        simulate_in_batches(&server.url(), &simulation_inputs(1), &block(mined), base)
+            .await
+            .expect("the batch simulates");
+
+        let requests = requests
+            .lock()
+            .expect("the lock is not poisoned");
+        let params = &requests[0][0]["params"];
+        let block_id: BlockId = serde_json::from_value(params[1].clone()).expect("a block id");
+        let options: GethDebugTracingCallOptions =
+            serde_json::from_value(params[2].clone()).expect("tracing call options");
+        (block_id, options.block_overrides)
+    }
+
+    /// After a mined block, a simulation reads that block's state as it is.
+    #[tokio::test]
+    async fn after_a_mined_block_the_simulation_reads_its_state() {
+        let call = traced_call(SimulationBase::AfterBlock, true).await;
+
+        assert_eq!(call, (BlockId::from(NUMBER), None));
+    }
+
+    /// Before a mined block, a simulation reads the parent's state, named by its hash, with the
+    /// block's number and timestamp.
+    #[tokio::test]
+    async fn before_a_mined_block_the_simulation_reads_the_parent_in_its_context() {
+        let call = traced_call(SimulationBase::BeforeBlock, true).await;
+
+        assert_eq!(call, (BlockId::from(PARENT_HASH), number_and_time()));
+    }
+
+    /// A pending block reads the pending state, with no block overrides, whatever the base.
+    #[tokio::test]
+    async fn a_pending_block_reads_the_pending_state_whatever_the_base() {
+        let after = traced_call(SimulationBase::AfterBlock, false).await;
+        let before = traced_call(SimulationBase::BeforeBlock, false).await;
+
+        let pending = (BlockId::from(BlockNumberOrTag::Pending), None);
+        assert_eq!(after, pending);
+        assert_eq!(before, pending);
     }
 }

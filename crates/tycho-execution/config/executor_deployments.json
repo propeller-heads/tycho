@@ -147,6 +147,10 @@
         "0x631352Aaa9d6554848aF674106bCD8Bb9E59a5CF"
       ]
     },
+    "ekubo_v3": {
+      "contract": "EkuboV3Executor",
+      "args": ["0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"]
+    },
     "rfq:bebop": {
       "contract": "BebopExecutor",
       "args": [
@@ -234,6 +238,10 @@
     "rfq:metric": {
       "contract": "MetricExecutor",
       "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x92Ebf3AC5B8F53faA94471E3D1260D4d7492e4f5"]
     }
   },
   "polygon": {
@@ -249,6 +257,14 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
+    },
+    "fallback:rfq:metric": {
+      "contract": "MetricFallbackExecutor",
+      "args": ["0x14d20db2490711E75ae4355A909AbEeF9B82835c"]
     }
   },
   "bsc": {
@@ -268,6 +284,10 @@
         "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df",
         "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
       ]
+    },
+    "ekubo_v3": {
+      "contract": "EkuboV3Executor",
+      "args": ["0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"]
     },
     "native_wrapper": {
       "contract": "NativeWrapExecutor",

@@ -113,6 +113,11 @@ RUN resolve_base() { \
             if [ -d "/source/$base_dir" ]; then \
                 echo "Including $base_dir (for protocol $protocol_clean)..."; \
                 cp -r "/source/$base_dir" "/filtered/"; \
+                for dep in $(sed -n 's#^ *- \.\./\([A-Za-z0-9_-]*\)/proto *$#\1#p' \
+                        "/source/$base_dir"/*.yaml | sort -u); do \
+                    echo "Including $dep (its protos are imported by $base_dir)..."; \
+                    cp -r "/source/$dep" "/filtered/"; \
+                done; \
                 base_wasm=$(echo "$base_dir" | tr '-' '_'); \
                 if [ -f "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" ]; then \
                     cp "/source/target/wasm32-unknown-unknown/release/${base_wasm}.wasm" \

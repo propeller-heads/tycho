@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "base-pancakeswap-infinity-cl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -507,6 +507,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "bsc-pancakeswap-infinity-cl-hooks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base-pancakeswap-infinity-cl",
+ "ethabi 18.0.0",
+ "getrandom 0.2.17",
+ "hex",
+ "rstest",
+ "serde",
+ "serde_qs 0.13.0",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "substreams-helper 0.0.2",
+ "tiny-keccak",
+ "tycho-substreams 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

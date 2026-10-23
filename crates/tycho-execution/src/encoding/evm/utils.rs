@@ -399,6 +399,15 @@ pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Vec<u8> {
     encoded_action_data
 }
 
+/// End of `items[index]` in `ple_encode(items)`.
+pub(crate) fn find_ple_item_end(items: &[Vec<u8>], index: usize) -> usize {
+    let mut end = 0;
+    for item in &items[..=index] {
+        end += size_of::<u16>() + item.len();
+    }
+    end
+}
+
 // Function used in tests to write calldata to a file that then is used by the corresponding
 // solidity tests.
 pub fn write_calldata_to_file(test_identifier: &str, hex_calldata: &str) {

@@ -159,6 +159,12 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const FALLBACK_KEY: &str = "fallback";
 
+/// Config key of `TychoSubsidizingExecutor` and of its `payer_address`.
+pub(crate) const SUBSIDY_KEY: &str = "subsidy";
+
+/// Protocol system of the native token wrap/unwrap.
+pub(crate) const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 
