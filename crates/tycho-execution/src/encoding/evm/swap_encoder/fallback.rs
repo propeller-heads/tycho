@@ -85,6 +85,22 @@ static SUPPORTED_PROTOCOLS: LazyLock<HashMap<Chain, &'static [FallbackProtocol]>
                     FallbackProtocol::UniswapV4,
                 ][..],
             ),
+            (
+                Chain::Arbitrum,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
+            (
+                Chain::Polygon,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
         ])
     });
 
@@ -547,6 +563,10 @@ mod tests {
         assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Robinhood));
         assert!(FallbackProtocol::UniswapV2.supported_on(Chain::Bsc));
         assert!(!FallbackProtocol::Curve.supported_on(Chain::Bsc));
+        assert!(FallbackProtocol::UniswapV3.supported_on(Chain::Arbitrum));
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Arbitrum));
+        assert!(FallbackProtocol::UniswapV4.supported_on(Chain::Polygon));
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Polygon));
         // No router.
         assert!(!FallbackProtocol::UniswapV3.supported_on(Chain::Plasma));
     }

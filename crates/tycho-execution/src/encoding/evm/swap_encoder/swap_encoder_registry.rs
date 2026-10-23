@@ -9,10 +9,11 @@ use crate::encoding::{
             BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
             HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
             METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
-            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V2_FORKS,
-            UNISWAP_V3_FORKS,
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
+            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
+        subsidy::SubsidyEncoder,
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
@@ -39,6 +40,8 @@ use crate::encoding::{
 
 /// The protocol system of a Uniswap V4 pool whose pool key names a hook.
 const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
+const PANCAKESWAP_INFINITY_CL: &str = "pancakeswap_infinity_cl";
+const PANCAKESWAP_INFINITY_CL_HOOKS: &str = "pancakeswap_infinity_cl_hooks";
 
 /// Registry containing all supported `SwapEncoders`.
 #[derive(Clone)]
@@ -46,11 +49,12 @@ pub struct SwapEncoderRegistry {
     chain: Chain,
     /// A hashmap containing the protocol system as a key and the `SwapEncoder` as a value.
     encoders: HashMap<String, Box<dyn SwapEncoder>>,
+    subsidy_encoder: Option<SubsidyEncoder>,
 }
 
 impl SwapEncoderRegistry {
     pub fn new(chain: Chain) -> Self {
-        Self { chain, encoders: HashMap::new() }
+        Self { chain, encoders: HashMap::new(), subsidy_encoder: None }
     }
 
     /// Creates a new registry pre-populated with all default encoders for the given chain.
@@ -82,22 +86,47 @@ impl SwapEncoderRegistry {
                 "No protocol specific config found for chain".to_string(),
             ))?;
         for (protocol, executor_address) in executors {
-            let encoder = self.create_encoder(
-                protocol,
-                Bytes::from_str(executor_address).map_err(|_| {
-                    EncodingError::FatalError(format!(
-                        "Invalid executor address for protocol {}",
-                        protocol
-                    ))
-                })?,
-                protocol_specific_config
-                    .get(protocol)
-                    .cloned(),
-            )?;
+            let executor_address = Bytes::from_str(executor_address).map_err(|_| {
+                EncodingError::FatalError(format!(
+                    "Invalid executor address for protocol {}",
+                    protocol
+                ))
+            })?;
+            let config = protocol_specific_config
+                .get(protocol)
+                .cloned();
+            if protocol == SUBSIDY_KEY {
+                self.subsidy_encoder =
+                    Some(SubsidyEncoder::from_config(executor_address, self.chain, config)?);
+                continue;
+            }
+            let encoder = self.create_encoder(protocol, executor_address, config)?;
             self.encoders
                 .insert(protocol.to_string(), encoder);
         }
         Ok(self)
+    }
+
+    /// Sets the subsidizing executor and the subsidy payer, replacing the configured ones.
+    pub fn register_subsidy_contracts(
+        mut self,
+        executor_address: Bytes,
+        payer_address: Bytes,
+    ) -> Self {
+        self.subsidy_encoder =
+            Some(SubsidyEncoder::new(executor_address, payer_address, self.chain));
+        self
+    }
+
+    pub(crate) fn get_subsidy_encoder(&self) -> Result<&SubsidyEncoder, EncodingError> {
+        self.subsidy_encoder
+            .as_ref()
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "No subsidizing executor is configured for {}",
+                    self.chain
+                ))
+            })
     }
 
     /// Adds an encoder to the registry, replacing any existing encoder for the same protocol.
@@ -117,6 +146,9 @@ impl SwapEncoderRegistry {
     ///
     /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
     /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
+    ///
+    /// `pancakeswap_infinity_cl_hooks` resolves to the `pancakeswap_infinity_cl` encoder the same
+    /// way: one Infinity executor serves hooked and hookless CL pools alike.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
@@ -124,6 +156,11 @@ impl SwapEncoderRegistry {
         }
         if protocol_system == UNISWAP_V4_HOOKS {
             return self.encoders.get("uniswap_v4");
+        }
+        if protocol_system == PANCAKESWAP_INFINITY_CL_HOOKS {
+            return self
+                .encoders
+                .get(PANCAKESWAP_INFINITY_CL);
         }
         if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
             return self
@@ -177,9 +214,13 @@ impl SwapEncoderRegistry {
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "pancakeswap_infinity_cl" | "pancakeswap_infinity_bin" => Ok(Box::new(
-                PancakeswapInfinitySwapEncoder::new(executor_address, self.chain, config)?,
-            )),
+            PANCAKESWAP_INFINITY_CL |
+            PANCAKESWAP_INFINITY_CL_HOOKS |
+            "pancakeswap_infinity_bin" => Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
+                executor_address,
+                self.chain,
+                config,
+            )?)),
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -235,7 +276,7 @@ impl SwapEncoderRegistry {
             "lunarbase" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "native_wrapper" => {
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "etherfi" => {
@@ -422,6 +463,38 @@ mod tests {
             .expect("a hooked V4 pool must resolve to an encoder");
 
         assert_eq!(hooked.executor_address(), core.executor_address());
+    }
+
+    /// Hooked Infinity CL pools swap through the same executor as hookless ones, so the
+    /// `pancakeswap_infinity_cl` entry serves them without a deployment of their own.
+    #[test]
+    fn test_pancakeswap_infinity_cl_hooks_resolves_to_the_cl_encoder() {
+        let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
+        let executors = format!(r#"{{"bsc": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
+
+        let registry = SwapEncoderRegistry::new(Chain::Bsc)
+            .add_default_encoders(Some(executors))
+            .unwrap();
+
+        let hooks = registry
+            .get_encoder("pancakeswap_infinity_cl_hooks")
+            .expect("a hooked Infinity CL pool must resolve to the Infinity encoder");
+        assert_eq!(hooks.executor_address(), &Bytes::from_str(executor).unwrap());
+    }
+
+    #[test]
+    fn test_registry_configured_with_subsidizing_executor_without_payer() {
+        let executors =
+            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+
+        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(Some(executors.to_string()));
+
+        assert!(
+            matches!(result, Err(EncodingError::FatalError(ref message)) if message.contains("payer_address")),
+            "{:?}",
+            result.err()
+        );
     }
 
     /// A registry configured with `uniswap_v4_hooks` alone — what the integration-test harness

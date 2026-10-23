@@ -18,6 +18,7 @@ use crate::{
         errors::RFQError,
         protocols::bebop::models::{BebopOrderToSign, BebopQuoteResponse, BebopSupportedChain},
     },
+    snapshot_feed::http::{nothing_refused, read_json},
 };
 
 /// Host serving Bebop's PMM API; every per-chain path hangs off it.
@@ -198,16 +199,17 @@ impl BebopClient {
                 }
             };
 
-            let quote_response = match response
-                .json::<BebopQuoteResponse>()
-                .await
+            let quote_response = match read_json::<BebopQuoteResponse>(
+                response,
+                "Bebop quote",
+                nothing_refused,
+            )
+            .await
             {
                 Ok(resp) => resp,
                 Err(e) => {
-                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote response parsing failed");
-                    last_error = Some(RFQError::ParsingError(format!(
-                        "Failed to parse Bebop quote response: {e}"
-                    )));
+                    warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %e, "quote response failed");
+                    last_error = Some(RFQError::from(e));
                     if attempt < MAX_RETRIES - 1 {
                         sleep(Duration::from_millis(100)).await;
                         continue;

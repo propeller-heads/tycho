@@ -50,6 +50,8 @@ services/
     cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
+    cache/view.rs           AccountView / ComponentView — views of cache entries plus window changes;
+                            state answers serialize from them without copying the entries
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -183,13 +185,21 @@ snapshot after the extractors are built and before the server starts (`EntityCac
 `services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
 window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
 load, and the windows fold into `DiscardSink`.
+A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
+`entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
+`entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).
 
 In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
 first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
-window changes up to the requested version, without reading the database. A request it cannot
-answer comes back as a `FallbackReason`, and the handler answers it from the database path and
-counts it in `db_path_requests{endpoint, reason}`. `shadow` answers every request from the
-database path.
+window changes up to the requested version, without reading the database. A `/contract_state` or
+`/protocol_state` answer is made of views (`services/state/cache/view.rs`). The service builds
+them from the cached entries and the window changes, without copying the entries. The JSON is
+written from the views. A large answer drops its views while it waits for a serialize permit
+(`services/off_worker.rs`) and builds them again in the serialize job. The answer does not enter
+the response caches, which keep only database answers. A request the service cannot answer comes
+back as a `FallbackReason`, and the handler answers it from the database path and counts it in
+`db_path_requests{endpoint, reason}`.
+`shadow` answers every request from the database path.
 
 In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the database path (the
 client's answer), then `StateService`, and `services/state/shadow.rs` compares the two.

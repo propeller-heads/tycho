@@ -1,7 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::{
-    eips::BlockNumberOrTag,
     primitives::{keccak256, map::AddressHashMap, Address, FixedBytes, Keccak256, B256, U256},
     providers::Provider,
     rpc::types::{state::AccountOverride, Block, BlockId, TransactionRequest},
@@ -510,22 +509,18 @@ pub fn setup_angstrom_overwrites(
 /// FermiSwap reads oracle state from PrioUpdateRegistry using a lane keyed by
 /// `keccak256(abi.encode(target, laneIndex))`. The first 4 bytes of that lane's
 /// slot store the update timestamp. To keep the lane payload intact, this reads
-/// each current slot value at the simulation block and only replaces the
-/// timestamp prefix with `block.timestamp`.
+/// each current slot value at `state_block`, the block whose state the simulation
+/// runs on, and only replaces the timestamp prefix with `block.timestamp`.
 pub async fn setup_fermiswap_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     pairs: &[(Address, Address)],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
     let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
     let timestamp = u32::try_from(block.header.timestamp)
         .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
 
     let mut state_diff = Vec::new();
     for &(base_asset, quote_asset) in pairs {
@@ -534,7 +529,7 @@ pub async fn setup_fermiswap_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {
@@ -586,22 +581,19 @@ fn overwrite_fermiswap_lane_timestamp(stored_value: B256, timestamp: u32) -> B25
 /// by `keccak256(abi.encode(module, assetId))` — the pricing module is the registry `target` and
 /// the book's `assetId` is the lane index. The first 4 bytes of that lane's slot store the update
 /// timestamp; the registry's exact-window `getState` gate reverts (`StaleUpdate`) unless
-/// `block.timestamp` matches it. This reads each lane's current value at the simulation block and
-/// only replaces the timestamp prefix with `block.timestamp`, leaving the quote payload intact.
+/// `block.timestamp` matches it. This reads each lane's current value at `state_block`, the block
+/// whose state the simulation runs on, and only replaces the timestamp prefix with
+/// `block.timestamp`, leaving the quote payload intact.
 pub async fn setup_bopamm_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     asset_ids: &[U256],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
     let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
     let timestamp = u32::try_from(block.header.timestamp)
         .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
 
     let mut state_diff = Vec::new();
     for asset_id in asset_ids {
@@ -609,7 +601,7 @@ pub async fn setup_bopamm_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {

@@ -72,11 +72,15 @@ impl PriceLevelStreamProcessor {
         // `tycho_integration_price_level_oracle_override_unserved_total` for TaurusFi, Tempest,
         // Goliath, Stelaxis, ElZorro and auto-detected venues, which Titan's override stream does
         // not serve at all.
+        //
+        // The stream's own simulation overrides are off: this service reads its overrides through
+        // `oracle_overrides`, so a second quote stream socket would only cost a connection.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
             .without_fallback_router()
+            .without_simulation_overrides()
             .build();
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);

@@ -26,8 +26,9 @@ use crate::encoding::{
 ///
 /// Two rules whose breach misorders the pool key, so the swap reverts `PoolNotInitialized`
 /// instead of swapping something else. Both covered by tests:
-/// - Read `hook_address`, never `hooks`: the substreams package always emits `hooks` as zero so
-///   `UniswapV4State` decodes every pool hookless.
+/// - Read `hook_address`, never `hooks`: `hooks` is for the simulator, and the hookless CL package
+///   emits it as zero for every pool so `UniswapV4State` decodes them hookless. Both Infinity CL
+///   packages emit the real hook as `hook_address`.
 /// - `zeroForOne` compares PROTOCOL-NATIVE addresses (native ETH is `Address::ZERO`) BEFORE
 ///   `convert_to_router_token`. CANONICAL definition lives in the executor contract.
 #[derive(Clone)]
@@ -66,7 +67,7 @@ impl SwapEncoder for PancakeswapInfinitySwapEncoder {
             .protocol_system
             .as_str()
         {
-            "pancakeswap_infinity_cl" => 0u8,
+            "pancakeswap_infinity_cl" | "pancakeswap_infinity_cl_hooks" => 0u8,
             "pancakeswap_infinity_bin" => 1u8,
             other => {
                 return Err(EncodingError::FatalError(format!(
@@ -213,6 +214,25 @@ mod tests {
             .concat()
         );
         write_calldata_to_file(&format!("test_encode_{protocol_system}_swap"), &hex_swap);
+    }
+
+    /// A `CLAlphaHook` pool is a CL pool: pool type 0, its `parameters` passed through with the
+    /// hook bitmap, and the hook from `hook_address`, while `hooks` carries the same address for
+    /// the simulator.
+    #[test]
+    fn test_encode_pancakeswap_infinity_cl_hooks_swap() {
+        let hook = Bytes::from("0xb0bb171d333569cfd28a37f5c5dddaaa90ad46af");
+        let swap = swap_fixture(
+            "pancakeswap_infinity_cl_hooks",
+            USDC,
+            USDT,
+            &[("hook_address", hook.clone()), ("hooks", hook)],
+        );
+
+        let hex_swap = encode(encode_swap(&swap).unwrap());
+
+        assert_eq!(&hex_swap[80..84], "0100", "zeroForOne, then the CL pool type");
+        assert_eq!(&hex_swap[hex_swap.len() - 40..], "b0bb171d333569cfd28a37f5c5dddaaa90ad46af");
     }
 
     /// Direction follows the pool's currency order, in which native ETH is `address(0)` and so

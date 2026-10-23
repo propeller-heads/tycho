@@ -19,13 +19,17 @@
 //! database, and it never evicts — an entity missing from the cache does not exist.
 //!
 //! Reads and folds take turns behind one read-write lock: a fold takes the write side and
-//! applies one whole block atomically, reads take the read side. Folds are expected to take well
-//! under a millisecond, so blocking is acceptable and a reader never observes half a block.
+//! applies one whole block atomically, reads take the read side. A reader never observes half a
+//! block.
 //!
-//! Accounts are held behind an `Arc`, because one can hold a large storage map. A reader copies
-//! only the `Arc` under the read lock and does the full copy outside it. A fold that changes an
-//! account a reader still holds copies the account first, under the write lock (`Arc::make_mut`),
-//! so that copy happens at most once per fold instead of once per read.
+//! Accounts and component states are held behind an `Arc`: an account can hold a large storage
+//! map, and a component many attributes. A reader copies only the `Arc` under the read lock, and
+//! the response is written from it through a view (`view`), without a full copy. A view holds an
+//! entry while it is built and written to JSON, not while it waits for a serialize permit. A fold
+//! that changes an entry a reader still holds copies the entry first, under the write lock
+//! (`Arc::make_mut`). Reads wait for that copy, but it happens at most once per fold instead of
+//! once per read. Each such copy adds to `entity_cache_shared_copies_total` and records its
+//! duration in `entity_cache_shared_copy_duration_ms`, both labelled by `entity`.
 
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -37,7 +41,7 @@ use std::{
     time::Instant,
 };
 
-use metrics::gauge;
+use metrics::{counter, gauge, histogram};
 use tracing::{info, warn};
 use tycho_common::{
     keccak256,
@@ -54,6 +58,8 @@ use tycho_common::{
     },
     Bytes,
 };
+
+pub(crate) mod view;
 
 use super::window::FoldSink;
 
@@ -83,8 +89,7 @@ impl<T> Timestamped<T> {
         Self { value, written_at }
     }
 
-    #[cfg(test)]
-    pub(crate) fn value(&self) -> &T {
+    fn value(&self) -> &T {
         &self.value
     }
 
@@ -237,60 +242,16 @@ impl CachedAccount {
         entry
     }
 
-    /// Applies one block's changes. Each value takes `at`; a value already written by that block
-    /// or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than here:
-    /// values of one account can have different timestamps, so the entry's `updated_at` cannot
-    /// decide for each of them. A deleted slot becomes the zero value, as in
-    /// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
-    /// [`WriteOutcome::Conflict`]s are counted and logged once here, where the address is known.
+    /// Applies one block's changes with the rule of [`apply_account_block`]. When a write applies,
+    /// `updated_at` moves to `at`.
     pub(crate) fn apply_block(
         &mut self,
         delta: Option<&AccountDelta>,
         balances: Option<&HashMap<Address, AccountBalance>>,
         at: WriteTimestamp,
     ) {
-        let mut applied = false;
-        let mut conflicts = 0;
-        let mut count = |outcome| match outcome {
-            WriteOutcome::Applied => applied = true,
-            WriteOutcome::Skipped => {}
-            WriteOutcome::Conflict => conflicts += 1,
-        };
-        if let Some(delta) = delta {
-            for (key, value) in &delta.slots {
-                count(write_timestamped(
-                    &mut self.slots,
-                    key.clone(),
-                    value.clone().unwrap_or_default(),
-                    at,
-                ));
-            }
-            if let Some(balance) = &delta.balance {
-                count(
-                    self.native_balance
-                        .write(balance.clone(), at),
-                );
-            }
-            if let Some(code) = delta.code() {
-                count(
-                    self.code
-                        .write(CachedCode::new(code.clone()), at),
-                );
-            }
-        }
-        for (token, balance) in balances.into_iter().flatten() {
-            count(write_timestamped(&mut self.token_balances, token.clone(), balance.clone(), at));
-        }
-        if applied {
+        if apply_account_block(self, delta, balances, at) {
             self.updated_at = self.updated_at.max(at);
-        }
-        if conflicts > 0 {
-            warn!(
-                address = %self.address,
-                block_ts = %at.block_ts(),
-                values = conflicts,
-                "Skipped writes from the applied block carry different values"
-            );
         }
     }
 
@@ -318,6 +279,92 @@ impl CachedAccount {
     pub(crate) fn code(&self) -> &Timestamped<CachedCode> {
         &self.code
     }
+}
+
+/// The values of one account that a block can write. Each write says what it did.
+trait AccountWrites {
+    fn address(&self) -> &Address;
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome;
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome;
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome;
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome;
+}
+
+impl AccountWrites for CachedAccount {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+
+    fn write_slot(&mut self, key: &StoreKey, value: StoreVal, at: WriteTimestamp) -> WriteOutcome {
+        write_timestamped(&mut self.slots, key.clone(), value, at)
+    }
+
+    fn write_native_balance(&mut self, balance: Balance, at: WriteTimestamp) -> WriteOutcome {
+        self.native_balance.write(balance, at)
+    }
+
+    fn write_code(&mut self, code: CachedCode, at: WriteTimestamp) -> WriteOutcome {
+        self.code.write(code, at)
+    }
+
+    fn write_token_balance(
+        &mut self,
+        token: &Address,
+        balance: AccountBalance,
+        at: WriteTimestamp,
+    ) -> WriteOutcome {
+        write_timestamped(&mut self.token_balances, token.clone(), balance, at)
+    }
+}
+
+/// Writes one block's changes to `account` and returns whether any write applied. Each value
+/// takes `at`; a value already written by that block or a newer one is left alone, so the rule
+/// lives in [`Timestamped::write`] rather than here: values of one account can have different
+/// timestamps, so one timestamp for the whole account cannot decide for each of them. A deleted
+/// slot becomes the zero value, as in [`Account::apply_delta`]. A delta that carries code replaces
+/// the code and its hash together. [`WriteOutcome::Conflict`]s are counted and logged once per
+/// block.
+fn apply_account_block(
+    account: &mut impl AccountWrites,
+    delta: Option<&AccountDelta>,
+    balances: Option<&HashMap<Address, AccountBalance>>,
+    at: WriteTimestamp,
+) -> bool {
+    let mut applied = false;
+    let mut conflicts = 0;
+    let mut count = |outcome| match outcome {
+        WriteOutcome::Applied => applied = true,
+        WriteOutcome::Skipped => {}
+        WriteOutcome::Conflict => conflicts += 1,
+    };
+    if let Some(delta) = delta {
+        for (key, value) in &delta.slots {
+            count(account.write_slot(key, value.clone().unwrap_or_default(), at));
+        }
+        if let Some(balance) = &delta.balance {
+            count(account.write_native_balance(balance.clone(), at));
+        }
+        if let Some(code) = delta.code() {
+            count(account.write_code(CachedCode::new(code.clone()), at));
+        }
+    }
+    for (token, balance) in balances.into_iter().flatten() {
+        count(account.write_token_balance(token, balance.clone(), at));
+    }
+    if conflicts > 0 {
+        warn!(
+            address = %account.address(),
+            block_ts = %at.block_ts(),
+            values = conflicts,
+            "Skipped writes from the applied block carry different values"
+        );
+    }
+    applied
 }
 
 impl From<CachedAccount> for Account {
@@ -460,7 +507,7 @@ pub(crate) struct CacheState {
     accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.
-    components: HashMap<ProtocolSystem, HashMap<ComponentId, CachedComponentState>>,
+    components: HashMap<ProtocolSystem, HashMap<ComponentId, Arc<CachedComponentState>>>,
 }
 
 impl CacheState {
@@ -468,7 +515,7 @@ impl CacheState {
         self.accounts.get(address)
     }
 
-    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&CachedComponentState> {
+    pub(crate) fn component(&self, system: &str, id: &str) -> Option<&Arc<CachedComponentState>> {
         self.components
             .get(system)
             .and_then(|components| components.get(id))
@@ -524,7 +571,7 @@ impl EntityCache {
         }
         let mut component_entries: HashMap<
             ProtocolSystem,
-            HashMap<ComponentId, CachedComponentState>,
+            HashMap<ComponentId, Arc<CachedComponentState>>,
         > = HashMap::new();
         for ComponentSnapshot { system, state, updated_at } in components {
             component_entries
@@ -532,7 +579,7 @@ impl EntityCache {
                 .or_default()
                 .insert(
                     state.component_id.clone(),
-                    CachedComponentState::from_snapshot(state, updated_at),
+                    Arc::new(CachedComponentState::from_snapshot(state, updated_at)),
                 );
         }
         Self {
@@ -601,6 +648,20 @@ fn component_changes(
     created.chain(changed)
 }
 
+/// `Arc::make_mut` that counts the copy and records its duration when a reader still holds the
+/// entry. The `entity` label is `account` or `component`.
+fn make_mut_recorded<'a, T: Clone>(entry: &'a mut Arc<T>, entity: &'static str) -> &'a mut T {
+    let shared = Arc::strong_count(entry) > 1;
+    let started = Instant::now();
+    let value = Arc::make_mut(entry);
+    if shared {
+        counter!("entity_cache_shared_copies_total", "entity" => entity).increment(1);
+        histogram!("entity_cache_shared_copy_duration_ms", "entity" => entity)
+            .record(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    value
+}
+
 impl CacheState {
     /// Applies one block's component changes. A component the block creates is built holding that
     /// block's own delta and balances; one the cache already holds is logged and then takes the
@@ -623,12 +684,12 @@ impl CacheState {
                             "Creation of a component already cached skipped"
                         );
                     }
-                    entry.apply_block(delta, balances, at);
+                    make_mut_recorded(entry, "component").apply_block(delta, balances, at);
                 }
                 (None, true) => {
                     system_components.insert(
                         id.clone(),
-                        CachedComponentState::from_creation(id, delta, balances, at),
+                        Arc::new(CachedComponentState::from_creation(id, delta, balances, at)),
                     );
                 }
                 (None, false) => warn!(
@@ -677,7 +738,9 @@ impl CacheState {
                 continue;
             }
             match (self.accounts.get_mut(address), delta) {
-                (Some(entry), delta) => Arc::make_mut(entry).apply_block(delta, balances, at),
+                (Some(entry), delta) => {
+                    make_mut_recorded(entry, "account").apply_block(delta, balances, at)
+                }
                 (None, Some(delta)) if delta.is_creation() => {
                     self.accounts.insert(
                         address.clone(),
@@ -715,6 +778,7 @@ mod test {
     use std::str::FromStr;
 
     use async_trait::async_trait;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use rstest::rstest;
     use tycho_common::models::protocol::ProtocolComponent;
 
@@ -743,7 +807,7 @@ mod test {
             .read()
             .component(EXTRACTOR, id)
             .cloned()
-            .map(ProtocolComponentState::from)
+            .map(|entry| ProtocolComponentState::from(Arc::unwrap_or_clone(entry)))
     }
 
     fn addr(n: u64) -> Bytes {
@@ -1266,7 +1330,7 @@ mod test {
             .component(EXTRACTOR, "c1")
             .unwrap();
         assert_eq!(
-            ProtocolComponentState::from(entry.clone()).attributes["x"],
+            ProtocolComponentState::from(Arc::unwrap_or_clone(entry.clone())).attributes["x"],
             Bytes::from(2u64),
             "the repeated creation does not rebuild the entry"
         );
@@ -1341,6 +1405,92 @@ mod test {
         );
     }
 
+    /// Returns the copy count and the number of recorded durations for one `entity` label.
+    fn shared_copies(snapshotter: &Snapshotter, entity: &str) -> (u64, usize) {
+        let (mut copies, mut durations) = (0, 0);
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            if !key
+                .key()
+                .labels()
+                .any(|l| l.key() == "entity" && l.value() == entity)
+            {
+                continue;
+            }
+            match (key.key().name(), value) {
+                ("entity_cache_shared_copies_total", DebugValue::Counter(n)) => copies += n,
+                ("entity_cache_shared_copy_duration_ms", DebugValue::Histogram(v)) => {
+                    durations += v.len()
+                }
+                _ => {}
+            }
+        }
+        (copies, durations)
+    }
+
+    #[rstest]
+    #[case::reader_holds_the_account(true, (1, 1))]
+    #[case::no_reader_holds_the_account(false, (0, 0))]
+    fn fold_records_a_copy_of_an_account_only_when_a_reader_holds_it(
+        #[case] held: bool,
+        #[case] expected: (u64, usize),
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cache = EntityCache::new();
+        let address = addr(1);
+        cache
+            .fold(&with_account_delta(msg(1), creation(&address, [(1, 1)], 0, "0x")))
+            .unwrap();
+        let reader = held.then(|| {
+            cache
+                .read()
+                .account(&address)
+                .cloned()
+                .unwrap()
+        });
+
+        cache
+            .fold(&with_account_delta(
+                msg(2),
+                update(&address, fixtures::optional_slots([(1, 12)])),
+            ))
+            .unwrap();
+
+        drop(reader);
+        assert_eq!(shared_copies(&snapshotter, "account"), expected);
+    }
+
+    #[rstest]
+    #[case::reader_holds_the_component(true, (1, 1))]
+    #[case::no_reader_holds_the_component(false, (0, 0))]
+    fn fold_records_a_copy_of_a_component_only_when_a_reader_holds_it(
+        #[case] held: bool,
+        #[case] expected: (u64, usize),
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(1), "c1"), "c1", 1))
+            .unwrap();
+        let reader = held.then(|| {
+            cache
+                .read()
+                .component(EXTRACTOR, "c1")
+                .cloned()
+                .unwrap()
+        });
+
+        cache
+            .fold(&with_state_delta(msg(2), "c1", 2))
+            .unwrap();
+
+        drop(reader);
+        assert_eq!(shared_copies(&snapshotter, "component"), expected);
+    }
+
     #[test]
     fn fold_leaves_an_account_a_reader_holds_unchanged() {
         let cache = EntityCache::new();
@@ -1367,6 +1517,34 @@ mod test {
                 .unwrap()
                 .slots,
             fixtures::slots([(1, 12)])
+        );
+    }
+
+    #[test]
+    fn fold_leaves_a_component_a_reader_holds_unchanged() {
+        let cache = EntityCache::new();
+        cache
+            .fold(&with_state_delta(with_component(msg(1), "c1"), "c1", 1))
+            .unwrap();
+        let held = cache
+            .read()
+            .component(EXTRACTOR, "c1")
+            .cloned()
+            .unwrap();
+
+        cache
+            .fold(&with_state_delta(msg(2), "c1", 2))
+            .unwrap();
+
+        assert_eq!(
+            ProtocolComponentState::from(Arc::unwrap_or_clone(held)).attributes["x"],
+            Bytes::from(1u64)
+        );
+        assert_eq!(
+            cached_component(&cache, "c1")
+                .unwrap()
+                .attributes["x"],
+            Bytes::from(2u64)
         );
     }
 

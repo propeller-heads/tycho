@@ -4,6 +4,9 @@ pragma solidity ^0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
+import {
+    IUniswapV2Pair
+} from "@uniswap-v2/contracts/interfaces/IUniswapV2Pair.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {FallbackRouterAssertions, FallbackSwaps} from "./Fallback.t.sol";
@@ -584,6 +587,134 @@ contract MetricFallbackRouterBscTest is FallbackRouterAssertions {
             BSC_WBNB,
             BSC_USDT,
             WBNB_IN,
+            protocol,
+            reason
+        );
+    }
+}
+
+/// @notice Runs the router as `deploy-fallback-router.js` deploys it on Polygon: a Uniswap V4
+/// PoolManager, no Fluid liquidity layer and Eden's Uniswap V3 static quoter. The Metric pool is
+/// a mock; the fallbacks are the live QuickSwap V2 and Uniswap V3 WETH/USDC pools. Swaps 0.1 WETH
+/// for USDC.
+contract MetricFallbackRouterPolygonTest is FallbackRouterAssertions {
+    uint256 constant FORK_BLOCK = 95_800_000;
+    uint256 constant WETH_IN = 0.1 ether;
+    /// WETH is token1 of the WETH/USDC pools.
+    bytes constant ONE_FOR_ZERO = hex"00";
+    address constant POLYGON_POOL_MANAGER =
+        0x67366782805870060151383F4BbFF9daB53e5cD6;
+    address constant POLYGON_UNISWAP_V3_STATIC_QUOTER =
+        0x7637Aaeb5BD58269B782726680d83f72C651aE74;
+    address constant QUICKSWAP_V2_WETH_USDC =
+        0x7bAF833f82BB1971f99A5a5d84bED1d5D0dEDD70;
+    /// The 0.05% pool.
+    address constant UNISWAP_V3_WETH_USDC =
+        0xA4D8c89f0c20efbe54cBa9e7e7a7E509056228D9;
+    uint8 constant QUICKSWAP_V2_FEE_BPS = 30;
+
+    MetricFallbackRouter router;
+    MockMetricOmmPool pool;
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("polygon"), FORK_BLOCK);
+        router = new MetricFallbackRouter(
+            IPoolManager(POLYGON_POOL_MANAGER),
+            address(0),
+            IUniswapV3StaticQuoter(POLYGON_UNISWAP_V3_STATIC_QUOTER)
+        );
+        pool = new MockMetricOmmPool(POLYGON_WETH, POLYGON_USDC);
+        deal(POLYGON_USDC, address(pool), 1_000_000e6);
+        deal(POLYGON_WETH, address(router), WETH_IN);
+    }
+
+    function testFallsBackToQuickswapV2() public {
+        pool.set(0, true);
+        uint256 expectedOut = _quickswapV2AmountOut();
+
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackProtocol.UniswapV2,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        router.swap(
+            _swapStruct(),
+            address(pool),
+            ONE_FOR_ZERO,
+            FallbackSwaps.uniswapV2(
+                QUICKSWAP_V2_WETH_USDC, QUICKSWAP_V2_FEE_BPS
+            )
+        );
+
+        assertEq(IERC20(POLYGON_USDC).balanceOf(BOB), expectedOut);
+        _assertRouterDrained(address(router), POLYGON_WETH, POLYGON_USDC);
+    }
+
+    /// The static quoter's quote is what the pool pays.
+    function testFallsBackToUniswapV3() public {
+        pool.set(0, true);
+        bytes memory v3 = FallbackSwaps.uniswapV3(UNISWAP_V3_WETH_USDC);
+        uint256 v3Out = _quoteFallback(v3);
+        assertGt(v3Out, 0);
+
+        _expectFallbackSwap(
+            TychoFallbackRouter.FallbackProtocol.UniswapV3,
+            TychoFallbackRouter.FallbackReason.FallbackQuotedHigher
+        );
+        router.swap(_swapStruct(), address(pool), ONE_FOR_ZERO, v3);
+
+        assertEq(IERC20(POLYGON_USDC).balanceOf(BOB), v3Out);
+        _assertRouterDrained(address(router), POLYGON_WETH, POLYGON_USDC);
+    }
+
+    function testMetricFillsWhenItBeatsUniswapV3() public {
+        bytes memory v3 = FallbackSwaps.uniswapV3(UNISWAP_V3_WETH_USDC);
+        uint256 metricOut = _quoteFallback(v3) + 1;
+        pool.set(metricOut, false);
+
+        vm.recordLogs();
+        router.swap(_swapStruct(), address(pool), ONE_FOR_ZERO, v3);
+
+        assertEq(IERC20(POLYGON_USDC).balanceOf(BOB), metricOut);
+        assertEq(IERC20(POLYGON_WETH).balanceOf(address(pool)), WETH_IN);
+        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
+        _assertRouterDrained(address(router), POLYGON_WETH, POLYGON_USDC);
+    }
+
+    /// QuickSwap V2's `getAmountOut` at its 30 bps fee, with WETH as token1.
+    function _quickswapV2AmountOut() internal view returns (uint256) {
+        (uint112 usdcReserve, uint112 wethReserve,) =
+            IUniswapV2Pair(QUICKSWAP_V2_WETH_USDC).getReserves();
+        uint256 amountInWithFee = WETH_IN * 9970;
+        return amountInWithFee * usdcReserve
+            / (uint256(wethReserve) * 10_000 + amountInWithFee);
+    }
+
+    function _quoteFallback(bytes memory fallbackSwap)
+        internal
+        returns (uint256)
+    {
+        vm.prank(address(router));
+        return router.quoteFallback(_swapStruct(), fallbackSwap);
+    }
+
+    function _swapStruct()
+        internal
+        view
+        returns (TychoFallbackRouter.Swap memory)
+    {
+        return FallbackSwaps.swap(POLYGON_WETH, POLYGON_USDC, WETH_IN, BOB);
+    }
+
+    function _expectFallbackSwap(
+        TychoFallbackRouter.FallbackProtocol protocol,
+        TychoFallbackRouter.FallbackReason reason
+    ) internal {
+        _expectFallbackSwap(
+            address(router),
+            address(pool),
+            POLYGON_WETH,
+            POLYGON_USDC,
+            WETH_IN,
             protocol,
             reason
         );

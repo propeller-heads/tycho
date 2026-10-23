@@ -144,12 +144,12 @@ receivers, and `outputToRouter` are hardcoded per-executor -- not encodable in c
 simple: they just call the protocol. All balance tracking, output verification, and transfer logic lives in the
 Dispatcher/TransferManager.
 
-Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
-Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
-PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
-address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
-fallback").
+Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
+Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
+native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
+the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
+fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -334,6 +334,44 @@ Constraints:
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
 
+### Subsidies (`executors/TychoSubsidizingExecutor.sol`)
+
+`TychoSubsidizingExecutor` wraps one hop: it runs the hop through an inner executor named in its swap data, then calls
+`ISubsidyPayer.pay` to pay a signed subsidy in the hop's output token.
+
+Swap data: `[boundTo: 20][amount: 32][minAmountIn: 32][nonce: 32][deadline: 6][signature: 65][innerExecutor: 20]
+[innerData]`. The subsidy's `innerSwapHash` is `keccak256` over `innerExecutor ‖ innerData`, so the signature covers the
+pool and the hop. Data shorter than 207 bytes reverts `TychoSubsidizingExecutor__InvalidDataLength`.
+
+- The inner executor must be approved on the router with its timelock passed, and may not be the wrapper itself;
+  otherwise `TychoSubsidizingExecutor__UnapprovedInnerExecutor`. `getTransferData` and `fundsExpectedAddress` forward to
+  it and map the wrapper's own address back to the router, so every transfer type and sequential hops work unchanged.
+- Before the inner swap, the wrapper writes the inner executor into `CURRENTLY_SWAPPING_EXECUTOR_SLOT`, so the
+  router's fallback sends pool callbacks straight to it. It clears the slot before calling the payer, so a contract
+  the payer sends funds to cannot reach the inner executor through the fallback.
+- The payer pays into the Dispatcher's `measureAt` (`outputToRouter ? router : receiver`), inside `swap()`, so the
+  Dispatcher counts the subsidy as hop output. Fees, slippage capture, `minAmountOut`, vault credits and later hops
+  then see it like any other output. The quote's `expectedAmountOut` has to include the subsidy, or positive slippage
+  capture takes it.
+- `pay` runs in `try/catch`. A payer revert emits `SubsidyPayerReverted(nonce, reason)` from the router, with `nonce`
+  indexed like in the payer's events, and the swap fills without the subsidy. A payer that returns malformed data would
+  still revert; the constructor rejects a payer address with no code.
+- The payer, a separate contract, holds the budget, the signer and the nonces. The wrapper writes no storage and moves
+  no tokens. Tokens already held by the router would not raise the balance at `measureAt`, so a payment from them
+  would not count as output.
+
+Encoding (`src/encoding/evm/subsidy.rs`): `Solution::with_subsidy(SubsidyTerms)` makes the strategy encoders wrap one
+swap group in the subsidizing executor. `SubsidyTerms` documents which swap group can carry the subsidy, and
+`EncodedSolution::write_subsidy_signature` documents the signing order.
+
+- The encoder does not sign. It writes a 65-byte zero signature, which the payer skips as `InvalidSignature`.
+- The executor address is the `subsidy` entry of `config/executor_addresses.json`; the payer is `payer_address` under
+  `subsidy` in `config/protocol_specific_addresses.json`. No chain lists them until they are deployed.
+  `SwapEncoderRegistry::register_subsidy_contracts` sets both, for tests and forks.
+- `tests/subsidy_integration_tests.rs` signs with a test key and writes `<name>` and `<name>_unsigned` calldata;
+  `contracts/test/protocols/TychoSubsidizingEncoder.t.sol` deploys the payer and the executor at the addresses the
+  Rust tests name and checks the exact output of both.
+
 ### Executor Flow, Callbacks & Output Verification
 
 **Balance-diff verification**: The Dispatcher independently verifies every swap output. It
@@ -493,17 +531,19 @@ same `FallbackSwapData` `user_data`:
   trade. Each inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the
   partial-fill fields and keeps the settlement calldata.
 
-The Native and Liquorice routers are not deployed, so no chain lists their entries yet. The gas estimator charges a
-Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop, Hashflow, Native or Liquorice leg the
-router's approval and output forward.
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
+and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
+The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
+Hashflow, Native or Liquorice leg the router's approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
 executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
-Base, Robinhood and BSC are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2 with
-`fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no static
-quoter.
+Base, Robinhood, BSC, Arbitrum and Polygon are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
+with `fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no
+static quoter. On Polygon, QuickSwap V2 pairs encode as Uniswap V2 with `fee_bps` 30, and Uniswap V3
+and Ramses V3 pools are quoted by Eden's static quoter.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same

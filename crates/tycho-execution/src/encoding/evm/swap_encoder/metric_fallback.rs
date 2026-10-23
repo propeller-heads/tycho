@@ -143,6 +143,30 @@ mod tests {
         assert_eq!(v3_swap, format!("{WETH}{USDC}{METRIC_POOL}0101{pancake_v3}"));
     }
 
+    /// QuickSwap V2 pairs encode as Uniswap V2 at their 30 bps fee, Ramses V3 pools as Uniswap V3.
+    #[test]
+    fn test_encode_polygon_fallbacks() {
+        let quickswap_v2 = "853ee4b2a13f8a742d64c8f088be7ba2131f670d";
+        // The encoder does not look the pool up, so any address stands in for a Ramses V3 pool.
+        let ramses_v3 = "5555555555555555555555555555555555555555";
+
+        let v2_swap = encode_weth_usdc(
+            Chain::Polygon,
+            Some(&format!(
+                r#"{{"fallback_protocol":"quickswap_v2","pair":"0x{quickswap_v2}","fee_bps":30}}"#
+            )),
+        )
+        .unwrap();
+        let v3_swap = encode_weth_usdc(
+            Chain::Polygon,
+            Some(&format!(r#"{{"fallback_protocol":"ramses_v3","pool":"0x{ramses_v3}"}}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(v2_swap, format!("{WETH}{USDC}{METRIC_POOL}0100{quickswap_v2}1e"));
+        assert_eq!(v3_swap, format!("{WETH}{USDC}{METRIC_POOL}0101{ramses_v3}"));
+    }
+
     #[test]
     fn test_rejects_fallback_the_chain_does_not_run() {
         let err = encode_weth_usdc(
