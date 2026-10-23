@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.1
+
+- Add QuantAMM weighted pool support via the `QuantAMMWeightedPoolFactory` (new
+  optional `quantamm_factory` deployment parameter) on Ethereum mainnet and Base.
+  Arbitrum and Gnosis manifests omit the param (defaults to empty). Pool creates
+  from both `create` and `createWithoutArgs` are indexed. Static attributes are
+  `pool_type`, `fee`, and optional `rate_providers` — create-time weights are
+  omitted because QuantAMM weights change via pool storage and time interpolation.
+
 ## v0.5.0
 
 - Add reCLAMM pool support via the `ReClammPoolFactory` (new `reclamm_factory`
