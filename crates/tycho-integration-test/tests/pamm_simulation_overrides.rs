@@ -22,14 +22,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use alloy::{
-    eips::BlockNumberOrTag,
-    primitives::{
-        map::{AddressHashMap, B256HashMap},
-        Address, B256,
-    },
-    providers::Provider,
-};
+use alloy::{eips::BlockNumberOrTag, primitives::Address, providers::Provider};
 use futures::StreamExt;
 use num_bigint::BigUint;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
@@ -42,7 +35,7 @@ use tycho_simulation::{
 };
 use tycho_test::{
     execution::{
-        encoding::encode_swap,
+        encoding::{encode_swap, pamm_account_overwrites},
         models::{RouterOverwritesData, TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction_before_block,
     },
@@ -107,24 +100,6 @@ fn tokens() -> HashMap<Bytes, Token> {
     ]
     .into_iter()
     .collect()
-}
-
-/// The storage part of the overrides, in the shape the simulator takes. It drops balance and
-/// nonce, because the simulator applies storage only, and the staleness check reads storage. The
-/// stream validated every width, so a wrong one fails the test.
-fn storage_of(overrides: &PammSimulationOverrides) -> AddressHashMap<B256HashMap<B256>> {
-    let mut out: AddressHashMap<B256HashMap<B256>> = AddressHashMap::default();
-    for (address, account) in &overrides.accounts {
-        let address = Address::try_from(&address[..]).expect("a validated 20-byte address");
-        let slots = out.entry(address).or_default();
-        for (slot, word) in &account.state_diff {
-            let slot = B256::try_from(&slot[..]).expect("a validated 32-byte slot");
-            let word = B256::try_from(&word[..]).expect("a validated 32-byte word");
-            slots.insert(slot, word);
-        }
-    }
-    out.retain(|_, slots| !slots.is_empty());
-    out
 }
 
 /// The absolute difference between `simulated` and `quoted`, in basis points of `quoted`;
@@ -296,37 +271,41 @@ async fn live_pamm_quotes_simulated_with_their_overrides() {
             candidate.quoted_out.clone(),
         )
         .expect("a served pAMM quote must encode");
-        let inputs: HashMap<String, TychoExecutionInput> = [(
-            "one".to_string(),
-            TychoExecutionInput {
-                solution,
-                transaction: transaction.clone(),
-                expected_amount_out: candidate.quoted_out.clone(),
-                protocol_system: candidate
-                    .component
-                    .protocol_system
-                    .clone(),
-                component_id: candidate.component.id.to_string(),
-                token_in: candidate.token_in.address.to_string(),
-                token_out: candidate.token_out.address.to_string(),
-                estimated_gas: transaction.estimated_gas().clone(),
-            },
-        )]
-        .into_iter()
-        .collect();
+        let input = TychoExecutionInput {
+            solution,
+            transaction: transaction.clone(),
+            expected_amount_out: candidate.quoted_out.clone(),
+            protocol_system: candidate
+                .component
+                .protocol_system
+                .clone(),
+            component_id: candidate.component.id.to_string(),
+            token_in: candidate.token_in.address.to_string(),
+            token_out: candidate.token_out.address.to_string(),
+            estimated_gas: transaction.estimated_gas().clone(),
+            account_overwrites: None,
+        };
 
-        let storage = storage_of(&candidate.overrides);
-        let slots: usize = storage.values().map(HashMap::len).sum();
-        assert!(!storage.is_empty(), "overrides must override at least one account's storage");
-        println!("  overrides: {} account(s), {slots} slot(s)", storage.len());
+        // Every field of the overrides, as a client applies them: balances, nonces and storage.
+        let overwrites = pamm_account_overwrites(&candidate.overrides);
+        let slots: usize = overwrites
+            .values()
+            .filter_map(|account| account.state_diff.as_ref())
+            .map(HashMap::len)
+            .sum();
+        assert!(!overwrites.is_empty(), "overrides must override at least one account");
+        println!("  overrides: {} account(s), {slots} slot(s)", overwrites.len());
 
         // The run with the quote's own overrides, which must reproduce the quoted amount.
         let with = simulate_swap_transaction_before_block(
             &rpc_tools,
-            inputs.clone(),
+            HashMap::from([(
+                "one".to_string(),
+                TychoExecutionInput { account_overwrites: Some(overwrites), ..input.clone() },
+            )]),
             &block,
             RouterOverwritesData::default(),
-            Some(storage),
+            None,
         )
         .await;
         match with
@@ -362,7 +341,7 @@ async fn live_pamm_quotes_simulated_with_their_overrides() {
 
         let without = simulate_swap_transaction_before_block(
             &rpc_tools,
-            inputs,
+            HashMap::from([("one".to_string(), input)]),
             &block,
             RouterOverwritesData::default(),
             None,

@@ -64,22 +64,16 @@ impl PriceLevelStreamProcessor {
         // test has no pool to name under `--disable-onchain`, and a fill on that pool would
         // measure the pool rather than the venue's quote.
         //
-        // The venue fills its quote whenever execution overrides its registry slot (see
-        // `oracle_overrides`). Without those overrides it reverts on its freshness guard, so every
-        // swap that lacks them is counted, by
-        // `tycho_integration_price_level_oracle_override_misses_total` when Titan published
-        // nothing for the venue at that block, and by
-        // `tycho_integration_price_level_oracle_override_unserved_total` for Metric, TaurusFi and
-        // auto-detected venues, which Titan's override stream does not serve at all.
-        //
-        // The stream's own simulation overrides are off: this service reads its overrides through
-        // `oracle_overrides`, so a second quote stream socket would only cost a connection.
+        // The stream's simulation overrides stay on, its default: each state carries the account
+        // state Titan priced its quote on, and the venue fills the quote when its swap is
+        // simulated with it. A swap whose state carries none is simulated against the venue's
+        // mined state, where its freshness guard usually reverts, and is counted by
+        // `tycho_integration_price_level_simulation_overrides_missing_total`.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
             .without_fallback_router()
-            .without_simulation_overrides()
             .build();
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);
