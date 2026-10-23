@@ -59,7 +59,7 @@ alloy-primitives = { version = "1.5", features = ["serde"], optional = true }
 
 # Enum utilities. `strum` defines `IntoEnumIterator`, the trait `strum_macros` derives. The price
 # level stream's telemetry iterates its label enums with it, so a new variant gets its zero series
-# without a hand-kept list.
+# without a hand-kept list; `override_stream`'s `TitanChannel` enumerates its channels the same way.
 strum = { workspace = true }
 strum_macros = { workspace = true }
 

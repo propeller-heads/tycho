@@ -69,8 +69,9 @@ impl PriceLevelStreamProcessor {
         // swap that lacks them is counted, by
         // `tycho_integration_price_level_oracle_override_misses_total` when Titan published
         // nothing for the venue at that block, and by
-        // `tycho_integration_price_level_oracle_override_unserved_total` for Metric, TaurusFi and
-        // auto-detected venues, which Titan's override stream does not serve at all.
+        // `tycho_integration_price_level_oracle_override_unserved_total` for TaurusFi, Tempest,
+        // Goliath, Stelaxis, ElZorro and auto-detected venues, which Titan's override stream does
+        // not serve at all.
         //
         // The stream's own simulation overrides are off: this service reads its overrides through
         // `oracle_overrides`, so a second quote stream socket would only cost a connection.
