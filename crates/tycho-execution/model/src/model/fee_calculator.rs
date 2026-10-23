@@ -1,5 +1,10 @@
 //! <https://github.com/propeller-heads/tycho-execution/blob/main/foundry/src/FeeCalculator.sol>
-use crate::{address::Address, error::Error, math::checked_subtract, params::Params};
+use crate::{
+    address::Address,
+    error::Error,
+    math::checked_subtract,
+    params::{ParamKey, Params},
+};
 
 pub const MAX_BPS: i64 = 100_000_000;
 const MAX_BPS_SQUARED: i64 = 10_000_000_000_000_000;
@@ -15,6 +20,19 @@ struct FeeInfo {
     router_fee_on_client_fee_bps: i64,
     positive_slippage_enabled: bool,
     positive_slippage_exempt: bool,
+}
+
+/// Mirrors `FeeCalculator._getTokenFee` in Solidity.
+///
+/// Returns the higher of the two tokens' fees, so a swap that touches two fee tokens (or the
+/// same token twice) pays one token fee.
+fn _get_token_fee(params: &Params, token_in: Address, token_out: Address) -> Result<i64, Error> {
+    if !crate::config::ENABLE_NONZERO_FEE_BPS {
+        return Ok(0);
+    }
+    let fee_in = params.request(ParamKey::TokenFeeBps { token: token_in }, vec![0, MAX_BPS])?;
+    let fee_out = params.request(ParamKey::TokenFeeBps { token: token_out }, vec![0, MAX_BPS])?;
+    Ok(fee_in.max(fee_out))
 }
 
 fn _get_fee_info(params: &Params) -> Result<FeeInfo, Error> {
@@ -73,18 +91,20 @@ pub fn calculate_fee(
     actual_amount_out: i64,
     expected_amount_out: i64,
     client_fee_bps: i64,
-    _token_in: Address,
-    _token_out: Address,
+    token_in: Address,
+    token_out: Address,
     _amount_in: i64,
 ) -> Result<Vec<FeeRecipient>, Error> {
     let fee_info = _get_fee_info(params)?;
+    let token_fee_bps = _get_token_fee(params, token_in, token_out)?;
 
     let positive_slippage =
         _calculate_positive_slippage(actual_amount_out, expected_amount_out, &fee_info);
 
     let fee_base = actual_amount_out - positive_slippage;
 
-    let (router_fee, client_fee) = _calculate_fee(fee_base, client_fee_bps, &fee_info)?;
+    let (router_fee, client_fee) =
+        _calculate_fee(fee_base, client_fee_bps, token_fee_bps, &fee_info)?;
 
     Ok(vec![
         FeeRecipient {
@@ -99,7 +119,12 @@ pub fn calculate_fee(
 ///
 /// Returns true if funds must pass through the router after the final swap
 /// instead of going directly to the receiver.
-pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Result<bool, Error> {
+pub fn must_output_through_router(
+    params: &Params,
+    client_fee_bps: i64,
+    token_in: Address,
+    token_out: Address,
+) -> Result<bool, Error> {
     let fee_info = _get_fee_info(params)?;
 
     if fee_info.positive_slippage_enabled && !fee_info.positive_slippage_exempt {
@@ -111,6 +136,9 @@ pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Resul
     if fee_info.router_fee_on_output_bps > 0 {
         return Ok(true);
     }
+    if _get_token_fee(params, token_in, token_out)? > 0 {
+        return Ok(true);
+    }
 
     Ok(false)
 }
@@ -118,13 +146,16 @@ pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Resul
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.
 ///
 /// Returns `(router_fee, client_fee)`: the total router fee (fee on output +
-/// cut of the client fee) and the client's portion of the client fee.
+/// token fee + cut of the client fee) and the client's portion of the client fee.
 fn _calculate_fee(
     fee_base: i64,
     client_fee_bps: i64,
+    token_fee_bps: i64,
     fee_info: &FeeInfo,
 ) -> Result<(i64, i64), Error> {
-    if (client_fee_bps + fee_info.router_fee_on_output_bps > MAX_BPS) ||
+    let router_fee_on_output_bps = fee_info.router_fee_on_output_bps + token_fee_bps;
+
+    if (client_fee_bps + router_fee_on_output_bps > MAX_BPS) ||
         fee_info.router_fee_on_client_fee_bps > MAX_BPS
     {
         return Err(Error::revert("_calculate_fee: fee bps too large"));
@@ -148,9 +179,9 @@ fn _calculate_fee(
 
     let mut router_fee = router_fee_on_client_fee;
 
-    if fee_info.router_fee_on_output_bps > 0 {
+    if router_fee_on_output_bps > 0 {
         router_fee +=
-            (fee_base as i128 * fee_info.router_fee_on_output_bps as i128 / MAX_BPS as i128) as i64;
+            (fee_base as i128 * router_fee_on_output_bps as i128 / MAX_BPS as i128) as i64;
     }
 
     Ok((router_fee, client_fee))

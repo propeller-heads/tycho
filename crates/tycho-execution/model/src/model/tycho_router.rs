@@ -325,7 +325,8 @@ fn _split_swap_checked(
         0
     };
 
-    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
+    let must_output_through_router =
+        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
@@ -382,7 +383,8 @@ fn _single_swap(
         0
     };
 
-    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
+    let must_output_through_router =
+        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
@@ -444,7 +446,8 @@ fn _sequential_swap_checked(
         0
     };
 
-    let must_output_through_router = must_output_through_router(params, client_fee_bps)?;
+    let must_output_through_router =
+        must_output_through_router(params, client_fee_bps, token_in, token_out)?;
 
     let final_receiver = if must_output_through_router { Address::Router } else { receiver };
 
@@ -521,6 +524,7 @@ fn _finalize_swap(
             params,
             vault,
             log,
+            token_in,
             token_out,
             actual_amount_out,
             expected_amount_out,
@@ -732,6 +736,7 @@ fn _take_fees(
     params: &Params,
     vault: &mut Vault,
     log: &mut impl Log,
+    token_in: Address,
     token: Address,
     actual_amount_out: i64,
     expected_amount_out: i64,
@@ -742,8 +747,8 @@ fn _take_fees(
         actual_amount_out,
         expected_amount_out,
         client_fee_bps,
-        Address::Zero,
-        Address::Zero,
+        token_in,
+        token,
         0,
     )?;
 
