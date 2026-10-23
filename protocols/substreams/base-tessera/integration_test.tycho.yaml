@@ -3,8 +3,8 @@ protocol_system: "vm:tessera"
 module_name: "map_protocol_changes"
 protocol_type_names: ["tessera_pair"]
 adapter_contract: "TesseraSwapAdapter"
-adapter_build_signature: "constructor(address)"
-adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e"
+adapter_build_signature: "constructor(address,address,address)"
+adapter_build_args: "0x55555522005BcAE1c2424D474BfD5ed477749E3e,0x31e99E05fee3DCE580af777C3fD63eE1B3B40c17,0x3dBE077e7986657E95e1CC50089f17a5a4AF0AaE"
 skip_balance_check: true # Inventory belongs to treasury, not component address.
 tests:
   - name: test_genesis_pairs_discovery
