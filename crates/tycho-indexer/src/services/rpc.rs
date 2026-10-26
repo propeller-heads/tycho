@@ -4285,6 +4285,66 @@ plans:
         assert_eq!(response.pagination.total, 3);
     }
 
+    /// A handler over `uniswap_v2`, `uniswap_v3` and `ekubo_v3`, where `ekubo_v3` is two hours
+    /// behind the chain and `uniswap_v3` has no known block.
+    async fn handler_with_a_lagging_system() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let systems =
+            vec!["ekubo_v3".to_string(), "uniswap_v2".to_string(), "uniswap_v3".to_string()];
+        let freshness =
+            ProtocolFreshness::load(&MockGateway::new(), &Chain::Ethereum, &[], Duration::hours(1))
+                .await
+                .unwrap();
+        let now = Utc::now().naive_utc();
+        freshness.record("uniswap_v2", now);
+        freshness.record("ekubo_v3", now - Duration::hours(2));
+
+        RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            systems,
+        )
+        .with_protocol_freshness(freshness)
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_leaves_out_lagging_systems() {
+        let handler = handler_with_a_lagging_system().await;
+        let request = dto::ProtocolSystemsRequestBody {
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 100 },
+        };
+
+        let response = handler
+            .get_protocol_systems(&request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol_systems, vec!["uniswap_v2"]);
+        assert_eq!(response.pagination.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_applies_the_allowlist_and_the_lag_check() {
+        let handler = handler_with_a_lagging_system().await;
+        let allowed: HashSet<String> =
+            HashSet::from(["ekubo_v3".to_string(), "uniswap_v3".to_string()]);
+        let request = dto::ProtocolSystemsRequestBody {
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 100 },
+        };
+
+        let response = handler
+            .get_protocol_systems(&request, Some(&allowed))
+            .await
+            .unwrap();
+
+        assert!(response.protocol_systems.is_empty());
+        assert_eq!(response.pagination.total, 0);
+    }
+
     #[tokio::test]
     async fn test_get_protocol_systems_no_allowed_returns_all() {
         let gw = MockGateway::new();

@@ -965,6 +965,34 @@ mod test {
     }
 
     #[tokio::test]
+    async fn run_records_the_time_of_each_full_block() {
+        let freshness = ProtocolFreshness::load(
+            &testing::MockGateway::new(),
+            &Chain::Ethereum,
+            &[],
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+        let buffer = PendingDeltas::new(["native:extractor"]).with_freshness(freshness.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.run(vec![rx], start_tx));
+        let message = native_msg(1, None, 1);
+        let block_ts = message.block.ts;
+
+        tx.send(DeltaCommand::Block(message))
+            .await
+            .unwrap();
+        drop(tx);
+        pump.await.unwrap().unwrap();
+
+        assert!(freshness.is_fresh("native:extractor", block_ts));
+        assert!(!freshness.is_fresh("native:extractor", block_ts + chrono::Duration::minutes(2)));
+    }
+
+    #[tokio::test]
     async fn run_ends_with_the_error_after_a_bad_insert() {
         let buffer = PendingDeltas::new(["native:extractor"]);
         let (tx, rx) = tokio::sync::mpsc::channel(8);
