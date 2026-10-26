@@ -37,8 +37,8 @@ Then, you can run the example with:
 cargo run --release --example book_quickstart
 ```
 
-The pAMM feeds (Metric) run alongside the RFQ venues by default, and need only `METRIC_API_KEY` —
-so the example works with no RFQ credentials at all. Pass `--disable-pamm` to leave them out:
+The pAMM feeds run alongside the RFQ venues when configured, so RFQ credentials are optional.
+Pass `--disable-pamm` to leave them out:
 
 ```bash
 cargo run --release --example book_quickstart -- --disable-pamm
@@ -74,7 +74,7 @@ export RPC_URL=<your-rpc-url>
 ## Important Notes
 
 - **Credentials**: Contact each venue directly to obtain API credentials for accessing its live
-  book. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
+  book. pAMM feeds use their configured credentials or RPC endpoints; `--disable-pamm` leaves them out.
 
 ## What you'll see
 
@@ -88,3 +88,26 @@ The example will:
 
 See [here](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) a complete guide to the
 book feeds.
+
+## ElFomoFi
+
+Enable ElFomoFi with `--enable-elfomofi`. On Base, BSC and Robinhood, set `RPC_URL` and
+`WS_RPC_URL` for the selected chain.
+`propamm:elfomofi` fetches complete helper books on new block heads, discovers pair changes,
+and interpolates quotes locally. Use `--book-polling` for HTTP-only providers. Settlement uses
+`swapWithContractBalance`, partner **299**, and no venue approval.
+
+```bash
+cargo run --release --example book_quickstart -- --chain base --enable-elfomofi
+```
+
+The quickstart needs a configured executor address for simulation or execution.
+
+Validate execution with the local executor fixture through read-only RPC state overrides:
+
+```bash
+cargo run -p tycho-integration-test -- --chain base --enable-elfomofi \
+  --disable-onchain --disable-rfq --disable-price-level-stream \
+  --max-blocks 1 --skip-messages-duration 0 \
+  --executor-fixture propamm:elfomofi=protocols/testing/fixtures/Elfomofi.runtime.json
+```

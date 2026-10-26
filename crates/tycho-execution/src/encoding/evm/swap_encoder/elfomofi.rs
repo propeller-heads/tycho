@@ -3,95 +3,49 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use alloy::{primitives::Address, sol_types::SolValue};
+use alloy::primitives::Address;
 use num_bigint::BigUint;
-use tokio::runtime::Handle;
-use tycho_common::{
-    models::{protocol::GetAmountOutParams, Chain},
-    simulation::indicatively_priced::SignedQuote,
-    Bytes,
-};
+use serde::{Deserialize, Serialize};
+use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::{
-        bytes_to_address, check_signed_quote, create_encoding_runtime, on_blocking_thread,
-        SafeRuntime,
-    },
+    evm::utils::bytes_to_address,
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
 
-const ROUTER: &str = "0xf0f0f0f0fb0d738452efd03a28e8be14c76d5f73";
-const PROTOCOL_SYSTEM: &str = "elfomofi";
+const PROTOCOL_SYSTEM: &str = "propamm:elfomofi";
+const DEFAULT_SLIPPAGE_BPS: u32 = 50;
 
-/// Encodes a pre-funded ERC20 swap against the immutable ElFomoFi venue.
-///
-/// The snapshot feed carries indicative books; the venue does not sign or reserve a fill. The
-/// solution's minimum output protects execution when its state changes after quoting.
+/// Encodes a local book quote and a minimum rate for a directly funded ElFomoFi swap.
 #[derive(Clone)]
 pub struct ElfomofiSwapEncoder {
     executor_address: Bytes,
     chain: Chain,
-    runtime_handle: Handle,
-    #[allow(dead_code)]
-    runtime: SafeRuntime,
+    slippage_bps: u32,
 }
 
-fn validate_quote(quote: &SignedQuote, params: &GetAmountOutParams) -> Result<u64, EncodingError> {
-    if quote.base_token != params.token_in ||
-        quote.quote_token != params.token_out ||
-        quote.amount_in != params.amount_in ||
-        quote.amount_out == BigUint::ZERO ||
-        quote.amount_out.bits() > 256
-    {
-        return Err(EncodingError::InvalidInput(
-            "ElFomoFi refreshed quote must match the requested pair and input with positive output"
-                .into(),
-        ));
-    }
-    let expiry = quote
-        .quote_attributes
-        .get("valid_until")
-        .ok_or_else(|| EncodingError::FatalError("ElFomoFi quote requires valid_until".into()))?;
-    let valid_until = u64::from_be_bytes(
-        expiry
-            .as_ref()
-            .try_into()
-            .map_err(|_| {
-                EncodingError::InvalidInput("ElFomoFi valid_until must be 8 bytes".into())
-            })?,
-    );
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| EncodingError::FatalError("SystemTime before UNIX EPOCH".into()))?
-        .as_secs();
-    if valid_until <= now {
-        return Err(EncodingError::RecoverableError("ElFomoFi refreshed quote has expired".into()));
-    }
-    Ok(valid_until)
+// Only the shared serialized snapshot timing is needed; pricing stays in ProtocolSim.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SnapshotTiming {
+    chain: Chain,
+    block_timestamp: u64,
+    observed_at: u64,
+    max_age_seconds: u64,
 }
 
-impl SwapEncoder for ElfomofiSwapEncoder {
-    fn new(
-        executor_address: Bytes,
-        chain: Chain,
-        _config: Option<HashMap<String, String>>,
-    ) -> Result<Self, EncodingError> {
-        if !matches!(chain, Chain::Base | Chain::Bsc | Chain::Robinhood) {
-            return Err(EncodingError::FatalError(
-                "ElFomoFi is configured for Base, BSC and Robinhood".into(),
-            ));
-        }
-        let (runtime_handle, runtime) = create_encoding_runtime()?;
-        Ok(Self { executor_address, chain, runtime_handle, runtime })
-    }
+#[derive(Deserialize)]
+struct SnapshotState {
+    snapshot: SnapshotTiming,
+}
+#[derive(Deserialize)]
+struct StateEnvelope {
+    state: SnapshotState,
+}
 
-    fn encode_swap(
-        &self,
-        swap: &Swap,
-        context: &EncodingContext,
-    ) -> Result<Vec<u8>, EncodingError> {
+impl ElfomofiSwapEncoder {
+    fn encode_at(&self, swap: &Swap, now: u64) -> Result<Vec<u8>, EncodingError> {
         let sell = bytes_to_address(&swap.token_in().address)?;
         let buy = bytes_to_address(&swap.token_out().address)?;
         if sell == buy ||
@@ -103,11 +57,10 @@ impl SwapEncoder for ElfomofiSwapEncoder {
                 "ElFomoFi requires two distinct ERC20 tokens".into(),
             ));
         }
-
         let component = swap.component();
         if component.chain != self.chain || component.protocol_system != PROTOCOL_SYSTEM {
             return Err(EncodingError::InvalidInput(
-                "ElFomoFi component must use elfomofi on the encoder's chain".into(),
+                "ElFomoFi component must use propamm:elfomofi on the encoder's chain".into(),
             ));
         }
         if component.tokens.len() != 2 ||
@@ -123,21 +76,23 @@ impl SwapEncoder for ElfomofiSwapEncoder {
             ));
         }
         let (first, second) = if sell < buy { (sell, buy) } else { (buy, sell) };
-        let expected_id = format!("elfomofi:{ROUTER}:{first:#x}:{second:#x}");
-        // Simulation components store text IDs as bytes; conversion back to the common
-        // component represents those bytes as hex. Both forms identify the same pinned pair.
-        if component.id != expected_id && component.id != hex::encode(expected_id.as_bytes()) {
+        let expected_id =
+            hex::encode([PROTOCOL_SYSTEM.as_bytes(), first.as_slice(), second.as_slice()].concat());
+        if component
+            .id
+            .strip_prefix("0x")
+            .unwrap_or(&component.id) !=
+            expected_id
+        {
             return Err(EncodingError::InvalidInput(
-                "ElFomoFi component does not match the canonical router/token pair".into(),
+                "ElFomoFi component does not match the canonical token pair".into(),
             ));
         }
         let state = swap
             .protocol_state()
             .as_ref()
             .ok_or_else(|| {
-                EncodingError::FatalError(
-                    "ElFomoFi requires protocol_state for a fresh quote".into(),
-                )
+                EncodingError::FatalError("ElFomoFi requires its book protocol_state".into())
             })?;
         let amount_in = swap
             .estimated_amount_in()
@@ -150,223 +105,475 @@ impl SwapEncoder for ElfomofiSwapEncoder {
                 "ElFomoFi input must be positive and fit uint256".into(),
             ));
         }
-        let sender = context
-            .router_address
-            .clone()
-            .ok_or_else(|| {
-                EncodingError::FatalError(
-                    "ElFomoFi requires the Tycho router address for quoting".into(),
-                )
-            })?;
-        if bytes_to_address(&sender)?.is_zero() {
-            return Err(EncodingError::InvalidInput("ElFomoFi quote sender cannot be zero".into()));
+        let timing =
+            serde_json::from_value::<StateEnvelope>(serde_json::to_value(state.as_ref())?)?
+                .state
+                .snapshot;
+        if timing.chain != self.chain || timing.max_age_seconds == 0 {
+            return Err(EncodingError::InvalidInput(
+                "ElFomoFi snapshot has an invalid chain or lifetime".into(),
+            ));
         }
-        let params = GetAmountOutParams {
-            amount_in: amount_in.clone(),
-            token_in: swap.token_in().address.clone(),
-            token_out: swap.token_out().address.clone(),
-            sender: sender.clone(),
-            receiver: sender,
-            origin: context.origin.clone(),
-        };
-        let quote = on_blocking_thread(|| {
-            self.runtime_handle.block_on(async {
-                state
-                    .as_indicatively_priced()?
-                    .request_signed_quote(GetAmountOutParams {
-                        amount_in: params.amount_in.clone(),
-                        token_in: params.token_in.clone(),
-                        token_out: params.token_out.clone(),
-                        sender: params.sender.clone(),
-                        receiver: params.receiver.clone(),
-                        origin: params.origin.clone(),
-                    })
-                    .await
-            })
-        })??;
-        let valid_until = validate_quote(&quote, &params)?;
-        check_signed_quote(swap, state.as_ref(), &quote)?;
-        let mut encoded = (sell, buy).abi_encode_packed();
+        let valid_until = timing
+            .block_timestamp
+            .min(timing.observed_at)
+            .checked_add(timing.max_age_seconds)
+            .ok_or_else(|| {
+                EncodingError::InvalidInput("ElFomoFi snapshot expiry overflows".into())
+            })?;
+        if now >= valid_until {
+            return Err(EncodingError::RecoverableError(
+                "ElFomoFi book expired; wait for a fresh snapshot".into(),
+            ));
+        }
+        let quote = state.get_amount_out(amount_in.clone(), swap.token_in(), swap.token_out())?;
+        if quote.amount == BigUint::ZERO || quote.amount.bits() > 256 {
+            return Err(EncodingError::InvalidInput(
+                "ElFomoFi book output must be positive and fit uint256".into(),
+            ));
+        }
+        // Round up so a positive quote always retains a positive execution floor.
+        let minimum = (&quote.amount * BigUint::from(10_000 - self.slippage_bps) +
+            BigUint::from(9_999u32)) /
+            BigUint::from(10_000u32);
+        let mut encoded = Vec::with_capacity(112);
+        encoded.extend_from_slice(sell.as_slice());
+        encoded.extend_from_slice(buy.as_slice());
         encoded.extend_from_slice(&valid_until.to_be_bytes());
+        for amount in [amount_in, &minimum] {
+            let bytes = amount.to_bytes_be();
+            encoded.resize(encoded.len() + 32 - bytes.len(), 0);
+            encoded.extend_from_slice(&bytes);
+        }
         Ok(encoded)
     }
+}
 
+impl SwapEncoder for ElfomofiSwapEncoder {
+    fn new(
+        executor_address: Bytes,
+        chain: Chain,
+        config: Option<HashMap<String, String>>,
+    ) -> Result<Self, EncodingError> {
+        if !matches!(chain, Chain::Base | Chain::Bsc | Chain::Robinhood) {
+            return Err(EncodingError::FatalError(
+                "ElFomoFi is configured for Base, BSC and Robinhood".into(),
+            ));
+        }
+        let slippage_bps = config
+            .as_ref()
+            .and_then(|config| config.get("slippage_bps"))
+            .map(|value| {
+                value.parse::<u32>().map_err(|_| {
+                    EncodingError::InvalidInput(
+                        "ElFomoFi slippage_bps must be an integer below 10000".into(),
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_SLIPPAGE_BPS);
+        if slippage_bps >= 10_000 {
+            return Err(EncodingError::InvalidInput(
+                "ElFomoFi slippage_bps must be below 10000".into(),
+            ));
+        }
+        Ok(Self { executor_address, chain, slippage_bps })
+    }
+
+    fn encode_swap(
+        &self,
+        swap: &Swap,
+        _context: &EncodingContext,
+    ) -> Result<Vec<u8>, EncodingError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| EncodingError::FatalError("SystemTime before UNIX EPOCH".into()))?
+            .as_secs();
+        self.encode_at(swap, now)
+    }
     fn executor_address(&self) -> &Bytes {
         &self.executor_address
     }
-
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
-    }
-
-    fn blocks_on_quote(&self) -> bool {
-        true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{any::Any, sync::Arc};
 
-    use num_bigint::BigUint;
-    use tycho_common::models::protocol::ProtocolComponent;
+    use tycho_common::{
+        dto::ProtocolStateDelta,
+        models::{protocol::ProtocolComponent, token::Token},
+        simulation::{
+            errors::{SimulationError, TransitionError},
+            protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        },
+    };
 
     use super::*;
     use crate::encoding::{
         evm::{
-            swap_encoder::swap_encoder_registry::SwapEncoderRegistry, testing_utils::MockRFQState,
+            swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
             tycho_encoders::TychoRouterEncoder, utils::write_calldata_to_file,
         },
         models::{default_token, Solution},
         tycho_encoder::TychoEncoder,
     };
 
+    const NOW: u64 = 1_792_586_309;
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct MockElfomofiBook {
+        snapshot: SnapshotTiming,
+        amount_out: BigUint,
+    }
+    #[typetag::serde]
+    impl ProtocolSim for MockElfomofiBook {
+        fn fee(&self) -> f64 {
+            0.0
+        }
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Ok(2.0)
+        }
+        fn get_amount_out(
+            &self,
+            _: BigUint,
+            _: &Token,
+            _: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            Ok(GetAmountOutResult::new(self.amount_out.clone(), BigUint::ZERO, self.clone_box()))
+        }
+        fn get_limits(&self, _: Bytes, _: Bytes) -> Result<(BigUint, BigUint), SimulationError> {
+            Ok((BigUint::from(1u8) << 256, BigUint::from(1u8) << 256))
+        }
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn eq(&self, other: &dyn ProtocolSim) -> bool {
+            other.as_any().is::<Self>()
+        }
+    }
     fn tokens() -> (Bytes, Bytes) {
         (
             Bytes::from("0x4200000000000000000000000000000000000006"),
             Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
         )
     }
-
-    fn component() -> ProtocolComponent {
+    fn component(chain: Chain) -> ProtocolComponent {
         let (a, b) = tokens();
         ProtocolComponent {
-            id: format!("elfomofi:{ROUTER}:{a}:{b}"),
+            id: hex::encode([PROTOCOL_SYSTEM.as_bytes(), a.as_ref(), b.as_ref()].concat()),
             protocol_system: PROTOCOL_SYSTEM.into(),
-            chain: Chain::Base,
+            chain,
             tokens: vec![a, b],
             ..Default::default()
         }
     }
-
-    fn encode(
-        component: ProtocolComponent,
-        sell: Bytes,
-        buy: Bytes,
-    ) -> Result<Vec<u8>, EncodingError> {
-        encode_amount(component, sell, buy, 100u64.into())
+    fn state(chain: Chain, timestamp: u64, amount_out: BigUint) -> Arc<MockElfomofiBook> {
+        Arc::new(MockElfomofiBook {
+            snapshot: SnapshotTiming {
+                chain,
+                block_timestamp: timestamp,
+                observed_at: timestamp + 1,
+                max_age_seconds: 10,
+            },
+            amount_out,
+        })
     }
-
-    fn encode_amount(
-        component: ProtocolComponent,
-        sell: Bytes,
-        buy: Bytes,
-        amount_in: BigUint,
-    ) -> Result<Vec<u8>, EncodingError> {
-        encode_amount_on(Chain::Base, component, sell, buy, amount_in)
+    fn swap(chain: Chain, reverse: bool) -> Swap {
+        let (mut a, mut b) = tokens();
+        if reverse {
+            std::mem::swap(&mut a, &mut b);
+        }
+        let mut a = default_token(a);
+        let mut b = default_token(b);
+        a.chain = chain;
+        b.chain = chain;
+        Swap::new(component(chain), a, b, 250_000u64.into())
+            .with_estimated_amount_in(100u64.into())
+            .with_protocol_state(state(chain, NOW, 200u64.into()))
     }
-
-    fn encode_amount_on(
-        chain: Chain,
-        component: ProtocolComponent,
-        sell: Bytes,
-        buy: Bytes,
-        amount_in: BigUint,
-    ) -> Result<Vec<u8>, EncodingError> {
-        let context = EncodingContext {
-            router_address: Some(Bytes::from(vec![0x44; 20])),
-            group_token_in: sell.clone(),
-            group_token_out: buy.clone(),
+    fn encoder(chain: Chain) -> ElfomofiSwapEncoder {
+        ElfomofiSwapEncoder::new(Bytes::from(vec![0x33; 20]), chain, None).unwrap()
+    }
+    fn context() -> EncodingContext {
+        EncodingContext {
+            router_address: None,
+            group_token_in: Bytes::zero(20),
+            group_token_out: Bytes::zero(20),
             origin: None,
-        };
-        let swap = Swap::new(component, default_token(sell), default_token(buy), BigUint::ZERO)
-            .with_estimated_amount_in(amount_in)
-            .with_protocol_state(Arc::new(MockRFQState {
-                quote_amount_out: 200u64.into(),
-                quote_data: HashMap::from([(
-                    "valid_until".into(),
-                    Bytes::from(u64::MAX.to_be_bytes().to_vec()),
-                )]),
-                ..Default::default()
-            }));
-        ElfomofiSwapEncoder::new(Bytes::zero(20), chain, None)?.encode_swap(&swap, &context)
+        }
     }
 
     #[test]
-    fn test_elfomofi_chain_selection_and_cross_chain_rejection() {
-        let (sell, buy) = tokens();
+    fn test_encode_elfomofi_local_book_both_directions() {
+        for reverse in [false, true] {
+            let swap = swap(Chain::Base, reverse);
+            let encoded = encoder(Chain::Base)
+                .encode_at(&swap, NOW)
+                .unwrap();
+            assert_eq!(encoded.len(), 112);
+            assert_eq!(&encoded[..20], swap.token_in().address.as_ref());
+            assert_eq!(&encoded[20..40], swap.token_out().address.as_ref());
+            assert_eq!(&encoded[40..48], &(NOW + 10).to_be_bytes());
+            assert_eq!(BigUint::from_bytes_be(&encoded[48..80]), 100u64.into());
+            assert_eq!(BigUint::from_bytes_be(&encoded[80..]), 199u64.into());
+        }
+    }
+    #[test]
+    fn test_encode_elfomofi_fork_calldata() {
+        for (reverse, amount_in, amount_out, name) in [
+            (false, 600_000_000_000_000_000u64, 1_480_650_386u64, "test_encode_elfomofi_weth_usdc"),
+            (true, 1_480_709_614u64, 600_000_000_000_000_000u64, "test_encode_elfomofi_usdc_weth"),
+        ] {
+            let swap = swap(Chain::Base, reverse)
+                .with_estimated_amount_in(amount_in.into())
+                .with_protocol_state(state(Chain::Base, NOW, amount_out.into()));
+            let encoded = encoder(Chain::Base)
+                .encode_at(&swap, NOW)
+                .unwrap();
+            write_calldata_to_file(name, &hex::encode(encoded));
+        }
+    }
+    #[test]
+    fn test_elfomofi_chains_and_canonical_ids() {
         for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
-            let component = ProtocolComponent { chain, ..component() };
-            let encoded = encode_amount_on(
-                chain,
-                component.clone(),
-                sell.clone(),
-                buy.clone(),
-                100u64.into(),
-            )
-            .unwrap();
-            assert_eq!(encoded, [sell.as_ref(), buy.as_ref(), &u64::MAX.to_be_bytes()].concat());
-            for wrong_chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
-                if chain != wrong_chain {
-                    assert!(matches!(
-                        encode_amount_on(
-                            wrong_chain,
-                            component.clone(),
-                            sell.clone(),
-                            buy.clone(),
-                            100u64.into(),
-                        ),
-                        Err(EncodingError::InvalidInput(_))
-                    ));
+            let swap = swap(chain, false);
+            assert!(encoder(chain)
+                .encode_at(&swap, NOW)
+                .is_ok());
+            for wrong in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
+                if wrong != chain {
+                    assert!(encoder(wrong)
+                        .encode_at(&swap, NOW)
+                        .is_err());
                 }
             }
         }
     }
-
     #[test]
-    fn test_encode_elfomofi_both_directions() {
-        let (a, b) = tokens();
-        for (name, sell, buy) in
-            [("test_encode_elfomofi_weth_usdc", &a, &b), ("test_encode_elfomofi_usdc_weth", &b, &a)]
-        {
-            let encoded = encode(component(), sell.clone(), buy.clone()).unwrap();
-            assert_eq!(encoded, [sell.as_ref(), buy.as_ref(), &u64::MAX.to_be_bytes()].concat());
-            write_calldata_to_file(name, &hex::encode(encoded));
+    fn test_elfomofi_accepts_common_component_hex_ids() {
+        let original = swap(Chain::Base, false);
+        assert!(!original
+            .component()
+            .id
+            .starts_with("0x"));
+        let mut component = original.component().clone();
+        component.id = format!("0x{}", component.id);
+        let prefixed = Swap::new(
+            component,
+            original.token_in().clone(),
+            original.token_out().clone(),
+            BigUint::ZERO,
+        )
+        .with_estimated_amount_in(100u64.into())
+        .with_protocol_state(state(Chain::Base, NOW, 200u64.into()));
+        assert_eq!(
+            encoder(Chain::Base)
+                .encode_at(&original, NOW)
+                .unwrap(),
+            encoder(Chain::Base)
+                .encode_at(&prefixed, NOW)
+                .unwrap()
+        );
+    }
+    #[test]
+    fn test_elfomofi_snapshot_expiry_and_chain() {
+        let swap = swap(Chain::Base, false);
+        assert!(encoder(Chain::Base)
+            .encode_at(&swap, NOW + 9)
+            .is_ok());
+        assert!(matches!(
+            encoder(Chain::Base).encode_at(&swap, NOW + 10),
+            Err(EncodingError::RecoverableError(_))
+        ));
+        let wrong = swap.with_protocol_state(state(Chain::Bsc, NOW, 200u64.into()));
+        assert!(encoder(Chain::Base)
+            .encode_at(&wrong, NOW)
+            .is_err());
+    }
+    #[test]
+    fn test_elfomofi_deadline_uses_oldest_timestamp_and_rejects_overflow() {
+        let swap = swap(Chain::Base, false);
+        for timing in [
+            SnapshotTiming {
+                chain: Chain::Base,
+                block_timestamp: NOW,
+                observed_at: NOW - 10,
+                max_age_seconds: 10,
+            },
+            SnapshotTiming {
+                chain: Chain::Base,
+                block_timestamp: NOW,
+                observed_at: NOW,
+                max_age_seconds: 0,
+            },
+            SnapshotTiming {
+                chain: Chain::Base,
+                block_timestamp: u64::MAX,
+                observed_at: u64::MAX,
+                max_age_seconds: 10,
+            },
+        ] {
+            let state = Arc::new(MockElfomofiBook { snapshot: timing, amount_out: 200u64.into() });
+            assert!(encoder(Chain::Base)
+                .encode_at(&swap.clone().with_protocol_state(state), NOW)
+                .is_err());
         }
     }
-
     #[test]
-    fn test_encode_elfomofi_simulation_component_id() {
+    fn test_elfomofi_requires_snapshot_and_reference_input() {
         let (a, b) = tokens();
-        let raw = component();
-        let converted = ProtocolComponent { id: hex::encode(raw.id.as_bytes()), ..raw.clone() };
-        assert_eq!(encode(raw, a.clone(), b.clone()).unwrap(), encode(converted, a, b).unwrap());
+        let swap =
+            Swap::new(component(Chain::Base), default_token(a), default_token(b), BigUint::ZERO);
+        assert!(encoder(Chain::Base)
+            .encode_at(&swap, NOW)
+            .is_err());
+        let swap = swap.with_protocol_state(state(Chain::Base, NOW, 200u64.into()));
+        assert!(encoder(Chain::Base)
+            .encode_at(&swap, NOW)
+            .is_err());
+        for amount in [BigUint::ZERO, BigUint::from(1u8) << 256] {
+            assert!(encoder(Chain::Base)
+                .encode_at(
+                    &swap
+                        .clone()
+                        .with_estimated_amount_in(amount),
+                    NOW
+                )
+                .is_err());
+        }
     }
-
     #[test]
-    fn test_encode_elfomofi_sequential_routes() {
-        let (a, b) = tokens();
+    fn test_elfomofi_unsigned_amounts_and_positive_floor() {
+        let mut swap = swap(Chain::Base, false);
+        swap = swap
+            .with_estimated_amount_in((BigUint::from(1u8) << 256) - 1u8)
+            .with_protocol_state(state(Chain::Base, NOW, 1u8.into()));
+        let encoded = encoder(Chain::Base)
+            .encode_at(&swap, NOW)
+            .unwrap();
+        assert_eq!(BigUint::from_bytes_be(&encoded[80..]), 1u8.into());
+        for output in [BigUint::ZERO, BigUint::from(1u8) << 256] {
+            assert!(encoder(Chain::Base)
+                .encode_at(
+                    &swap
+                        .clone()
+                        .with_protocol_state(state(Chain::Base, NOW, output)),
+                    NOW
+                )
+                .is_err());
+        }
+    }
+    #[test]
+    fn test_elfomofi_slippage_config() {
+        for value in ["10000", "-1", "invalid"] {
+            assert!(ElfomofiSwapEncoder::new(
+                Bytes::zero(20),
+                Chain::Base,
+                Some(HashMap::from([("slippage_bps".into(), value.into())]))
+            )
+            .is_err());
+        }
+        let encoder = ElfomofiSwapEncoder::new(
+            Bytes::zero(20),
+            Chain::Base,
+            Some(HashMap::from([("slippage_bps".into(), "0".into())])),
+        )
+        .unwrap();
+        let encoded = encoder
+            .encode_at(&swap(Chain::Base, false), NOW)
+            .unwrap();
+        assert_eq!(BigUint::from_bytes_be(&encoded[80..]), 200u64.into());
+    }
+    #[test]
+    fn test_elfomofi_rejects_invalid_components_and_tokens() {
+        let original = swap(Chain::Base, false);
+        for component in [
+            ProtocolComponent { id: "wrong".into(), ..component(Chain::Base) },
+            ProtocolComponent { protocol_system: "elfomofi".into(), ..component(Chain::Base) },
+            ProtocolComponent { tokens: vec![], ..component(Chain::Base) },
+        ] {
+            let invalid = Swap::new(
+                component,
+                original.token_in().clone(),
+                original.token_out().clone(),
+                BigUint::ZERO,
+            )
+            .with_estimated_amount_in(100u64.into())
+            .with_protocol_state(state(Chain::Base, NOW, 200u64.into()));
+            assert!(encoder(Chain::Base)
+                .encode_at(&invalid, NOW)
+                .is_err());
+        }
+        for token in [
+            Bytes::zero(20),
+            Bytes::from(vec![0xee; 20]),
+            Bytes::zero(19),
+            original.token_out().address.clone(),
+        ] {
+            let invalid = Swap::new(
+                component(Chain::Base),
+                default_token(token),
+                original.token_out().clone(),
+                BigUint::ZERO,
+            )
+            .with_estimated_amount_in(100u64.into())
+            .with_protocol_state(state(Chain::Base, NOW, 200u64.into()));
+            assert!(encoder(Chain::Base)
+                .encode_at(&invalid, NOW)
+                .is_err());
+        }
+        assert!(ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).is_err());
+    }
+    #[test]
+    fn test_elfomofi_encoding_needs_no_rpc_runtime_or_router() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let swap =
+            swap(Chain::Base, false).with_protocol_state(state(Chain::Base, now, 200u64.into()));
+        assert!(!encoder(Chain::Base).blocks_on_quote());
+        assert!(encoder(Chain::Base)
+            .encode_swap(&swap, &context())
+            .is_ok());
+    }
+    #[test]
+    fn test_elfomofi_sequential_routes_allow_any_leg_count() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (a, _) = tokens();
         let executor = Bytes::from(vec![0x33; 20]);
         let router = Bytes::from(vec![0x44; 20]);
-        let registry = SwapEncoderRegistry::new(Chain::Base).register_encoder(
-            PROTOCOL_SYSTEM,
-            Box::new(ElfomofiSwapEncoder::new(executor.clone(), Chain::Base, None).unwrap()),
-        );
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .register_encoder(PROTOCOL_SYSTEM, Box::new(encoder(Chain::Base)));
         let encoder = TychoRouterEncoder::new(registry, router.clone()).unwrap();
-        let state = Arc::new(MockRFQState {
-            quote_amount_out: 200u64.into(),
-            quote_data: HashMap::from([(
-                "valid_until".into(),
-                Bytes::from(u64::MAX.to_be_bytes().to_vec()),
-            )]),
-            ..Default::default()
-        });
         for legs in [2, 4, 8] {
             let swaps = (0..legs)
                 .map(|index| {
-                    let (sell, buy) = if index % 2 == 0 { (&a, &b) } else { (&b, &a) };
-                    Swap::new(
-                        component(),
-                        default_token(sell.clone()),
-                        default_token(buy.clone()),
-                        200_000u64.into(),
-                    )
-                    .with_estimated_amount_in(if index == 0 {
-                        100u64.into()
-                    } else {
-                        200u64.into()
-                    })
-                    .with_protocol_state(state.clone())
+                    swap(Chain::Base, index % 2 != 0).with_protocol_state(state(
+                        Chain::Base,
+                        now,
+                        200u64.into(),
+                    ))
                 })
                 .collect();
             let solution = Solution::new(
@@ -382,199 +589,12 @@ mod tests {
             let encoded = encoder
                 .encode_solutions(vec![solution])
                 .unwrap();
-            assert_eq!(encoded.len(), 1);
             assert_eq!(encoded[0].interacting_with(), &router);
-            assert!(encoded[0]
-                .function_signature()
-                .starts_with("sequentialSwap("));
-            assert_eq!(encoded[0].swaps().len(), legs * 70);
-            for (index, leg) in encoded[0]
-                .swaps()
-                .chunks_exact(70)
-                .enumerate()
-            {
-                let (sell, buy) = if index % 2 == 0 { (&a, &b) } else { (&b, &a) };
-                assert_eq!(&leg[..2], &68u16.to_be_bytes());
+            assert_eq!(encoded[0].swaps().len(), legs * 134);
+            for leg in encoded[0].swaps().chunks_exact(134) {
+                assert_eq!(&leg[..2], &132u16.to_be_bytes());
                 assert_eq!(&leg[2..22], executor.as_ref());
-                assert_eq!(&leg[22..42], sell.as_ref());
-                assert_eq!(&leg[42..62], buy.as_ref());
-                assert_eq!(&leg[62..], &u64::MAX.to_be_bytes());
             }
-        }
-    }
-
-    #[test]
-    fn test_elfomofi_input_accepts_unsigned_range_and_rejects_overflow() {
-        let (a, b) = tokens();
-        for amount in [BigUint::from(1u8) << 255, (BigUint::from(1u8) << 256) - 1u8] {
-            assert!(encode_amount(component(), a.clone(), b.clone(), amount).is_ok());
-        }
-        for amount in [BigUint::ZERO, BigUint::from(1u8) << 256] {
-            assert!(matches!(
-                encode_amount(component(), a.clone(), b.clone(), amount),
-                Err(EncodingError::InvalidInput(_)),
-            ));
-        }
-    }
-
-    #[test]
-    fn test_elfomofi_forwards_origin_and_applies_optional_quote_shortfall() {
-        let (sell, buy) = tokens();
-        let origin = Some(Bytes::from(vec![0x55; 20]));
-        let context = EncodingContext {
-            router_address: Some(Bytes::from(vec![0x44; 20])),
-            group_token_in: sell.clone(),
-            group_token_out: buy.clone(),
-            origin: origin.clone(),
-        };
-        let state = Arc::new(MockRFQState {
-            quote_amount_out: 198u64.into(),
-            level_amount_out: Some(200u64.into()),
-            quote_data: HashMap::from([(
-                "valid_until".into(),
-                Bytes::from(u64::MAX.to_be_bytes().to_vec()),
-            )]),
-            ..Default::default()
-        });
-        let swap = Swap::new(component(), default_token(sell), default_token(buy), BigUint::ZERO)
-            .with_estimated_amount_in(100u64.into())
-            .with_protocol_state(state.clone());
-        let encoder = ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Base, None).unwrap();
-        assert!(encoder
-            .encode_swap(&swap, &context)
-            .is_ok());
-        assert!(encoder
-            .encode_swap(
-                &swap
-                    .clone()
-                    .with_max_signed_quote_shortfall_bps(100),
-                &context
-            )
-            .is_ok());
-        assert!(matches!(
-            encoder.encode_swap(&swap.with_max_signed_quote_shortfall_bps(99), &context),
-            Err(EncodingError::RecoverableError(_))
-        ));
-        assert_eq!(*state.received_origins.lock().unwrap(), vec![origin; 3]);
-    }
-
-    #[test]
-    fn test_elfomofi_rejects_wrong_component() {
-        let (a, b) = tokens();
-        let original = component();
-        for invalid in [
-            ProtocolComponent { id: "wrong".into(), ..original.clone() },
-            ProtocolComponent { chain: Chain::Ethereum, ..original.clone() },
-            ProtocolComponent { protocol_system: "other_protocol".into(), ..original.clone() },
-            ProtocolComponent { tokens: vec![a.clone()], ..original.clone() },
-            ProtocolComponent { tokens: vec![a.clone(), Bytes::zero(20)], ..original.clone() },
-            ProtocolComponent { id: format!("{ROUTER}:{b}:{a}"), ..original },
-        ] {
-            assert!(encode(invalid, a.clone(), b.clone()).is_err());
-        }
-    }
-
-    #[test]
-    fn test_elfomofi_rejects_native_identical_or_malformed_tokens() {
-        let (a, b) = tokens();
-        for invalid in [Bytes::zero(20), Bytes::from(vec![0xee; 20]), Bytes::zero(19), b.clone()] {
-            assert!(encode(component(), invalid, b.clone()).is_err());
-        }
-        assert!(encode(component(), a.clone(), a).is_err());
-        assert!(ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).is_err());
-    }
-
-    #[test]
-    fn test_elfomofi_requires_fresh_quote_context() {
-        let (a, b) = tokens();
-        let context = EncodingContext {
-            router_address: Some(Bytes::from(vec![0x44; 20])),
-            group_token_in: a.clone(),
-            group_token_out: b.clone(),
-            origin: None,
-        };
-        let raw = Swap::new(component(), default_token(a), default_token(b), BigUint::ZERO);
-        let encoder = ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Base, None).unwrap();
-        assert!(encoder.blocks_on_quote());
-        assert!(matches!(encoder.encode_swap(&raw, &context), Err(EncodingError::FatalError(_))));
-        let state = Arc::new(MockRFQState {
-            quote_amount_out: 200u64.into(),
-            quote_data: HashMap::from([(
-                "valid_until".into(),
-                Bytes::from(u64::MAX.to_be_bytes().to_vec()),
-            )]),
-            ..Default::default()
-        });
-        let without_amount = raw.with_protocol_state(state);
-        assert!(matches!(
-            encoder.encode_swap(&without_amount, &context),
-            Err(EncodingError::FatalError(_))
-        ));
-        let complete = without_amount.with_estimated_amount_in(100u64.into());
-        let without_router = EncodingContext { router_address: None, ..context };
-        assert!(matches!(
-            encoder.encode_swap(&complete, &without_router),
-            Err(EncodingError::FatalError(_))
-        ));
-    }
-
-    #[test]
-    fn test_elfomofi_rejects_mismatched_or_empty_quote() {
-        let (a, b) = tokens();
-        let params = GetAmountOutParams {
-            amount_in: 100u64.into(),
-            token_in: a.clone(),
-            token_out: b.clone(),
-            sender: Bytes::from(vec![0x44; 20]),
-            receiver: Bytes::from(vec![0x44; 20]),
-            origin: None,
-        };
-        for (base_token, quote_token, amount_in, amount_out) in [
-            (b.clone(), a.clone(), 100u64, 200u64),
-            (a.clone(), b.clone(), 101u64, 200u64),
-            (a, b, 100u64, 0u64),
-        ] {
-            let quote = SignedQuote {
-                base_token,
-                quote_token,
-                amount_in: amount_in.into(),
-                amount_out: amount_out.into(),
-                quote_attributes: HashMap::new(),
-            };
-            assert!(matches!(validate_quote(&quote, &params), Err(EncodingError::InvalidInput(_))));
-        }
-    }
-
-    #[test]
-    fn test_elfomofi_rejects_missing_malformed_or_stale_expiry() {
-        let (a, b) = tokens();
-        let context = EncodingContext {
-            router_address: Some(Bytes::from(vec![0x44; 20])),
-            group_token_in: a.clone(),
-            group_token_out: b.clone(),
-            origin: None,
-        };
-        let encoder = ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Base, None).unwrap();
-        for expiry in [None, Some(Bytes::zero(7)), Some(Bytes::from(0u64.to_be_bytes().to_vec()))] {
-            let quote_data = expiry
-                .map(|value| HashMap::from([("valid_until".into(), value)]))
-                .unwrap_or_default();
-            let state = Arc::new(MockRFQState {
-                quote_amount_out: 200u64.into(),
-                quote_data,
-                ..Default::default()
-            });
-            let swap = Swap::new(
-                component(),
-                default_token(a.clone()),
-                default_token(b.clone()),
-                BigUint::ZERO,
-            )
-            .with_estimated_amount_in(100u64.into())
-            .with_protocol_state(state);
-            assert!(encoder
-                .encode_swap(&swap, &context)
-                .is_err());
         }
     }
 }

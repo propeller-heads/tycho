@@ -52,7 +52,7 @@ pub(super) async fn discover(
                     .ok()
                     .and_then(|raw| decode_symbol(&raw))
                     .unwrap_or_else(|| target.clone());
-                // Transfer gas is a provisional conservative ERC20 estimate, as for swap gas.
+                // Transfer gas uses a conservative ERC20 estimate.
                 let token = Token::new(
                     &address,
                     &symbol,

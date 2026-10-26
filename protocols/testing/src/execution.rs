@@ -87,9 +87,9 @@ static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'stati
     LazyLock::new(|| {
         HashMap::from([
             ((Chain::Bsc, "ring_swap_v2"), RING_SWAP_V2_BSC_BYTECODE_JSON),
-            ((Chain::Base, "elfomofi"), ELFOMOFI_BYTECODE_JSON),
-            ((Chain::Bsc, "elfomofi"), ELFOMOFI_BYTECODE_JSON),
-            ((Chain::Robinhood, "elfomofi"), ELFOMOFI_BYTECODE_JSON),
+            ((Chain::Base, "propamm:elfomofi"), ELFOMOFI_BYTECODE_JSON),
+            ((Chain::Bsc, "propamm:elfomofi"), ELFOMOFI_BYTECODE_JSON),
+            ((Chain::Robinhood, "propamm:elfomofi"), ELFOMOFI_BYTECODE_JSON),
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
