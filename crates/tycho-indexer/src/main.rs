@@ -65,7 +65,8 @@ use tycho_indexer::{
         ExtractionError,
     },
     services::{
-        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
+        EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ProtocolFreshness,
+        ServicesBuilder, WindowConfig,
     },
 };
 use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
@@ -549,6 +550,21 @@ async fn create_indexing_tasks(
         }
     };
 
+    let max_protocol_lag = chrono::Duration::minutes(
+        i64::try_from(global_args.max_protocol_lag_minutes).map_err(|_| {
+            ExtractionError::Setup(format!(
+                "max protocol lag of {} minutes is too large",
+                global_args.max_protocol_lag_minutes
+            ))
+        })?,
+    );
+    let protocol_freshness =
+        ProtocolFreshness::load(&rpc_gw, &chain, &protocol_systems, max_protocol_lag)
+            .await
+            .map_err(|e| {
+                ExtractionError::Setup(format!("Failed to load the newest block times: {e}"))
+            })?;
+
     let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
         .prefix(&global_args.server_version_prefix)
         .bind(&global_args.server_ip)
@@ -556,6 +572,7 @@ async fn create_indexing_tasks(
         .plans_config(plans_config)
         .dci_protocols(dci_protocols)
         .protocol_systems(protocol_systems)
+        .protocol_freshness(protocol_freshness)
         .register_extractors(extractor_handles.clone())
         .pending_deltas(pending_deltas_rxs)
         .window_config(WindowConfig {
