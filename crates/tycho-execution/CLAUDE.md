@@ -146,7 +146,7 @@ Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
 Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
-Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
+Hashflow (RFQ), Liquorice (RFQ), Euclid (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
 native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
 the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").

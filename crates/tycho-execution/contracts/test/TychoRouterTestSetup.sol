@@ -40,6 +40,7 @@ import {
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {AeroBasicExecutor} from "../src/executors/AeroBasicExecutor.sol";
+import {EuclidExecutor} from "@src/executors/EuclidExecutor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
@@ -159,6 +160,7 @@ contract TychoRouterTestSetup is
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
     AeroBasicExecutor public aeroBasicExecutor;
+    EuclidExecutor public euclidExecutor;
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
@@ -341,9 +343,11 @@ contract TychoRouterTestSetup is
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
         aeroBasicExecutor = new AeroBasicExecutor();
+        // Appended last: every earlier executor keeps its CREATE address.
+        euclidExecutor = new EuclidExecutor(ONEINCH_ROUTER_V5);
 
         address[] memory executors = new address[](
-            30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            31 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -375,7 +379,8 @@ contract TychoRouterTestSetup is
         executors[27] = address(lidoV4Executor);
         executors[28] = address(pancakeswapInfinityExecutor);
         executors[29] = address(aeroBasicExecutor);
-        uint256 nextExecutorIndex = 30;
+        executors[30] = address(euclidExecutor);
+        uint256 nextExecutorIndex = 31;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;

@@ -4330,3 +4330,96 @@ fn test_sequential_encoding_strategy_sky() {
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
+
+/// A quote recorded from Euclid's gateway: 0.003 WETH for USDC, requested for the TychoRouter
+/// the Forge setup deploys as sender and receiver, so the order admits that router and pays to
+/// it. `TychoRouterForEuclidTest` fills the calldata written here on a fork pinned at the block
+/// the quote was recorded at.
+const EUCLID_QUOTE_AMOUNT_IN: &str = "3000000000000000";
+const EUCLID_QUOTE_AMOUNT_OUT: &str = "6241692";
+const EUCLID_QUOTE_CALLDATA: &str = "0x5a09984300000000000000000000000000000000000000006af30923b32dc5212b477b5c000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000002e5c8ab45381393443cbb18542b7f4c38c5604920000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c6600000000000000000000000000000000000000000000000000000000005f3d9c000000000000000000000000000000000000000000000000000aa87bee5380000000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000aa87bee5380000000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c660000000000000000000000000000000000000000000000000000000000000041ce99310be418235a75297ac077298e92cb69e95d755e1b1d2546362acbfb574f0736ad242f5662c0dfb0becda5b0cb4b6afc88ffb23897c7996a6ed6303510e31b00000000000000000000000000000000000000000000000000000000000000";
+
+/// Encodes a swap of `given_amount` WETH through the recorded Euclid quote and writes the router
+/// calldata under `test_identifier`. The quote covers 0.003 WETH; the executor lowers the fill
+/// to what the route delivers, and the router pays the order's amount pro rata, rounded down.
+fn write_euclid_calldata(given_amount: BigUint, test_identifier: &str) {
+    let user = Bytes::from_str("0xd2068e04cf586f76eece7ba5beb779d7bb1474a1").unwrap();
+    let token_in = weth();
+    let token_out = usdc();
+    let quote_amount_in = BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap();
+    let quote_amount_out = BigUint::from_str(EUCLID_QUOTE_AMOUNT_OUT).unwrap();
+
+    let euclid_state = MockRFQState {
+        quote_amount_in: Some(quote_amount_in.clone()),
+        quote_amount_out: quote_amount_out.clone(),
+        quote_data: HashMap::from([(
+            "calldata".to_string(),
+            Bytes::from_str(EUCLID_QUOTE_CALLDATA).unwrap(),
+        )]),
+        ..Default::default()
+    };
+    let euclid_component = ProtocolComponent {
+        id: String::from("euclid-rfq"),
+        protocol_system: String::from("rfq:euclid"),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        euclid_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(quote_amount_in.clone())
+    .with_protocol_state(Arc::new(euclid_state));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let expected_amount_out = &quote_amount_out * &given_amount / &quote_amount_in;
+    let solution = Solution::new(
+        user.clone(),
+        user,
+        token_in,
+        token_out,
+        given_amount,
+        expected_amount_out.clone(),
+        // 2% below the quote
+        &expected_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(test_identifier, hex::encode(&calldata).as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_euclid() {
+    write_euclid_calldata(
+        BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap(),
+        "test_single_encoding_strategy_euclid",
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_euclid_partial_fill() {
+    // Half of what the quote was signed for reaches the executor.
+    write_euclid_calldata(
+        BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap() / BigUint::from(2u64),
+        "test_single_encoding_strategy_euclid_partial_fill",
+    );
+}

@@ -80,8 +80,8 @@ for any protocol indexed by Tycho.
   complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
   set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
   another `A`), and a `Book` is one book's simulate-ready component + state, plus the provider's
-  `updated_at` where it reports one: a pair for Bebop, Native and Metric, a pair and one market
-  maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
+  `updated_at` where it reports one: a pair for Bebop, Euclid, Native and Metric, a pair and one
+  market maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
   provider's `*Feed` implements `SnapshotFeed` directly, with a `run` that calls one of the two
   loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
   book feed needs whatever transport it runs on, and is the first argument of every feed builder;
@@ -97,7 +97,7 @@ for any protocol indexed by Tycho.
     has levels on, which a component carries as its `swap_directions` static attribute
     (`book::{SWAP_DIRECTIONS_ATTRIBUTE, decode_swap_directions}`) wherever its token list does not
     already read as them — one side of a book, or neither, and every all-pairs component.
-    `all_pairs` is the opt-in layout (`all_pairs()` on the four RFQ builders, taking the `QuoteRule`
+    `all_pairs` is the opt-in layout (`all_pairs()` on the five RFQ builders, taking the `QuoteRule`
     on the two that name their makers) that publishes a venue as one component for every pair it
     prices: `AllPairs<P, T>` holds the per-pair states the other layout would publish, picks the
     best book still allowed to quote under the component's `QuoteRule` (`once_per_maker`,
@@ -114,7 +114,7 @@ for any protocol indexed by Tycho.
     from those two types, so the four differ only in them and in what a venue refuses before a
     book is picked (`RefusesQuote::check_amount`). A book reporting no direction is left out of
     the state, so its tokens and its directions agree
-  - **Prices feed and book assembler (Bebop, Hashflow, Metric)**: `<Venue>PricesFeed` in
+  - **Prices feed and book assembler (Bebop, Euclid, Hashflow, Metric)**: `<Venue>PricesFeed` in
     `feed.rs`, built by `<Venue>PricesFeedBuilder`, streams or polls the venue and publishes
     `<Venue>Prices` (`models.rs`, serde), needing only the chain and credentials.
     `<Venue>BookAssembler::books(prices)` in `source.rs` turns prices into the books the `*Feed`
@@ -138,7 +138,7 @@ for any protocol indexed by Tycho.
     off their own levels also take the USD quote-token set
     (`book::quote_tokens::usd_stablecoins_for_chain` is the curated default); how a venue's books
     are oriented and deduplicated is that provider's business, decided in its `source.rs`
-- **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Hashflow,
+- **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Euclid, Hashflow,
   Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
   signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting layer
   and never reaches a public signature. Credentials are constructor arguments of the feed builders;
