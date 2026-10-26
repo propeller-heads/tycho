@@ -1512,7 +1512,10 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
 
 /// Retrieve protocol systems
 ///
-/// This endpoint retrieves the protocol systems available in the indexer.
+/// This endpoint retrieves the protocol systems available in the indexer. It leaves out a
+/// protocol system while its newest indexed block is far behind the chain, for example while a
+/// new protocol indexes its history. The other endpoints still accept that protocol system by
+/// name.
 #[utoipa::path(
     post,
     path = "/v1/protocol_systems",

@@ -42,6 +42,9 @@ extractor/
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
+  protocol_freshness.rs     ProtocolFreshness — newest block time per protocol system; hides
+                            systems more than --max-protocol-lag-minutes behind from
+                            /protocol_systems
   off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
@@ -250,7 +253,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/protocol_components` | Components by system / TVL / IDs |
 | `/traced_entry_points` | Traced entry point results |
 | `/add_entry_points` | Register entry points for tracing |
-| `/protocol_systems` | List available protocol systems |
+| `/protocol_systems` | List available protocol systems; leaves out systems whose newest block is more than `--max-protocol-lag-minutes` (default 60) old, e.g. a new extractor that backfills. The time comes from the last committed block at startup, then from each full block of the delta pump; a system with no committed block is left out |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
