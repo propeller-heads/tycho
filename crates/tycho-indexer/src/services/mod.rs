@@ -43,12 +43,14 @@ mod debug;
 mod deltas_buffer;
 mod middleware;
 mod off_worker;
+mod protocol_freshness;
 mod rpc;
 mod state;
 mod ws;
 
 pub use cache::RpcCacheKind;
 pub use middleware::PlansConfig;
+pub use protocol_freshness::ProtocolFreshness;
 pub use state::{
     cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
 };
