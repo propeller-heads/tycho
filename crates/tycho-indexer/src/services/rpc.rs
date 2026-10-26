@@ -34,6 +34,7 @@ use crate::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
         off_worker::{CacheReply, OffWorker},
+        protocol_freshness::ProtocolFreshness,
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
@@ -133,6 +134,9 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    /// Hides systems whose extractor is far behind the chain from `protocol_systems`. `None`
+    /// lists every system.
+    protocol_freshness: Option<ProtocolFreshness>,
     /// Which path answers state requests. `Off` without extractors.
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
@@ -190,9 +194,16 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            protocol_freshness: None,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
         }
+    }
+
+    /// Lists in `protocol_systems` only the systems that `freshness` reports as fresh.
+    pub(crate) fn with_protocol_freshness(mut self, freshness: ProtocolFreshness) -> Self {
+        self.protocol_freshness = Some(freshness);
+        self
     }
 
     /// Turns the given response caches off. A request to an endpoint whose cache is off always
@@ -767,14 +778,17 @@ where
         allowed_systems: Option<&HashSet<String>>,
     ) -> Result<dto::ProtocolSystemsRequestResponse, RpcError> {
         info!(?request, "Getting protocol systems.");
-        let filtered: Vec<&String> = match allowed_systems {
-            Some(allowed) => self
-                .protocol_systems
-                .iter()
-                .filter(|ps| allowed.contains(ps.as_str()))
-                .collect(),
-            None => self.protocol_systems.iter().collect(),
-        };
+        let now = Utc::now().naive_utc();
+        let filtered: Vec<&String> = self
+            .protocol_systems
+            .iter()
+            .filter(|ps| allowed_systems.is_none_or(|allowed| allowed.contains(ps.as_str())))
+            .filter(|ps| {
+                self.protocol_freshness
+                    .as_ref()
+                    .is_none_or(|freshness| freshness.is_fresh(ps, now))
+            })
+            .collect();
         let total = filtered.len() as i64;
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
