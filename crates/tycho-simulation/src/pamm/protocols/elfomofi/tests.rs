@@ -48,8 +48,15 @@ fn snapshot(balance: u64) -> Snapshot {
         },
     }
 }
+fn from_snapshot(
+    snapshot: Snapshot,
+) -> Result<ElfomofiState, tycho_common::simulation::errors::SimulationError> {
+    let base = token_on(snapshot.chain, snapshot.book.base_token.clone(), 0);
+    let quote = token_on(snapshot.chain, snapshot.book.quote_token.clone(), 0);
+    ElfomofiState::from_snapshot(snapshot, base, quote)
+}
 fn state() -> ElfomofiState {
-    ElfomofiState::from_snapshot(snapshot(10_000)).unwrap()
+    from_snapshot(snapshot(10_000)).unwrap()
 }
 fn quote(
     state: &ElfomofiState,
@@ -81,7 +88,7 @@ fn integer_interpolation_rounds_down_without_extrapolation() {
 #[test]
 fn inventory_caps_every_advertised_input_in_both_directions() {
     for balance in [0, 1, 100, 200, 201, 349, 500, 10_000] {
-        let state = ElfomofiState::from_snapshot(snapshot(balance)).unwrap();
+        let state = from_snapshot(snapshot(balance)).unwrap();
         let book = &state.snapshot().book;
         for (sell, buy) in
             [(&book.base_token, &book.quote_token), (&book.quote_token, &book.base_token)]
@@ -172,7 +179,7 @@ fn wall_clock_expiry_also_checks_chain_timestamp_and_future_observations() {
     value.observed_at = 100;
     value.block_timestamp = 98;
     value.max_age_seconds = 10;
-    let state = ElfomofiState::from_snapshot(value).unwrap();
+    let state = from_snapshot(value).unwrap();
     assert!(!state.is_fresh_at(99));
     assert!(state.is_fresh_at(107));
     assert!(!state.is_fresh_at(108));
@@ -191,19 +198,19 @@ fn malformed_and_nonmonotone_snapshots_are_rejected() {
     let original = snapshot(10_000);
     let mut value = original.clone();
     value.book.bids[1].amount_in = 100u64.into();
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
     let mut value = original.clone();
     value.book.asks[0].amount_out = BigUint::ZERO;
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
     let mut value = original.clone();
     value.book.quote_token = value.book.base_token.clone();
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
     let mut value = original.clone();
     value.block_hash = Bytes::zero(31);
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
     let mut value = original;
     value.book.base_balance = BigUint::from(1u8) << 256;
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
 }
 
 #[test]
@@ -215,7 +222,7 @@ fn amounts_keep_precision_above_u128_and_use_full_uint256_input_domain() {
         Level { amount_in: &scale * 2u64, amount_out: &scale * 3u64 },
     ];
     value.book.quote_balance = BigUint::from(1u8) << 255;
-    let state = ElfomofiState::from_snapshot(value.clone()).unwrap();
+    let state = from_snapshot(value.clone()).unwrap();
     let book = &state.snapshot().book;
     assert_eq!(
         state
@@ -231,7 +238,7 @@ fn amounts_keep_precision_above_u128_and_use_full_uint256_input_domain() {
     let max_input: BigUint = (BigUint::from(1u8) << 256) - 1u64;
     value.book.bids = vec![Level { amount_in: max_input.clone(), amount_out: max_input.clone() }];
     value.book.quote_balance = max_input.clone();
-    let state = ElfomofiState::from_snapshot(value.clone()).unwrap();
+    let state = from_snapshot(value.clone()).unwrap();
     let book = &state.snapshot().book;
     assert_eq!(
         state
@@ -261,7 +268,7 @@ fn amounts_keep_precision_above_u128_and_use_full_uint256_input_domain() {
         )
         .is_err());
     value.book.bids[0].amount_in = &max_input + 1u64;
-    assert!(ElfomofiState::from_snapshot(value).is_err());
+    assert!(from_snapshot(value).is_err());
 }
 
 #[test]
@@ -269,7 +276,7 @@ fn empty_books_and_wrong_pairs_have_no_liquidity() {
     let mut value = snapshot(10_000);
     value.book.bids.clear();
     value.book.asks.clear();
-    let state = ElfomofiState::from_snapshot(value).unwrap();
+    let state = from_snapshot(value).unwrap();
     assert!(quote(&state, 1, false).is_err());
     assert!(state
         .get_amount_out(
@@ -309,7 +316,7 @@ fn chain_identity_survives_serialization_and_repeated_native_quotes() {
     for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
         let mut snapshot = snapshot(10_000);
         snapshot.chain = chain;
-        let state = ElfomofiState::from_snapshot(snapshot).unwrap();
+        let state = from_snapshot(snapshot).unwrap();
         let book = &state.snapshot().book;
         let base = token_on(chain, book.base_token.clone(), 0);
         let quote = token_on(chain, book.quote_token.clone(), 0);
@@ -341,14 +348,44 @@ fn chain_identity_survives_serialization_and_repeated_native_quotes() {
 }
 
 #[test]
-fn old_snapshots_default_to_base_and_unsupported_chains_are_rejected() {
+fn missing_and_unsupported_chains_are_rejected() {
     let mut json = serde_json::to_value(state()).unwrap();
     json["snapshot"]
         .as_object_mut()
         .unwrap()
         .remove("chain");
-    let restored: ElfomofiState = serde_json::from_value(json.clone()).unwrap();
-    assert_eq!(restored.snapshot().chain, Chain::Base);
+    assert!(serde_json::from_value::<ElfomofiState>(json.clone()).is_err());
     json["snapshot"]["chain"] = serde_json::to_value(Chain::Ethereum).unwrap();
+    assert!(serde_json::from_value::<ElfomofiState>(json).is_err());
+}
+
+#[test]
+fn pair_directions_follow_servable_book_sides() {
+    use crate::book::component::PairState;
+    let mut snapshot = snapshot(10_000);
+    snapshot.book.asks.clear();
+    let state = from_snapshot(snapshot.clone()).unwrap();
+    assert_eq!(
+        state.directions(),
+        vec![(snapshot.book.base_token.clone(), snapshot.book.quote_token.clone())]
+    );
+    snapshot.book.quote_balance = BigUint::ZERO;
+    assert!(from_snapshot(snapshot)
+        .unwrap()
+        .directions()
+        .is_empty());
+}
+
+#[test]
+fn deserialization_rejects_token_metadata_from_another_pair_or_chain() {
+    let state = state();
+    for pointer in ["/base_token/address", "/quote_token/address"] {
+        let mut json = serde_json::to_value(&state).unwrap();
+        *json.pointer_mut(pointer).unwrap() =
+            serde_json::to_value(Bytes::from(vec![7; 20])).unwrap();
+        assert!(serde_json::from_value::<ElfomofiState>(json).is_err());
+    }
+    let mut json = serde_json::to_value(&state).unwrap();
+    json["base_token"]["chain"] = serde_json::to_value(Chain::Bsc).unwrap();
     assert!(serde_json::from_value::<ElfomofiState>(json).is_err());
 }

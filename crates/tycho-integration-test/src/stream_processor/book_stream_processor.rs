@@ -248,6 +248,7 @@ pub struct BookStreamProcessor {
     skip_messages_duration: Duration,
     /// Whether each venue publishes one component for all of its pairs rather than one each.
     all_pairs: bool,
+    pamm_rpc: Option<(String, Option<String>, bool)>,
 }
 
 impl BookStreamProcessor {
@@ -271,7 +272,18 @@ impl BookStreamProcessor {
             rpc_url,
             skip_messages_duration,
             all_pairs,
+            pamm_rpc: None,
         }
+    }
+
+    pub fn with_pamm_rpc(
+        mut self,
+        rpc_url: String,
+        ws_rpc_url: Option<String>,
+        polling: bool,
+    ) -> Self {
+        self.pamm_rpc = Some((rpc_url, ws_rpc_url, polling));
+        self
     }
 
     /// Starts the book stream, or returns `None` when no book feed was added: both kinds are
@@ -291,8 +303,7 @@ impl BookStreamProcessor {
             min_tvl_usd: self.tvl_threshold,
         };
 
-        // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself, so it is
-        // the one venue a chain without a curated set can still serve.
+        // RFQ feeds price TVL through these stablecoins; pAMMs handle their own TVL.
         let usd_quote_tokens = usd_stablecoins_for_chain(self.chain).map(Arc::new);
 
         let mut feeds = BookFeedStreams::new();
@@ -300,6 +311,32 @@ impl BookStreamProcessor {
         add_pamm_feeds(&self.pamm, &book_config, &self.rpc_url, &mut feeds, |name| {
             env::var(name).ok()
         })?;
+        if !matches!(self.pamm, PammSelection::Disabled) {
+            if matches!(self.chain, Chain::Base | Chain::Bsc | Chain::Robinhood) {
+                use tycho_simulation::pamm::protocols::elfomofi::{
+                    self, feed::ElfomofiFeedBuilder,
+                };
+
+                if let Some((rpc_url, ws_rpc_url, polling)) = &self.pamm_rpc {
+                    let mut builder =
+                        ElfomofiFeedBuilder::new(book_config.clone(), rpc_url.clone());
+                    if *polling {
+                        builder = builder.polling();
+                    } else if let Some(ws_rpc_url) = ws_rpc_url {
+                        builder = builder.ws_rpc_url(ws_rpc_url.clone());
+                    }
+                    match builder.build() {
+                        Ok(feed) => {
+                            info!("Adding {} feed...", elfomofi::PROTOCOL_SYSTEM);
+                            feeds
+                                .add(elfomofi::PROTOCOL_SYSTEM, feed)
+                                .expect("each provider is added once");
+                        }
+                        Err(error) => warn!("Skipping ElFomoFi feed: {error}"),
+                    }
+                }
+            }
+        }
 
         for (protocol, user, key) in self.rfq.venues() {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
@@ -510,15 +547,7 @@ impl BookStreamProcessor {
                 }
                 *next_stream_time = now + skip_messages_duration;
 
-                // Sample random books from the venue's complete snapshot
-                let books = Arc::new(
-                    books
-                        .iter()
-                        .choose_multiple(&mut rand::rng(), sample_size)
-                        .into_iter()
-                        .map(|(id, book)| (id.clone(), book.clone()))
-                        .collect(),
-                );
+                let books = Arc::new(sample_books(&books, sample_size));
 
                 let received_at =
                     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -651,6 +680,25 @@ impl Unavailable {
     }
 }
 
+fn sample_books(
+    books: &HashMap<String, tycho_simulation::book::Book>,
+    sample_size: usize,
+) -> HashMap<String, tycho_simulation::book::Book> {
+    books
+        .iter()
+        // A book explicitly advertising no swap direction cannot produce a simulation.
+        .filter(|(_, book)| {
+            book.component
+                .static_attributes
+                .get(tycho_simulation::book::SWAP_DIRECTIONS_ATTRIBUTE)
+                .is_none_or(|directions| !directions.is_empty())
+        })
+        .choose_multiple(&mut rand::rng(), sample_size)
+        .into_iter()
+        .map(|(id, book)| (id.clone(), book.clone()))
+        .collect()
+}
+
 /// Hands one update to the harness. `false` once nobody is receiving, which is the processor's
 /// signal to stop.
 async fn forward(
@@ -666,6 +714,13 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
+    use tycho_simulation::{
+        book::{Book, SWAP_DIRECTIONS_ATTRIBUTE},
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        protocol::models::ProtocolComponent,
+    };
+
     use super::*;
 
     /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
@@ -889,5 +944,38 @@ mod tests {
         handle
             .expect("the Bebop feed runs")
             .abort();
+    }
+
+    #[test]
+    fn empty_books_do_not_spend_the_simulation_sample() {
+        let token =
+            |byte| Token::new(&Bytes::from(vec![byte; 20]), "T", 18, 0, &[], Chain::Base, 100);
+        let active = Book {
+            component: ProtocolComponent::new(
+                Bytes::from(vec![1; 20]),
+                "test:book".into(),
+                "book_pool".into(),
+                Chain::Base,
+                vec![token(1), token(2)],
+                vec![],
+                HashMap::new(),
+                Bytes::default(),
+                Default::default(),
+            ),
+            state: Arc::new(UniswapV2State::new(U256::from(1000), U256::from(1000))),
+            updated_at: None,
+        };
+        let mut books = HashMap::from([("active".to_string(), active.clone())]);
+        for n in 0..20 {
+            let mut empty = active.clone();
+            empty
+                .component
+                .static_attributes
+                .insert(SWAP_DIRECTIONS_ATTRIBUTE.to_string(), Bytes::default());
+            books.insert(format!("empty{n}"), empty);
+        }
+        let sample = sample_books(&books, 1);
+        assert_eq!(sample.len(), 1);
+        assert!(sample.contains_key("active"));
     }
 }

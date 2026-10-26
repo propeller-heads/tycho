@@ -4,27 +4,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
-    models::{protocol::GetAmountOutParams, token::Token},
+    models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        indicatively_priced::{IndicativelyPriced, SignedQuote},
         protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
     },
     Bytes,
 };
 
-use super::{
-    models::{Level, Snapshot},
-    rpc,
-};
+use super::models::{Level, Snapshot};
+use crate::book::component::PairState;
 
-const GAS: u64 = 200_000;
+// Conservative protocol-only allowance; router/transfer overhead is estimated separately.
+fn swap_gas(chain: tycho_common::models::Chain) -> u64 {
+    match chain {
+        tycho_common::models::Chain::Base => 320_000,
+        tycho_common::models::Chain::Bsc => 300_000,
+        tycho_common::models::Chain::Robinhood => 340_000,
+        _ => unreachable!("validated supported chain"),
+    }
+}
 
 /// Cumulative, fee-inclusive quote ladders fetched from the helper.
 ///
@@ -32,6 +36,8 @@ const GAS: u64 = 200_000;
 #[derive(Clone, Debug, Serialize)]
 pub struct ElfomofiState {
     pub(super) snapshot: Snapshot,
+    pub(super) base_token: Token,
+    pub(super) quote_token: Token,
 }
 
 impl<'de> Deserialize<'de> for ElfomofiState {
@@ -42,16 +48,33 @@ impl<'de> Deserialize<'de> for ElfomofiState {
         #[derive(Deserialize)]
         struct SerializedState {
             snapshot: Snapshot,
+            base_token: Token,
+            quote_token: Token,
         }
         let value = SerializedState::deserialize(deserializer)?;
-        Self::from_snapshot(value.snapshot).map_err(serde::de::Error::custom)
+        Self::from_snapshot(value.snapshot, value.base_token, value.quote_token)
+            .map_err(serde::de::Error::custom)
     }
 }
 
 impl ElfomofiState {
-    pub fn from_snapshot(snapshot: Snapshot) -> Result<Self, SimulationError> {
+    pub fn from_snapshot(
+        snapshot: Snapshot,
+        base_token: Token,
+        quote_token: Token,
+    ) -> Result<Self, SimulationError> {
         validate_snapshot(&snapshot)?;
-        Ok(Self { snapshot })
+        if base_token.address != snapshot.book.base_token ||
+            quote_token.address != snapshot.book.quote_token ||
+            base_token.chain != snapshot.chain ||
+            quote_token.chain != snapshot.chain
+        {
+            return Err(SimulationError::InvalidInput(
+                "ElFomoFi token metadata differs from the snapshot".into(),
+                None,
+            ));
+        }
+        Ok(Self { snapshot, base_token, quote_token })
     }
 
     pub fn snapshot(&self) -> &Snapshot {
@@ -137,6 +160,26 @@ pub(super) fn validate_snapshot(snapshot: &Snapshot) -> Result<(), SimulationErr
         .map_err(|error| SimulationError::RecoverableError(error.to_string()))
 }
 
+impl PairState for ElfomofiState {
+    fn base_token(&self) -> &Token {
+        &self.base_token
+    }
+    fn quote_token(&self) -> &Token {
+        &self.quote_token
+    }
+    fn directions(&self) -> Vec<(Bytes, Bytes)> {
+        let mut directions = Vec::new();
+        if !self.snapshot.book.bids.is_empty() && self.snapshot.book.quote_balance != BigUint::ZERO
+        {
+            directions.push((self.base_token.address.clone(), self.quote_token.address.clone()));
+        }
+        if !self.snapshot.book.asks.is_empty() && self.snapshot.book.base_balance != BigUint::ZERO {
+            directions.push((self.quote_token.address.clone(), self.base_token.address.clone()));
+        }
+        directions
+    }
+}
+
 #[typetag::serde]
 impl ProtocolSim for ElfomofiState {
     fn fee(&self) -> f64 {
@@ -177,7 +220,11 @@ impl ProtocolSim for ElfomofiState {
         let (levels, balance) = self.book(&token_in.address, &token_out.address)?;
         self.available()?;
         if amount_in == BigUint::ZERO {
-            return Ok(GetAmountOutResult::new(BigUint::ZERO, BigUint::from(GAS), self.clone_box()));
+            return Ok(GetAmountOutResult::new(
+                BigUint::ZERO,
+                BigUint::from(swap_gas(self.snapshot.chain)),
+                self.clone_box(),
+            ));
         }
         if amount_in > Self::limits(levels, balance).0 {
             return Err(SimulationError::InvalidInput(
@@ -186,7 +233,11 @@ impl ProtocolSim for ElfomofiState {
             ));
         }
         let amount = Self::interpolate(levels, &amount_in)?;
-        Ok(GetAmountOutResult::new(amount, BigUint::from(GAS), self.clone_box()))
+        Ok(GetAmountOutResult::new(
+            amount,
+            BigUint::from(swap_gas(self.snapshot.chain)),
+            self.clone_box(),
+        ))
     }
 
     fn get_limits(
@@ -199,10 +250,6 @@ impl ProtocolSim for ElfomofiState {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
         Ok(Self::limits(levels, balance))
-    }
-
-    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
-        Ok(self)
     }
 
     fn delta_transition(
@@ -227,26 +274,10 @@ impl ProtocolSim for ElfomofiState {
         other
             .as_any()
             .downcast_ref::<Self>()
-            .is_some_and(|other| self.snapshot == other.snapshot)
-    }
-}
-
-#[async_trait]
-impl IndicativelyPriced for ElfomofiState {
-    /// The RFQ interface calls this a signed quote, but ElFomoFi returns an unsigned current
-    /// contract quote. Execution recomputes pricing; route minimum output protects the trader.
-    async fn request_signed_quote(
-        &self,
-        params: GetAmountOutParams,
-    ) -> Result<SignedQuote, SimulationError> {
-        self.book(&params.token_in, &params.token_out)?;
-        self.available()?;
-        rpc::request_quote(self.snapshot.chain, self.snapshot.max_age_seconds, &params)
-            .await
-            .map_err(|error| {
-                SimulationError::RecoverableError(format!(
-                    "ElFomoFi fresh execution quote failed: {error}"
-                ))
+            .is_some_and(|other| {
+                self.snapshot == other.snapshot &&
+                    self.base_token == other.base_token &&
+                    self.quote_token == other.quote_token
             })
     }
 }

@@ -11,7 +11,6 @@ pub const BASE_HELPER: &str = "0xc1b13606fc7227f2554067afb3fb12de75c02d81";
 pub const BASE_ROUTER: &str = "0xf0f0f0f0fb0d738452efd03a28e8be14c76d5f73";
 pub const BSC_HELPER: &str = "0x78015e3544d989f0712a0b9986cb05838c3fe06d";
 pub const ROBINHOOD_HELPER: &str = "0x20d24ee45c9b338ef7acf2eede75183b9e2c9e3c";
-pub const PRICING: &str = "0xffffffbb2d432b8acb4c57d556c0c721a431d038";
 pub const PARTNER_ID: u64 = 299;
 
 pub fn helper_for(chain: Chain) -> Result<&'static str, FeedError> {
@@ -30,17 +29,8 @@ pub fn router_for(chain: Chain) -> Result<&'static str, FeedError> {
     }
 }
 
-pub fn pricing_for(chain: Chain) -> Result<&'static str, FeedError> {
-    router_for(chain)?;
-    Ok(PRICING)
-}
-
 fn unsupported_chain(chain: Chain) -> FeedError {
     FeedError::InvalidInput(format!("ElFomoFi is not configured for {chain}"))
-}
-
-fn default_chain() -> Chain {
-    Chain::Base
 }
 
 /// Cumulative raw-token input and output amounts returned by the public helper.
@@ -64,7 +54,6 @@ pub struct Book {
 /// Atomic orderbook state observed at a verified canonical full-block header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
-    #[serde(default = "default_chain")]
     pub chain: Chain,
     pub block_number: u64,
     pub block_hash: Bytes,
@@ -89,15 +78,16 @@ impl Book {
         validate_levels(&self.bids)
     }
 
-    /// Hex-encodes the canonical ASCII router/pair identity expected by Tycho's component model.
+    /// Shared book identity with a stable token orientation.
     pub fn component_id(&self, chain: Chain) -> Result<String, FeedError> {
         let (first, second) = if self.base_token < self.quote_token {
             (&self.base_token, &self.quote_token)
         } else {
             (&self.quote_token, &self.base_token)
         };
-        let router = router_for(chain)?;
-        Ok(hex::encode(format!("elfomofi:{router}:{first}:{second}").as_bytes()))
+        router_for(chain)?;
+        Ok(crate::book::component::pair_component_id(super::PROTOCOL_SYSTEM, first, second)
+            .to_string())
     }
 }
 
@@ -174,8 +164,6 @@ sol! {
     function getAllOrderbooks() external view returns (
         PairOrderbook[] books, uint256 blockNumber, uint256 blockTimestamp
     );
-    function getAmountOut(address from, address to, uint256 amount, address executor, uint256 partnerId)
-        external view returns (uint256 toAmount, uint256 quoteId, bytes data);
 }
 
 pub(crate) fn decode_orderbooks(
@@ -249,31 +237,31 @@ mod tests {
                 Chain::Base,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../protocols/fixtures/elfomofi/base-51169738.hex"
+                    "/../../protocols/fixtures/elfomofi/base-52898481.hex"
                 )),
-                51_169_738,
-                1_789_128_823,
-                10,
+                52898481,
+                1792586309,
+                11,
             ),
             (
                 Chain::Bsc,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../protocols/fixtures/elfomofi/bsc-125861977.hex"
+                    "/../../protocols/fixtures/elfomofi/bsc-128939405.hex"
                 )),
-                125_861_977,
-                1_791_200_531,
-                12,
+                128939405,
+                1792586310,
+                13,
             ),
             (
                 Chain::Robinhood,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../protocols/fixtures/elfomofi/robinhood-80758189.hex"
+                    "/../../protocols/fixtures/elfomofi/robinhood-94288199.hex"
                 )),
-                80_758_189,
-                1_791_200_532,
-                9,
+                94288199,
+                1792586311,
+                10,
             ),
         ];
         for (chain, fixture, number, timestamp, books) in fixtures {
@@ -289,16 +277,6 @@ mod tests {
             )
             .unwrap();
             assert_eq!(snapshots.len(), books);
-            if chain == Chain::Base {
-                assert_eq!(
-                    snapshots
-                        .iter()
-                        .filter(|snapshot| snapshot.book.asks.is_empty() &&
-                            snapshot.book.bids.is_empty())
-                        .count(),
-                    2
-                );
-            }
             for snapshot in snapshots {
                 snapshot.validate().unwrap();
                 assert_eq!(snapshot.chain, chain);
