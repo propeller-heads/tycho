@@ -105,7 +105,7 @@
     },
     "fallback:rfq:liquorice": {
       "contract": "LiquoriceFallbackExecutor",
-      "args": ["0x0000000000000000000000000000000000000000"]
+      "args": ["0x60C0050d60Ca4ce90EB3E52CaE63F1d547b05d5A"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",

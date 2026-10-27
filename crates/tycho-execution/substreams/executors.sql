@@ -108,6 +108,8 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('ethereum', '0x81c7febeed3fd67a5fdcf892d43489091caeb186', ARRAY['rfq:liquorice']),
     ('ethereum', '0x8594ac3486b6c68df5bf5f9add25fdcac69f2588', ARRAY['vm:balancer_v3']),
     ('ethereum', '0x8b2042d7be0be18303464362d39d667ca5e74d42', ARRAY['weth']),
+    ('ethereum', '0x8c54853d51bb615db48fcea9a8cc8257847f1458', ARRAY['fallback:rfq:liquorice']),
+    ('ethereum', '0x8fd1749a1ab8d3b1faa44902f89feb4caeb1df50', ARRAY['rfq:liquorice']),
     ('ethereum', '0x8fd892dd5f8e153fe15cc3a7567e18ed6f7b1e0a', ARRAY['native_wrapper']),
     ('ethereum', '0x93fc40cd88b54f2cbcbf182fa1c78522805b213a', ARRAY['rfq:hashflow']),
     ('ethereum', '0x95ca663a10736a748981139f3071cdb21baac954', ARRAY['liquidity_party', 'vm:liquidityparty']),

@@ -21,6 +21,11 @@
       "settlement_address": "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8",
       "balance_manager_address": "0x56B4720e40dF52C560E520238E34e9C33d57E593"
     },
+    "fallback:rfq:liquorice": {
+      "fallback_router": "0x60C0050d60Ca4ce90EB3E52CaE63F1d547b05d5A",
+      "settlement_address": "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8",
+      "balance_manager_address": "0x56B4720e40dF52C560E520238E34e9C33d57E593"
+    },
     "rfq:native": {
       "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
     }
