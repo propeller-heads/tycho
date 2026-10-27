@@ -10,6 +10,7 @@ use chrono::{Duration, NaiveDateTime};
 use deepsize::DeepSizeOf;
 use metrics::{counter, gauge, histogram};
 use mockall::automock;
+use num_bigint::BigUint;
 use prost::Message;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
@@ -17,6 +18,7 @@ use tycho_common::{
     models::{
         blockchain::{
             Block, BlockAggregatedChanges, BlockTag, DCIUpdate, EntryPoint, TracingParams,
+            TxWithChanges,
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
@@ -675,55 +677,7 @@ where
             .into_iter()
             .map(|(addr, _)| addr)
             .collect::<Vec<_>>();
-        // Construct unkown tokens using rpc
-        let balance_map: HashMap<Address, (Address, Balance)> = msg
-            .txs_with_update
-            .iter()
-            .flat_map(|tx| {
-                tx.protocol_components
-                    .iter()
-                    // Filtering to keep only components with ChangeType::Creation
-                    .filter(|(_, c_change)| c_change.change == ChangeType::Creation)
-                    .filter_map(|(c_id, change)| {
-                        tx.state_updates
-                            .get(&change.id)
-                            .and_then(|state| {
-                                state
-                                    .updated_attributes
-                                    .get("balance_owner")
-                                    .cloned()
-                            })
-                            .or_else(|| {
-                                change
-                                    .contract_addresses
-                                    // TODO: Currently, it's assumed that the pool is always the
-                                    // first contract in the
-                                    // protocol component. This approach is a temporary
-                                    // workaround and needs to be revisited for a more robust
-                                    // solution.
-                                    .first()
-                                    .cloned()
-                                    .or_else(|| Bytes::from_str(&change.id).ok())
-                            })
-                            .map(|owner| (c_id, owner))
-                    })
-                    .filter_map(|(c_id, addr)| {
-                        tx.balance_changes
-                            .get(c_id)
-                            .map(|balances| {
-                                balances
-                                    .iter()
-                                    // We currently only keep the latest created pool for
-                                    // it's token
-                                    .map(move |(token, balance)| {
-                                        (token.clone(), (addr.clone(), balance.balance.clone()))
-                                    })
-                            })
-                    })
-                    .flatten()
-            })
-            .collect::<HashMap<_, _>>();
-        let tf = TokenOwnerStore::new(balance_map);
+        let tf = new_pool_token_owners(&msg.txs_with_update);
         let existing_tokens = self
             .protocol_cache
             .get_tokens(&known_tokens)
@@ -2231,6 +2185,61 @@ impl ExtractorGateway for ExtractorPgGateway {
     }
 }
 
+/// Builds the token owners used to analyze new tokens, from the pools created in `txs`.
+///
+/// A pool's owner is its `balance_owner` attribute, else its first contract address, else its id.
+/// For each token, the owner of the pool with the largest balance is the holder, and the owners of
+/// all its new pools are the candidate pools, largest balance first.
+fn new_pool_token_owners(txs: &[TxWithChanges]) -> TokenOwnerStore {
+    let mut owners: HashMap<Address, Vec<(Address, Balance)>> = HashMap::new();
+    for tx in txs {
+        for (c_id, change) in &tx.protocol_components {
+            if change.change != ChangeType::Creation {
+                continue;
+            }
+            let owner = tx
+                .state_updates
+                .get(&change.id)
+                .and_then(|state| {
+                    state
+                        .updated_attributes
+                        .get("balance_owner")
+                        .cloned()
+                })
+                .or_else(|| {
+                    change
+                        .contract_addresses
+                        // TODO: Currently, it's assumed that the pool is always the first contract
+                        // in the protocol component. This approach is a temporary workaround and
+                        // needs to be revisited for a more robust solution.
+                        .first()
+                        .cloned()
+                        .or_else(|| Bytes::from_str(&change.id).ok())
+                });
+            let (Some(owner), Some(balances)) = (owner, tx.balance_changes.get(c_id)) else {
+                continue;
+            };
+            for (token, balance) in balances {
+                owners
+                    .entry(token.clone())
+                    .or_default()
+                    .push((owner.clone(), balance.balance.clone()));
+            }
+        }
+    }
+
+    let mut holders = HashMap::with_capacity(owners.len());
+    let mut pools = HashMap::with_capacity(owners.len());
+    for (token, mut rows) in owners {
+        rows.sort_by_cached_key(|(_, balance)| {
+            std::cmp::Reverse(BigUint::from_bytes_be(balance.as_ref()))
+        });
+        holders.insert(token.clone(), rows[0].clone());
+        pools.insert(token, rows);
+    }
+    TokenOwnerStore::with_pools(holders, pools)
+}
+
 #[cfg(test)]
 mod test {
     use std::{
@@ -2249,7 +2258,7 @@ mod test {
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
-    use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_common::traits::TokenOwnerFinding;
 
     use super::*;
     use crate::{
@@ -2864,6 +2873,74 @@ mod test {
             ),
             (Bytes::from("0x0000000000000000000000000000000000000002"), 2980881444.0),
         ])
+    }
+
+    fn new_pool(id: &str, owner: &str, token: &Bytes, balance: u64) -> TxWithChanges {
+        TxWithChanges {
+            protocol_components: HashMap::from([(
+                id.to_string(),
+                ProtocolComponent {
+                    id: id.to_string(),
+                    tokens: vec![token.clone()],
+                    contract_addresses: vec![Bytes::from_str(owner).unwrap()],
+                    change: ChangeType::Creation,
+                    ..Default::default()
+                },
+            )]),
+            balance_changes: HashMap::from([(
+                id.to_string(),
+                HashMap::from([(
+                    token.clone(),
+                    ComponentBalance {
+                        token: token.clone(),
+                        // Minimal-length big-endian, as Tycho stores balances.
+                        balance: Bytes::from(num_bigint::BigUint::from(balance).to_bytes_be()),
+                        balance_float: balance as f64,
+                        modify_tx: Bytes::default(),
+                        component_id: id.to_string(),
+                    },
+                )]),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_pool_token_owners_holder_is_largest_and_all_are_pools() {
+        let token = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
+        let small = "0x00000000000000000000000000000000000000aa";
+        let large = "0x00000000000000000000000000000000000000bb";
+        // The larger balance takes more bytes, so a byte-wise pick would choose the small pool.
+        let txs = vec![
+            new_pool("small", small, &token, 0xff),
+            new_pool("large", large, &token, 0x1_0000),
+        ];
+
+        let store = new_pool_token_owners(&txs);
+
+        assert_eq!(
+            store
+                .find_owner(token.clone(), Bytes::from(1u64))
+                .await
+                .unwrap(),
+            Some((
+                Bytes::from_str(large).unwrap(),
+                Bytes::from(num_bigint::BigUint::from(0x1_0000u64).to_bytes_be())
+            ))
+        );
+        assert_eq!(
+            store.find_pools(token).await.unwrap(),
+            vec![
+                (
+                    Bytes::from_str(large).unwrap(),
+                    Bytes::from(num_bigint::BigUint::from(0x1_0000u64).to_bytes_be())
+                ),
+                (
+                    Bytes::from_str(small).unwrap(),
+                    Bytes::from(num_bigint::BigUint::from(0xffu64).to_bytes_be())
+                ),
+            ]
+        );
     }
 
     #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
