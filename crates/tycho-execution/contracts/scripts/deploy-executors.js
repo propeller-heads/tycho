@@ -42,6 +42,7 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
         "fallback:rfq:hashflow",
+        "fallback:rfq:liquorice",
     ],
     "base": [
         "uniswap_v2",
