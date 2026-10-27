@@ -27,7 +27,7 @@ impl ObservedTransfer {
     /// Zero when nothing was sent or the receiver got at least `sent`. Above 10_000 when the
     /// receiver ends with less than it started. Errors if `balance_before + sent` or
     /// `shortfall * 10_000` overflows U256.
-    fn fee_bps(&self) -> Result<U256, String> {
+    pub(crate) fn fee_bps(&self) -> Result<U256, String> {
         let expected_after = self
             .balance_before
             .checked_add(self.sent)

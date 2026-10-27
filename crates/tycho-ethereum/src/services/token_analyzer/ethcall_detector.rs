@@ -28,6 +28,11 @@ use crate::{rpc::EthereumRpcClient, BytesCodec};
 /// a safe upper bound for a single token analysis call.
 const GAS_LIMIT: u64 = 30_000_000;
 
+/// Largest balance difference that counts as rounding, not as a fee, once the settlement splits
+/// what it received into sell legs. Tokens that convert amounts to shares can lose a wei per
+/// transfer, and a slice can be as small as 6_250 wei, where one wei is already over 1 bps.
+const SELL_ROUNDING_WEI: u64 = 2;
+
 /// `TokenAnalyzer` implementation using `eth_call` with bytecode state overrides.
 ///
 /// Injects the Analyzer contract at the token holder's address and the Forwarder contract at the
@@ -116,6 +121,7 @@ impl EthCallDetector {
         };
 
         let recipient = arbitrary_recipient();
+        let pools: Vec<Address> = vec![];
 
         let tx = TransactionRequest::default()
             .from(holder)
@@ -126,7 +132,7 @@ impl EthCallDetector {
                     amount,
                     settlement: self.settlement_contract,
                     recipient,
-                    pools: vec![],
+                    pools: pools.clone(),
                 }
                 .abi_encode()
                 .into(),
@@ -171,13 +177,14 @@ impl EthCallDetector {
         let returns = analyzeCall::abi_decode_returns(raw.as_ref())
             .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))?;
 
-        Self::handle_response(returns, amount, holder)
+        Self::handle_response(returns, amount, holder, &pools)
     }
 
     fn handle_response(
         r: <analyzeCall as SolCall>::Return,
         amount: U256,
         holder: Address,
+        pools: &[Address],
     ) -> Result<(TokenQuality, Option<U256>, Option<U256>), String> {
         if !r.transferInOk {
             return Ok((
@@ -246,6 +253,10 @@ impl EthCallDetector {
                 ))
             }
         };
+        let sell_fee = highest_sell_fee(&r, pools);
+        let tax = sell_fee
+            .as_ref()
+            .map_or(fees, |sell| fees.max(sell.fee_bps));
 
         // Safe: calculate_fee_bps already checked this sum for overflow.
         let computed_balance_after_in = r.balanceBeforeIn + amount;
@@ -258,11 +269,18 @@ impl EthCallDetector {
                     r.balanceAfterIn,
                 )),
                 Some(gas_per_transfer),
-                Some(fees),
+                Some(tax),
             ));
         }
 
-        if r.balanceAfterOut != expected_balance_after_out {
+        // Without sell legs the settlement sends back exactly what it received, so share rounding
+        // cancels out. With them it keeps the difference of two rounded amounts.
+        let settlement_off_by = r
+            .balanceAfterOut
+            .abs_diff(expected_balance_after_out);
+        let allowed =
+            if sell_budget.is_zero() { U256::ZERO } else { U256::from(SELL_ROUNDING_WEI) };
+        if settlement_off_by > allowed {
             return Ok((
                 TokenQuality::bad(format!(
                     "Transferring {middle_amount} out of settlement was expected to leave a \
@@ -270,7 +288,7 @@ impl EthCallDetector {
                     r.balanceAfterOut,
                 )),
                 Some(gas_per_transfer),
-                Some(fees),
+                Some(tax),
             ));
         }
 
@@ -285,7 +303,22 @@ impl EthCallDetector {
                     r.recipientAfter,
                 )),
                 Some(gas_per_transfer),
-                Some(fees),
+                Some(tax),
+            ));
+        }
+
+        if let Some(sell) = sell_fee {
+            return Ok((
+                TokenQuality::bad(format!(
+                    "Transferring {} into pool {:#x} was expected to result in a balance of {} \
+                     but got {}. The token likely takes a fee on transfer.",
+                    r.sellAmount,
+                    sell.pool,
+                    sell.leg.balanceBefore + r.sellAmount,
+                    sell.leg.balanceAfter,
+                )),
+                Some(gas_per_transfer),
+                Some(tax),
             ));
         }
 
@@ -293,12 +326,60 @@ impl EthCallDetector {
             return Ok((
                 TokenQuality::bad("Approval of U256::MAX failed".to_string()),
                 Some(gas_per_transfer),
-                Some(fees),
+                Some(tax),
             ));
         }
 
-        Ok((TokenQuality::Good, Some(gas_per_transfer), Some(fees)))
+        Ok((TokenQuality::Good, Some(gas_per_transfer), Some(tax)))
     }
+}
+
+/// A sell leg whose pool received less than it was sent.
+struct SellFee<'a> {
+    pool: Address,
+    leg: &'a SellLeg,
+    fee_bps: U256,
+}
+
+/// Returns the sell leg with the highest non-zero fee, or `None` when every pool received the
+/// full amount, give or take `SELL_ROUNDING_WEI`. A leg whose transfer failed, or whose fee
+/// overflows U256, tells nothing about a tax and is skipped.
+fn highest_sell_fee<'a>(
+    r: &'a <analyzeCall as SolCall>::Return,
+    pools: &[Address],
+) -> Option<SellFee<'a>> {
+    let mut highest: Option<SellFee> = None;
+    for (pool, leg) in pools.iter().zip(&r.sellLegs) {
+        if !leg.ok {
+            tracing::debug!(?pool, "ethcall: sell leg into pool failed, skipping it");
+            continue;
+        }
+        let transfer = ObservedTransfer {
+            sent: r.sellAmount,
+            balance_before: leg.balanceBefore,
+            balance_after: leg.balanceAfter,
+        };
+        let fee_bps = match transfer.fee_bps() {
+            Ok(fee_bps) => fee_bps,
+            Err(e) => {
+                tracing::debug!(?pool, e, "ethcall: sell leg fee overflows, skipping it");
+                continue;
+            }
+        };
+        // Safe: fee_bps already checked this sum for overflow.
+        let shortfall = (leg.balanceBefore + r.sellAmount).saturating_sub(leg.balanceAfter);
+        if shortfall <= U256::from(SELL_ROUNDING_WEI) {
+            continue;
+        }
+        if !fee_bps.is_zero() &&
+            highest
+                .as_ref()
+                .is_none_or(|h| fee_bps > h.fee_bps)
+        {
+            highest = Some(SellFee { pool: *pool, leg, fee_bps });
+        }
+    }
+    highest
 }
 
 #[cfg(test)]
@@ -357,7 +438,8 @@ mod tests {
     #[test]
     fn handle_response_good_token() {
         let amount = U256::from(1_000_000_u64);
-        let result = EthCallDetector::handle_response(good_return(amount), amount, Address::ZERO);
+        let result =
+            EthCallDetector::handle_response(good_return(amount), amount, Address::ZERO, &[]);
         let (quality, gas, tax) = result.unwrap();
         assert_eq!(quality, TokenQuality::Good);
         assert_eq!(gas, Some(U256::from(27_500_u64))); // (30_000 + 25_000) / 2
@@ -369,10 +451,44 @@ mod tests {
         let amount = U256::from(1_000_000_u64);
         let r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert_eq!(quality, TokenQuality::Good);
         assert_eq!(gas, Some(U256::from(27_500_u64)));
         assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[rstest::rstest]
+    #[case::one_wei_more(1)]
+    #[case::two_wei_less(-2)]
+    fn handle_response_settlement_rounding_with_sells_is_good(#[case] delta: i64) {
+        // Share-based tokens can leave the settlement a wei off after it sends `received - budget`.
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        r.balanceAfterOut = U256::from(500_000_i64 + delta);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_settlement_three_wei_off_with_sells_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        r.balanceAfterOut = U256::from(500_003_u64);
+        let (quality, _, _) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+    }
+
+    #[test]
+    fn handle_response_settlement_one_wei_off_without_sells_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return(amount);
+        r.balanceAfterOut = U256::from(1_u64);
+        let (quality, _, _) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
     }
 
     #[test]
@@ -381,8 +497,107 @@ mod tests {
         let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
         r.balanceAfterOut = U256::ZERO;
         r.recipientAfter = amount;
-        let (quality, _, _) = EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        let (quality, _, _) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
+    }
+
+    fn pools(n: usize) -> Vec<Address> {
+        (1..=n)
+            .map(|i| Address::with_last_byte(i as u8))
+            .collect()
+    }
+
+    #[test]
+    fn handle_response_sell_fee_is_bad_with_tax() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        // Pool 3 keeps only 95% of what it was sent: a 5% sell tax.
+        r.sellLegs[2].balanceAfter = r.sellLegs[2].balanceBefore + U256::from(118_750_u64);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(4)).unwrap();
+        let TokenQuality::Bad { reason } = quality else { panic!("expected Bad, got {quality:?}") };
+        assert!(
+            reason.contains(&format!("{:#x}", pools(4)[2])),
+            "reason must name the pool: {reason}"
+        );
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert_eq!(tax, Some(U256::from(500_u64)));
+    }
+
+    #[test]
+    fn handle_response_failed_sell_leg_is_ignored() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        r.sellLegs[1].ok = false;
+        r.sellLegs[1].balanceAfter = r.sellLegs[1].balanceBefore;
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(4)).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_pool_receiving_more_has_no_fee() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        // A swap-back adds tokens to the pool during the sell.
+        r.sellLegs[0].balanceAfter += U256::from(40_000_u64);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(4)).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_sell_one_wei_short_has_no_fee() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        r.sellLegs[3].balanceAfter -= U256::from(1_u64);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(4)).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_small_sell_two_wei_short_has_no_fee() {
+        // MIN_AMOUNT split over 8 pools: a 2 wei shortfall is 3 bps of a 6_250 wei slice.
+        let amount = U256::from(100_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(6_250_u64), 8);
+        r.sellLegs[5].balanceAfter -= U256::from(2_u64);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(8)).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_small_sell_fee_is_bad() {
+        let amount = U256::from(100_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(6_250_u64), 8);
+        // 1% of 6_250.
+        r.sellLegs[5].balanceAfter -= U256::from(62_u64);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(8)).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(tax, Some(U256::from(99_u64)));
+    }
+
+    #[test]
+    fn handle_response_tax_is_max_of_all_legs() {
+        // 1% inbound fee, then 2% and 3% sell taxes on two of the pools.
+        let amount = U256::from(1_000_000_u64);
+        let received = U256::from(990_000_u64);
+        let sell_amount = U256::from(247_500_u64);
+        let mut r = good_return_with_sells(received, sell_amount, 2);
+        r.balanceAfterIn = received;
+        r.sellLegs[0].balanceAfter = r.sellLegs[0].balanceBefore + U256::from(242_550_u64);
+        r.sellLegs[1].balanceAfter = r.sellLegs[1].balanceBefore + U256::from(240_075_u64);
+        let (quality, _, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &pools(2)).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(tax, Some(U256::from(300_u64)));
     }
 
     #[test]
@@ -391,7 +606,7 @@ mod tests {
         let mut r = good_return(amount);
         r.transferInOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_none());
         assert!(tax.is_none());
@@ -403,7 +618,7 @@ mod tests {
         let mut r = good_return(amount);
         r.transferOutOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_none());
         assert!(tax.is_none());
@@ -415,7 +630,7 @@ mod tests {
         let mut r = good_return(amount);
         r.approvalOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         assert!(tax.is_some());
@@ -430,7 +645,7 @@ mod tests {
         r.balanceAfterIn = received;
         r.recipientAfter = received; // recipient gets what settlement received
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         // Fee should be ~100 bps (1%)
@@ -447,7 +662,7 @@ mod tests {
         r.balanceAfterOut = U256::from(50_000_u64);
         r.recipientAfter = U256::from(990_000_u64);
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         assert_eq!(tax, Some(U256::from(100_u64)));
@@ -459,7 +674,7 @@ mod tests {
         let mut r = good_return(amount);
         r.balanceBeforeIn = U256::MAX;
         r.balanceAfterIn = U256::MAX;
-        let (quality, gas, tax) = EthCallDetector::handle_response(r, amount, Address::ZERO)
+        let (quality, gas, tax) = EthCallDetector::handle_response(r, amount, Address::ZERO, &[])
             .expect("a balance near U256::MAX must yield a Bad verdict, not an error");
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert_eq!(gas, Some(U256::from(27_500_u64)));
@@ -473,7 +688,7 @@ mod tests {
         r.balanceAfterIn = amount + U256::from(1_u64);
         r.recipientAfter = amount + U256::from(1_u64);
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(r, amount, Address::ZERO, &[]).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert_eq!(gas, Some(U256::from(27_500_u64)));
         assert_eq!(tax, Some(U256::ZERO));
