@@ -3079,6 +3079,53 @@ mod test {
         assert_eq!(*committed.lock().unwrap(), vec![3, 4]);
     }
 
+    #[tokio::test]
+    async fn test_extractor_promoted_during_its_cursor_read_takes_over_from_the_newer_cursor() {
+        let (channels, writer) = WriterChannels::follower();
+        let channels = Arc::new(channels);
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        let cursor_reads = AtomicUsize::new(0);
+        let promote_on_read = channels.clone();
+        gw.expect_get_cursor()
+            .returning(move || {
+                // The former leader commits blocks 2 and 3 after the first read.
+                let height = match cursor_reads.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        promote_on_read.promote();
+                        1
+                    }
+                    _ => 3,
+                };
+                Ok((b"cursor".to_vec(), crate::testing::block(height).hash))
+            });
+        gw.expect_get_block().returning(|hash| {
+            (1..=3)
+                .map(crate::testing::block)
+                .find(|block| block.hash == hash)
+                .ok_or_else(|| StorageError::NotFound("Block".into(), hash.to_string()))
+        });
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let committed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let committed_clone = committed.clone();
+        gw.expect_advance()
+            .returning(move |changes, _, _, _| {
+                committed_clone
+                    .lock()
+                    .unwrap()
+                    .push(changes.block.number);
+                Ok(())
+            });
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
+
+        process_trailing_blocks(&extractor, 2..=6).await;
+        wait_for_commits(&extractor).await;
+
+        assert_eq!(*committed.lock().unwrap(), vec![4]);
+    }
+
     fn following_gateway() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
