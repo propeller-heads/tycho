@@ -44,6 +44,7 @@ const deploy_protocols = {
         "fallback:rfq:hashflow",
     ],
     "base": [
+        "propamm:elfomofi",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
@@ -86,6 +87,7 @@ const deploy_protocols = {
         "fallback:rfq:metric"
     ],
     "bsc": [
+        "propamm:elfomofi",
         "ring_swap_v2",
         "uniswap_v2",
         "pancakeswap_v2",
@@ -106,6 +108,7 @@ const deploy_protocols = {
         "native_wrapper",
     ],
     "robinhood": [
+        "propamm:elfomofi",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",

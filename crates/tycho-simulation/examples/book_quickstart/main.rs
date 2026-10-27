@@ -78,7 +78,19 @@ struct Cli {
     tvl_threshold: f64,
     #[arg(long, default_value = "ethereum")]
     chain: Chain,
-    /// Disable the pAMM book feeds (Metric), keeping the RFQ venues
+    /// Include ElFomoFi books on supported chains.
+    #[arg(long, default_value_t = false)]
+    enable_elfomofi: bool,
+    /// HTTP RPC endpoint on --chain, used by ElFomoFi and swap simulation.
+    #[arg(long, env = "RPC_URL", hide_env_values = true)]
+    rpc_url: Option<String>,
+    /// WebSocket RPC endpoint on --chain for new block heads.
+    #[arg(long, env = "WS_RPC_URL", hide_env_values = true)]
+    ws_rpc_url: Option<String>,
+    /// Poll ElFomoFi books over HTTP instead of subscribing to new block heads.
+    #[arg(long, default_value_t = false)]
+    book_polling: bool,
+    /// Disable the pAMM book feeds, keeping the RFQ venues.
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
     /// Publish each RFQ venue as one component for every pair it prices, which a route may take
@@ -88,6 +100,12 @@ struct Cli {
 }
 
 impl Cli {
+    fn elfomofi_enabled(&self) -> bool {
+        self.enable_elfomofi &&
+            !self.disable_pamm &&
+            matches!(self.chain, Chain::Base | Chain::Bsc | Chain::Robinhood)
+    }
+
     fn with_defaults(mut self) -> Self {
         // By default, we request quotes for USDC to WETH on whatever chain we choose
 
@@ -95,6 +113,8 @@ impl Cli {
             self.buy_token = Some(match self.chain {
                 Chain::Ethereum => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 Chain::Base => "0x4200000000000000000000000000000000000006".to_string(),
+                Chain::Bsc => "0x2170Ed0880ac9A755fd29B2688956BD959F933F8".to_string(),
+                Chain::Robinhood => "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".to_string(),
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \
@@ -109,6 +129,8 @@ impl Cli {
             self.sell_token = Some(match self.chain {
                 Chain::Ethereum => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 Chain::Base => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
+                Chain::Bsc => "0x55d398326f99059fF775485246999027B3197955".to_string(),
+                Chain::Robinhood => "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168".to_string(),
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \
@@ -130,11 +152,12 @@ async fn main() {
         .with_target(false)
         .init();
 
+    dotenv().ok();
     let cli = Cli::parse().with_defaults();
+    let enable_elfomofi = cli.elfomofi_enabled();
 
     let chain = cli.chain;
 
-    dotenv().expect("Missing .env file");
     let tycho_url = env::var("TYCHO_URL").unwrap_or_else(|_| {
         get_default_url(&chain)
             .unwrap_or_else(|| panic!("Unknown URL for chain {chain}", chain = cli.chain))
@@ -156,7 +179,7 @@ async fn main() {
         native_key.is_none()
     {
         if cli.disable_pamm {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run Metric on its own.");
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run the pAMM feeds.");
         } else {
             println!(
                 "No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n"
@@ -213,7 +236,7 @@ async fn main() {
         .expect("Failed to get default SwapEncoderRegistry");
     let encoder = TychoRouterEncoderBuilder::new()
         .chain(chain)
-        .swap_encoder_registry(swap_encoder_registry)
+        .swap_encoder_registry(swap_encoder_registry.clone())
         .build()
         .expect("Failed to build encoder");
 
@@ -230,8 +253,7 @@ async fn main() {
 
     let book_config =
         BookFeedConfig { chain, tokens: Arc::new(rfq_tokens), min_tvl_usd: cli.tvl_threshold };
-    // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself, so it is the
-    // one venue a chain without a curated set can still serve.
+    // RFQ feeds price TVL through these stablecoins; pAMMs handle their own TVL.
     let usd_quote_tokens = usd_stablecoins_for_chain(chain).map(Arc::new);
     if usd_quote_tokens.is_none() {
         println!(
@@ -317,7 +339,7 @@ async fn main() {
     if !cli.disable_pamm {
         println!("Setting up Metric feed...\n");
         match env::var("METRIC_API_KEY") {
-            Ok(api_key) => match MetricFeedBuilder::new(book_config, api_key).build() {
+            Ok(api_key) => match MetricFeedBuilder::new(book_config.clone(), api_key).build() {
                 Ok(metric_feed) => {
                     feeds
                         .add(metric::PROTOCOL_SYSTEM, metric_feed)
@@ -326,6 +348,28 @@ async fn main() {
                 Err(e) => eprintln!("Skipping Metric feed: {e}"),
             },
             Err(_) => eprintln!("Skipping Metric feed: METRIC_API_KEY not set"),
+        }
+        if enable_elfomofi {
+            use tycho_simulation::pamm::protocols::elfomofi::{self, feed::ElfomofiFeedBuilder};
+
+            if let Some(rpc_url) = &cli.rpc_url {
+                let mut builder = ElfomofiFeedBuilder::new(book_config, rpc_url.clone());
+                if cli.book_polling {
+                    builder = builder.polling();
+                } else if let Some(ws_rpc_url) = &cli.ws_rpc_url {
+                    builder = builder.ws_rpc_url(ws_rpc_url.clone());
+                }
+                match builder.build() {
+                    Ok(feed) => {
+                        feeds
+                            .add(elfomofi::PROTOCOL_SYSTEM, feed)
+                            .expect("each provider is added once");
+                    }
+                    Err(error) => eprintln!("Skipping ElFomoFi feed: {error}"),
+                }
+            } else {
+                eprintln!("Skipping ElFomoFi feed: RPC_URL not set");
+            }
         }
     }
 
@@ -396,6 +440,17 @@ async fn main() {
                             buy_token.symbol
                         );
 
+                        if swap_encoder_registry
+                            .get_encoder(&component.protocol_system)
+                            .is_none()
+                        {
+                            eprintln!(
+                                "No executor configured for {}; continuing with quotes only.",
+                                component.protocol_system
+                            );
+                            continue;
+                        }
+
                         // Clone expected_amount to avoid ownership issues
                         let expected_amount_copy = amount_out.clone();
 
@@ -417,7 +472,11 @@ async fn main() {
                         let provider = ProviderBuilder::default()
                             .with_chain(NamedChain::try_from(chain.id()).expect("Invalid chain"))
                             .wallet(tx_signer)
-                            .connect(&env::var("RPC_URL").expect("RPC_URL env var not set"))
+                            .connect(
+                                cli.rpc_url
+                                    .as_deref()
+                                    .expect("RPC_URL env var not set"),
+                            )
                             .await
                             .expect("Failed to connect provider");
 
@@ -550,19 +609,25 @@ async fn main() {
                                     amount_out_result.gas,
                                 );
 
-                                let encoded_solution = encoder
-                                    .encode_solutions(vec![solution.clone()])
-                                    .expect("Failed to encode router calldata")[0]
-                                    .clone();
+                                let Some(encoded_solution) = encoded_solution_or_skip(
+                                    encoder.encode_solutions(vec![solution.clone()]),
+                                ) else {
+                                    continue;
+                                };
 
-                                let tx = encode_tycho_router_call(
+                                let tx = match encode_tycho_router_call(
                                     chain.id(),
                                     encoded_solution.clone(),
                                     &solution,
                                     chain.native_token().address,
                                     signer.clone(),
-                                )
-                                .expect("Failed to encode router call");
+                                ) {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        eprintln!("Failed to encode router call: {error}");
+                                        continue;
+                                    }
+                                };
 
                                 let swap_request = TransactionRequest {
                                     to: Some(TxKind::Call(Address::from_slice(&tx.to))),
@@ -723,19 +788,25 @@ async fn main() {
                                 );
 
                                 // Encode the swaps of the solution
-                                let encoded_solution = encoder
-                                    .encode_solutions(vec![solution.clone()])
-                                    .expect("Failed to encode router calldata")[0]
-                                    .clone();
+                                let Some(encoded_solution) = encoded_solution_or_skip(
+                                    encoder.encode_solutions(vec![solution.clone()]),
+                                ) else {
+                                    continue;
+                                };
 
-                                let swap_tx = encode_tycho_router_call(
+                                let swap_tx = match encode_tycho_router_call(
                                     chain.id(),
                                     encoded_solution.clone(),
                                     &solution,
                                     chain.native_token().address,
                                     signer.clone(),
-                                )
-                                .expect("Failed to encode router call");
+                                ) {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        eprintln!("Failed to encode router call: {error}");
+                                        continue;
+                                    }
+                                };
 
                                 let swap_request = TransactionRequest {
                                     to: Some(TxKind::Call(Address::from_slice(&swap_tx.to))),
@@ -821,6 +892,24 @@ async fn main() {
         println!("\nWaiting for more price levels... (Press Ctrl+C to exit)");
     }
     eprintln!("Every book feed has ended, exiting.");
+}
+
+fn encoded_solution_or_skip(
+    result: Result<Vec<EncodedSolution>, EncodingError>,
+) -> Option<EncodedSolution> {
+    match result {
+        Ok(solutions) => solutions
+            .into_iter()
+            .next()
+            .or_else(|| {
+                eprintln!("No encoded swap returned; skipping this swap.");
+                None
+            }),
+        Err(error) => {
+            eprintln!("Failed to encode swap: {error}");
+            None
+        }
+    }
 }
 
 // Format token amounts to human-readable values
@@ -1034,4 +1123,83 @@ async fn get_token_balance(
     };
     // Convert the U256 to BigUint
     Ok(BigUint::from_bytes_be(&balance.to_be_bytes::<32>()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_cli_needs_no_new_arguments() {
+        let cli = Cli::try_parse_from(["book_quickstart"])
+            .unwrap()
+            .with_defaults();
+        assert_eq!(cli.chain, Chain::Ethereum);
+        assert!(!cli.elfomofi_enabled());
+
+        let cli = Cli::try_parse_from([
+            "book_quickstart",
+            "--chain",
+            "base",
+            "--sell-amount",
+            "5",
+            "--all-pairs",
+        ])
+        .unwrap();
+        assert_eq!(cli.sell_amount, 5.0);
+        assert!(cli.all_pairs);
+        assert!(!cli.elfomofi_enabled());
+    }
+
+    #[test]
+    fn rpc_configuration_does_not_enable_an_extra_venue() {
+        for chain in ["base", "bsc", "robinhood"] {
+            let cli = Cli::try_parse_from([
+                "book_quickstart",
+                "--chain",
+                chain,
+                "--rpc-url",
+                "http://localhost:8545",
+                "--ws-rpc-url",
+                "ws://localhost:8546",
+                "--book-polling",
+            ])
+            .unwrap();
+            assert!(!cli.elfomofi_enabled());
+        }
+    }
+
+    #[test]
+    fn elfomofi_requires_explicit_enable_on_a_supported_chain() {
+        for chain in ["base", "bsc", "robinhood"] {
+            let cli =
+                Cli::try_parse_from(["book_quickstart", "--chain", chain, "--enable-elfomofi"])
+                    .unwrap();
+            assert!(cli.elfomofi_enabled());
+        }
+        let cli = Cli::try_parse_from(["book_quickstart", "--enable-elfomofi"]).unwrap();
+        assert!(!cli.elfomofi_enabled());
+    }
+
+    #[test]
+    fn disabling_pamm_still_disables_explicit_elfomofi() {
+        let cli = Cli::try_parse_from([
+            "book_quickstart",
+            "--chain",
+            "base",
+            "--enable-elfomofi",
+            "--disable-pamm",
+        ])
+        .unwrap();
+        assert!(!cli.elfomofi_enabled());
+    }
+
+    #[test]
+    fn unavailable_encoding_is_skipped() {
+        assert!(encoded_solution_or_skip(Err(EncodingError::FatalError(
+            "No executor configured".into()
+        )))
+        .is_none());
+        assert!(encoded_solution_or_skip(Ok(Vec::new())).is_none());
+    }
 }

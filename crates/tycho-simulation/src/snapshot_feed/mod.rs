@@ -36,10 +36,14 @@ pub use crate::snapshot_feed::publisher::Publisher;
 #[cfg(feature = "book-feeds")]
 pub mod errors;
 #[cfg(feature = "book-feeds")]
+pub(crate) mod evm_heads;
+#[cfg(feature = "book-feeds")]
 mod failures;
 #[cfg(feature = "book-feeds")]
 pub mod http;
 mod publisher;
+#[cfg(feature = "book-feeds")]
+pub(crate) mod trigger;
 #[cfg(feature = "book-feeds")]
 pub mod ws;
 

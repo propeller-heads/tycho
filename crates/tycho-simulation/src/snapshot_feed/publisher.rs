@@ -48,9 +48,19 @@ impl<T> Publisher<T> {
     /// staleness and the last receiver leaving can cut into. Work a feed does elsewhere runs to
     /// its end before either is noticed.
     pub async fn publishing<E>(
-        mut self,
+        self,
         max_age: Option<Duration>,
         snapshots: impl Stream<Item = Result<T, E>>,
+    ) -> Result<(), E> {
+        self.publishing_updates(max_age, snapshots.map(|snapshot| snapshot.map(Some)))
+            .await
+    }
+
+    /// Publishes snapshots or explicitly withdraws them when a trigger becomes unavailable.
+    pub(crate) async fn publishing_updates<E>(
+        mut self,
+        max_age: Option<Duration>,
+        snapshots: impl Stream<Item = Result<Option<T>, E>>,
     ) -> Result<(), E> {
         tokio::pin!(snapshots);
         loop {
@@ -58,7 +68,8 @@ impl<T> Publisher<T> {
                 .next_snapshot(max_age, snapshots.next())
                 .await
             {
-                Some(Ok(snapshot)) => self.publish(snapshot),
+                Some(Ok(Some(snapshot))) => self.publish(snapshot),
+                Some(Ok(None)) => withdraw(&self.tx, &mut self.published_at),
                 Some(Err(e)) => return Err(e),
                 None => return Ok(()),
             }
@@ -73,11 +84,11 @@ impl<T> Publisher<T> {
     /// never cuts the wait short — only the stream, or the last receiver leaving, decides when
     /// this returns — because a snapshot goes stale by the clock rather than by anything the feed
     /// is waiting for.
-    async fn next_snapshot<E>(
+    async fn next_snapshot<U, E>(
         &mut self,
         max_age: Option<Duration>,
-        next: impl Future<Output = Option<Result<T, E>>>,
-    ) -> Option<Result<T, E>> {
+        next: impl Future<Output = Option<Result<U, E>>>,
+    ) -> Option<Result<U, E>> {
         tokio::pin!(next);
         // Split so the wait can watch the receivers while the deadline still updates what is
         // published.
@@ -95,7 +106,10 @@ impl<T> Publisher<T> {
 
                 // Nothing is published any more, so nothing else can go stale before the
                 // snapshot this is still waiting for arrives.
-                next.await
+                select! {
+                    _ = tx.closed() => None,
+                    out = &mut next => out,
+                }
             }
             out = &mut next => out,
         }
