@@ -37,7 +37,7 @@ RUN resolve_base() { \
         case "$1" in \
             bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3|ethereum-communityv3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
@@ -88,7 +88,7 @@ RUN resolve_base() { \
         case "$1" in \
             bsc-lunarbase) echo "base-lunarbase" ;; \
             base-alienbase-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
-            robinhood-sushiswap-v3|robinhood-robinswap-v3) echo "ethereum-uniswap-v3-logs-only" ;; \
+            robinhood-sushiswap-v3|robinhood-robinswap-v3|ethereum-communityv3) echo "ethereum-uniswap-v3-logs-only" ;; \
             robinhood-ramses-v3) echo "polygon-ramses-v3" ;; \
             robinhood-gigadex-v3) echo "ethereum-pancakeswap-v3" ;; \
             robinhood-ekubo-v3|bsc-ekubo-v3|base-ekubo-v3) echo "ethereum-ekubo-v3" ;; \
