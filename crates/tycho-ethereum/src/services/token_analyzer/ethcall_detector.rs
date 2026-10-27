@@ -19,7 +19,7 @@ use tycho_common::{
 
 use super::{
     arbitrary_recipient,
-    bytecode::{analyzeCall, ANALYZER_BYTECODE, FORWARDER_BYTECODE},
+    bytecode::{analyzeCall, SellLeg, ANALYZER_BYTECODE, FORWARDER_BYTECODE},
     calculate_fee_bps, map_block_tag, ObservedTransfer,
 };
 use crate::{rpc::EthereumRpcClient, BytesCodec};
@@ -121,9 +121,15 @@ impl EthCallDetector {
             .from(holder)
             .to(holder)
             .input(TransactionInput::both(
-                analyzeCall { token, amount, settlement: self.settlement_contract, recipient }
-                    .abi_encode()
-                    .into(),
+                analyzeCall {
+                    token,
+                    amount,
+                    settlement: self.settlement_contract,
+                    recipient,
+                    pools: vec![],
+                }
+                .abi_encode()
+                .into(),
             ))
             .gas_limit(GAS_LIMIT);
 
@@ -199,12 +205,23 @@ impl EthCallDetector {
 
         let gas_per_transfer = (r.gasIn + r.gasOut) / U256::from(2);
 
-        // The Solidity guard ensures balanceAfterIn >= balanceBeforeIn when transferInOk = true,
-        // so this subtraction is always safe.
+        // The settlement keeps `sellAmount` per sell leg and sends the rest to the recipient.
+        // The Analyzer sizes the budget at half of what arrived, so neither subtraction
+        // underflows and the multiplication does not overflow for a well-formed response.
+        let sell_budget = r
+            .sellAmount
+            .checked_mul(U256::from(r.sellLegs.len()))
+            .ok_or("sell budget overflow")?;
+        // The Solidity guard ensures balanceAfterIn >= balanceBeforeIn when transferInOk = true.
         let middle_amount = r
             .balanceAfterIn
             .checked_sub(r.balanceBeforeIn)
+            .and_then(|received| received.checked_sub(sell_budget))
             .ok_or("settlement balance underflow after successful transfer in")?;
+        let expected_balance_after_out = r
+            .balanceBeforeIn
+            .checked_add(sell_budget)
+            .ok_or("settlement balance overflow after transfer out")?;
 
         // A U256 overflow in the fee maths is token state (a balance near U256::MAX), not an RPC
         // fault. Both transfers ran, so gas is known; the fee is not.
@@ -245,12 +262,12 @@ impl EthCallDetector {
             ));
         }
 
-        if r.balanceAfterOut != r.balanceBeforeIn {
+        if r.balanceAfterOut != expected_balance_after_out {
             return Ok((
                 TokenQuality::bad(format!(
-                    "Transferring {amount} out of settlement was expected to restore the \
-                     original balance of {} but got {}.",
-                    r.balanceBeforeIn, r.balanceAfterOut,
+                    "Transferring {middle_amount} out of settlement was expected to leave a \
+                     balance of {expected_balance_after_out} but got {}.",
+                    r.balanceAfterOut,
                 )),
                 Some(gas_per_transfer),
                 Some(fees),
@@ -310,7 +327,31 @@ mod tests {
             recipientAfter: amount,
             gasIn: U256::from(30_000_u64),
             gasOut: U256::from(25_000_u64),
+            sellAmount: U256::ZERO,
+            sellLegs: vec![],
         }
+    }
+
+    // Return value for a token without any tax, where the settlement kept `sell_amount` for each
+    // of `pools` sell legs and every pool received it in full.
+    fn good_return_with_sells(
+        amount: U256,
+        sell_amount: U256,
+        pools: usize,
+    ) -> <analyzeCall as SolCall>::Return {
+        let budget = sell_amount * U256::from(pools);
+        let mut r = good_return(amount);
+        r.balanceAfterOut = budget;
+        r.recipientAfter = amount - budget;
+        r.sellAmount = sell_amount;
+        r.sellLegs = (0..pools)
+            .map(|i| SellLeg {
+                ok: true,
+                balanceBefore: U256::from(i * 7),
+                balanceAfter: U256::from(i * 7) + sell_amount,
+            })
+            .collect();
+        r
     }
 
     #[test]
@@ -321,6 +362,27 @@ mod tests {
         assert_eq!(quality, TokenQuality::Good);
         assert_eq!(gas, Some(U256::from(27_500_u64))); // (30_000 + 25_000) / 2
         assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_sell_budget_stays_in_settlement() {
+        let amount = U256::from(1_000_000_u64);
+        let r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        let (quality, gas, tax) =
+            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(gas, Some(U256::from(27_500_u64)));
+        assert_eq!(tax, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn handle_response_sell_budget_sent_to_recipient_is_bad() {
+        let amount = U256::from(1_000_000_u64);
+        let mut r = good_return_with_sells(amount, U256::from(125_000_u64), 4);
+        r.balanceAfterOut = U256::ZERO;
+        r.recipientAfter = amount;
+        let (quality, _, _) = EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
     }
 
     #[test]
