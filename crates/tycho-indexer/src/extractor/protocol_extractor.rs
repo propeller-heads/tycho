@@ -184,10 +184,8 @@ where
         protocol_types: HashMap<String, ProtocolType>,
         token_pre_processor: T,
         post_processor: Option<fn(BlockChanges) -> BlockChanges>,
-        dci_plugin: Option<E>,
         writer: WriterStatus,
     ) -> Result<Self, ExtractionError> {
-        let dci_plugin = dci_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
         // Read before the cursor. A process that becomes the leader after this read starts
         // following, and takes over from the cursor the former leader left.
         let commit_mode = match writer.role() {
@@ -235,7 +233,7 @@ where
                     post_processor,
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
-                    dci_plugin,
+                    dci_plugin: None,
                     writer,
                     commit_mode: Mutex::new(commit_mode),
                 }
@@ -282,7 +280,7 @@ where
                     post_processor,
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
-                    dci_plugin,
+                    dci_plugin: None,
                     writer,
                     commit_mode: Mutex::new(commit_mode),
                 }
@@ -292,6 +290,16 @@ where
 
         res.ensure_protocol_types().await?;
         Ok(res)
+    }
+
+    /// Makes `plugin` process each block before the extractor buffers it.
+    ///
+    /// Load the plugin's state from the database after [`Self::new`] read the cursor. The
+    /// stream then starts at or below the block of the plugin's state, and the plugin sees again
+    /// the blocks its state already holds, instead of missing the blocks between the two reads.
+    pub fn with_dci_plugin(mut self, plugin: E) -> Self {
+        self.dci_plugin = Some(Arc::new(Mutex::new(plugin)));
+        self
     }
 
     async fn update_cursor(&self, cursor: String) {
@@ -2663,7 +2671,6 @@ mod test {
             protocol_types,
             preprocessor,
             None,
-            None,
             writer,
         )
         .await
@@ -4024,7 +4031,6 @@ mod test {
             HashMap::from([("pt_1".to_string(), ProtocolType::default())]),
             preprocessor,
             None,
-            None,
             WriterStatus::leader(),
         )
         .await
@@ -4158,7 +4164,6 @@ mod test {
             protocol_cache,
             HashMap::from([("pt_1".to_string(), ProtocolType::default())]),
             preprocessor,
-            None,
             None,
             WriterStatus::leader(),
         )
@@ -6920,7 +6925,6 @@ mod test_serial_db {
                 protocol_types,
                 get_mocked_token_pre_processor(),
                 None,
-                None,
                 WriterStatus::leader(),
             )
                 .await
@@ -7111,7 +7115,6 @@ mod test_serial_db {
                 protocol_cache,
                 protocol_types,
                 preprocessor,
-                None,
                 None,
                 WriterStatus::leader(),
             )
@@ -7321,7 +7324,6 @@ mod test_serial_db {
                 protocol_cache,
                 protocol_types,
                 preprocessor,
-                None,
                 None,
                 WriterStatus::leader(),
             )

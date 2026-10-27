@@ -104,6 +104,11 @@ contract state and injects it back into `BlockChanges`. Two implementations exis
 `DynamicContractIndexer` (`dci.rs` — generic EVM tracing) and `HooksDCI` (`hooks/hook_dci.rs` —
 UniswapV4-style hooks with permission detection and protocol-specific metadata via `integrations/`).
 When no DCI is configured the call is a no-op.
+`ExtractorFactory::build_runner` adds the plugin (`ProtocolExtractor::with_dci_plugin`) after the
+extractor read its cursor, so the plugin loads its state from the database after that read. On a
+follower the leader can commit in between: the stream then starts below the block of the plugin's
+state, and the plugin sees those blocks again (it does not trace again an entry point with a stored
+result) instead of missing them.
 
 ### Revert handling
 
