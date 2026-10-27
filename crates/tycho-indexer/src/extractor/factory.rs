@@ -359,9 +359,9 @@ impl ExtractorFactory {
                 self.token_pre_processor.clone(),
                 post_processor,
                 dci_plugin,
+                self.writer_status.clone(),
             )
-            .await?
-            .with_writer_status(self.writer_status.clone()),
+            .await?,
         );
 
         // Ensure the spkg file is present (download from S3 if needed).
