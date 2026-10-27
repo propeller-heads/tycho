@@ -18,8 +18,8 @@ services/
   ├─ token_pre_processor.rs   Fetches symbol + decimals; gracefully handles non-standard tokens
   ├─ token_analyzer/
   │    ├─ mod.rs              Public API; re-exports EthCallDetector (primary) and TraceCallDetector (deprecated)
-  │    ├─ ethcall_detector.rs EthCallDetector — simulates token transfers via eth_call with bytecode state overrides; works on all EVM chains
-  │    ├─ onchain_owners.rs   OnChainTokenOwners — TokenOwnerFinding that checks candidate holders with balanceOf at the analysis block
+  │    ├─ ethcall_detector.rs EthCallDetector — simulates token transfers via eth_call with bytecode state overrides; works on all EVM chains (see Token analysis)
+  │    ├─ onchain_owners.rs   OnChainTokenOwners — TokenOwnerFinding that picks each pool's holder among its candidate addresses with balanceOf at the analysis block
   │    ├─ trace_detector.rs   TraceCallDetector — legacy trace_callMany approach; deprecated, use EthCallDetector
   │    ├─ common.rs           Shared helpers (token quality classification, transfer cost parsing)
   │    └─ bytecode.rs         Compiled bytecode + ABI for Analyzer and Forwarder Solidity contracts
@@ -31,6 +31,25 @@ services/
 
 test_fixtures.rs        Shared RPC/account fixtures, also consumed by tycho-test
 ```
+
+## Token analysis
+
+`EthCallDetector` runs one `eth_call` per token, two when the first holder cannot move the token
+(see below). It injects the Analyzer (`contracts/Analyzer.sol`) at
+the holder from `TokenOwnerFinding::find_owner` and the Forwarder at the settlement contract. The
+call moves tokens holder → settlement → a fresh recipient. The settlement keeps half of what it
+received and sells equal slices of it into up to 8 candidate pools: the holder, then
+`TokenOwnerFinding::find_pools`, largest balance first. A pool that receives less than its slice
+shows a tax that only applies to transfers into that pool (sell taxes, pair-only taxes). The tax is
+the highest fee of all transfers; any fee makes the verdict Bad. A sell leg that reverts or uses up
+its 2M gas gives no information and is skipped. A sell leg shortfall of up to 2 wei is rounding,
+not a fee, and so is a settlement balance up to 2 wei off once there are sell legs (share tokens
+round the split). The holder is often the token's own pair; a token that calls its pair during a
+transfer then fails, because the pair runs the Analyzer code. On such a transfer failure the
+detector runs once more with the next pool (at least `MIN_AMOUNT`) as holder. Callers fill the
+candidate pools from the new pools of a block (indexer) or from every `get_token_owners` row
+(analysis cron). The cron passes each pool's candidate addresses to `OnChainTokenOwners`, which takes
+the candidate with the largest `balanceOf` as the pool's address and its on-chain balance.
 
 ## Module Dependencies
 
