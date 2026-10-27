@@ -1445,7 +1445,6 @@ async fn process_update(
                 before_block,
                 &block,
                 router_overwrites_data.clone(),
-                None,
             )
             .await
             .map_err(|(e, _, _)| e)?,
@@ -1453,15 +1452,9 @@ async fn process_update(
     }
     if !after_block.is_empty() {
         results.extend(
-            simulate_swap_transaction(
-                &rpc_tools,
-                after_block,
-                &block,
-                router_overwrites_data,
-                None,
-            )
-            .await
-            .map_err(|(e, _, _)| e)?,
+            simulate_swap_transaction(&rpc_tools, after_block, &block, router_overwrites_data)
+                .await
+                .map_err(|(e, _, _)| e)?,
         );
     }
 
@@ -1755,7 +1748,7 @@ async fn process_state(
             .map(|perm| (perm[0].clone(), perm[1].clone()))
             .collect(),
     };
-    let account_overwrites = simulation_overwrites(state.as_ref());
+    let account_overwrites = simulation_overwrites(state.as_ref(), block.header.number);
     let mut execution_infos = HashMap::new();
     for (i, (token_in, token_out)) in swap_directions.iter().enumerate() {
         debug!(
@@ -2217,14 +2210,27 @@ fn record_swaps_without_simulation_overrides(
     }
 }
 
-/// The account overwrites a state's swaps are simulated with: for a price level stream state, the
-/// account state Titan priced its quote on. `None` for any other state, and for a price level
-/// stream state that carries no simulation overrides.
-fn simulation_overwrites(state: &dyn ProtocolSim) -> Option<AddressHashMap<AccountOverride>> {
+/// The account overwrites a state's swaps are simulated with at `block_number`: for a price level
+/// stream state, the account state Titan priced its quote on. `None` for any other state, and for
+/// a price level stream state that carries no simulation overrides.
+fn simulation_overwrites(
+    state: &dyn ProtocolSim,
+    block_number: u64,
+) -> Option<AddressHashMap<AccountOverride>> {
     let overrides = state
         .as_any()
         .downcast_ref::<PriceLevelStreamState>()?
         .simulation_overrides()?;
+    // A venue's freshness guard can reject overrides built for another block, so a revert of
+    // such a swap may not be the overrides' fault.
+    if let Some(overrides_block) = overrides.block_number {
+        if overrides_block != block_number {
+            debug!(
+                overrides_block,
+                block_number, "Simulation overrides name a different block than the swap's"
+            );
+        }
+    }
     Some(pamm_account_overwrites(overrides))
 }
 
