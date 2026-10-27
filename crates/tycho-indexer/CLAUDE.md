@@ -190,8 +190,11 @@ tries the `LeaderLock` once:
 
 ### Leader and follower extractors
 
-Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
-set by `ExtractorFactory::with_writer_status`; without it the extractor is the only writer):
+Each extractor has a `CommitMode` driven by its `WriterStatus` (given to `ProtocolExtractor::new`
+by the factory, set by `ExtractorFactory::with_writer_status`; `WriterStatus::leader()` for the
+only writer). `new` reads the role before the cursor: a role only changes from follower to leader,
+so a process that becomes the leader after that read follows and then takes over from the cursor
+the former leader left, instead of committing again from an old cursor:
 
 - **Committing** (leader): the path above.
 - **Following**: drained blocks go into the committing section but are never written. They are

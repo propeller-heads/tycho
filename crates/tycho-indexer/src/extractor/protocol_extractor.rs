@@ -170,6 +170,8 @@ where
     T: TokenPreProcessor,
     E: ExtractorExtension,
 {
+    /// Builds an extractor that resumes after the block of its cursor, and commits or follows
+    /// according to `writer`.
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         gateway: G,
@@ -183,8 +185,15 @@ where
         token_pre_processor: T,
         post_processor: Option<fn(BlockChanges) -> BlockChanges>,
         dci_plugin: Option<E>,
+        writer: WriterStatus,
     ) -> Result<Self, ExtractionError> {
         let dci_plugin = dci_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
+        // Read before the cursor. A process that becomes the leader after this read starts
+        // following, and takes over from the cursor the former leader left.
+        let commit_mode = match writer.role() {
+            Role::Leader => CommitMode::Committing { floor: None },
+            Role::Follower => CommitMode::Following,
+        };
 
         // Register both label sets at zero so the first miss registers as a rise for
         // increase(); a series born at a nonzero value looks flat and no alert fires.
@@ -227,8 +236,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
-                    writer: WriterStatus::leader(),
-                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
+                    writer,
+                    commit_mode: Mutex::new(commit_mode),
                 }
             }
             Ok((cursor, block_hash)) => {
@@ -274,8 +283,8 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
-                    writer: WriterStatus::leader(),
-                    commit_mode: Mutex::new(CommitMode::Committing { floor: None }),
+                    writer,
+                    commit_mode: Mutex::new(commit_mode),
                 }
             }
             Err(err) => return Err(ExtractionError::Setup(err.to_string())),
@@ -283,18 +292,6 @@ where
 
         res.ensure_protocol_types().await?;
         Ok(res)
-    }
-
-    /// Makes the extractor commit or follow according to `writer`. Without this call the
-    /// extractor commits as the only writer.
-    pub fn with_writer_status(mut self, writer: WriterStatus) -> Self {
-        let mode = match writer.role() {
-            Role::Leader => CommitMode::Committing { floor: None },
-            Role::Follower => CommitMode::Following,
-        };
-        self.commit_mode = Mutex::new(mode);
-        self.writer = writer;
-        self
     }
 
     async fn update_cursor(&self, cursor: String) {
@@ -2638,10 +2635,11 @@ mod test {
 
     const EXTRACTOR_NAME: &str = "TestExtractor";
     const TEST_PROTOCOL: &str = "TestProtocol";
-    async fn create_extractor_with_chain_and_batch_size(
+    async fn create_extractor_with_writer(
         gw: MockExtractorGateway,
         batch_size: usize,
         chain: Chain,
+        writer: WriterStatus,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
         let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
@@ -2666,9 +2664,19 @@ mod test {
             preprocessor,
             None,
             None,
+            writer,
         )
         .await
         .expect("Failed to create extractor")
+    }
+
+    async fn create_extractor_with_chain_and_batch_size(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+        chain: Chain,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        create_extractor_with_writer(gw, batch_size, chain, WriterStatus::leader()).await
     }
 
     async fn create_extractor_with_batch_size(
@@ -2928,9 +2936,7 @@ mod test {
     async fn test_promoted_follower_at_the_chain_head_takes_over_at_head_priority() {
         let (gw, committed) = priority_gateway(1);
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         for number in 1..=4 {
             extractor
                 .process_full_block_message(
@@ -2979,9 +2985,7 @@ mod test {
         gw.expect_advance().never();
         gw.expect_cache_tokens().never();
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
 
         let msg = process_trailing_blocks(&extractor, 1..=4)
             .await
@@ -3016,9 +3020,7 @@ mod test {
                     .extend(tokens.iter().map(|t| t.symbol.clone()))
             });
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         let mut first = trailing_block(1);
         let usdc = Bytes::from_str("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         first
@@ -3042,9 +3044,7 @@ mod test {
     async fn test_promoted_follower_commits_only_blocks_above_the_former_leaders_height() {
         let (gw, committed) = takeover_gateway(2);
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         process_trailing_blocks(&extractor, 1..=5).await;
         assert_eq!(committing_numbers(&extractor).await, vec![1, 2, 3]);
         assert!(committed.lock().unwrap().is_empty());
@@ -3108,9 +3108,8 @@ mod test {
         ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>,
     ) {
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(following_gateway())
-            .await
-            .with_writer_status(writer);
+        let extractor =
+            create_extractor_with_writer(following_gateway(), 1, Chain::Ethereum, writer).await;
         (channels, extractor)
     }
 
@@ -3201,9 +3200,7 @@ mod test {
     async fn test_takeover_fails_when_retained_blocks_do_not_continue_the_database() {
         let (gw, committed) = takeover_gateway(1);
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         process_trailing_blocks(&extractor, 1..=5).await;
         // Lose block 2: the database ends at block 1 and the retained blocks start at 3.
         extractor
@@ -3230,9 +3227,7 @@ mod test {
         floor.hash = Bytes::from(0xdead_u64).lpad(32, 0);
         let (gw, committed) = takeover_gateway_at(floor);
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         process_trailing_blocks(&extractor, 1..=5).await;
 
         channels.promote();
@@ -3251,9 +3246,7 @@ mod test {
     async fn test_promoted_lagging_follower_drops_blocks_the_former_leader_committed() {
         let (gw, committed) = takeover_gateway(5);
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(gw)
-            .await
-            .with_writer_status(writer);
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         process_trailing_blocks(&extractor, 1..=3).await;
 
         channels.promote();
@@ -3985,6 +3978,7 @@ mod test {
             preprocessor,
             None,
             None,
+            WriterStatus::leader(),
         )
         .await
         .expect("Extractor init failed");
@@ -4119,6 +4113,7 @@ mod test {
             preprocessor,
             None,
             None,
+            WriterStatus::leader(),
         )
         .await
         .expect("extractor init failed");
@@ -4173,9 +4168,8 @@ mod test {
     #[tokio::test]
     async fn test_follower_partial_block_reports_the_leaders_committed_height() {
         let (channels, writer) = WriterChannels::follower();
-        let extractor = create_extractor(following_gateway())
-            .await
-            .with_writer_status(writer);
+        let extractor =
+            create_extractor_with_writer(following_gateway(), 1, Chain::Ethereum, writer).await;
         channels.leader_committed(3);
 
         let msg = extractor
@@ -6880,6 +6874,7 @@ mod test_serial_db {
                 get_mocked_token_pre_processor(),
                 None,
                 None,
+                WriterStatus::leader(),
             )
                 .await
                 .expect("Failed to create extractor");
@@ -7071,6 +7066,7 @@ mod test_serial_db {
                 preprocessor,
                 None,
                 None,
+                WriterStatus::leader(),
             )
                 .await
                 .expect("Failed to create extractor");
@@ -7280,6 +7276,7 @@ mod test_serial_db {
                 preprocessor,
                 None,
                 None,
+                WriterStatus::leader(),
             )
             .await
             .expect("Failed to create extractor");
