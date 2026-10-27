@@ -167,7 +167,15 @@ async fn analyze_batch(
         .collect::<Vec<_>>();
     let token_owner = gw
         .get_token_owners(&chain, &addresses, Some(100_000f64))
-        .await?;
+        .await?
+        .into_iter()
+        .filter_map(|(token, owners)| {
+            owners
+                .into_iter()
+                .next()
+                .map(|owner| (token, owner))
+        })
+        .collect::<HashMap<_, _>>();
     let component_ids = token_owner
         .values()
         .map(|(cid, _)| cid.as_str())
@@ -614,17 +622,17 @@ mod test {
                     Ok(HashMap::from([
                         (
                             Bytes::from("0x228c6fcd7376177ff0cff304043f461189752750"),
-                            (
+                            vec![(
                                 "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea".to_string(),
                                 Bytes::from("0x0186a0"),
-                            ),
+                            )],
                         ),
                         (
                             Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
-                            (
+                            vec![(
                                 "0x7ec8e94a9b379f6b90ee5af7b9a78624280b50ea".to_string(),
                                 Bytes::from("0x0186a0"),
-                            ),
+                            )],
                         ),
                     ]))
                 })
@@ -713,7 +721,7 @@ mod test {
                 Box::pin(async move {
                     Ok(HashMap::from([(
                         Bytes::from(usdtb),
-                        (POOL.to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68")),
+                        vec![(POOL.to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))],
                     )]))
                 })
             });

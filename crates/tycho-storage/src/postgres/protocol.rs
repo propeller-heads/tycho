@@ -435,7 +435,7 @@ impl PostgresGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
         conn: &mut AsyncPgConnection,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, Vec<(ComponentId, Bytes)>>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
         let token_ids: HashMap<i64, Address> = schema::token::table
             .inner_join(schema::account::table)
@@ -463,7 +463,7 @@ impl PostgresGateway {
             .await
             .map_err(PostgresError::from)?;
 
-        Ok(largest_balance_per_token(rows, &token_ids))
+        Ok(balances_per_token(rows, &token_ids))
     }
 
     pub async fn add_protocol_components(
@@ -2041,26 +2041,34 @@ impl PostgresGateway {
     }
 }
 
-/// Keeps, per token, the component with the largest balance. Rows are `(token_id, component_id,
-/// balance)`. On a tie the first row stays. Rows whose token id is not in `token_ids` are ignored.
-fn largest_balance_per_token(
+/// Groups the rows by token and sorts each token's components by balance, largest first. Rows are
+/// `(token_id, component_id, balance)`. Equal balances keep their row order. A component that
+/// appears more than once for a token keeps its first row. Rows whose token id is not in
+/// `token_ids` are ignored.
+fn balances_per_token(
     rows: impl IntoIterator<Item = (i64, ComponentId, Bytes)>,
     token_ids: &HashMap<i64, Address>,
-) -> HashMap<Address, (ComponentId, Bytes)> {
-    let mut largest: HashMap<Address, (ComponentId, Bytes)> = HashMap::new();
+) -> HashMap<Address, Vec<(ComponentId, Bytes)>> {
+    let mut per_token: HashMap<Address, Vec<(ComponentId, Bytes)>> = HashMap::new();
     for (token_id, component_id, balance) in rows {
         let Some(token) = token_ids.get(&token_id) else {
             continue;
         };
-        let replace = match largest.get(token) {
-            Some((_, current)) => compare_balances(&balance, current) == Ordering::Greater,
-            None => true,
-        };
-        if replace {
-            largest.insert(token.clone(), (component_id, balance));
+        let components = per_token
+            .entry(token.clone())
+            .or_default();
+        if !components
+            .iter()
+            .any(|(id, _)| *id == component_id)
+        {
+            components.push((component_id, balance));
         }
     }
-    largest
+    for components in per_token.values_mut() {
+        // Stable sort, so equal balances keep their row order.
+        components.sort_by(|(_, a), (_, b)| compare_balances(b, a));
+    }
+    per_token
 }
 
 /// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
@@ -3857,19 +3865,25 @@ mod test {
 
     #[rstest]
     #[case::dai(&[DAI], HashMap::from([
-        (Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"), (
+        (Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"), vec![(
             "state3".to_string(),
             Bytes::from("0x00000000000000000000000000000000000000000000006c6b935b8bbd400000")
-        ))]))]
+        )])]))]
     #[case::weth(&[WETH], HashMap::from([
-        (Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), (
-            "state1".to_string(),
-            Bytes::from("0x0000000000000000000000000000000000000000000000000de0b6b3a7640000")
-        ))]))]
+        (Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), vec![
+            (
+                "state1".to_string(),
+                Bytes::from("0x0000000000000000000000000000000000000000000000000de0b6b3a7640000")
+            ),
+            (
+                "state3".to_string(),
+                Bytes::from("0x0000000000000000000000000000000000000000000000000de0b6b3a7640000")
+            ),
+        ])]))]
     #[tokio::test]
     async fn test_get_token_owners(
         #[case] tokens: &[&str],
-        #[case] exp: HashMap<Address, (String, Bytes)>,
+        #[case] exp: HashMap<Address, Vec<(String, Bytes)>>,
     ) {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;
@@ -3900,7 +3914,7 @@ mod test {
         ("curve", "0x08c7be39eaf21f5b7efb68"),
         ("hooks", "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"),
     ])]
-    fn test_largest_balance_per_token_compares_numerically(#[case] rows: &[(&str, &str)]) {
+    fn test_balances_per_token_sorts_numerically(#[case] rows: &[(&str, &str)]) {
         let token = Bytes::from(USDTB);
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = rows
@@ -3909,19 +3923,28 @@ mod test {
                 (1_i64, component_id.to_string(), Bytes::from(*balance))
             });
 
-        let res = largest_balance_per_token(rows, &token_ids);
+        let res = balances_per_token(rows, &token_ids);
 
         assert_eq!(
             res,
             HashMap::from([(
                 token,
-                ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))
+                vec![
+                    ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68")),
+                    (
+                        "hooks".to_string(),
+                        Bytes::from(
+                            "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"
+                        )
+                    ),
+                    ("v3".to_string(), Bytes::from("0x029c07c98d")),
+                ]
             )])
         );
     }
 
     #[test]
-    fn test_largest_balance_per_token_keeps_first_on_equal_value() {
+    fn test_balances_per_token_keeps_row_order_on_equal_value() {
         let token = Bytes::from(USDTB);
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = vec![
@@ -3930,9 +3953,43 @@ mod test {
             (2_i64, "unknown_token".to_string(), Bytes::from("0xffff")),
         ];
 
-        let res = largest_balance_per_token(rows, &token_ids);
+        let res = balances_per_token(rows, &token_ids);
 
-        assert_eq!(res, HashMap::from([(token, ("first".to_string(), Bytes::from("0x00ff")))]));
+        assert_eq!(
+            res,
+            HashMap::from([(
+                token,
+                vec![
+                    ("first".to_string(), Bytes::from("0x00ff")),
+                    ("second".to_string(), Bytes::from("0xff")),
+                ]
+            )])
+        );
+    }
+
+    #[test]
+    fn test_balances_per_token_drops_repeated_components() {
+        let token = Bytes::from(USDTB);
+        let token_ids = HashMap::from([(1_i64, token.clone())]);
+        // The owner query repeats a balance row once per token the component holds.
+        let rows = vec![
+            (1_i64, "pool".to_string(), Bytes::from("0x01")),
+            (1_i64, "other".to_string(), Bytes::from("0x02")),
+            (1_i64, "pool".to_string(), Bytes::from("0x01")),
+        ];
+
+        let res = balances_per_token(rows, &token_ids);
+
+        assert_eq!(
+            res,
+            HashMap::from([(
+                token,
+                vec![
+                    ("other".to_string(), Bytes::from("0x02")),
+                    ("pool".to_string(), Bytes::from("0x01")),
+                ]
+            )])
+        );
     }
 
     #[tokio::test]

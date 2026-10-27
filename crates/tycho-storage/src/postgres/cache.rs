@@ -978,7 +978,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, Vec<(ComponentId, Bytes)>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)

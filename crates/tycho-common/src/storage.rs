@@ -294,8 +294,7 @@ pub trait ProtocolGateway {
     /// Retrieves owners of tokens
     ///
     /// Queries for owners (protocol components) of tokens that have a certain minimum
-    /// balance and returns a maximum aggregate of those in case there are multiple
-    /// owners.
+    /// balance. Returns, per token, every owner with its balance, largest balance first.
     ///
     /// # Parameters
     /// - `chain` The chain of the component
@@ -308,7 +307,7 @@ pub trait ProtocolGateway {
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError>;
+    ) -> Result<HashMap<Address, Vec<(ComponentId, Bytes)>>, StorageError>;
 
     async fn add_protocol_components(&self, new: &[ProtocolComponent]) -> Result<(), StorageError>;
 

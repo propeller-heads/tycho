@@ -361,7 +361,7 @@ mock! {
             Box<
                 dyn ::core::future::Future<
                     Output = Result<
-                        HashMap<Address, (ComponentId, Bytes)>,
+                        HashMap<Address, Vec<(ComponentId, Bytes)>>,
                         StorageError,
                     >,
                 > + ::core::marker::Send + 'async_trait,
