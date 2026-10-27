@@ -211,7 +211,7 @@ async fn analyze_batch(
             };
             let candidates =
                 pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
-            Some((address, candidates))
+            Some((address, vec![candidates]))
         })
         .collect::<HashMap<_, _>>();
     let analyzer = EthCallDetector::new(

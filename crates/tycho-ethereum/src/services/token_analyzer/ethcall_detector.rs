@@ -33,7 +33,7 @@ const GAS_LIMIT: u64 = 30_000_000;
 const MIN_AMOUNT: u64 = 100_000;
 
 /// Maximum number of pools that receive a sell leg in one analysis.
-const MAX_SELL_POOLS: usize = 8;
+pub(crate) const MAX_SELL_POOLS: usize = 8;
 
 /// Largest balance difference that counts as rounding, not as a fee, once the settlement splits
 /// what it received into sell legs. Tokens that convert amounts to shares can lose a wei per
