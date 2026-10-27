@@ -4,7 +4,7 @@ use alloy::{
     primitives::{Address, Bytes as AlloyBytes, U256},
     rpc::types::{
         state::{AccountOverride, StateOverride},
-        TransactionInput, TransactionRequest,
+        BlockNumberOrTag, TransactionInput, TransactionRequest,
     },
     sol_types::SolCall,
 };
@@ -27,6 +27,13 @@ use crate::{rpc::EthereumRpcClient, BytesCodec};
 /// Gas limit passed to the simulated `eth_call`. Set to the Ethereum block gas limit, which is
 /// a safe upper bound for a single token analysis call.
 const GAS_LIMIT: u64 = 30_000_000;
+
+/// Smallest amount the holder sends into the settlement: large enough that small relative fees
+/// are visible.
+const MIN_AMOUNT: u64 = 100_000;
+
+/// Maximum number of pools that receive a sell leg in one analysis.
+const MAX_SELL_POOLS: usize = 8;
 
 /// Largest balance difference that counts as rounding, not as a fee, once the settlement splits
 /// what it received into sell legs. Tokens that convert amounts to shares can lose a wei per
@@ -84,45 +91,87 @@ impl EthCallDetector {
     ) -> Result<(TokenQuality, Option<U256>, Option<U256>), String> {
         let block_tag = map_block_tag(block);
 
-        // Arbitrary amount that is large enough that small relative fees should be
-        // visible.
-        const MIN_AMOUNT: u64 = 100_000;
-        let (holder, amount) = match self
+        let Some((owner, balance)) = self
             .finder
             .find_owner(token.to_bytes(), MIN_AMOUNT.into())
             .await
             .map_err(|e| e.to_string())?
-        {
-            Some((address, balance)) => {
-                // Use half the balance to reduce races between find_owner and the eth_call.
-                let amount = cmp::max(
-                    U256::from_be_bytes::<32>(
-                        balance
-                            .lpad(32, 0)
-                            .as_ref()
-                            .try_into()
-                            .expect("balance should be 32 bytes"),
-                    ) / U256::from(2),
-                    U256::from(MIN_AMOUNT),
-                );
-                tracing::debug!(?token, ?address, ?amount, "ethcall: found token owner");
-                (Address::from_bytes(&address), amount)
-            }
-            None => {
-                return Ok((
-                    TokenQuality::bad(format!(
-                        "Could not find on chain source of the token with at least \
-                         {MIN_AMOUNT} balance.",
-                    )),
-                    None,
-                    None,
-                ))
-            }
+        else {
+            return Ok((
+                TokenQuality::bad(format!(
+                    "Could not find on chain source of the token with at least {MIN_AMOUNT} \
+                     balance.",
+                )),
+                None,
+                None,
+            ));
         };
+        let mut holder = Address::from_bytes(&owner);
+        let mut amount = halve(to_u256(&balance));
+        tracing::debug!(?token, ?holder, ?amount, "ethcall: found token owner");
 
-        let recipient = arbitrary_recipient();
-        let pools: Vec<Address> = vec![];
+        let found: Vec<(Address, U256)> = self
+            .finder
+            .find_pools(token.to_bytes())
+            .await?
+            .iter()
+            // Pool ids that are not addresses cannot receive tokens.
+            .filter(|(pool, _)| pool.len() == 20)
+            .map(|(pool, balance)| (Address::from_bytes(pool), to_u256(balance)))
+            .collect();
+        let addresses: Vec<Address> = found
+            .iter()
+            .map(|(pool, _)| *pool)
+            .collect();
 
+        let mut pools = candidate_pools(holder, addresses.clone());
+        let mut simulation = self
+            .simulate(token, holder, amount, &pools, block_tag)
+            .await?;
+        // The holder is often the token's own pair. A token that calls its pair during a
+        // transfer reverts while the pair runs the Analyzer code, so let the next pool hold.
+        if simulation.transfer_failed() {
+            if let Some((next, balance)) = found
+                .iter()
+                .find(|(pool, balance)| *pool != holder && *balance >= U256::from(MIN_AMOUNT))
+            {
+                tracing::debug!(
+                    ?token,
+                    ?holder,
+                    ?next,
+                    "ethcall: holder cannot transfer, retrying"
+                );
+                holder = *next;
+                amount = halve(*balance);
+                pools = candidate_pools(holder, addresses);
+                simulation = self
+                    .simulate(token, holder, amount, &pools, block_tag)
+                    .await?;
+            }
+        }
+
+        match simulation {
+            Simulation::Returned(returns) => {
+                Self::handle_response(*returns, amount, holder, &pools)
+            }
+            Simulation::Reverted(e) => Ok((
+                TokenQuality::bad(format!("Token analysis simulation reverted: {e}")),
+                None,
+                None,
+            )),
+        }
+    }
+
+    /// Runs the Analyzer once, with `holder` as the source of `amount` and `pools` as the sell
+    /// leg targets.
+    async fn simulate(
+        &self,
+        token: Address,
+        holder: Address,
+        amount: U256,
+        pools: &[Address],
+        block_tag: BlockNumberOrTag,
+    ) -> Result<Simulation, String> {
         let tx = TransactionRequest::default()
             .from(holder)
             .to(holder)
@@ -131,8 +180,8 @@ impl EthCallDetector {
                     token,
                     amount,
                     settlement: self.settlement_contract,
-                    recipient,
-                    pools: pools.clone(),
+                    recipient: arbitrary_recipient(),
+                    pools: pools.to_vec(),
                 }
                 .abi_encode()
                 .into(),
@@ -164,20 +213,13 @@ impl EthCallDetector {
             // A revert is caused by the token itself (e.g. balanceOf reverting), not by the
             // RPC: the injected Analyzer only propagates reverts raised by token calls.
             // Report it as a Bad verdict so callers stop retrying the token indefinitely.
-            Err(e) if e.is_execution_reverted() => {
-                return Ok((
-                    TokenQuality::bad(format!("Token analysis simulation reverted: {e}")),
-                    None,
-                    None,
-                ))
-            }
+            Err(e) if e.is_execution_reverted() => return Ok(Simulation::Reverted(e.to_string())),
             Err(e) => return Err(format!("eth_call with state overrides failed: {e}")),
         };
 
-        let returns = analyzeCall::abi_decode_returns(raw.as_ref())
-            .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))?;
-
-        Self::handle_response(returns, amount, holder, &pools)
+        analyzeCall::abi_decode_returns(raw.as_ref())
+            .map(|returns| Simulation::Returned(Box::new(returns)))
+            .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))
     }
 
     fn handle_response(
@@ -332,6 +374,54 @@ impl EthCallDetector {
 
         Ok((TokenQuality::Good, Some(gas_per_transfer), Some(tax)))
     }
+}
+
+/// The outcome of one Analyzer `eth_call`.
+enum Simulation {
+    Returned(Box<<analyzeCall as SolCall>::Return>),
+    /// The token reverted the whole call. Holds the RPC error message.
+    Reverted(String),
+}
+
+impl Simulation {
+    /// Whether the holder could not move the token into the settlement or out of it.
+    fn transfer_failed(&self) -> bool {
+        match self {
+            Simulation::Returned(r) => !r.transferInOk || !r.transferOutOk,
+            Simulation::Reverted(_) => false,
+        }
+    }
+}
+
+fn to_u256(balance: &Bytes) -> U256 {
+    U256::from_be_bytes::<32>(
+        balance
+            .lpad(32, 0)
+            .as_ref()
+            .try_into()
+            .expect("balance should be 32 bytes"),
+    )
+}
+
+/// Half of the holder's balance, to reduce races between the owner lookup and the eth_call, but
+/// at least `MIN_AMOUNT`.
+fn halve(balance: U256) -> U256 {
+    cmp::max(balance / U256::from(2), U256::from(MIN_AMOUNT))
+}
+
+/// Returns the pools that receive a sell leg: the holder first, then `found` in order, without
+/// duplicates or the zero address, at most `MAX_SELL_POOLS`.
+fn candidate_pools(holder: Address, found: Vec<Address>) -> Vec<Address> {
+    let mut pools = Vec::with_capacity(MAX_SELL_POOLS);
+    for pool in std::iter::once(holder).chain(found) {
+        if pools.len() == MAX_SELL_POOLS {
+            break;
+        }
+        if !pool.is_zero() && !pools.contains(&pool) {
+            pools.push(pool);
+        }
+    }
+    pools
 }
 
 /// A sell leg whose pool received less than it was sent.
@@ -601,6 +691,31 @@ mod tests {
     }
 
     #[test]
+    fn candidate_pools_put_holder_first_and_drop_duplicates_and_zero() {
+        let holder = Address::with_last_byte(9);
+        let found = vec![
+            Address::with_last_byte(1),
+            holder,
+            Address::ZERO,
+            Address::with_last_byte(2),
+            Address::with_last_byte(1),
+        ];
+        assert_eq!(
+            candidate_pools(holder, found),
+            vec![holder, Address::with_last_byte(1), Address::with_last_byte(2)]
+        );
+    }
+
+    #[test]
+    fn candidate_pools_keep_the_first_eight() {
+        let holder = Address::with_last_byte(100);
+        let found = pools(12);
+        let mut expected = vec![holder];
+        expected.extend(&found[..MAX_SELL_POOLS - 1]);
+        assert_eq!(candidate_pools(holder, found), expected);
+    }
+
+    #[test]
     fn handle_response_transfer_in_failed() {
         let amount = U256::from(1_000_000_u64);
         let mut r = good_return(amount);
@@ -735,6 +850,155 @@ mod tests {
         assert!(gas.is_none());
         assert!(tax.is_none());
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn detect_impl_sends_found_pools_to_the_analyzer() {
+        let mut server = mockito::Server::new_async().await;
+        let pool = "5555555555555555555555555555555555555555";
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(pool.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted","data":"0x"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let token = Bytes::from_str("e172e9b6cfbeeb5593bdce3f077356fdb33af904").unwrap();
+        let holder = Bytes::from_str("000000000004444c5dc75cb358380d2e3de08a90").unwrap();
+        let finder = TokenOwnerStore::with_pools(
+            HashMap::from([(token.clone(), (holder, U256::from(1_000_000_u64).to_bytes()))]),
+            HashMap::from([(
+                token.clone(),
+                vec![(Bytes::from_str(pool).unwrap(), U256::from(500_000_u64).to_bytes())],
+            )]),
+        );
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .expect("the mock answers only a call that carries the pool");
+
+        mock.assert_async().await;
+    }
+
+    const FIRST_HOLDER: &str = "1111111111111111111111111111111111111111";
+    const NEXT_POOL: &str = "2222222222222222222222222222222222222222";
+
+    // Answers an `analyze` eth_call sent from `holder` with `ret`, echoing the request id.
+    async fn mock_analyze_from(
+        server: &mut mockito::ServerGuard,
+        holder: &str,
+        ret: <analyzeCall as SolCall>::Return,
+        hits: usize,
+    ) -> mockito::Mock {
+        let result = format!("0x{}", alloy::hex::encode(analyzeCall::abi_encode_returns(&ret)));
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(format!(r#""from":"0x{holder}""#)))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                serde_json::json!({"jsonrpc": "2.0", "id": body["id"], "result": result})
+                    .to_string()
+                    .into()
+            })
+            .expect(hits)
+            .create_async()
+            .await
+    }
+
+    fn holder_and_next_pool(next_balance: u64) -> (Bytes, TokenOwnerStore) {
+        let token = Bytes::from_str("e172e9b6cfbeeb5593bdce3f077356fdb33af904").unwrap();
+        let holder = Bytes::from_str(FIRST_HOLDER).unwrap();
+        let balance = U256::from(2_000_000_u64).to_bytes();
+        let finder = TokenOwnerStore::with_pools(
+            HashMap::from([(token.clone(), (holder.clone(), balance.clone()))]),
+            HashMap::from([(
+                token.clone(),
+                vec![
+                    (holder, balance),
+                    (Bytes::from_str(NEXT_POOL).unwrap(), U256::from(next_balance).to_bytes()),
+                ],
+            )]),
+        );
+        (token, finder)
+    }
+
+    #[tokio::test]
+    async fn detect_impl_retries_with_the_next_pool_when_the_holder_cannot_transfer() {
+        let mut server = mockito::Server::new_async().await;
+        let mut failed = good_return(U256::from(1_000_000_u64));
+        failed.transferOutOk = false;
+        let first = mock_analyze_from(&mut server, FIRST_HOLDER, failed, 1).await;
+        // The next pool holds 400_000, so it sends 200_000.
+        let next =
+            mock_analyze_from(&mut server, NEXT_POOL, good_return(U256::from(200_000_u64)), 1)
+                .await;
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let (token, finder) = holder_and_next_pool(400_000);
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        let (quality, _, tax) = detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .unwrap();
+
+        assert_eq!(quality, TokenQuality::Good);
+        assert_eq!(tax, Some(0));
+        first.assert_async().await;
+        next.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn detect_impl_does_not_retry_with_a_pool_below_the_minimum_amount() {
+        let mut server = mockito::Server::new_async().await;
+        let mut failed = good_return(U256::from(1_000_000_u64));
+        failed.transferInOk = false;
+        let first = mock_analyze_from(&mut server, FIRST_HOLDER, failed, 1).await;
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let (token, finder) = holder_and_next_pool(99_999);
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        let (quality, _, _) = detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .unwrap();
+
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        first.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn detect_impl_does_not_retry_after_a_fee_verdict() {
+        let mut server = mockito::Server::new_async().await;
+        let amount = U256::from(1_000_000_u64);
+        let mut fee = good_return(amount);
+        fee.balanceAfterIn = U256::from(990_000_u64);
+        fee.recipientAfter = U256::from(990_000_u64);
+        let first = mock_analyze_from(&mut server, FIRST_HOLDER, fee, 1).await;
+        let next = mock_analyze_from(&mut server, NEXT_POOL, good_return(amount), 0).await;
+        let rpc = EthereumRpcClient::new(&server.url()).expect("mock rpc client");
+        let (token, finder) = holder_and_next_pool(400_000);
+        let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
+
+        let (quality, _, tax) = detector
+            .analyze(token, BlockTag::Latest)
+            .await
+            .unwrap();
+
+        assert!(matches!(quality, TokenQuality::Bad { .. }));
+        assert_eq!(tax, Some(100));
+        first.assert_async().await;
+        next.assert_async().await;
     }
 
     #[tokio::test]

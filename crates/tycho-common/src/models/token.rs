@@ -146,18 +146,29 @@ impl TokenQuality {
 /// A store for tracking token owners and their balances.
 ///
 /// The `TokenOwnerStore` maintains a mapping between token addresses and their respective
-/// owner's address and balance. It can be used to quickly retrieve token owner information
-/// without needing to query external sources.
+/// owner's address and balance, and optionally the pools that hold each token. It can be used to
+/// quickly retrieve token owner information without needing to query external sources.
 #[derive(Debug)]
 pub struct TokenOwnerStore {
     /// A `HashMap` where the key is the token address and the value is a tuple containing
     /// the owner address and the balance of the owner for the token.
     values: HashMap<Address, (Address, Balance)>,
+    /// Pools that hold each token with their balance, largest balance first.
+    pools: HashMap<Address, Vec<(Address, Balance)>>,
 }
 
 impl TokenOwnerStore {
     pub fn new(values: HashMap<Address, (Address, Balance)>) -> Self {
-        TokenOwnerStore { values }
+        Self::with_pools(values, HashMap::new())
+    }
+
+    /// Creates a store that also returns `pools` from `find_pools`. Each list should be sorted
+    /// by balance, largest first.
+    pub fn with_pools(
+        values: HashMap<Address, (Address, Balance)>,
+        pools: HashMap<Address, Vec<(Address, Balance)>>,
+    ) -> Self {
+        TokenOwnerStore { values, pools }
     }
 }
 
@@ -176,6 +187,14 @@ impl TokenOwnerFinding for TokenOwnerStore {
                     BigUint::from_bytes_be(min_balance.as_ref())
             })
             .cloned())
+    }
+
+    async fn find_pools(&self, token: Address) -> Result<Vec<(Address, Balance)>, String> {
+        Ok(self
+            .pools
+            .get(&token)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -252,6 +271,41 @@ mod tests {
         );
 
         assert_eq!(usdc.one(), BigUint::from(1000000u64));
+    }
+
+    #[tokio::test]
+    async fn test_find_pools() {
+        let token = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let owner = Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let other = Bytes::from_str("0x2222222222222222222222222222222222222222").unwrap();
+        let pools =
+            vec![(owner.clone(), Bytes::from(1_000u64)), (other.clone(), Bytes::from(10u64))];
+        let store = TokenOwnerStore::with_pools(
+            HashMap::from([(token.clone(), (owner.clone(), Bytes::from(1_000u64)))]),
+            HashMap::from([(token.clone(), pools.clone())]),
+        );
+
+        assert_eq!(
+            store
+                .find_pools(token.clone())
+                .await
+                .unwrap(),
+            pools
+        );
+        assert_eq!(
+            store
+                .find_pools(other.clone())
+                .await
+                .unwrap(),
+            Vec::<(Bytes, Bytes)>::new()
+        );
+        assert_eq!(
+            TokenOwnerStore::new(HashMap::from([(token.clone(), (owner, Bytes::from(1_000u64)))]))
+                .find_pools(token)
+                .await
+                .unwrap(),
+            Vec::<(Bytes, Bytes)>::new()
+        );
     }
 
     #[tokio::test]

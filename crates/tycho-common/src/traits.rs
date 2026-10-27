@@ -171,6 +171,17 @@ pub trait TokenOwnerFinding: Send + Sync + Debug {
         token: Address,
         min_balance: Balance,
     ) -> Result<Option<(Address, Balance)>, String>; // TODO: introduce custom error type
+
+    /// Finds pools that hold the specified token, largest balance first.
+    ///
+    /// The default implementation knows no pools and returns an empty list.
+    ///
+    /// # Returns
+    /// Each pool address with its balance of the token, or a string representing an error
+    /// message on failure.
+    async fn find_pools(&self, _token: Address) -> Result<Vec<(Address, Balance)>, String> {
+        Ok(vec![])
+    }
 }
 
 /// Trait for retrieving additional information about tokens, such as the number of decimals
