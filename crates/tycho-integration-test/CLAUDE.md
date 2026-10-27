@@ -43,6 +43,12 @@ router keeps its deployed bytecode, and only the read-only simulation call is af
 help an executor that has no bytecode deployed. Off by default so that a missing activation still
 shows up as a failure.
 
+Metric book updates (`rfq:metric`) on Ethereum need Metric's oracle update, which Titan orders first in the block
+it builds. They are simulated at the block after the latest one, under the overrides Titan's state
+stream published for that block on both Metric oracle channels; a block without them is skipped.
+The simulation runs on that block's post-state, so a trade earlier in the same block that drained
+the pool shows up as slippage.
+
 ## Module Structure
 
 - **`main.rs`**: CLI (`Cli` struct), top-level orchestration loop — subscribes to Tycho,
@@ -74,8 +80,12 @@ shows up as a failure.
     `FeedStalled` for Metric) the swap counts as a stale quote
     (`tycho_integration_execution_stale_quotes_total`) instead of a revert
 - **`oracle_overrides.rs`**: `OracleOverrides` — keeps the storage overrides Titan's
-  `pamm_quote_stream` publishes, per quoted block, for the venues Titan serves (`vm:fermiswap`,
-  `vm:kipseli`, `vm:bopamm`). Each frame is a venue's whole override set, so a venue's newest
+  `pamm_quote_stream` publishes, per quoted block, for the venues Titan serves. `VENUE_CHANNELS`
+  maps each venue to the `TitanChannel`s it needs: one for FermiSwap, Kipseli and Bebop, and both
+  of Metric's Ethereum oracles for Metric, which the `rfq:metric` path also uses; a block covers a
+  venue only when all its channels published (`covers_all`). A test fails when a venue in
+  `default_served_pamms()` is neither in `VENUE_CHANNELS` nor listed as having no channel, so a
+  new venue has to be classified. Each frame is a venue's whole override set, so a venue's newest
   frame replaces its previous one for that block; venues are merged only on read
 - **`statistics.rs`**: `TestStatistics` + `ProtocolStatistics` — per-protocol counters for
   simulation success/failure, execution reverts, slippage, `get_limits` / `get_amount_out` calls

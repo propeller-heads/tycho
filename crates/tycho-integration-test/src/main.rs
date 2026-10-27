@@ -37,6 +37,7 @@ use tycho_execution::encoding::evm::{
 use tycho_simulation::{
     book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
     evm::protocol::cowamm::constants::PROTOCOL_SYSTEM as COWAMM_PROTOCOL_SYSTEM,
+    pamm::protocols::metric::PROTOCOL_SYSTEM as METRIC_PROTOCOL_SYSTEM,
     protocol::models::ProtocolComponent,
     rfq::protocols::hashflow::state::{HashflowAllPairsState, HashflowState},
     tycho_common::models::{chain_config::TvlThresholdTier, token::Token, Chain},
@@ -55,7 +56,9 @@ use tycho_test::{
 
 use crate::{
     fee_fetcher::{fetch_router_fee_on_output, RouterFeeOnOutput},
-    oracle_overrides::{override_protocol, titan_providers, BlockOverrides, OracleOverrides},
+    oracle_overrides::{
+        override_channels, titan_providers, BlockOverrides, OracleOverrides, METRIC_ORACLE_CHANNELS,
+    },
     statistics::TestStatistics,
     stream_processor::{
         book_stream_processor::BookStreamProcessor,
@@ -474,8 +477,12 @@ async fn run(cli: Cli) -> miette::Result<()> {
     // One Titan connection serves both the indexed pAMM pools and the execution overrides. The
     // price level stream only runs on Ethereum, so off it the providers are only worth opening
     // for the pools.
-    let overrides_wanted =
+    let price_level_overrides_wanted =
         chain == Chain::Ethereum && !cli.disable_price_level_stream && !cli.disable_execution;
+    // Metric's Ethereum pools only quote after the oracle update Titan orders first in its block.
+    let metric_overrides_wanted =
+        chain == Chain::Ethereum && !cli.disable_pamm && !cli.disable_execution;
+    let overrides_wanted = price_level_overrides_wanted || metric_overrides_wanted;
     let override_providers =
         if !cli.disable_onchain || overrides_wanted { titan_providers() } else { HashMap::new() };
 
@@ -534,11 +541,12 @@ async fn run(cli: Cli) -> miette::Result<()> {
     }
 
     // Without the overrides the venue reverts `StaleUpdate()`.
-    let oracle_overrides = if price_level_handle.is_some() && !cli.disable_execution {
-        OracleOverrides::spawn(&override_providers).map(Arc::new)
-    } else {
-        None
-    };
+    let oracle_overrides =
+        if (price_level_handle.is_some() || metric_overrides_wanted) && !cli.disable_execution {
+            OracleOverrides::spawn(&override_providers).map(Arc::new)
+        } else {
+            None
+        };
 
     let tycho_state = Arc::new(RwLock::new(TychoState::default()));
     // Only collect statistics when max_blocks is set; avoids unbounded growth for indefinite runs
@@ -847,6 +855,28 @@ async fn refresh_token_prices(chain: Chain, prices: SharedTokenPrices, interval:
             }
         }
     }
+}
+
+/// How long a Metric RFQ update on Ethereum waits for the block after the latest one, which its
+/// swaps are simulated at: one slot plus a margin for the RPC to serve the new block.
+const METRIC_TARGET_BLOCK_WAIT: Duration = Duration::from_secs(18);
+
+/// How many polls `poll_interval` apart span [`METRIC_TARGET_BLOCK_WAIT`]. Always at least one,
+/// and at most one per millisecond of the wait: an interval below 1 ms counts as 1 ms.
+fn metric_target_block_attempts(poll_interval: Duration) -> u32 {
+    let wait_ms = METRIC_TARGET_BLOCK_WAIT.as_millis();
+    let interval_ms = poll_interval
+        .as_millis()
+        .clamp(1, wait_ms);
+    u32::try_from(wait_ms / interval_ms).expect("METRIC_TARGET_BLOCK_WAIT in ms fits in a u32")
+}
+
+/// Whether `update` is Metric's book on Ethereum, whose swaps need Metric's oracle update.
+fn is_metric_on_ethereum(chain: Chain, update: &StreamUpdate) -> bool {
+    let StreamUpdatePayload::Book { protocol_system, .. } = &update.payload else {
+        return false;
+    };
+    chain == Chain::Ethereum && protocol_system == METRIC_PROTOCOL_SYSTEM
 }
 
 /// Waits until the RPC has reached `target_block` and returns exactly that block. `Ok(None)`
@@ -1228,7 +1258,7 @@ async fn process_update(
         }
         StreamUpdatePayload::Book { .. } => {
             // Book updates: fetch latest block without alignment checks
-            match rpc_tools
+            let latest = match rpc_tools
                 .provider
                 .get_block_by_number(BlockNumberOrTag::Latest)
                 .await
@@ -1237,10 +1267,29 @@ async fn process_update(
                 .ok()
                 .flatten()
             {
-                Some(b) => Arc::new(b),
+                Some(b) => b,
                 None => {
                     warn!("Failed to retrieve latest block, continuing to next message...");
                     return Ok(());
+                }
+            };
+            if !is_metric_on_ethereum(chain, update) {
+                Arc::new(latest)
+            } else {
+                // A Metric pool on Ethereum only quotes after Metric's oracle update, which Titan
+                // orders first in the block it builds. Simulate at that next block, under the
+                // overrides Titan published for it.
+                let target_block = latest.header.number + 1;
+                let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
+                let attempts = metric_target_block_attempts(poll_interval);
+                match await_target_block(&rpc_tools, target_block, attempts, poll_interval).await? {
+                    Some(b) => Arc::new(b),
+                    None => {
+                        warn!(
+                            "RPC did not reach block {target_block} for the Metric swaps; skipping"
+                        );
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1447,7 +1496,8 @@ async fn process_update(
         return Ok(());
     }
 
-    // Titan publishes overrides per block, so only price level stream updates take them.
+    // Titan publishes overrides per block, so only price level stream updates and Metric's
+    // Ethereum book take them.
     let oracle_overwrites = match &update.payload {
         StreamUpdatePayload::PriceLevelStream(_) => {
             let overrides = oracle_overrides
@@ -1459,6 +1509,20 @@ async fn process_update(
                 block.number(),
             );
             overrides.map(BlockOverrides::into_storage)
+        }
+        StreamUpdatePayload::Book { .. } if is_metric_on_ethereum(chain, update) => {
+            let Some(overrides) = oracle_overrides
+                .as_ref()
+                .and_then(|overrides| overrides.for_block(block.header.number))
+                .filter(|overrides| overrides.covers_all(METRIC_ORACLE_CHANNELS))
+            else {
+                warn!(
+                    block = block.number(),
+                    "Titan published no Metric oracle overrides for the block; skipping its swaps"
+                );
+                return Ok(());
+            };
+            Some(overrides.into_storage())
         }
         StreamUpdatePayload::Protocol(_) | StreamUpdatePayload::Book { .. } => None,
     };
@@ -2206,9 +2270,9 @@ fn record_oracle_override_misses(
         let Some(venue) = pamm_venue(&info.protocol_system) else {
             continue;
         };
-        match override_protocol(venue) {
-            Some(protocol) => {
-                if !overrides.is_some_and(|overrides| overrides.covers(protocol)) {
+        match override_channels(venue) {
+            Some(channels) => {
+                if !overrides.is_some_and(|overrides| overrides.covers_all(channels)) {
                     missing.insert(&info.protocol_system);
                 }
             }
@@ -2306,9 +2370,51 @@ mod tests {
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, is_oracle_stale_revert, pamm_venue, sample_swap_directions,
+        book_swap_directions, is_metric_on_ethereum, is_oracle_stale_revert,
+        metric_target_block_attempts, pamm_venue, sample_swap_directions,
         should_fetch_block_by_number, Cli, TychoState,
     };
+    use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
+
+    fn book_update(protocol_system: &str) -> StreamUpdate {
+        StreamUpdate {
+            payload: StreamUpdatePayload::Book {
+                protocol_system: protocol_system.to_string(),
+                received_at: chrono::Utc::now(),
+                books: Default::default(),
+            },
+            is_first_update: false,
+            received_at: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Only Metric's own book on Ethereum waits for the next block and Titan's Metric overrides.
+    #[rstest]
+    #[case::metric_on_ethereum(Chain::Ethereum, "rfq:metric", true)]
+    #[case::metric_elsewhere(Chain::Base, "rfq:metric", false)]
+    #[case::another_book_on_ethereum(Chain::Ethereum, "rfq:bebop", false)]
+    fn only_metric_books_on_ethereum_need_the_metric_overrides(
+        #[case] chain: Chain,
+        #[case] protocol_system: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_metric_on_ethereum(chain, &book_update(protocol_system)), expected);
+    }
+
+    /// The wait for the next block is bounded whatever the poll interval: a zero interval counts
+    /// as 1 ms, and an interval longer than the wait still polls once.
+    #[rstest]
+    #[case::default_interval(500, 36)]
+    #[case::zero_interval(0, 18_000)]
+    #[case::interval_longer_than_the_wait(60_000, 1)]
+    #[case::interval_beyond_u32_ms(u64::MAX, 1)]
+    fn the_metric_block_wait_polls_a_bounded_number_of_times(
+        #[case] poll_interval_ms: u64,
+        #[case] expected: u32,
+    ) {
+        let poll_interval = std::time::Duration::from_millis(poll_interval_ms);
+        assert_eq!(metric_target_block_attempts(poll_interval), expected);
+    }
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
