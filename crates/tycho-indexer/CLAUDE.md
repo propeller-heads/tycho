@@ -9,12 +9,13 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU (and, with jemalloc heap profiling on, memory) profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task
 testing.rs                  Test utilities
 
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; on a follower, waits to build the extractor while the leader syncs history
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -22,6 +23,7 @@ extractor/
   chain_state.rs            ChainState — tracks current tip and finality horizon
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role and leader's committed blocks as watch receivers; `needs_stream`
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -147,7 +149,12 @@ database cursor.
 ## Persistence
 
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
-block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
+block batch arrives. Each commit has a `WritePriority` (`write_priority`): `Backfill` when the
+newest block the extractor has received is older than `BACKFILL_BLOCK_AGE` (10 minutes, by block
+timestamp), else `Head`, so the executor runs the commits of extractors at the chain head first. A
+takeover commit uses the same rule. The committed blocks' own age cannot decide it, as only
+finalized blocks are committed and these are minutes old at the head; finality cannot either, as on
+many chains a block at the head is already final. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
 `valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
@@ -157,6 +164,76 @@ they are provably behind the finality horizon.
 Drained blocks stay in the buffer's committing section (shared with the commit task via
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
+
+### Leader election
+
+Several `index` processes can run against one database. All of them extract and serve WS/RPC;
+only the leader commits. `leadership::elect` (called in `main.rs` before the extractors are built)
+tries the `LeaderLock` once:
+
+- **Lock taken**: increments the writer epoch (`CachedGateway::increment_writer_epoch`), role
+  `Leader` from the start. `main.rs` then runs `initialize_accounts`. This is the single-replica
+  path and behaves as before.
+- **Lock held elsewhere**: role `Follower`. A background task polls
+  `CachedGateway::get_committed_blocks` into the `WriterStatus` every second and retries the lock.
+  On success it increments the writer epoch (fencing the former leader, see "Writer fencing" in
+  `crates/tycho-storage/CLAUDE.md`) and only then switches the role to `Leader`, so no extractor
+  commits before the fence. A promoted process does not run `initialize_accounts`: the initialized
+  accounts are a testing aid to start indexing from a later block, and the first leader wrote them.
+- **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
+  it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
+  follower. `tycho_leader` (gauge, 0/1) shows the role.
+- **Health**: each successful lock check is published in the `WriterStatus`
+  (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
+  confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
+  the lock. A frozen process does not answer the probe at all, which has the same effect.
+
+### Leader and follower extractors
+
+Each extractor has a `CommitMode` driven by its `WriterStatus` (`ProtocolExtractor::with_writer_status`,
+set by `ExtractorFactory::with_writer_status`; without it the extractor is the only writer):
+
+- **Committing** (leader): the path above.
+- **Following**: drained blocks go into the committing section but are never written. They are
+  released once the leader's committed height for this extractor (`WriterStatus::committed_height`)
+  passes them, and the released blocks' `new_tokens` go into the token cache
+  (`ExtractorGateway::cache_tokens`), the same point at which the leader's write-through caches them.
+  Outgoing messages carry the leader's committed height as `db_committed_block_height`.
+  A following extractor keeps committing blocks that span less than `FOLLOWER_RETENTION_SPAN`
+  (1 hour of chain time, newest minus oldest committing block timestamp; chain time and not a
+  block count, as block times range from 100 ms to minutes; more than the finality delay of every
+  chain, so a follower at the head does not pause). At the limit,
+  `Extractor::wait_for_capacity` (awaited by the runner before it pulls the next block, in the
+  same `select!` as the stop signal) pauses it until the leader's commits release blocks or it
+  becomes leader; it logs `FollowerPaused` and `FollowerResumed` with the span and block count.
+  It never drops retained blocks: revert lookups rely on them until the database covers them.
+- **Takeover**: on the first full block after the role turns `Leader`, the extractor reads its
+  `extraction_state` block (the former leader's last commit, `floor`), releases retained blocks at or
+  below it, commits the rest, and from then on drops every drained block at or below `floor`. A
+  follower that was behind the former leader therefore never writes a block twice. Messages report
+  `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
+  and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
+  extractor from its cursor.
+- **No stream while the leader syncs**: before it builds an extractor (at start and on each
+  restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
+  follows and the leader's newest committed block for the extractor is missing (first sync) or
+  older than `FOLLOWER_RETENTION_SPAN`. So only the leader pays Substreams for history, a follower
+  cannot serve history anyway, and a follower that opens its stream can retain every block from the
+  leader's commit to the head. The wait
+  polls every second and still serves `Stop`. During the wait the supervisor publishes
+  `StreamState::WaitingForLeader` on a `watch` channel, and `ExtractorHandle::subscribe` returns
+  `SubscribeError::NotStreaming` at once, which the WS client receives as `SubscribeError`. In
+  every other state `subscribe` queues the request and returns without waiting for the supervisor,
+  which can be busy for a long time, for example while it builds the extractor. The wait drops a
+  `Subscribe` queued before it started, which closes that subscriber's channel. It logs
+  `FollowerWaitsForLeaderSync`, `SubscriptionRejected` and `FollowerStreamStarts`. It ends when
+  the leader gets near the head or this process becomes leader. `/v1/health` stays 200 during the
+  wait, because the wait can last hours and a readiness gate would block a rollout. tycho-client
+  retries a rejected subscription on the same WS connection, so a client that the load balancer
+  keeps on such a follower uses up its retries; a client-side reconnect is follow-up work. A
+  process that is already leader builds the extractor with `CommitMode::Committing` from the
+  database cursor, as at a normal start. Once the stream is open, the wait does not
+  apply again until the next restart; `FOLLOWER_RETENTION_SPAN` bounds memory instead.
 
 ## Why extractor messages must be broadcast to the RPC service
 
@@ -174,6 +251,19 @@ Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until 
 `min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
 Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
 to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+The window learns `db_committed` only from the next block message, so the database can already
+hold blocks the window still calls uncommitted. Re-applied state deltas are harmless (absolute
+values), but `get_protocol_components` then lists a new component twice, once from the database
+and once from the window, and counts it twice in `total`. On a single writer this lasts from the
+write until the next message; on a follower, which learns the leader's height from a 1 s poll, up
+to 1 s plus one block time per leader commit. Known and not yet fixed.
+A follower can also lag the leader by more than the finality delay, for example after a stream
+reconnect on a chain with a short finality delay. Its `db_committed` is capped at its own
+finalized height, so a request at its tip counts as uncommitted: the database is read at `Latest`,
+which already holds the leader's newer commits, and only the follower's window deltas are applied
+on top. The answer then mixes two versions, and the follower's next deltas can set attributes back
+to older values. Known and not yet fixed; a follow-up can carry the uncapped leader height, so that
+versions at or below it are read from the database at that exact version.
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
 Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one sample per
@@ -252,7 +342,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check |
+| `/health` | GET — health check; 503 when the leader stopped confirming its lock |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at

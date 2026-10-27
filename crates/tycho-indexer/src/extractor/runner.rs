@@ -5,8 +5,8 @@ use metrics::gauge;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc::{self, error::SendError, Receiver, Sender},
-        oneshot, Mutex,
+        mpsc::{self, Receiver, Sender},
+        oneshot, watch, Mutex,
     },
     task::JoinHandle,
 };
@@ -93,23 +93,53 @@ pub enum ControlMessage {
     Subscribe(Sender<DeltaCommand>),
 }
 
+/// Whether the supervisor of an extractor takes new subscribers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamState {
+    /// The supervisor takes new subscribers. It registers them as soon as it reads their request,
+    /// also while it builds or restarts the extractor.
+    Open,
+    /// The extractor's stream is not open on this process: it follows a leader that syncs the
+    /// extractor's history, and it opens the stream once the leader gets near the chain head.
+    WaitingForLeader,
+}
+
+/// Why a subscription to an extractor failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SubscribeError {
+    #[error("The extractor's control channel is closed")]
+    ControlChannelClosed,
+    #[error("The extractor's control channel stayed full for {0:?}")]
+    Timeout(std::time::Duration),
+    #[error(
+        "The extractor does not stream on this instance yet: the leader syncs its history. \
+         Subscribe again later or on another instance."
+    )]
+    NotStreaming,
+}
+
 /// A trait for a message sender that can be used to subscribe to messages.
 ///
 /// Extracted out of [`ExtractorHandle`] to allow for easier testing.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError>;
 }
 
 #[derive(Clone)]
 pub struct ExtractorHandle {
     id: ExtractorIdentity,
     control_tx: Sender<ControlMessage>,
+    stream_state: watch::Receiver<StreamState>,
 }
 
 impl ExtractorHandle {
-    pub fn new(id: ExtractorIdentity, control_tx: Sender<ControlMessage>) -> Self {
-        Self { id, control_tx }
+    pub fn new(
+        id: ExtractorIdentity,
+        control_tx: Sender<ControlMessage>,
+        stream_state: watch::Receiver<StreamState>,
+    ) -> Self {
+        Self { id, control_tx, stream_state }
     }
 
     pub fn get_id(&self) -> ExtractorIdentity {
@@ -127,26 +157,29 @@ impl ExtractorHandle {
 
 #[async_trait]
 impl MessageSender for ExtractorHandle {
+    /// Queues a subscription to the extractor and returns its receiver at once.
+    ///
+    /// Does not wait for the supervisor to read the request: the supervisor can be busy for a
+    /// long time, for example while it builds the extractor. A request that the supervisor
+    /// reads after it starts to wait for the leader is dropped, which closes the receiver.
     #[instrument(skip(self))]
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
-        let (tx, rx) = mpsc::channel(16);
-        // Define a timeout duration
-        let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
-
-        // Wrap the send operation with a timeout
-        let send_result = tokio::time::timeout(
-            timeout_duration,
-            self.control_tx
-                .send(ControlMessage::Subscribe(tx)),
-        )
-        .await;
-
-        match send_result {
-            Ok(Ok(())) => Ok(rx),
-            Ok(Err(e)) => Err(e),
-            // TODO: use a better error type that lets us return this as an error.
-            Err(_) => panic!("Subscription timed out!"),
+    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SubscribeError> {
+        let stream_state = *self.stream_state.borrow();
+        match stream_state {
+            StreamState::Open => {}
+            StreamState::WaitingForLeader => return Err(SubscribeError::NotStreaming),
         }
+        let timeout = std::time::Duration::from_secs(5);
+        let (sender, rx) = mpsc::channel(16);
+        tokio::time::timeout(
+            timeout,
+            self.control_tx
+                .send(ControlMessage::Subscribe(sender)),
+        )
+        .await
+        .map_err(|_| SubscribeError::Timeout(timeout))?
+        .map_err(|_| SubscribeError::ControlChannelClosed)?;
+        Ok(rx)
     }
 }
 
@@ -209,12 +242,18 @@ impl ExtractorRunner {
                 );
 
                 let should_continue = async {
+                    let extractor = &self.extractor;
+                    let substreams = &mut self.substreams;
+                    let next_block = async {
+                        extractor.wait_for_capacity().await;
+                        substreams.next().await
+                    };
                     tokio::select! {
                         _ = &mut self.stop_rx => {
                             warn!("Stop signal received; exiting!");
                             return Ok(false);
                         }
-                        val = self.substreams.next().instrument(info_span!("substreams_waiting")) => {
+                        val = next_block.instrument(info_span!("substreams_waiting")) => {
                             match val {
                                 None => {
                                     error!("stream ended");

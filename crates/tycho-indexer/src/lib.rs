@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod extractor;
+pub mod leadership;
 // `tonic::Status` is large enough to trigger `result_large_err`; this is an
 // existing API shape, and boxing it here would be a larger compatibility change.
 #[allow(clippy::result_large_err)]

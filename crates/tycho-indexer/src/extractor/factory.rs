@@ -33,6 +33,7 @@ use crate::{
         protocol_cache::ProtocolMemoryCache,
         protocol_extractor::{ExtractorPgGateway, ProtocolExtractor},
         runner::{compute_start_block, DCIPlugin, ExtractorRunner, SubscriptionsMap},
+        writer_status::WriterStatus,
         ExtractionError, Extractor,
     },
     pb::sf::substreams::v1::Package,
@@ -174,6 +175,7 @@ pub struct ExtractorFactory {
     runtime_handle: Option<Handle>,
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,
+    writer_status: WriterStatus,
 }
 
 impl ExtractorFactory {
@@ -222,7 +224,20 @@ impl ExtractorFactory {
             runtime_handle,
             protocol_cache,
             chain_state,
+            writer_status: WriterStatus::leader(),
         })
+    }
+
+    /// Makes every extractor this factory builds commit or follow according to
+    /// `writer_status`. Without this call the extractors commit as the only writer.
+    pub fn with_writer_status(mut self, writer_status: WriterStatus) -> Self {
+        self.writer_status = writer_status;
+        self
+    }
+
+    /// Returns the writer status the extractors of this factory commit or follow by.
+    pub(super) fn writer_status(&self) -> &WriterStatus {
+        &self.writer_status
     }
 
     /// Builds a fresh, ready-to-run [`ExtractorRunner`].
@@ -338,7 +353,8 @@ impl ExtractorFactory {
                 post_processor,
                 dci_plugin,
             )
-            .await?,
+            .await?
+            .with_writer_status(self.writer_status.clone()),
         );
 
         // Ensure the spkg file is present (download from S3 if needed).
