@@ -1,4 +1,9 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+    time::Instant,
+};
 
 use chrono::NaiveDateTime;
 use futures03::{future::try_join_all, FutureExt};
@@ -7,9 +12,9 @@ use tracing::{debug, info, warn};
 use tycho_common::{
     models::{
         blockchain::BlockTag,
-        protocol::QualityRange,
+        protocol::{ProtocolComponent, QualityRange},
         token::{Token, TokenQuality, TransferCost, TransferTax},
-        Chain, PaginationParams,
+        Address, Balance, Chain, ComponentId, PaginationParams,
     },
     storage::ProtocolGateway,
     traits::TokenAnalyzer,
@@ -165,20 +170,15 @@ async fn analyze_batch(
         .iter()
         .map(|t| t.address.clone())
         .collect::<Vec<_>>();
-    let token_owner = gw
+    let token_owners = gw
         .get_token_owners(&chain, &addresses, Some(100_000f64))
-        .await?
-        .into_iter()
-        .filter_map(|(token, owners)| {
-            owners
-                .into_iter()
-                .next()
-                .map(|owner| (token, owner))
-        })
-        .collect::<HashMap<_, _>>();
-    let component_ids = token_owner
+        .await?;
+    let component_ids = token_owners
         .values()
+        .flatten()
         .map(|(cid, _)| cid.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     let components = gw
         .get_protocol_components(&chain, None, Some(&component_ids), None, None)
@@ -202,21 +202,13 @@ async fn analyze_batch(
         })
         .collect::<HashMap<_, _>>();
 
-    let candidates_per_token = token_owner
-        .into_iter()
-        .filter_map(|(address, (cid, _))| {
-            let Some(pc) = components.get(&cid) else {
-                warn!(component_id=?cid, "Failed to find component for id!");
-                return None;
-            };
-            let candidates =
-                pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
-            Some((address, vec![candidates]))
-        })
-        .collect::<HashMap<_, _>>();
     let analyzer = EthCallDetector::new(
         rpc,
-        Arc::new(OnChainTokenOwners::new(rpc, BlockTag::Latest, candidates_per_token)),
+        Arc::new(OnChainTokenOwners::new(
+            rpc,
+            BlockTag::Latest,
+            pool_candidates(token_owners, &components, &balance_owners),
+        )),
         settlement_contract,
     );
     let mut outcome = PassOutcome::default();
@@ -312,15 +304,39 @@ fn pool_holder_candidates(
     candidates
 }
 
+/// Lists, per token, the holder candidates of each pool that holds it, in the order of the owner
+/// rows (largest balance first). Pools whose component is unknown or that have no candidate are
+/// left out.
+fn pool_candidates(
+    token_owners: HashMap<Address, Vec<(ComponentId, Balance)>>,
+    components: &HashMap<ComponentId, ProtocolComponent>,
+    balance_owners: &HashMap<ComponentId, Bytes>,
+) -> HashMap<Address, Vec<Vec<Bytes>>> {
+    let mut candidates = HashMap::with_capacity(token_owners.len());
+    for (token, rows) in token_owners {
+        let mut pools = Vec::with_capacity(rows.len());
+        for (cid, _) in rows {
+            let Some(pc) = components.get(&cid) else {
+                warn!(component_id=?cid, "Failed to find component for id!");
+                continue;
+            };
+            let pool =
+                pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
+            if !pool.is_empty() {
+                pools.push(pool);
+            }
+        }
+        candidates.insert(token, pools);
+    }
+    candidates
+}
+
 #[cfg(test)]
 mod test {
     use chrono::NaiveDateTime;
     use mockall::Sequence;
     use rstest::rstest;
-    use tycho_common::{
-        models::{protocol::ProtocolComponent, ChangeType},
-        storage::WithTotal,
-    };
+    use tycho_common::{models::ChangeType, storage::WithTotal};
 
     use super::*;
     use crate::testing;
@@ -339,6 +355,46 @@ mod test {
 
     fn test_token_at(address: &str, quality: u32) -> Token {
         Token::new(&Bytes::from(address), "TEST", 18, 0, &[], Chain::Ethereum, quality)
+    }
+
+    fn pool(id: &str, contract: &str) -> ProtocolComponent {
+        ProtocolComponent::new(
+            id,
+            "uniswap_v2",
+            "pool",
+            Chain::Ethereum,
+            vec![],
+            vec![Bytes::from(contract)],
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::from("0x00"),
+            NaiveDateTime::default(),
+        )
+    }
+
+    #[test]
+    fn test_pool_candidates_keep_row_order_and_skip_unknown_components() {
+        let token = Bytes::from("0xe172e9b6cfbeeb5593bdce3f077356fdb33af904");
+        let vault = Bytes::from("0x00000000000000000000000000000000000000aa");
+        let hook = Bytes::from("0x00000000000000000000000000000000000000cc");
+        let pair = Bytes::from("0x00000000000000000000000000000000000000bb");
+        let token_owners = HashMap::from([(
+            token.clone(),
+            vec![
+                ("v4_pool".to_string(), Bytes::from("0x0200")),
+                ("unknown".to_string(), Bytes::from("0x0150")),
+                ("v2_pool".to_string(), Bytes::from("0x0100")),
+            ],
+        )]);
+        let components = HashMap::from([
+            ("v4_pool".to_string(), pool("v4_pool", "0x00000000000000000000000000000000000000cc")),
+            ("v2_pool".to_string(), pool("v2_pool", "0x00000000000000000000000000000000000000bb")),
+        ]);
+        let balance_owners = HashMap::from([("v4_pool".to_string(), vault.clone())]);
+
+        let res = pool_candidates(token_owners, &components, &balance_owners);
+
+        assert_eq!(res, HashMap::from([(token, vec![vec![vault, hook], vec![pair]])]));
     }
 
     #[rstest]
