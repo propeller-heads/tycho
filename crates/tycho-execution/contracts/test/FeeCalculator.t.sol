@@ -1185,20 +1185,146 @@ contract FeeCalculatorSlippageTest is Constants {
         assertEq(fees[0].feeAmount, 0);
     }
 
+    // TOKEN FEE TESTS
+    function _tokenFeeInput(address tokenIn, address tokenOut)
+        internal
+        view
+        returns (FeeInput memory)
+    {
+        return FeeInput({
+            actualAmountOut: 1 ether,
+            expectedAmountOut: 1 ether,
+            amountIn: 0.5 ether,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            clientFeeBps: 0,
+            client: BOB
+        });
+    }
+
+    function testSetTokenFeeUnauthorized() public {
+        vm.prank(BOB);
+        vm.expectRevert();
+        feeCalculator.setTokenFee(USDC_ADDR, _1_PCT);
+    }
+
+    function testSetTokenFeeTooHigh() public {
+        vm.prank(FEE_SETTER);
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.setTokenFee(USDC_ADDR, _100_PCT + 1);
+    }
+
+    function testSetAndRemoveTokenFee() public {
+        assertEq(feeCalculator.getTokenFee(USDC_ADDR), 0);
+
+        vm.prank(FEE_SETTER);
+        vm.expectEmit(true, false, false, true);
+        emit FeeCalculator.TokenFeeUpdated(USDC_ADDR, 0, _1_PCT);
+        feeCalculator.setTokenFee(USDC_ADDR, _1_PCT);
+        assertEq(feeCalculator.getTokenFee(USDC_ADDR), _1_PCT);
+
+        vm.prank(FEE_SETTER);
+        feeCalculator.setTokenFee(USDC_ADDR, 0);
+        assertEq(feeCalculator.getTokenFee(USDC_ADDR), 0);
+    }
+
+    function testTokenFeeAppliesOnInputOrOutputToken() public {
+        vm.prank(FEE_SETTER);
+        feeCalculator.setTokenFee(USDC_ADDR, _1_PCT);
+
+        FeeRecipient[] memory onInput =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, WETH_ADDR));
+        FeeRecipient[] memory onOutput =
+            feeCalculator.calculateFee(_tokenFeeInput(WETH_ADDR, USDC_ADDR));
+        FeeRecipient[] memory unrelated =
+            feeCalculator.calculateFee(_tokenFeeInput(WETH_ADDR, DAI_ADDR));
+
+        assertEq(onInput[0].feeAmount, 0.01 ether);
+        assertEq(onOutput[0].feeAmount, 0.01 ether);
+        assertEq(unrelated[0].feeAmount, 0);
+    }
+
+    function testTokenFeeTakesHigherFeeOnce() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setTokenFee(USDC_ADDR, _1_PCT);
+        feeCalculator.setTokenFee(DAI_ADDR, _5_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory bothTokens =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, DAI_ADDR));
+        FeeRecipient[] memory sameToken =
+            feeCalculator.calculateFee(_tokenFeeInput(USDC_ADDR, USDC_ADDR));
+
+        assertEq(bothTokens[0].feeAmount, 0.05 ether);
+        assertEq(sameToken[0].feeAmount, 0.01 ether);
+    }
+
+    function testTokenFeeAddsToRouterFeeOnOutput() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_1_PCT);
+        feeCalculator.setTokenFee(USDC_ADDR, _HALF_PCT);
+        vm.stopPrank();
+
+        FeeRecipient[] memory fees =
+            feeCalculator.calculateFee(_tokenFeeInput(WETH_ADDR, USDC_ADDR));
+
+        assertEq(fees[0].feeAmount, 0.015 ether);
+        assertEq(fees[1].feeAmount, 0);
+    }
+
+    function testTokenFeeCombinedAboveMaxReverts() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setRouterFeeOnOutput(_50_PCT);
+        feeCalculator.setTokenFee(USDC_ADDR, _50_PCT + 1);
+        vm.stopPrank();
+
+        vm.expectRevert(FeeCalculator__FeeTooHigh.selector);
+        feeCalculator.calculateFee(_tokenFeeInput(WETH_ADDR, USDC_ADDR));
+    }
+
+    function testMustOutputThroughRouterWithTokenFee() public {
+        vm.startPrank(FEE_SETTER);
+        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setTokenFee(USDC_ADDR, _1_PCT);
+        vm.stopPrank();
+
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(0, BOB, USDC_ADDR, WETH_ADDR)
+        );
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(0, BOB, WETH_ADDR, USDC_ADDR)
+        );
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(0, BOB, WETH_ADDR, DAI_ADDR)
+        );
+    }
+
     function testMustOutputThroughRouterWithExemption() public {
         // Positive slippage is enabled in setUp, so a non-exempt client
         // must route output through the router
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(
+                0, BOB, address(0), address(0)
+            )
+        );
 
         // An exempt client with no fees may skip the router hop
         vm.prank(FEE_SETTER);
         feeCalculator.setPositiveSlippageExempt(BOB, true);
-        assertFalse(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertFalse(
+            feeCalculator.mustOutputThroughRouter(
+                0, BOB, address(0), address(0)
+            )
+        );
 
         // Any fee still forces the router hop for the exempt client
         vm.prank(FEE_SETTER);
         feeCalculator.setRouterFeeOnOutput(_1_PCT);
-        assertTrue(feeCalculator.mustOutputThroughRouter(0, BOB));
+        assertTrue(
+            feeCalculator.mustOutputThroughRouter(
+                0, BOB, address(0), address(0)
+            )
+        );
     }
 
     function testZeroSlippageNoSurplus() public {

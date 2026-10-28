@@ -48,6 +48,10 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     // while positive slippage capture is enabled
     mapping(address => bool) private _positiveSlippageExempt;
 
+    // Router fee on output in fee units for swaps whose input or output is
+    // the token. Zero means no token fee.
+    mapping(address => uint32) private _tokenFeeBps;
+
     //keccak256("ROUTER_FEE_SETTER_ROLE")
     bytes32 public constant ROUTER_FEE_SETTER_ROLE =
         0x9939157be7760e9462f1d5a0dcad88b616ddc64138e317108b40b1cf55601348;
@@ -67,6 +71,9 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     );
     event PositiveSlippageToggled(bool enabled);
     event PositiveSlippageExemptionSet(address indexed client, bool exempt);
+    event TokenFeeUpdated(
+        address indexed token, uint32 oldFeeBps, uint32 newFeeBps
+    );
 
     /**
      * @param routerFeeSetter Address granted ROUTER_FEE_SETTER_ROLE
@@ -123,8 +130,12 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         // When no surplus (disabled or actual <= expected): it is zero.
         uint256 feeBase = feeInput.actualAmountOut - positiveSlippage;
 
-        (uint256 routerFee, uint256 clientFee) =
-            _calculateFee(feeBase, resolvedClient, feeInput.clientFeeBps);
+        (uint256 routerFee, uint256 clientFee) = _calculateFee(
+            feeBase,
+            resolvedClient,
+            feeInput.clientFeeBps,
+            _getTokenFee(feeInput.tokenIn, feeInput.tokenOut)
+        );
 
         feeRecipients = new FeeRecipient[](2);
         feeRecipients[0] = FeeRecipient({
@@ -139,14 +150,17 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
      * @notice Whether funds must pass through the router after the final swap instead of going directly to the receiver
      * @param clientFeeBps Client fee in basis points
      * @param client The client address to check
+     * @param tokenIn The swap's input token
+     * @param tokenOut The swap's output token
      * @return True if funds must pass through the router after the
      *         final swap instead of going directly to the receiver
      */
-    function mustOutputThroughRouter(uint32 clientFeeBps, address client)
-        external
-        view
-        returns (bool)
-    {
+    function mustOutputThroughRouter(
+        uint32 clientFeeBps,
+        address client,
+        address tokenIn,
+        address tokenOut
+    ) external view returns (bool) {
         address resolvedClient = _resolveClient(client);
 
         // Slippage direction is unknown before the swap, so we always
@@ -163,6 +177,7 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
 
         if (clientFeeBps > 0) return true;
         if (routerFeeOnOutputBps > 0) return true;
+        if (_getTokenFee(tokenIn, tokenOut) > 0) return true;
 
         return false;
     }
@@ -170,16 +185,21 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
     /**
      * @dev Calculates fees from the fee base amount (output minus any
      *      extracted surplus).
-     * @return routerFee Total router fee (fee on output + cut of the client fee)
+     * @param tokenFeeBps Token fee in fee units, charged on top of the
+     *        router fee on output
+     * @return routerFee Total router fee (fee on output + token fee + cut of
+     *         the client fee)
      * @return clientFee Client's portion of the client fee (after the router's cut)
      */
-    function _calculateFee(uint256 feeBase, address client, uint32 clientFeeBps)
-        internal
-        view
-        returns (uint256 routerFee, uint256 clientFee)
-    {
+    function _calculateFee(
+        uint256 feeBase,
+        address client,
+        uint32 clientFeeBps,
+        uint32 tokenFeeBps
+    ) internal view returns (uint256 routerFee, uint256 clientFee) {
         (uint32 routerFeeOnOutputBps, uint32 routerFeeOnClientFeeBps) =
             _getFeeInfo(client);
+        routerFeeOnOutputBps += tokenFeeBps;
 
         if (
             (clientFeeBps + routerFeeOnOutputBps > MAX_BPS)
@@ -245,6 +265,20 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         positiveSlippage = actualAmountOut - expectedAmountOut;
+    }
+
+    /**
+     * @dev Returns the higher of the two tokens' fees, so a swap that touches
+     *      two fee tokens (or the same token twice) pays one token fee.
+     */
+    function _getTokenFee(address tokenIn, address tokenOut)
+        internal
+        view
+        returns (uint32)
+    {
+        uint32 feeIn = _tokenFeeBps[tokenIn];
+        uint32 feeOut = _tokenFeeBps[tokenOut];
+        return feeIn > feeOut ? feeIn : feeOut;
     }
 
     /**
@@ -401,6 +435,30 @@ contract FeeCalculator is AccessControl, IFeeCalculator {
         }
 
         emit CustomRouterFeeOnClientFeeRemoved(client);
+    }
+
+    /**
+     * @dev Sets the router fee on output for swaps whose input or output
+     *      token is `token`. Applies to every client, on top of the router
+     *      fee on output. A fee of zero removes the token fee.
+     * @param token The token to charge the fee on
+     * @param feeBps Fee in fee units (1 unit = 0.0001 BPS; 100_000_000 = 100%)
+     */
+    function setTokenFee(address token, uint32 feeBps)
+        external
+        onlyRole(ROUTER_FEE_SETTER_ROLE)
+    {
+        if (feeBps > MAX_BPS) revert FeeCalculator__FeeTooHigh();
+        uint32 oldFeeBps = _tokenFeeBps[token];
+        _tokenFeeBps[token] = feeBps;
+        emit TokenFeeUpdated(token, oldFeeBps, feeBps);
+    }
+
+    /**
+     * @dev Returns the token fee for `token` in fee units (zero if unset)
+     */
+    function getTokenFee(address token) external view returns (uint32) {
+        return _tokenFeeBps[token];
     }
 
     /**
