@@ -13,10 +13,11 @@ use crate::{erc20::balanceOfCall, rpc::EthereumRpcClient, BytesCodec};
 
 /// Finds a token holder by asking the chain.
 ///
-/// Holds, per token, candidate holder addresses in preference order. `find_owner` returns the
-/// first candidate whose `balanceOf` at the configured block is at least `min_balance`, with that
-/// on-chain balance. A candidate whose `balanceOf` reverts or returns no data counts as holding
-/// nothing. Errors only when the RPC call itself fails.
+/// Holds, per token, candidate holder addresses in preference order. `find_owner` reads the
+/// `balanceOf` of every candidate at the configured block in one batch request and returns the
+/// candidate with the largest balance that is at least `min_balance`, with that on-chain balance.
+/// On equal balances the earlier candidate wins. A candidate whose `balanceOf` reverts or returns
+/// no data counts as holding nothing. Errors only when the RPC call itself fails.
 #[derive(Debug)]
 pub struct OnChainTokenOwners {
     rpc: EthereumRpcClient,
@@ -35,23 +36,38 @@ impl OnChainTokenOwners {
 }
 
 impl OnChainTokenOwners {
-    /// Returns the holder's balance, or `None` when the call reverts or returns no decodable
-    /// data. A reverting `balanceOf` is a property of the token, not an RPC fault, and must end
-    /// in a Bad verdict instead of an error that the cron retries forever.
-    async fn balance_of(&self, token: &Bytes, holder: &Bytes) -> Result<Option<U256>, String> {
-        let calldata = balanceOfCall { _owner: Address::from_bytes(holder) }.abi_encode();
-        let request = TransactionRequest::default()
-            .to(Address::from_bytes(token))
-            .input(TransactionInput::both(calldata.into()));
-        match self
+    /// Returns each holder's balance from one batch request, in holder order. A balance is `None`
+    /// when its call reverts or returns no decodable data. A reverting `balanceOf` is a property
+    /// of the token, not an RPC fault, and must end in a Bad verdict instead of an error that the
+    /// cron retries forever.
+    async fn balances_of(
+        &self,
+        token: &Bytes,
+        holders: &[Bytes],
+    ) -> Result<Vec<Option<U256>>, String> {
+        let requests = holders
+            .iter()
+            .map(|holder| {
+                let calldata = balanceOfCall { _owner: Address::from_bytes(holder) }.abi_encode();
+                TransactionRequest::default()
+                    .to(Address::from_bytes(token))
+                    .input(TransactionInput::both(calldata.into()))
+            })
+            .collect::<Vec<_>>();
+        let results = self
             .rpc
-            .eth_call(request, map_block_tag(self.block))
+            .batch_eth_call(&requests, map_block_tag(self.block))
             .await
-        {
-            Ok(raw) => Ok(balanceOfCall::abi_decode_returns(raw.as_ref()).ok()),
-            Err(e) if e.is_execution_reverted() => Ok(None),
-            Err(e) => Err(format!("balanceOf({holder}) on token {token} failed: {e}")),
-        }
+            .map_err(|e| format!("balanceOf batch on token {token} failed: {e}"))?;
+        holders
+            .iter()
+            .zip(results)
+            .map(|(holder, result)| match result {
+                Ok(raw) => Ok(balanceOfCall::abi_decode_returns(raw.as_ref()).ok()),
+                Err(e) if e.is_execution_reverted() => Ok(None),
+                Err(e) => Err(format!("balanceOf({holder}) on token {token} failed: {e}")),
+            })
+            .collect()
     }
 }
 
@@ -62,19 +78,28 @@ impl TokenOwnerFinding for OnChainTokenOwners {
         token: Bytes,
         min_balance: Bytes,
     ) -> Result<Option<(Bytes, Bytes)>, String> {
-        let Some(candidates) = self.candidates.get(&token) else {
+        let Some(candidates) = self
+            .candidates
+            .get(&token)
+            .filter(|candidates| !candidates.is_empty())
+        else {
             return Ok(None);
         };
         let min_balance = U256::try_from_be_slice(min_balance.as_ref())
             .ok_or_else(|| format!("min_balance {min_balance} does not fit in 256 bits"))?;
-        for holder in candidates {
-            if let Some(balance) = self.balance_of(&token, holder).await? {
-                if balance >= min_balance {
-                    return Ok(Some((holder.clone(), balance.to_bytes())));
-                }
+        let balances = self
+            .balances_of(&token, candidates)
+            .await?;
+        let mut owner: Option<(&Bytes, U256)> = None;
+        for (holder, balance) in candidates.iter().zip(balances) {
+            let Some(balance) = balance else {
+                continue;
+            };
+            if balance >= min_balance && owner.is_none_or(|(_, largest)| balance > largest) {
+                owner = Some((holder, balance));
             }
         }
-        Ok(None)
+        Ok(owner.map(|(holder, balance)| (holder.clone(), balance.to_bytes())))
     }
 }
 
@@ -82,38 +107,57 @@ impl TokenOwnerFinding for OnChainTokenOwners {
 mod tests {
     use std::str::FromStr;
 
+    use rstest::rstest;
+
     use super::*;
 
     const TOKEN: &str = "0xc139190f447e929f090edeb554d95abb8b18ac1c";
     const FACTORY: &str = "0x6a8cbed756804b16e05e741edabd5cb544ae21bf";
     const POOL: &str = "0xc2921134073151490193ac7369313c8e0b08e1e7";
 
-    fn result_body(balance: u64) -> String {
-        format!(r#"{{"jsonrpc":"2.0","id":0,"result":"0x{balance:064x}"}}"#)
+    // Each test uses a new client, so the batch request ids are 0 for FACTORY and 1 for POOL.
+    fn balance_response(id: usize, balance: u64) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"0x{balance:064x}"}}"#)
     }
 
-    const REVERT_BODY: &str =
-        r#"{"jsonrpc":"2.0","id":0,"error":{"code":3,"message":"execution reverted","data":"0x"}}"#;
-    const EMPTY_BODY: &str = r#"{"jsonrpc":"2.0","id":0,"result":"0x"}"#;
-    const INVALID_PARAMS_BODY: &str =
-        r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"invalid params"}}"#;
+    fn revert_response(id: usize) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":3,"message":"execution reverted","data":"0x"}}}}"#
+        )
+    }
 
-    /// Mocks one `eth_call` whose calldata names `holder` (balanceOf encodes the holder address).
-    async fn mock_holder(
+    fn empty_response(id: usize) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"0x"}}"#)
+    }
+
+    fn invalid_params_response(id: usize) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32602,"message":"invalid params"}}}}"#
+        )
+    }
+
+    /// Mocks one batch request that asks for the balances of FACTORY and POOL.
+    async fn mock_batch(
         server: &mut mockito::ServerGuard,
-        holder: &str,
-        body: &str,
+        responses: [String; 2],
     ) -> mockito::Mock {
         server
             .mock("POST", "/")
-            .match_body(mockito::Matcher::Regex(
-                holder
-                    .trim_start_matches("0x")
-                    .to_string(),
+            .match_body(mockito::Matcher::AllOf(
+                [FACTORY, POOL]
+                    .iter()
+                    .map(|holder| {
+                        mockito::Matcher::Regex(
+                            holder
+                                .trim_start_matches("0x")
+                                .to_string(),
+                        )
+                    })
+                    .collect(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(body)
+            .with_body(format!("[{}]", responses.join(",")))
             .expect(1)
             .create_async()
             .await
@@ -124,7 +168,10 @@ mod tests {
         OnChainTokenOwners::new(
             &rpc,
             BlockTag::Latest,
-            HashMap::from([(Bytes::from(TOKEN), vec![Bytes::from(FACTORY), Bytes::from(POOL)])]),
+            HashMap::from([
+                (Bytes::from(TOKEN), vec![Bytes::from(FACTORY), Bytes::from(POOL)]),
+                (Bytes::from_str("0x0000000000000000000000000000000000000002").unwrap(), vec![]),
+            ]),
         )
     }
 
@@ -133,10 +180,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_first_funded_candidate_with_onchain_balance() {
+    async fn picks_largest_balance_at_least_min() {
         let mut server = mockito::Server::new_async().await;
-        let factory = mock_holder(&mut server, FACTORY, &result_body(0)).await;
-        let pool = mock_holder(&mut server, POOL, &result_body(5_000_000)).await;
+        let batch =
+            mock_batch(&mut server, [balance_response(0, 200_000), balance_response(1, 5_000_000)])
+                .await;
 
         let res = finder(&server.url())
             .find_owner(Bytes::from(TOKEN), min_balance())
@@ -144,15 +192,27 @@ mod tests {
             .expect("find_owner failed");
 
         assert_eq!(res, Some((Bytes::from(POOL), U256::from(5_000_000_u64).to_bytes())));
-        factory.assert_async().await;
-        pool.assert_async().await;
+        batch.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn equal_balances_keep_the_earlier_candidate() {
+        let mut server = mockito::Server::new_async().await;
+        mock_batch(&mut server, [balance_response(0, 5_000_000), balance_response(1, 5_000_000)])
+            .await;
+
+        let res = finder(&server.url())
+            .find_owner(Bytes::from(TOKEN), min_balance())
+            .await
+            .expect("find_owner failed");
+
+        assert_eq!(res, Some((Bytes::from(FACTORY), U256::from(5_000_000_u64).to_bytes())));
     }
 
     #[tokio::test]
     async fn returns_none_when_no_candidate_holds_the_minimum() {
         let mut server = mockito::Server::new_async().await;
-        mock_holder(&mut server, FACTORY, &result_body(0)).await;
-        mock_holder(&mut server, POOL, &result_body(99_999)).await;
+        mock_batch(&mut server, [balance_response(0, 0), balance_response(1, 99_999)]).await;
 
         let res = finder(&server.url())
             .find_owner(Bytes::from(TOKEN), min_balance())
@@ -165,8 +225,7 @@ mod tests {
     #[tokio::test]
     async fn skips_candidate_whose_balance_of_reverts() {
         let mut server = mockito::Server::new_async().await;
-        mock_holder(&mut server, FACTORY, REVERT_BODY).await;
-        mock_holder(&mut server, POOL, &result_body(5_000_000)).await;
+        mock_batch(&mut server, [revert_response(0), balance_response(1, 5_000_000)]).await;
 
         let res = finder(&server.url())
             .find_owner(Bytes::from(TOKEN), min_balance())
@@ -179,8 +238,7 @@ mod tests {
     #[tokio::test]
     async fn skips_candidate_that_returns_no_data() {
         let mut server = mockito::Server::new_async().await;
-        mock_holder(&mut server, FACTORY, EMPTY_BODY).await;
-        mock_holder(&mut server, POOL, &result_body(5_000_000)).await;
+        mock_batch(&mut server, [empty_response(0), balance_response(1, 5_000_000)]).await;
 
         let res = finder(&server.url())
             .find_owner(Bytes::from(TOKEN), min_balance())
@@ -193,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn rpc_failure_is_an_error() {
         let mut server = mockito::Server::new_async().await;
-        mock_holder(&mut server, FACTORY, INVALID_PARAMS_BODY).await;
+        mock_batch(&mut server, [invalid_params_response(0), balance_response(1, 5_000_000)]).await;
 
         let res = finder(&server.url())
             .find_owner(Bytes::from(TOKEN), min_balance())
@@ -202,14 +260,14 @@ mod tests {
         assert!(res.is_err());
     }
 
+    #[rstest]
+    #[case::unknown_token("0x0000000000000000000000000000000000000001")]
+    #[case::empty_candidate_list("0x0000000000000000000000000000000000000002")]
     #[tokio::test]
-    async fn token_without_candidates_makes_no_rpc_call() {
+    async fn token_without_candidates_makes_no_rpc_call(#[case] token: &str) {
         // Port 1 refuses connections: any RPC call would turn into an Err.
         let res = finder("http://localhost:1")
-            .find_owner(
-                Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
-                min_balance(),
-            )
+            .find_owner(Bytes::from_str(token).unwrap(), min_balance())
             .await
             .expect("no RPC call expected");
 
