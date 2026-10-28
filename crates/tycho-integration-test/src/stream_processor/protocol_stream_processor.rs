@@ -312,6 +312,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_infinity_cl".to_string(),
                 "pancakeswap_infinity_cl_hooks".to_string(),
                 "lunarbase".to_string(),
+                "topaz_cl".to_string(),
             ],
             Chain::Unichain => {
                 vec![
