@@ -29,7 +29,7 @@ struct SupportedModule {
     default_fee_cap: u32,
 }
 
-const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 5] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 6] = [
     // The three Base modules moved from 600 to 480 in tx 0x42122c80…7550 (block 52,307,488), and
     // 0x87D8 again to 30 in tx 0x1aeb7f17…2ae4 (block 53,228,614).
     SupportedModule {
@@ -65,6 +65,13 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 5] = [
         address: address!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"),
         seconds_ago: DEFAULT_SECONDS_AGO,
         default_fee_cap: 50_000,
+    },
+    // Topaz CL on BSC. The Robinhood module's code with `MAX_BASE_FEE` 30_000 and `MAX_FEE_CAP`
+    // 50_000; its `defaultFeeCap` has been 10_000 since deployment.
+    SupportedModule {
+        address: address!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"),
+        seconds_ago: DEFAULT_SECONDS_AGO,
+        default_fee_cap: 10_000,
     },
 ];
 
@@ -532,12 +539,13 @@ mod tests {
     #[rstest]
     #[case::up(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 30_000)]
     #[case::topaz_cl(hex!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"), 40_000)]
+    #[case::topaz_cl_bsc(hex!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"), 10_000)]
     fn base_fee_without_scaling_factor_is_capped_by_the_module_default(
         #[case] module: [u8; 20],
         #[case] expected_fee: u32,
     ) {
         // A custom base fee with no scaling factor of its own: the module caps it at its
-        // `defaultFeeCap`, 30_000 for UP and 50_000 for Topaz.
+        // `defaultFeeCap`, 30_000 for UP, 50_000 for Topaz on Robinhood and 10_000 on BSC.
         let attributes = HashMap::from([
             (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
             ("dfc_baseFee".to_string(), Bytes::from(40_000_u32.to_be_bytes())),
