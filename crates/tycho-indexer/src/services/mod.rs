@@ -43,12 +43,14 @@ mod debug;
 mod deltas_buffer;
 mod middleware;
 mod off_worker;
+mod protocol_freshness;
 mod rpc;
 mod state;
 mod ws;
 
 pub use cache::RpcCacheKind;
 pub use middleware::PlansConfig;
+pub use protocol_freshness::ProtocolFreshness;
 pub use state::{
     cache::EntityCache, service::EntityCacheSetup, window::WindowConfig, EntityCacheMode,
 };
@@ -66,6 +68,8 @@ pub struct ServicesBuilder<G> {
     dci_protocols: Vec<String>,
     /// Active protocol systems derived from extractor config.
     protocol_systems: Vec<String>,
+    /// Hides systems whose extractor is far behind the chain from `/protocol_systems`.
+    protocol_freshness: Option<ProtocolFreshness>,
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
@@ -109,6 +113,7 @@ where
             plans_config: PlansConfig::default(),
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
+            protocol_freshness: None,
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
             entity_cache: EntityCacheSetup::Off,
@@ -156,6 +161,13 @@ where
     /// Sets the active protocol systems derived from extractor config.
     pub fn protocol_systems(mut self, protocol_systems: Vec<String>) -> Self {
         self.protocol_systems = protocol_systems;
+        self
+    }
+
+    /// Lists in `/protocol_systems` only the systems that `freshness` reports as fresh. The
+    /// delta pump keeps it current.
+    pub fn protocol_freshness(mut self, freshness: ProtocolFreshness) -> Self {
+        self.protocol_freshness = Some(freshness);
         self
     }
 
@@ -235,7 +247,10 @@ where
                 .map(|e_id| e_id.name.as_str()),
             self.window_config,
         );
-        let pending_deltas = PendingDeltas::from_windows(windows.clone(), sink);
+        let mut pending_deltas = PendingDeltas::from_windows(windows.clone(), sink);
+        if let Some(freshness) = &self.protocol_freshness {
+            pending_deltas = pending_deltas.with_freshness(freshness.clone());
+        }
         info!(
             depth = self.window_config.depth,
             min_fold_batch = self.window_config.min_fold_batch,
@@ -306,18 +321,20 @@ where
         if !self.disabled_rpc_caches.is_empty() {
             info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
         }
-        let rpc_data = web::Data::new(
-            rpc::RpcHandler::new(
-                self.db_gateway,
-                pending_deltas,
-                tracer,
-                self.plans_config,
-                self.dci_protocols,
-                self.protocol_systems,
-            )
-            .with_disabled_caches(&self.disabled_rpc_caches)
-            .with_state_service(state_service),
-        );
+        let mut rpc_handler = rpc::RpcHandler::new(
+            self.db_gateway,
+            pending_deltas,
+            tracer,
+            self.plans_config,
+            self.dci_protocols,
+            self.protocol_systems,
+        )
+        .with_disabled_caches(&self.disabled_rpc_caches)
+        .with_state_service(state_service);
+        if let Some(freshness) = self.protocol_freshness {
+            rpc_handler = rpc_handler.with_protocol_freshness(freshness);
+        }
+        let rpc_data = web::Data::new(rpc_handler);
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()

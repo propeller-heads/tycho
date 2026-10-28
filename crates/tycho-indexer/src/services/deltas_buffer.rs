@@ -26,7 +26,10 @@ use crate::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
         DeltaCommand,
     },
-    services::state::window::{DeltaWindow, FoldSink},
+    services::{
+        protocol_freshness::ProtocolFreshness,
+        state::window::{DeltaWindow, FoldSink},
+    },
 };
 
 /// Facade over one [`DeltaWindow`] per extractor.
@@ -39,6 +42,8 @@ pub struct PendingDeltas {
     /// Keyed by protocol system name.
     windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
     sink: Arc<dyn FoldSink>,
+    /// Receives the time of every full block. `None` records nothing.
+    freshness: Option<ProtocolFreshness>,
 }
 
 impl DeepSizeOf for PendingDeltas {
@@ -117,7 +122,13 @@ impl PendingDeltas {
         windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
         sink: Arc<dyn FoldSink>,
     ) -> Self {
-        Self { windows, sink }
+        Self { windows, sink, freshness: None }
+    }
+
+    /// Records the time of every full block the pump receives in `freshness`.
+    pub(crate) fn with_freshness(mut self, freshness: ProtocolFreshness) -> Self {
+        self.freshness = Some(freshness);
+        self
     }
 
     /// Folds one extractor's committed blocks into the sink, then empties its window. Nothing
@@ -332,6 +343,9 @@ impl PendingDeltas {
                     // Skip partial messages - only full-block updates go to the window.
                     if message.partial_block_index.is_some() {
                         continue;
+                    }
+                    if let Some(freshness) = &self.freshness {
+                        freshness.record(&message.extractor, message.block.ts);
                     }
                     self.insert(&message).map_err(|err| {
                         error!(
@@ -948,6 +962,34 @@ mod test {
         assert_eq!(*sink.folded.lock().unwrap(), vec![1, 2, 3]);
         assert!(has_block(&buffer, 4));
         assert!(!has_block(&buffer, 1) && !has_block(&buffer, 5));
+    }
+
+    #[tokio::test]
+    async fn run_records_the_time_of_each_full_block() {
+        let freshness = ProtocolFreshness::load(
+            &testing::MockGateway::new(),
+            &Chain::Ethereum,
+            &[],
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+        let buffer = PendingDeltas::new(["native:extractor"]).with_freshness(freshness.clone());
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // `run` sends the start signal into this buffered channel; nothing needs to receive it.
+        let (start_tx, _start_rx) = std::sync::mpsc::sync_channel(1);
+        let pump = tokio::spawn(buffer.run(vec![rx], start_tx));
+        let message = native_msg(1, None, 1);
+        let block_ts = message.block.ts;
+
+        tx.send(DeltaCommand::Block(message))
+            .await
+            .unwrap();
+        drop(tx);
+        pump.await.unwrap().unwrap();
+
+        assert!(freshness.is_fresh("native:extractor", block_ts));
+        assert!(!freshness.is_fresh("native:extractor", block_ts + chrono::Duration::minutes(2)));
     }
 
     #[tokio::test]

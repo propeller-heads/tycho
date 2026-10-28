@@ -35,6 +35,7 @@ use crate::{
             ValidateRestrictions,
         },
         off_worker::{CacheReply, OffWorker},
+        protocol_freshness::ProtocolFreshness,
         state::{
             service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
             shadow::{self, Endpoint, SampledRequest, Shadow},
@@ -134,6 +135,9 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    /// Hides systems whose extractor is far behind the chain from `protocol_systems`. `None`
+    /// lists every system.
+    protocol_freshness: Option<ProtocolFreshness>,
     /// Which path answers state requests. `Off` without extractors.
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
@@ -191,9 +195,16 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            protocol_freshness: None,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
         }
+    }
+
+    /// Lists in `protocol_systems` only the systems that `freshness` reports as fresh.
+    pub(crate) fn with_protocol_freshness(mut self, freshness: ProtocolFreshness) -> Self {
+        self.protocol_freshness = Some(freshness);
+        self
     }
 
     /// Turns the given response caches off. A request to an endpoint whose cache is off always
@@ -768,14 +779,17 @@ where
         allowed_systems: Option<&HashSet<String>>,
     ) -> Result<dto::ProtocolSystemsRequestResponse, RpcError> {
         info!(?request, "Getting protocol systems.");
-        let filtered: Vec<&String> = match allowed_systems {
-            Some(allowed) => self
-                .protocol_systems
-                .iter()
-                .filter(|ps| allowed.contains(ps.as_str()))
-                .collect(),
-            None => self.protocol_systems.iter().collect(),
-        };
+        let now = Utc::now().naive_utc();
+        let filtered: Vec<&String> = self
+            .protocol_systems
+            .iter()
+            .filter(|ps| allowed_systems.is_none_or(|allowed| allowed.contains(ps.as_str())))
+            .filter(|ps| {
+                self.protocol_freshness
+                    .as_ref()
+                    .is_none_or(|freshness| freshness.is_fresh(ps, now))
+            })
+            .collect();
         let total = filtered.len() as i64;
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
@@ -1501,7 +1515,10 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
 
 /// Retrieve protocol systems
 ///
-/// This endpoint retrieves the protocol systems available in the indexer.
+/// This endpoint retrieves the protocol systems available in the indexer. It leaves out a
+/// protocol system while its newest indexed block is far behind the chain, for example while a
+/// new protocol indexes its history. The other endpoints still accept that protocol system by
+/// name.
 #[utoipa::path(
     post,
     path = "/v1/protocol_systems",
@@ -4272,6 +4289,66 @@ plans:
 
         assert_eq!(response.protocol_systems.len(), 1);
         assert_eq!(response.pagination.total, 3);
+    }
+
+    /// A handler over `uniswap_v2`, `uniswap_v3` and `ekubo_v3`, where `ekubo_v3` is two hours
+    /// behind the chain and `uniswap_v3` has no known block.
+    async fn handler_with_a_lagging_system() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let systems =
+            vec!["ekubo_v3".to_string(), "uniswap_v2".to_string(), "uniswap_v3".to_string()];
+        let freshness =
+            ProtocolFreshness::load(&MockGateway::new(), &Chain::Ethereum, &[], Duration::hours(1))
+                .await
+                .unwrap();
+        let now = Utc::now().naive_utc();
+        freshness.record("uniswap_v2", now);
+        freshness.record("ekubo_v3", now - Duration::hours(2));
+
+        RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            systems,
+        )
+        .with_protocol_freshness(freshness)
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_leaves_out_lagging_systems() {
+        let handler = handler_with_a_lagging_system().await;
+        let request = dto::ProtocolSystemsRequestBody {
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 100 },
+        };
+
+        let response = handler
+            .get_protocol_systems(&request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol_systems, vec!["uniswap_v2"]);
+        assert_eq!(response.pagination.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_applies_the_allowlist_and_the_lag_check() {
+        let handler = handler_with_a_lagging_system().await;
+        let allowed: HashSet<String> =
+            HashSet::from(["ekubo_v3".to_string(), "uniswap_v3".to_string()]);
+        let request = dto::ProtocolSystemsRequestBody {
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 100 },
+        };
+
+        let response = handler
+            .get_protocol_systems(&request, Some(&allowed))
+            .await
+            .unwrap();
+
+        assert!(response.protocol_systems.is_empty());
+        assert_eq!(response.pagination.total, 0);
     }
 
     #[tokio::test]
