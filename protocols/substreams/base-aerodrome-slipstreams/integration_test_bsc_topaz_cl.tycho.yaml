@@ -1,0 +1,30 @@
+substreams_yaml_path: ./bsc-topaz-cl.yaml
+protocol_system: "topaz_cl"
+protocol_type_names:
+  - "topaz_cl_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # USDT / USDC on tick spacing 1. The range starts at the factory's deployment block because a
+  # pool is only emitted once its tick spacing has a stored fee, and the factory enables its tick
+  # spacings in its constructor.
+  - name: usdt_usdc_zero_fee
+    start_block: 98756164
+    # Stop at the first swap after the pool's base fee was set to the zero-fee indicator:
+    #   PoolCreated + Initialize + Mint:  block 98,787,198
+    #   SetCustomFee 420 (zero fee):      block 98,787,389
+    #   Burn:                             block 98,787,891
+    #   Swap:                             block 98,788,453
+    stop_block: 98788453
+    expected_components:
+      - id: "0xab5ec7b18d3b184ed85bef7f4277f59c673da1f5"
+        tokens:
+          - "0x55d398326f99059fF775485246999027B3197955" # USDT
+          - "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d" # USDC
+        static_attributes:
+          default_fee: "0x64"
+          tick_spacing: "0x01"
+        creation_tx: "0x6de319a07bcb458893271eff02f7f88a018100679a29e1184332107c585bbfb8"
+        skip_simulation: false
+        skip_execution: false
