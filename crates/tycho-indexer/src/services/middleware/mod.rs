@@ -3,7 +3,7 @@ mod metrics;
 mod pagination;
 mod plan_restrictions;
 
-pub(super) use compression::compression_middleware;
+pub(super) use compression::{compress_state_response, compression_middleware};
 pub(super) use metrics::rpc_metrics_middleware;
 pub use pagination::RequestPaginationValidation;
 pub use plan_restrictions::PlansConfig;

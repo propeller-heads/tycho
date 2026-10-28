@@ -35,7 +35,7 @@ networks:
 # `-p map_events=ve33_address=0x... -p map_components=ve33_address=0x...`.
 params:
   map_events: "mev_capture_v21_address=0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49"
-  map_components: "signed_exclusive_swap_address=0x55b703eED01b35641963da2FB2E14885993605A3"
+  map_components: "signed_exclusive_swap_address=0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"
 
 modules:
   # Stage 1

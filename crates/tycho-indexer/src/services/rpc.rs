@@ -31,7 +31,8 @@ use crate::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
         middleware::{
-            PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
+            compress_state_response, PlanRestrictions, PlansConfig, RequestPaginationValidation,
+            ValidateRestrictions,
         },
         off_worker::{CacheReply, OffWorker},
         state::{
@@ -1338,7 +1339,7 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     let handler = handler.into_inner();
     let response = handler.get_contract_state(&body).await;
 
-    match response {
+    let response = match response {
         Ok(StateAnswer::EntityCache(response)) => Ok(response),
         Ok(StateAnswer::Db(state)) => {
             handler
@@ -1350,7 +1351,8 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve tokens
@@ -1481,7 +1483,7 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let handler = handler.into_inner();
     let response = handler.get_protocol_state(&body).await;
 
-    match response {
+    let response = match response {
         Ok(StateAnswer::EntityCache(response)) => Ok(response),
         Ok(StateAnswer::Db(state)) => {
             handler
@@ -1493,7 +1495,8 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)
         }
-    }
+    }?;
+    compress_state_response(&req, response).await
 }
 
 /// Retrieve protocol systems

@@ -79,7 +79,10 @@ mod tests {
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::models::{default_token, Swap};
+    use crate::encoding::{
+        evm::utils::write_calldata_to_file,
+        models::{default_token, Swap},
+    };
 
     /// Covers the encoder shared by the slipstream forks and Ramses V3: it packs the immutable
     /// `tick_spacing` static attribute into the 3-byte slot, which the Uniswap V3 executor ignores.
@@ -135,5 +138,58 @@ mod tests {
                 "01",
             ))
         );
+    }
+
+    #[test]
+    fn test_encode_aero_cl() {
+        // WETH -> cbBTC on the AERO v1.1 WETH/cbBTC pool on Base (tick spacing 10).
+        let pool = ProtocolComponent {
+            id: String::from("0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"),
+            protocol_system: String::from("aero_cl"),
+            static_attributes: [(
+                "tick_spacing".into(),
+                Bytes::from(BigInt::from(10).to_signed_bytes_be()),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+        let token_out = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+        let swap = Swap::new(
+            pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
+        };
+        let encoder = SlipstreamsSwapEncoder::new(
+            Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
+            Chain::Base,
+            None,
+        )
+        .unwrap();
+
+        let hex_swap = encode(
+            encoder
+                .encode_swap(&swap, &encoding_context)
+                .unwrap(),
+        );
+
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                "4200000000000000000000000000000000000006",
+                "cbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+                "00000a",
+                "bb5507daae822ba89c4da61bbfdf4b49a1666bac",
+                "01",
+            ))
+        );
+        write_calldata_to_file("test_encode_aero_cl", hex_swap.as_str());
     }
 }

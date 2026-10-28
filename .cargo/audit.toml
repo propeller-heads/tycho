@@ -16,6 +16,9 @@
 # RUSTSEC-2026-0382: rustls-webpki may accept distrusted intermediates. Only patched in
 # rustls-webpki >= 0.103.16 (which we use). The 0.101.x line has no fix and is pulled in by
 # rustls 0.21 (tonic 0.9 and aws-sdk-s3's legacy rustls feature).
+# RUSTSEC-2026-0387: crypto-bigint timing variability. Only patched in crypto-bigint >= 0.7.6.
+# The 0.4.x and 0.5.x lines have no fix and are pulled in by aws-sigv4 (aws-sdk-s3, aws-config)
+# and elliptic-curve 0.12/0.13 (alloy-signer). The latest aws-sigv4 still requires ^0.5.
 ignore = [
     "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
@@ -29,4 +32,5 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0382",
+    "RUSTSEC-2026-0387",
 ]

@@ -38,12 +38,23 @@ contract AerodromeV1Executor is IExecutor {
         bool zeroForOne,
         address receiver
     ) internal {
-        uint256 amountOut = pool.getAmountOut(amountIn, tokenIn);
+        uint256 amountOut = _getAmountOut(pool, amountIn, tokenIn);
         if (zeroForOne) {
             pool.swap(0, amountOut, receiver, "");
         } else {
             pool.swap(amountOut, 0, receiver, "");
         }
+    }
+
+    /// @dev The output to request from `pool` for `amountIn` already sent to it.
+    // Called by `_swap`; Slither misreads the AeroBasicExecutor override as making it unused.
+    // slither-disable-next-line dead-code
+    function _getAmountOut(
+        IAerodromeV1Pool pool,
+        uint256 amountIn,
+        address tokenIn
+    ) internal view virtual returns (uint256) {
+        return pool.getAmountOut(amountIn, tokenIn);
     }
 
     function _decodeData(bytes calldata data)

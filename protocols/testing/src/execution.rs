@@ -21,6 +21,7 @@ const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runti
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Angstrom.runtime.json");
+const AERO_BASIC_BYTECODE_JSON: &str = include_str!("../fixtures/AeroBasic.runtime.json");
 const BALANCER_V2_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV2.runtime.json");
 const BALANCER_V3_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV3.runtime.json");
 const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json");
@@ -68,6 +69,8 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
     map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("aero_basic", AERO_BASIC_BYTECODE_JSON);
+    map.insert("aero_cl", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);

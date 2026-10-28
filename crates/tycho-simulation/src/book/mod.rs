@@ -23,11 +23,15 @@ use crate::{
 
 pub mod all_pairs;
 pub(crate) mod component;
-pub use component::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE};
+pub use component::{
+    decode_swap_directions, pair_book, pair_component, pair_component_id, PairState,
+    SWAP_DIRECTIONS_ATTRIBUTE,
+};
 pub(crate) mod levels;
+pub use levels::{Levels, PriceLevel};
 pub mod quote_tokens;
-pub(crate) mod sim;
-pub(crate) mod tvl;
+pub mod sim;
+pub mod tvl;
 pub(crate) mod wire;
 
 /// One pair's book: the component that identifies the pair and the ready-to-simulate state
@@ -47,7 +51,7 @@ pub struct Book {
 /// The books a source has decoded out of one answer from its venue, each under the id of the
 /// component it carries.
 #[derive(Debug, Default, derive_more::Deref)]
-pub(crate) struct Books(HashMap<String, Book>);
+pub struct Books(HashMap<String, Book>);
 
 impl Books {
     pub fn new() -> Self {
@@ -74,6 +78,11 @@ impl Books {
                 free.insert(book);
             }
         }
+    }
+
+    /// Returns the books as the map stored in a snapshot.
+    pub fn into_map(self) -> HashMap<String, Book> {
+        self.0
     }
 }
 
@@ -105,7 +114,7 @@ pub struct BookSnapshot<A> {
 
 impl BookSnapshot<ReceivedAt> {
     /// `books` as the complete set a feed received just now.
-    pub(crate) fn received_now(books: Books) -> Self {
+    pub fn received_now(books: Books) -> Self {
         BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books.0) }
     }
 }
@@ -135,23 +144,15 @@ pub struct BookFeedConfig {
 }
 
 impl BookFeedConfig {
-    /// The numeric chain id a venue's API addresses this chain by, or a [`FeedError::Fatal`]
-    /// naming the chain that has none.
-    pub(crate) fn chain_id(&self) -> Result<u64, FeedError> {
-        self.chain
-            .try_id()
-            .map_err(|error| FeedError::Fatal(format!("no chain id for {}: {error}", self.chain)))
-    }
-
     /// The two tokens of a pair, or `None` when either is outside the universe and the pair is
     /// therefore not served.
-    pub(crate) fn pair_tokens(&self, a: &Bytes, b: &Bytes) -> Option<(&Token, &Token)> {
+    pub fn pair_tokens(&self, a: &Bytes, b: &Bytes) -> Option<(&Token, &Token)> {
         Some((self.tokens.get(a)?, self.tokens.get(b)?))
     }
 
     /// Whether a book with `tvl_usd` clears the floor; names the component it would be
     /// published under in the log line when it does not.
-    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, component_id: &Bytes) -> bool {
+    pub fn clears_min_tvl(&self, tvl_usd: f64, component_id: &Bytes) -> bool {
         let clears = tvl_usd >= self.min_tvl_usd;
         if !clears {
             debug!(
@@ -163,6 +164,14 @@ impl BookFeedConfig {
         }
         clears
     }
+}
+
+/// Returns the numeric id used by venue APIs for `chain`, or a [`FeedError::Fatal`] naming the
+/// chain if it has no numeric id.
+pub(crate) fn chain_id(chain: Chain) -> Result<u64, FeedError> {
+    chain
+        .try_id()
+        .map_err(|error| FeedError::Fatal(format!("no chain id for {chain}: {error}")))
 }
 
 /// Several book feeds, merged — [`SnapshotFeedStreams`] with the types every book feed uses.
@@ -217,6 +226,30 @@ pub(crate) fn test_token_map(entries: &[(&Bytes, &str, u32)]) -> HashMap<Bytes, 
             )
         })
         .collect()
+}
+
+/// A chain that resolves to no numeric chain id: a custom chain the registry does not know, which
+/// only deserialization can produce.
+#[cfg(test)]
+pub(crate) fn chain_without_id() -> Chain {
+    serde_json::from_str(r#"{"custom":"unregistered"}"#).unwrap()
+}
+
+/// Asserts that two book sets hold the same components under the same ids, with equal states and
+/// provider times.
+#[cfg(test)]
+pub(crate) fn assert_same_books(actual: &HashMap<String, Book>, expected: &HashMap<String, Book>) {
+    let mut actual_ids: Vec<_> = actual.keys().collect();
+    let mut expected_ids: Vec<_> = expected.keys().collect();
+    actual_ids.sort();
+    expected_ids.sort();
+    assert_eq!(actual_ids, expected_ids);
+    for (id, book) in actual {
+        let other = &expected[id];
+        assert_eq!(book.component, other.component, "{id}");
+        assert_eq!(book.updated_at, other.updated_at, "{id}");
+        assert!(book.state.eq(&*other.state), "{id}: states differ");
+    }
 }
 
 #[cfg(test)]

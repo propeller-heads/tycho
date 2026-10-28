@@ -23,6 +23,11 @@ pub struct TychoExecutionInput {
     pub token_in: String,
     pub token_out: String,
     pub estimated_gas: BigUint,
+    /// Accounts this simulation alone overwrites, applied after every other overwrite: the
+    /// account state a pAMM quote was priced on, for example. An account's balance, nonce, code
+    /// and full storage (`state`) replace the ones set before, and its `state_diff` slots merge in
+    /// slot by slot.
+    pub account_overwrites: Option<AddressHashMap<AccountOverride>>,
 }
 
 /// Result of executing a Tycho transaction simulation.

@@ -21,7 +21,9 @@ const FILL_TOLERANCE: f64 = 4.0 * f64::EPSILON;
 /// token. Inside a [`Levels`] both are finite and positive.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PriceLevel {
+    /// Output token received per unit of input token.
     pub price: f64,
+    /// Input token units this level absorbs.
     pub quantity: f64,
 }
 

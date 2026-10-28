@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    pin::Pin,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,7 +14,10 @@ use super::{
         canonical_pamm_address, default_denied_pamms, default_served_pamms, PriceLevelStreamConfig,
         DEFAULT_AUTO_DETECTED_GAS_COST,
     },
-    titan::{self, ConnectionSettings, TITAN_PRICE_LEVEL_URL, TITAN_PRICE_LEVEL_URL_ENV},
+    titan::{
+        self, ConnectionSettings, TitanQuoteStreamMessage, TITAN_PRICE_LEVEL_URL,
+        TITAN_PRICE_LEVEL_URL_ENV, TITAN_QUOTE_STREAM_URL, TITAN_QUOTE_STREAM_URL_ENV,
+    },
     tracker::{FreshnessTracker, Now, TrackerSettings, DEFAULT_STALE_AFTER},
 };
 use crate::protocol::models::Update;
@@ -22,7 +26,7 @@ use crate::protocol::models::Update;
 pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 
 /// The longest [`stale_after`](PriceLevelStreamBuilder::stale_after) the builder accepts;
-/// longer values are capped to it. Quotes target the block being built, so serving a ladder for
+/// longer values are capped to it. Quotes target the block being built, so serving quotes for
 /// longer than this is never intended, and deadlines this far ahead stay representable on the
 /// monotonic clock.
 pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
@@ -47,6 +51,10 @@ pub struct PriceLevelStreamBuilder {
     denied: HashSet<Bytes>,
     tokens: HashMap<Bytes, Token>,
     url: Option<String>,
+    /// See [`quote_stream_endpoint`](Self::quote_stream_endpoint).
+    quote_stream_url: Option<String>,
+    /// See [`without_simulation_overrides`](Self::without_simulation_overrides).
+    simulation_overrides: bool,
     auto_detect: bool,
     auto_detected_gas_cost: Option<BigUint>,
     connection: ConnectionSettings,
@@ -66,6 +74,8 @@ impl Default for PriceLevelStreamBuilder {
             denied: HashSet::new(),
             tokens: HashMap::new(),
             url: None,
+            quote_stream_url: None,
+            simulation_overrides: true,
             auto_detect: false,
             auto_detected_gas_cost: None,
             connection: ConnectionSettings::default(),
@@ -110,31 +120,61 @@ impl PriceLevelStreamBuilder {
     /// (see <https://docs.titanbuilder.xyz/propamms/takers>). Without it, the
     /// `TITAN_PAMM_PRICE_LEVEL_URL` environment variable is used when set, else the built-in
     /// default.
+    ///
+    /// This sets the price level socket only; the quote stream socket has its own
+    /// [`quote_stream_endpoint`](Self::quote_stream_endpoint) and its own default. To change
+    /// region, set both: a region's quote stream matches that region's price levels, and nobody
+    /// has tested whether it matches another region's. `build` logs a WARN when only one of the
+    /// two is customized.
     pub fn endpoint(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
     }
 
+    /// Sets the endpoint of the quote stream socket, which carries the account state Titan priced
+    /// the books on. Point it at the same Titan region as [`endpoint`](Self::endpoint). Without
+    /// it, the stream uses the `TITAN_PAMM_QUOTE_STREAM_URL` environment variable when set, else
+    /// the built-in default. [`without_simulation_overrides`](Self::without_simulation_overrides)
+    /// wins in either call order: with it, this setting has no effect.
+    pub fn quote_stream_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.quote_stream_url = Some(url.into());
+        self
+    }
+
+    /// Emits states without simulation overrides, and connects no quote stream socket.
+    ///
+    /// By default the stream also reads Titan's quote stream, which publishes the account state
+    /// Titan simulated each venue on to price its books, and attaches it to the matching states
+    /// (see [`simulation_overrides`](super::state::PriceLevelStreamState::simulation_overrides)).
+    /// A consumer that never simulates a swap with `eth_call` does not need it; opting out spares
+    /// the second connection and the memory the held entries use. Quoting is the same either way:
+    /// overrides never change a quote.
+    pub fn without_simulation_overrides(mut self) -> Self {
+        self.simulation_overrides = false;
+        self
+    }
+
     /// Overrides how long a single connection attempt may take before it is aborted and retried
-    /// (default: 10s), so a hung TCP/TLS handshake cannot block the stream forever.
+    /// (default: 10s), so a hung TCP/TLS handshake cannot block the stream forever. Applies to
+    /// both Titan sockets, which are connected and maintained independently.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connection.connect_timeout = timeout;
         self
     }
 
-    /// Overrides the longest gap between parsed Titan frames tolerated before the connection is
-    /// treated as dead and re-established (default: 10s). Titan pushes one frame per second and
+    /// Overrides the longest gap between parsed Titan messages tolerated before the connection is
+    /// treated as dead and re-established (default: 10s). Titan pushes one message per second and
     /// sends no keepalives, so a multi-second silence means a stalled or half-open connection.
     /// Control frames and unparsable text do not reset this timeout, and neither does the time
     /// the consumer spends between polls: the gap is measured while the stream waits on the
-    /// socket.
+    /// socket. Applies to both Titan sockets, each measured on its own traffic.
     pub fn read_idle_timeout(mut self, timeout: Duration) -> Self {
         self.connection.read_idle_timeout = timeout;
         self
     }
 
     /// Overrides the cap on the exponential reconnect backoff of `2^attempt` seconds
-    /// (default: 32s).
+    /// (default: 32s). Applies to both Titan sockets, each backing off on its own failures.
     pub fn max_backoff(mut self, max_backoff: Duration) -> Self {
         self.connection.max_backoff = max_backoff;
         self
@@ -207,8 +247,8 @@ impl PriceLevelStreamBuilder {
 
     /// Provides the token metadata used to build components and interpret amounts, and the set of
     /// assets the stream may price at all: a book is served only if both addresses it names are
-    /// present here, and those tokens supply the decimals its ladders are converted with. Books
-    /// naming any other asset are skipped.
+    /// present here, and those tokens supply the decimals its price levels are converted with.
+    /// Books naming any other asset are skipped.
     pub fn with_tokens(mut self, tokens: HashMap<Bytes, Token>) -> Self {
         self.tokens = tokens;
         self
@@ -225,15 +265,15 @@ impl PriceLevelStreamBuilder {
         self
     }
 
-    /// Overrides how long a component stays served after the last accepted frame that carried
-    /// it (default: 24s, two slots). A component no accepted frame has carried for this long
-    /// turns stale and is emitted in `removed_pairs`; the next accepted frame carrying it
-    /// re-adds it in `new_pairs`. Frames whose `timestamp` is this old or older are rejected.
-    /// Independent of this setting, a state refuses to quote once its frame is one slot old
+    /// Overrides how long a component stays served after the last accepted message that carried
+    /// it (default: 24s, two slots). A component no accepted message has carried for this long
+    /// turns stale and is emitted in `removed_pairs`; the next accepted message carrying it
+    /// re-adds it in `new_pairs`. Messages whose `ts` is this old or older are rejected.
+    /// Independent of this setting, a state refuses to quote once its message is one slot old
     /// (see [`without_quote_guard`](Self::without_quote_guard)).
     ///
-    /// Values above [`MAX_STALE_AFTER`] are capped to it. A value shorter than the age frames
-    /// arrive with rejects every frame as `too_old`, which the
+    /// Values above [`MAX_STALE_AFTER`] are capped to it. A value shorter than the age messages
+    /// arrive with rejects every message as `too_old`, which the
     /// `price_level_stream_frames_rejected_total` counter and a WARN log show.
     pub fn stale_after(mut self, duration: Duration) -> Self {
         self.stale_after = duration.min(MAX_STALE_AFTER);
@@ -243,13 +283,13 @@ impl PriceLevelStreamBuilder {
     /// Emits states that never refuse to quote.
     ///
     /// By default every emitted state refuses `spot_price`, `get_amount_out` and `get_limits`
-    /// once its frame is one slot ([`QUOTE_TTL`](super::state::QUOTE_TTL)) old: Titan quotes
-    /// the block being built, and a venue rejects a fill against an older ladder as stale, so
-    /// such a quote is not executable. Opt out only for a consumer that quotes a state more
-    /// than one slot after it arrived by design — a batch simulator, a validation harness — and
-    /// that accepts a quote the venue may no longer fill. The component still turns stale and
-    /// is removed after [`stale_after`](Self::stale_after), which then becomes the only bound
-    /// on how old a quoted ladder can be. Never disable it on a live router.
+    /// once its message is one slot ([`QUOTE_TTL`](super::state::QUOTE_TTL)) old: Titan prices
+    /// the block being built, so after one slot the quotes were priced for a block already built
+    /// and may no longer match what the venue fills. Opt out only for a consumer that quotes a
+    /// state more than one slot after it arrived by design — a batch simulator, a validation
+    /// harness — and that accepts a quote the venue may no longer fill. The component still
+    /// turns stale and is removed after [`stale_after`](Self::stale_after), which then becomes
+    /// the only bound on how old served quotes can be. Never disable it on a live router.
     pub fn without_quote_guard(mut self) -> Self {
         self.quote_guard = false;
         self
@@ -263,26 +303,31 @@ impl PriceLevelStreamBuilder {
     /// [`without_fallback_router`](Self::without_fallback_router) keeps them on the direct
     /// `pricelevelstream:` path.
     ///
-    /// The connection is established lazily on first poll and maintained (with reconnects) for as
-    /// long as the stream is polled; it never terminates on its own, and dropping the stream
-    /// closes the connection.
+    /// The stream connects the price level socket, and the quote stream socket unless
+    /// [`without_simulation_overrides`](Self::without_simulation_overrides) turned it off, on the
+    /// first poll. It reconnects both for as long as it is polled; neither ends on its own, and
+    /// dropping the stream closes both. A quote stream message produces no update of its own: the
+    /// tracker holds its entries until a later price level message's books name them. A quote
+    /// stream that is refused, silent or malformed costs the states their overrides and nothing
+    /// else: the stream never waits on the quote stream socket to serve a price level message or
+    /// a stale removal.
     ///
-    /// Every accepted frame yields an update with the states of the served pairs it carries,
+    /// Every accepted message yields an update with the states of the served pairs it carries,
     /// with `new_pairs` for pairs not currently served. The update does not mention pairs the
-    /// frame does not carry, so consumers keep their previous state. A component no accepted
-    /// frame has carried for [`stale_after`](Self::stale_after) turns stale and is emitted in
+    /// message does not carry, so consumers keep their previous state. A component no accepted
+    /// message has carried for [`stale_after`](Self::stale_after) turns stale and is emitted in
     /// `removed_pairs`, together with every other component turning stale at that instant, and
-    /// re-added by the next accepted frame carrying it. Frames that are too old, from the
+    /// re-added by the next accepted message carrying it. Messages that are too old, from the
     /// future, out of order, or whose block regresses or jumps more than one block per elapsed
-    /// slot plus 2 are rejected without effect. Frames that contain no served pAMM produce no
+    /// slot plus 2 are rejected without effect. Messages that contain no served pAMM produce no
     /// update. Books naming an address absent from the provided token metadata are skipped, as is
     /// any one book side whose levels do not state a usable price function — leaving that
     /// direction unquotable.
     ///
-    /// Every update is stamped with the block its frame targets, a removal with the newest
+    /// Every update carries the block its message targets, and a removal carries the newest
     /// accepted block. Block numbers never decrease while something is served. Once every
-    /// component has turned stale, the next accepted frame is judged as a first frame and may
-    /// carry a lower block than the removal did: that is how the stream recovers from a frame
+    /// component has turned stale, the next accepted message is judged as a first message and may
+    /// carry a lower block than the removal did: that is how the stream recovers from a message
     /// with an implausible block, so consumers must not rely on the block number to order
     /// updates across such a gap. See the [module documentation](super) for the full contract.
     pub fn build(self) -> impl Stream<Item = Update> + Send {
@@ -291,6 +336,8 @@ impl PriceLevelStreamBuilder {
             denied,
             tokens,
             url,
+            quote_stream_url,
+            simulation_overrides,
             auto_detect,
             auto_detected_gas_cost,
             connection,
@@ -314,6 +361,23 @@ impl PriceLevelStreamBuilder {
             std::env::var(TITAN_PRICE_LEVEL_URL_ENV)
                 .unwrap_or_else(|_| TITAN_PRICE_LEVEL_URL.to_string())
         });
+        let quote_stream_url = simulation_overrides.then(|| {
+            quote_stream_url.unwrap_or_else(|| {
+                std::env::var(TITAN_QUOTE_STREAM_URL_ENV)
+                    .unwrap_or_else(|_| TITAN_QUOTE_STREAM_URL.to_string())
+            })
+        });
+        if let Some(quote_stream_url) = &quote_stream_url {
+            if (url == TITAN_PRICE_LEVEL_URL) != (quote_stream_url == TITAN_QUOTE_STREAM_URL) {
+                tracing::warn!(
+                    price_level_url = url,
+                    quote_stream_url,
+                    "Only one of the two Titan endpoints is customized; the quote stream of one \
+                     region may not match the price levels of another, which costs states their \
+                     simulation overrides"
+                );
+            }
+        }
         let auto_detected_gas_cost =
             auto_detected_gas_cost.unwrap_or_else(|| BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST));
         let mut tracker = FreshnessTracker::new(TrackerSettings {
@@ -325,18 +389,34 @@ impl PriceLevelStreamBuilder {
             stale_after,
             via_fallback_router: fallback_router,
             quote_guard,
+            simulation_overrides,
         });
 
         stream! {
-            let frames = titan::messages(url, connection);
-            tokio::pin!(frames);
+            let messages = titan::messages(url, connection);
+            tokio::pin!(messages);
+            // A stream that never yields stands in for the quote stream socket when it is off.
+            let mut quote_stream_messages: Pin<
+                Box<dyn Stream<Item = TitanQuoteStreamMessage> + Send>,
+            > = match quote_stream_url {
+                Some(url) => {
+                    Box::pin(titan::messages::<TitanQuoteStreamMessage>(url, connection))
+                }
+                None => Box::pin(tokio_stream::pending()),
+            };
             loop {
                 let deadline = tracker.stale_deadline();
                 let sleep_until_deadline = tokio::time::sleep_until(
                     deadline.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                 );
                 let update = tokio::select! {
-                    Some(frame) = frames.next() => tracker.on_frame(frame, now()),
+                    Some(message) = messages.next() => {
+                        tracker.on_price_level_message(message, now())
+                    }
+                    Some(message) = quote_stream_messages.next() => {
+                        tracker.on_quote_stream_message(message);
+                        None
+                    }
                     () = sleep_until_deadline, if deadline.is_some() => {
                         tracker.on_stale_deadline(timer_now())
                     }
@@ -349,7 +429,7 @@ impl PriceLevelStreamBuilder {
     }
 }
 
-/// The clocks a frame is judged against: the wall clock for Titan's `timestamp`, and the
+/// The clocks a message is judged against: the wall clock for Titan's `ts`, and the
 /// timer's clock for every deadline. This is the only place the stream reads a clock; the
 /// tracker only ever sees the values it is handed.
 fn now() -> Now {
@@ -357,7 +437,7 @@ fn now() -> Now {
 }
 
 /// Nanoseconds since the Unix epoch. A system clock unrepresentable as unix nanoseconds yields
-/// 0, which rejects every frame as `in_future`.
+/// 0, which rejects every message as `in_future`.
 fn wall_clock_nanos() -> u64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -367,7 +447,7 @@ fn wall_clock_nanos() -> u64 {
         Some(wall_nanos) => wall_nanos,
         None => {
             tracing::error!(
-                "System clock unrepresentable as unix nanoseconds; every price level frame will \
+                "System clock unrepresentable as unix nanoseconds; every price level message will \
                  be rejected as in_future"
             );
             0
@@ -388,7 +468,7 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         time::Duration,
@@ -408,7 +488,8 @@ mod tests {
                 RECONNECTS,
             },
             test_support::{
-                address, captured_frame_text, fermiswap, frame_text, frame_then_repeat, token,
+                address, captured_message_text, captured_quote_stream_text, captured_tokens,
+                fermiswap, matching_message_text, message_text, message_then_repeat, token,
                 token_map, tokens, wall_nanos_now, FakeConnection, FakeTitan, KIPSELI,
                 KIPSELI_STREAMED, PAMM, USDC, WBTC, WETH,
             },
@@ -446,14 +527,29 @@ mod tests {
     }
 
     /// Short timings for a test: `stale_after` 2 s, `read_idle_timeout` 100 ms, `max_backoff`
-    /// 20 ms, reading from `fake`.
-    fn fast_timings(fake: &FakeTitan) -> PriceLevelStreamBuilder {
+    /// 20 ms, reading price level messages from `fake`.
+    ///
+    /// It leaves the quote stream socket at its default, Titan's live endpoint, so no test builds
+    /// on it directly: tests use [`fast_timings`], which turns that socket off, or
+    /// [`two_socket_timings`], which points it at a second fake.
+    fn timings(fake: &FakeTitan) -> PriceLevelStreamBuilder {
         PriceLevelStreamBuilder::new()
             .endpoint(fake.url())
             .stale_after(STALE_AFTER)
             .connect_timeout(Duration::from_secs(1))
             .read_idle_timeout(Duration::from_millis(100))
             .max_backoff(Duration::from_millis(20))
+    }
+
+    /// [`timings`] with no quote stream socket, for everything that socket has no part in.
+    fn fast_timings(fake: &FakeTitan) -> PriceLevelStreamBuilder {
+        timings(fake).without_simulation_overrides()
+    }
+
+    /// [`timings`] with the quote stream socket pointed at a second fake: the default shape of the
+    /// stream, with both endpoints local.
+    fn two_socket_timings(prices: &FakeTitan, overrides: &FakeTitan) -> PriceLevelStreamBuilder {
+        timings(prices).quote_stream_endpoint(overrides.url())
     }
 
     /// A [`fast_timings`] builder serving the FermiSwap venue with the bound assets' metadata.
@@ -464,7 +560,7 @@ mod tests {
     }
 
     /// The `stale_after` of [`fast_builder`]: long enough that a loaded runner does not reject
-    /// the first frame as too old, short enough that a removal arrives within [`WAIT`].
+    /// the first message as too old, short enough that a removal arrives within [`WAIT`].
     const STALE_AFTER: Duration = Duration::from_secs(2);
 
     /// How long a test waits for one update.
@@ -517,26 +613,26 @@ mod tests {
         assert_eq!(update.removed_pairs.len(), expected_removed);
     }
 
-    fn fresh_frame() -> Message {
-        Message::Text(frame_text(100, wall_nanos_now()).into())
+    fn fresh_message() -> Message {
+        Message::Text(message_text(100, wall_nanos_now()).into())
     }
 
-    /// Sends one fresh frame on the first connection only; later connections stay silent.
-    async fn first_connection_sends_one_frame(index: usize, mut socket: FakeConnection) {
+    /// Sends one fresh message on the first connection only; later connections stay silent.
+    async fn first_connection_sends_one_message(index: usize, mut socket: FakeConnection) {
         if index == 0 {
-            let _ = socket.send(fresh_frame()).await;
+            let _ = socket.send(fresh_message()).await;
         }
         std::future::pending::<()>().await;
     }
 
     #[tokio::test]
     async fn silence_past_stale_after_removes_every_served_component() {
-        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let fake = FakeTitan::spawn(first_connection_sends_one_message).await;
         let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
-        // The stream reconnects on idle timeout, but the later connections send no frame, so no
+        // The stream reconnects on idle timeout, but the later connections send no message, so no
         // component deadline moves.
         let removal = next_within(&mut stream, WAIT)
             .await
@@ -551,7 +647,7 @@ mod tests {
     async fn repeated_immediate_closes_remove_within_stale_after() {
         let fake = FakeTitan::spawn(|index, mut socket| async move {
             if index == 0 {
-                let _ = socket.send(fresh_frame()).await;
+                let _ = socket.send(fresh_message()).await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             let _ = socket.close(None).await;
@@ -572,7 +668,7 @@ mod tests {
     fn refused_reconnects_remove_within_stale_after() {
         let (removal, snapshot) = record_async(async {
             let mut fake = FakeTitan::spawn(|_, mut socket| async move {
-                let _ = socket.send(fresh_frame()).await;
+                let _ = socket.send(fresh_message()).await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 let _ = socket.close(None).await;
             })
@@ -583,25 +679,32 @@ mod tests {
             expect_first_update(&mut stream).await;
             // From here every connect is refused at TCP level. The fake closes 20 ms in and the
             // backoff is capped at 20 ms, so one reconnect can be accepted before `shutdown`
-            // drops the listener; its fresh frame refreshes the component without re-adding it.
+            // drops the listener; its fresh message refreshes the component without re-adding it.
             fake.shutdown();
             expect_removal(&mut stream).await
         });
 
         assert_removal_only(&removal, 1);
         assert!(
-            counter_value(&snapshot, RECONNECTS, &[("reason", "connect_failed")]) >= 1,
+            counter_value(
+                &snapshot,
+                RECONNECTS,
+                &[("reason", "connect_failed"), ("socket", "price_levels")]
+            ) >= 1,
             "no connect was refused"
         );
     }
 
     #[tokio::test]
-    async fn replayed_frames_remove_within_stale_after_and_never_re_add() {
-        // One frame, stamped once, replayed every 50 ms forever.
-        let replay = fresh_frame();
-        let fake =
-            FakeTitan::spawn(frame_then_repeat(replay.clone(), replay, Duration::from_millis(50)))
-                .await;
+    async fn replayed_messages_remove_within_stale_after_and_never_re_add() {
+        // One message, with one `ts`, replayed every 50 ms forever.
+        let replay = fresh_message();
+        let fake = FakeTitan::spawn(message_then_repeat(
+            replay.clone(),
+            replay,
+            Duration::from_millis(50),
+        ))
+        .await;
         let stream = fast_builder(&fake)
             .read_idle_timeout(Duration::from_secs(5))
             .build();
@@ -609,7 +712,7 @@ mod tests {
 
         expect_first_update(&mut stream).await;
         // Replays are accepted while fresh but cannot extend the deadline; the deadline fires
-        // even though a frame is ready on every poll.
+        // even though a message is ready on every poll.
         let removal = expect_removal(&mut stream).await;
 
         assert_removal_only(&removal, 1);
@@ -620,12 +723,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_frame_after_removal_re_adds_the_component() {
+    async fn fresh_message_after_removal_re_adds_the_component() {
         let fake = FakeTitan::spawn(|_, mut socket| async move {
-            let _ = socket.send(fresh_frame()).await;
+            let _ = socket.send(fresh_message()).await;
             tokio::time::sleep(STALE_AFTER + Duration::from_millis(500)).await;
             let _ = socket
-                .send(Message::Text(frame_text(101, wall_nanos_now()).into()))
+                .send(Message::Text(message_text(101, wall_nanos_now()).into()))
                 .await;
             std::future::pending::<()>().await;
         })
@@ -650,8 +753,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frames_are_forwarded_without_waiting_on_timers() {
-        let fake = FakeTitan::spawn(fresh_frame_every(Duration::from_millis(50))).await;
+    async fn messages_are_forwarded_without_waiting_on_timers() {
+        let fake = FakeTitan::spawn(fresh_message_every(Duration::from_millis(50))).await;
         let stream = fast_builder(&fake)
             .stale_after(Duration::from_secs(24))
             .build();
@@ -661,14 +764,14 @@ mod tests {
         for _ in 0..5 {
             let update = next_within(&mut stream, Duration::from_secs(1))
                 .await
-                .expect("steady-state frame");
+                .expect("steady-state message");
             assert!(update.removed_pairs.is_empty());
         }
     }
 
     #[tokio::test]
     async fn no_connection_before_first_poll() {
-        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let fake = FakeTitan::spawn(first_connection_sends_one_message).await;
         let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
@@ -685,7 +788,7 @@ mod tests {
             FakeTitan::spawn(move |_, mut socket| {
                 let server_saw_close = server_saw_close.clone();
                 async move {
-                    let _ = socket.send(fresh_frame()).await;
+                    let _ = socket.send(fresh_message()).await;
                     // Read until the client goes away.
                     while let Some(Ok(message)) = socket.next().await {
                         if matches!(message, Message::Close(_)) {
@@ -714,7 +817,7 @@ mod tests {
     }
 
     /// `Instant + Duration` panics on overflow, so an absurd `stale_after` must be capped before
-    /// the first accepted frame computes a deadline from it.
+    /// the first accepted message computes a deadline from it.
     #[tokio::test]
     async fn stale_after_above_the_cap_still_serves() {
         assert_eq!(
@@ -723,7 +826,7 @@ mod tests {
                 .stale_after,
             MAX_STALE_AFTER
         );
-        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let fake = FakeTitan::spawn(first_connection_sends_one_message).await;
         let stream = fast_builder(&fake)
             .stale_after(Duration::MAX)
             .build();
@@ -734,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_quote_guard_emits_states_that_never_expire() {
-        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let fake = FakeTitan::spawn(first_connection_sends_one_message).await;
         let stream = fast_builder(&fake)
             .without_quote_guard()
             .build();
@@ -753,14 +856,18 @@ mod tests {
         assert!(state.quotable_until().is_none());
     }
 
-    /// A [`FakeTitan`] handler that sends a freshly stamped frame every `interval` until the
+    /// A [`FakeTitan`] handler that sends a message with a current `ts` every `interval` until the
     /// socket closes.
-    fn fresh_frame_every(
+    fn fresh_message_every(
         interval: Duration,
     ) -> impl Fn(usize, FakeConnection) -> BoxFuture<'static, ()> + Send + Sync + 'static {
         move |_, mut socket| {
             Box::pin(async move {
-                while socket.send(fresh_frame()).await.is_ok() {
+                while socket
+                    .send(fresh_message())
+                    .await
+                    .is_ok()
+                {
                     tokio::time::sleep(interval).await;
                 }
             })
@@ -939,14 +1046,15 @@ mod tests {
     /// Synthetic: a token that calls itself `WBTC` at an address no default binding names.
     const IMPOSTOR_WBTC: &str = "0x00000000000000000000000000000000deadbeef";
 
-    /// Sends one freshly stamped frame of Kipseli's captured books on the first connection only.
+    /// Sends one message with a current `ts`, of Kipseli's captured books, on the first connection
+    /// only.
     /// The books arrive under the address Titan streams them by, so serving them at all also
     /// exercises the alias on the live path.
     async fn first_connection_sends_captured_books(index: usize, mut socket: FakeConnection) {
         if index == 0 {
-            let frame = captured_frame_text("Kipseli", 100, wall_nanos_now());
+            let message = captured_message_text("Kipseli", 100, wall_nanos_now());
             let _ = socket
-                .send(Message::Text(frame.into()))
+                .send(Message::Text(message.into()))
                 .await;
         }
         std::future::pending::<()>().await;
@@ -1013,17 +1121,20 @@ mod tests {
         }
     }
 
-    /// Traffic that is not a parsed frame keeps neither the socket nor the component alive: the
-    /// idle timeout reconnects, every reconnect resends the same frame, which refreshes the
+    /// Traffic that is not a parsed message keeps neither the socket nor the component alive: the
+    /// idle timeout reconnects, every reconnect resends the same message, which refreshes the
     /// component but cannot move its deadline, and the removal follows.
     #[rstest]
     #[case::ping_only(Message::Ping(Vec::new().into()))]
     #[case::malformed_text(Message::Text("nonsense".into()))]
     #[tokio::test]
-    async fn non_frame_traffic_removes_within_stale_after(#[case] filler: Message) {
-        let fake =
-            FakeTitan::spawn(frame_then_repeat(fresh_frame(), filler, Duration::from_millis(10)))
-                .await;
+    async fn traffic_that_is_not_a_message_removes_within_stale_after(#[case] filler: Message) {
+        let fake = FakeTitan::spawn(message_then_repeat(
+            fresh_message(),
+            filler,
+            Duration::from_millis(10),
+        ))
+        .await;
         let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
@@ -1032,5 +1143,335 @@ mod tests {
 
         assert_removal_only(&removal, 1);
         assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on idle timeout");
+    }
+
+    /// How long a two-socket test waits for the quote stream socket to have been read before it
+    /// sends the price level message whose books name its entries. Both sockets connect on the
+    /// first poll, so this orders the two messages rather than racing them.
+    const SOCKET_HEAD_START: Duration = Duration::from_millis(250);
+
+    /// A builder serving the known venues, which are every venue of the 2026-10-16 captures,
+    /// reading both captures from `prices` and `overrides`. Registered up front rather than
+    /// auto-detected, because entries are only stored for venues already served when they arrive.
+    fn capture_builder(prices: &FakeTitan, overrides: &FakeTitan) -> PriceLevelStreamBuilder {
+        two_socket_timings(prices, overrides)
+            .with_known_pamms()
+            .with_tokens(captured_tokens())
+    }
+
+    /// The price level capture whose books match the captured quote stream message, with its `ts`
+    /// set to now so that it passes the freshness checks.
+    fn matching_message() -> Message {
+        Message::Text(matching_message_text(100, wall_nanos_now()).into())
+    }
+
+    /// The captured quote stream message, verbatim: matching reads no clock, so its timestamps can
+    /// stay as captured.
+    fn quote_stream_message() -> Message {
+        Message::Text(captured_quote_stream_text().into())
+    }
+
+    /// A [`FakeTitan`] handler that sends `message` after `delay` on the first connection only,
+    /// then holds the socket open: a message the stream must see exactly once, at a known point
+    /// relative to the other socket's.
+    fn send_once_after(
+        delay: Duration,
+        message: Message,
+    ) -> impl Fn(usize, FakeConnection) -> BoxFuture<'static, ()> + Send + Sync + 'static {
+        move |index, mut socket| {
+            let message = message.clone();
+            Box::pin(async move {
+                if index == 0 {
+                    tokio::time::sleep(delay).await;
+                    let _ = socket.send(message).await;
+                }
+                std::future::pending::<()>().await;
+            })
+        }
+    }
+
+    /// How many connections `fake` has accepted.
+    fn connections(fake: &FakeTitan) -> usize {
+        fake.connections.load(Ordering::SeqCst)
+    }
+
+    /// The states of `update` that carry simulation overrides.
+    fn states_with_overrides(update: &Update) -> Vec<&PriceLevelStreamState> {
+        update
+            .states
+            .values()
+            .map(|state| {
+                state
+                    .as_any()
+                    .downcast_ref::<PriceLevelStreamState>()
+                    .expect("price level state")
+            })
+            .filter(|state| state.simulation_overrides().is_some())
+            .collect()
+    }
+
+    /// Both captures, read from two local sockets with the quote stream message arriving first:
+    /// the 27 served pairs whose venue's entry carries the pair in the book's slot come out with
+    /// overrides, and the other 3 without. The count comes from the fixtures themselves, worked
+    /// out independently of this code.
+    #[tokio::test]
+    async fn a_quote_stream_message_attaches_overrides_to_the_books_it_priced() {
+        let overrides =
+            FakeTitan::spawn(send_once_after(Duration::ZERO, quote_stream_message())).await;
+        let prices = FakeTitan::spawn(send_once_after(SOCKET_HEAD_START, matching_message())).await;
+        let stream = capture_builder(&prices, &overrides)
+            .read_idle_timeout(Duration::from_secs(5))
+            .build();
+        tokio::pin!(stream);
+
+        let update = next_within(&mut stream, WAIT)
+            .await
+            .expect("first update");
+
+        assert_eq!(update.states.len(), 30);
+        let with_overrides = states_with_overrides(&update);
+        assert_eq!(with_overrides.len(), 27);
+        for state in with_overrides {
+            let overrides = state
+                .simulation_overrides()
+                .expect("overrides");
+            assert!(!overrides.accounts.is_empty(), "overrides with no account");
+            assert_eq!(overrides.block_number, Some(26_201_954));
+        }
+    }
+
+    /// An entry that arrives after the books it priced changes nothing already served: the update
+    /// the consumer holds keeps the states it was given. The next message with the same books gets
+    /// overrides, which shows the first one's lack of them is about ordering, not matching.
+    #[tokio::test]
+    async fn a_late_quote_stream_message_leaves_served_states_without_overrides() {
+        let overrides =
+            FakeTitan::spawn(send_once_after(SOCKET_HEAD_START, quote_stream_message())).await;
+        let prices = FakeTitan::spawn(move |index, mut socket| async move {
+            if index == 0 {
+                let _ = socket.send(matching_message()).await;
+                tokio::time::sleep(2 * SOCKET_HEAD_START).await;
+                let _ = socket.send(matching_message()).await;
+            }
+            std::future::pending::<()>().await;
+        })
+        .await;
+        let stream = capture_builder(&prices, &overrides)
+            .read_idle_timeout(Duration::from_secs(5))
+            .build();
+        tokio::pin!(stream);
+
+        let first = next_within(&mut stream, WAIT).await;
+        let second = next_within(&mut stream, WAIT).await;
+
+        let first = first.expect("first update");
+        assert_eq!(first.new_pairs.len(), 30);
+        assert!(states_with_overrides(&first).is_empty(), "overrides before any entry arrived");
+        assert_eq!(states_with_overrides(&second.expect("second update")).len(), 27);
+    }
+
+    /// Opting out connects no quote stream socket at all, so no state gets overrides and nothing
+    /// is read from an endpoint the consumer never wanted, whichever of the opt-out and
+    /// `quote_stream_endpoint` is called first.
+    #[rstest]
+    #[case::opt_out_after_the_endpoint(false)]
+    #[case::opt_out_before_the_endpoint(true)]
+    #[tokio::test]
+    async fn without_simulation_overrides_connects_no_quote_stream_socket(
+        #[case] opt_out_first: bool,
+    ) {
+        let overrides =
+            FakeTitan::spawn(send_once_after(Duration::ZERO, quote_stream_message())).await;
+        let prices = FakeTitan::spawn(send_once_after(SOCKET_HEAD_START, matching_message())).await;
+        let builder = if opt_out_first {
+            timings(&prices)
+                .without_simulation_overrides()
+                .quote_stream_endpoint(overrides.url())
+        } else {
+            timings(&prices)
+                .quote_stream_endpoint(overrides.url())
+                .without_simulation_overrides()
+        };
+        let stream = builder
+            .with_known_pamms()
+            .with_tokens(captured_tokens())
+            .read_idle_timeout(Duration::from_secs(5))
+            .build();
+        tokio::pin!(stream);
+
+        let update = next_within(&mut stream, WAIT)
+            .await
+            .expect("first update");
+
+        assert_eq!(update.states.len(), 30);
+        assert!(states_with_overrides(&update).is_empty());
+        assert_eq!(connections(&overrides), 0, "connected the quote stream socket");
+    }
+
+    /// Whatever the quote stream socket does, the price level socket keeps serving: the states lose
+    /// their overrides and nothing else. A silent socket reconnects on the idle timeout, malformed
+    /// text is skipped and then reconnected for the same reason, a close is reconnected, and a
+    /// flood is read without starving the other two arms of the select. In every case the first
+    /// update arrives and the stale removal that follows the price level socket's silence still
+    /// fires on time.
+    ///
+    /// `connects` is the least number of connections the quote stream socket must have made by
+    /// then: 2 for the cases that test recovery, so a socket that gives up after one failure fails
+    /// them; 1 for the flood, whose messages parse and keep the connection alive.
+    #[rstest]
+    #[case::silent(None, 2)]
+    #[case::malformed(Some(Message::Text("nonsense".into())), 2)]
+    #[case::closed(Some(Message::Close(None)), 2)]
+    #[case::flooding(Some(quote_stream_message()), 1)]
+    #[tokio::test]
+    async fn the_price_level_socket_survives_any_quote_stream_socket(
+        #[case] repeat: Option<Message>,
+        #[case] connects: usize,
+    ) {
+        let overrides = FakeTitan::spawn(move |_, mut socket| {
+            let repeat = repeat.clone();
+            async move {
+                while let Some(message) = repeat.clone() {
+                    if socket.send(message).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                std::future::pending::<()>().await;
+            }
+        })
+        .await;
+        let prices = FakeTitan::spawn(first_connection_sends_one_message).await;
+        let stream = two_socket_timings(&prices, &overrides)
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = expect_removal(&mut stream).await;
+
+        assert_removal_only(&removal, 1);
+        assert!(
+            connections(&overrides) >= connects,
+            "the quote stream socket connected {} times, expected at least {connects}",
+            connections(&overrides)
+        );
+    }
+
+    /// A refused quote stream socket does not stall the price level socket, which serves and
+    /// expires on its own schedule.
+    #[tokio::test]
+    async fn a_refused_quote_stream_socket_does_not_stall_the_price_level_socket() {
+        let mut overrides =
+            FakeTitan::spawn(send_once_after(Duration::ZERO, quote_stream_message())).await;
+        let url = overrides.url();
+        overrides.shutdown();
+        let prices = FakeTitan::spawn(first_connection_sends_one_message).await;
+        let stream = timings(&prices)
+            .quote_stream_endpoint(url)
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = expect_removal(&mut stream).await;
+
+        assert_removal_only(&removal, 1);
+    }
+
+    /// A quote stream socket whose handshake never completes does not stall the price level
+    /// socket, which serves and expires on its own schedule. The quote stream socket's connect
+    /// timeout fires and it is retried; without the timeout the stream would wait on the hung
+    /// handshake for as long as the peer keeps the connection open.
+    #[tokio::test]
+    async fn a_hung_quote_stream_socket_does_not_stall_the_price_level_socket() {
+        let overrides = FakeTitan::spawn_hung().await;
+        let prices = FakeTitan::spawn(first_connection_sends_one_message).await;
+        let stream = two_socket_timings(&prices, &overrides)
+            .connect_timeout(Duration::from_millis(200))
+            .add_pamm(fermiswap())
+            .with_tokens(tokens())
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
+        let removal = expect_removal(&mut stream).await;
+
+        assert_removal_only(&removal, 1);
+        assert!(
+            connections(&overrides) >= 2,
+            "the hung socket was connected to {} times, expected a retry",
+            connections(&overrides)
+        );
+    }
+
+    /// Isolation holds the other way too: with the price level socket refused the stream yields
+    /// nothing, and the quote stream socket is still read. The captured quote stream message names
+    /// venues this stream does not serve, which it counts as it reads them.
+    #[test]
+    fn a_refused_price_level_socket_does_not_stall_the_quote_stream_socket() {
+        let (update, snapshot) = record_async(async {
+            let overrides = FakeTitan::spawn(message_then_repeat(
+                quote_stream_message(),
+                quote_stream_message(),
+                Duration::from_millis(20),
+            ))
+            .await;
+            let mut prices = FakeTitan::spawn(first_connection_sends_one_message).await;
+            prices.shutdown();
+            let stream = two_socket_timings(&prices, &overrides)
+                .add_pamm(fermiswap())
+                .with_tokens(tokens())
+                .build();
+            tokio::pin!(stream);
+            next_within(&mut stream, Duration::from_millis(500)).await
+        });
+
+        assert!(update.is_none(), "an update without a price level message");
+        assert!(
+            counter_value(&snapshot, "price_level_stream_unserved_venue_entries_total", &[]) > 0,
+            "the quote stream socket was never read"
+        );
+    }
+
+    /// Dropping the stream closes both sockets, and neither is reconnected afterwards.
+    #[tokio::test]
+    async fn drop_closes_both_sockets() {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let spawn_watching = |closed: Arc<AtomicUsize>, first: Message| async move {
+            FakeTitan::spawn(move |_, mut socket| {
+                let closed = closed.clone();
+                let first = first.clone();
+                async move {
+                    let _ = socket.send(first).await;
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(message, Message::Close(_)) {
+                            break;
+                        }
+                    }
+                    closed.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .await
+        };
+        let overrides = spawn_watching(closed.clone(), quote_stream_message()).await;
+        let prices = spawn_watching(closed.clone(), matching_message()).await;
+        let mut stream = Box::pin(
+            capture_builder(&prices, &overrides)
+                .read_idle_timeout(Duration::from_secs(5))
+                .build(),
+        );
+        next_within(&mut stream.as_mut(), WAIT)
+            .await
+            .expect("first update");
+
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(closed.load(Ordering::SeqCst), 2, "a socket was not closed on drop");
+        assert_eq!(connections(&prices), 1, "reconnected after drop");
+        assert_eq!(connections(&overrides), 1, "reconnected after drop");
     }
 }

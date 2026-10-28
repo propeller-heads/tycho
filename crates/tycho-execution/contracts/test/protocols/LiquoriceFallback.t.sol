@@ -7,10 +7,7 @@ import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {TestUtils} from "../TestUtils.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
 import {FallbackRouterAssertions, FallbackSwaps} from "./Fallback.t.sol";
-import {
-    ILiquoriceSettlement,
-    IAllowListAuthentication
-} from "./Liquorice.t.sol";
+import {LiquoriceOrders} from "./Liquorice.t.sol";
 import {
     FallbackExecutor__InvalidDataLength
 } from "../../src/executors/FallbackExecutor.sol";
@@ -27,22 +24,20 @@ import {
 
 /// @dev Uses `LiquoriceExecutorTest.testSettleSingle`'s signed quote, whose trader and receiver
 /// is `TRADER`.
-contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
-    uint256 constant FORK_BLOCK = 24_392_845;
+contract LiquoriceFallbackRouterTest is
+    LiquoriceOrders,
+    FallbackRouterAssertions,
+    TestUtils
+{
     address constant TRADER = 0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f;
-    address constant AUTH_MANAGER = 0x000438801500c89E225E8D6CB69D9c14dD05e000;
-    address constant MAKER = 0x06465bcEEaef280Bb7340A58D75dfc5E1F687058;
-    uint256 constant QUOTE_EXPIRY = 0x69850367;
     uint256 constant SIGNED_USDC_IN = 3000e6;
     uint256 constant SIGNED_WETH_OUT = 1 ether;
-    bytes constant SETTLE_SINGLE_CALLDATA =
-        hex"9935c86800000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f68705800000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000024000000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000000000000000320000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000000010000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f0000000000000000000000005615deb798bb3e4dfa0139dfa1b3d433cc23b72f000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000000000b2d05e000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006985036700000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058000000000000000000000000000000000000000000000000000000000000000131000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041883a6506193307eebda0f3adf2cb81f84a073e030749055ebb18cbf98704eef100a03c307266527d706f9a5c3e08ed0988f5b130bc5327e0ad62dde6f3709d251b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
-
     LiquoriceFallbackRouter router;
     LiquoriceFallbackExecutor executor;
 
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), FORK_BLOCK);
+        _setUpLiquorice(SIGNED_WETH_OUT);
+
         router = new LiquoriceFallbackRouter(
             IPoolManager(POOL_MANAGER),
             FLUIDV1_LIQUIDITY,
@@ -54,17 +49,15 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         assertEq(address(router), TRADER);
         executor = new LiquoriceFallbackExecutor(address(router));
 
-        IAllowListAuthentication authenticator = IAllowListAuthentication(
-            ILiquoriceSettlement(LIQUORICE_SETTLEMENT).AUTHENTICATOR()
-        );
-        vm.startPrank(AUTH_MANAGER);
-        authenticator.addSolver(address(router));
-        authenticator.addMaker(MAKER);
-        vm.stopPrank();
+        _allowSolver(address(router));
+    }
 
-        deal(WETH_ADDR, MAKER, SIGNED_WETH_OUT);
-        vm.prank(MAKER);
-        IERC20(WETH_ADDR).approve(LIQUORICE_BALANCE_MANAGER, type(uint256).max);
+    /// @dev The quote names the router as trader and receiver, as the encoder requests it.
+    function _signedQuote() internal view returns (bytes memory) {
+        return
+            _encodeSettleSingle(
+                address(router), SIGNED_USDC_IN, SIGNED_WETH_OUT
+            );
     }
 
     /// The signed price needs no comparison, so the fallback pool is never quoted.
@@ -77,7 +70,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
             uint64(0)
         );
         vm.recordLogs();
-        _swap(SIGNED_USDC_IN, SETTLE_SINGLE_CALLDATA);
+        _swap(SIGNED_USDC_IN, _signedQuote());
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), SIGNED_WETH_OUT);
         _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
@@ -95,7 +88,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN + remainder);
         uint256 callerUsdcBefore = IERC20(USDC_ADDR).balanceOf(address(this));
 
-        _swap(SIGNED_USDC_IN + remainder, SETTLE_SINGLE_CALLDATA);
+        _swap(SIGNED_USDC_IN + remainder, _signedQuote());
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), SIGNED_WETH_OUT);
         assertEq(
@@ -113,7 +106,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         uint256 fallbackOut = _quoteFallback(amountIn);
 
         _expectFallbackSwap(amountIn);
-        _swap(amountIn, SETTLE_SINGLE_CALLDATA);
+        _swap(amountIn, _signedQuote());
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), fallbackOut);
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
@@ -122,13 +115,30 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     /// An expired quote reverts in the settlement, so the fallback fills the whole leg.
     function testExpiredQuote() public {
         deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
-        vm.warp(QUOTE_EXPIRY + 1);
+        // The quote is signed against the current timestamp, so it is built before the warp.
+        bytes memory quote = _signedQuote();
+        vm.warp(block.timestamp + QUOTE_VALIDITY + 1);
         uint256 fallbackOut = _quoteFallback(SIGNED_USDC_IN);
 
         _expectFallbackSwap(SIGNED_USDC_IN);
-        _swap(SIGNED_USDC_IN, SETTLE_SINGLE_CALLDATA);
+        _swap(SIGNED_USDC_IN, quote);
 
         assertEq(IERC20(WETH_ADDR).balanceOf(BOB), fallbackOut);
+        _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
+    }
+
+    /// The `settle` entrypoint fills like `settleSingle`.
+    function testSettleQuote() public {
+        deal(USDC_ADDR, address(router), SIGNED_USDC_IN);
+
+        vm.recordLogs();
+        _swap(
+            SIGNED_USDC_IN,
+            _encodeSettle(address(router), SIGNED_USDC_IN, SIGNED_WETH_OUT)
+        );
+
+        assertEq(IERC20(WETH_ADDR).balanceOf(BOB), SIGNED_WETH_OUT);
+        _assertNoFallbackSwap(address(router), vm.getRecordedLogs());
         _assertRouterDrained(address(router), USDC_ADDR, WETH_ADDR);
     }
 
@@ -197,7 +207,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
 
     /// The length prefix says the settlement calldata runs to the end, leaving no fallback.
     function testExecutorDataWithoutFallback() public {
-        bytes memory settlementCalldata = SETTLE_SINGLE_CALLDATA;
+        bytes memory settlementCalldata = _signedQuote();
         bytes memory data = abi.encodePacked(
             USDC_ADDR,
             WETH_ADDR,
@@ -251,7 +261,7 @@ contract LiquoriceFallbackRouterTest is FallbackRouterAssertions, TestUtils {
     }
 
     function _executorData() internal view returns (bytes memory) {
-        bytes memory settlementCalldata = SETTLE_SINGLE_CALLDATA;
+        bytes memory settlementCalldata = _signedQuote();
         return abi.encodePacked(
             USDC_ADDR,
             WETH_ADDR,

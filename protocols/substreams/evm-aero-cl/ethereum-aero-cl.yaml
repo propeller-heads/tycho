@@ -1,0 +1,125 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_aero_cl"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/evm-aero-cl"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/utils.proto
+    - slipstreams.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_aero_cl.wasm
+
+# Every module starts at the CL factory deployment, which precedes the hook's. Their constructors
+# write the tick spacing fees, the default swap hook and the hook's settings, which pool creation
+# reads; a later start would miss them.
+modules:
+  - name: map_tick_spacing_fee
+    kind: map
+    initialBlock: &initial_block 26238245
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.aerodrome.TickSpacingFees
+
+  - name: store_tick_spacing_fee
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_tick_spacing_fee
+
+  - name: map_pools_created
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_tick_spacing_fee
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.aerodrome.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: store_pool_fee_slots
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
+  - name: store_pool_ids
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
+  - name: store_fee_settings
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: set
+    valueType: bytes
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: *initial_block
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_pool_fee_slots
+      - store: store_pool_ids
+      - store: store_fee_settings
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_balance_changes
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+# AERO v1.1.0 CL factory on ethereum; the DynamicSwapFeeHook has the same address on every chain.
+params:
+  map_tick_spacing_fee: &aero_cl_params "factory=0xF4Fd2E6c5B60c5b365cd1B96DD6245E6D60414c2&hook=0xC0ed888AfE87ed1AcF01D9f19bB850159e3ce434"
+  map_pools_created: *aero_cl_params
+  store_fee_settings: *aero_cl_params
+  map_protocol_changes: *aero_cl_params

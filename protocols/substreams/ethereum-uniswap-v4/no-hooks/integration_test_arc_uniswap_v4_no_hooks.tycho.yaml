@@ -5,8 +5,6 @@ protocol_type_names:
   - "uniswap_v4_pool"
 protocol_system: "uniswap_v4"
 module_name: "map_protocol_changes"
-initialized_accounts:
-  - "0x8366a39CC670B4001A1121B8F6A443A643e40951" # pool manager
 tests:
   # This no-hooks pool initializes in block 1954869, receives liquidity in 1954872,
   # and first swaps in 1954876.

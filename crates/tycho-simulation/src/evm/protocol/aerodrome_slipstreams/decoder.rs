@@ -2,12 +2,19 @@ use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
-use tycho_common::{models::token::Token, Bytes};
+use tycho_common::{
+    models::token::Token,
+    simulation::protocol_sim::{BlockContext, ProtocolSim},
+    Bytes,
+};
 
 use super::state::AerodromeSlipstreamsState;
 use crate::{
     evm::protocol::utils::{
-        slipstreams::{dynamic_fee_module::DynamicFeeConfig, observations::Observation},
+        slipstreams::{
+            aero_hook_fee::AeroHookFee, dynamic_fee_module::DynamicFeeConfig,
+            observations::Observation,
+        },
         uniswap::{i24_be_bytes_to_i32, tick_list::TickInfo},
     },
     protocol::{
@@ -86,6 +93,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         let dynamic_fee_config = DynamicFeeConfig::from_attributes(&snapshot.state.attributes)
             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))?;
+        // `aero_cl` components carry the AERO swap hook's settings instead of a fee module's.
+        let aero_hook = snapshot
+            .state
+            .attributes
+            .contains_key("hook_seconds_ago")
+            .then(|| AeroHookFee::from_attributes(&snapshot.state.attributes))
+            .transpose()
+            .map_err(InvalidSnapshotError::ValueError)?;
 
         let tick_spacing = snapshot
             .component
@@ -214,7 +229,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             observations,
             dynamic_fee_config,
         )
-        .map(|state| state.with_position_assumption(decoder_context.block_position))
+        .map(|state| {
+            let mut state = match aero_hook {
+                Some(hook) => state.with_aero_hook(hook),
+                None => state,
+            }
+            .with_position_assumption(decoder_context.block_position);
+            state.apply_block(&BlockContext::new(block.number, block.timestamp));
+            state
+        })
         .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }

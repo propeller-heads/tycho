@@ -26,7 +26,8 @@ bytes = { workspace = true, optional = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
-# `raw_value` lets `book::wire` set an entry aside before it is read.
+# `raw_value` lets `book::wire` set an entry aside before it is read, and lets the price level
+# stream read `calculated_from` leniently and decode each quote stream venue entry on its own.
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_with = { workspace = true, optional = true }
 toml = { workspace = true }
@@ -56,7 +57,10 @@ num-traits = { workspace = true }
 # Used by the vendored Curve math/adapter modules (src/evm/protocol/curve/{math,adapter}).
 alloy-primitives = { version = "1.5", features = ["serde"], optional = true }
 
-# Enum utilities
+# Enum utilities. `strum` defines `IntoEnumIterator`, the trait `strum_macros` derives. The price
+# level stream's telemetry iterates its label enums with it, so a new variant gets its zero series
+# without a hand-kept list.
+strum = { workspace = true }
 strum_macros = { workspace = true }
 
 # Tycho dependencies

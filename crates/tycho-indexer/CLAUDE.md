@@ -6,7 +6,7 @@ serves it over HTTP/WebSocket.
 ## Module Map
 
 ```
-main.rs                     CLI entry point; account initialisation; extractor startup
+main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU (and, with jemalloc heap profiling on, memory) profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
 testing.rs                  Test utilities
@@ -59,7 +59,7 @@ services/
   debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
-    compression.rs          Zstd response compression
+    compression.rs          Zstd response compression: the middleware (level 3), and level 1 for state responses
     metrics.rs              RPC request metrics
     pagination.rs           Request pagination validation
 
