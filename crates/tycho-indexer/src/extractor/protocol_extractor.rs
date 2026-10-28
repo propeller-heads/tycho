@@ -915,6 +915,31 @@ where
     }
 }
 
+#[cfg(test)]
+impl<G, T, E> ProtocolExtractor<G, T, E>
+where
+    G: ExtractorGateway + 'static,
+    T: TokenPreProcessor,
+    E: ExtractorExtension,
+{
+    /// Waits for the queued database commit, if any, and returns its result. Afterwards every
+    /// block drained so far has been handed to the gateway.
+    pub(crate) async fn wait_for_commit(&self) -> Result<(), ExtractionError> {
+        let Some(handle) = self
+            .gateway
+            .commit_handle
+            .lock()
+            .await
+            .take()
+        else {
+            return Ok(());
+        };
+        handle.await.map_err(|err| {
+            ExtractionError::Unknown(format!("Database commit task did not finish: {err}"))
+        })?
+    }
+}
+
 /// Revert class of one (component, attribute) pair, decided by its event history inside
 /// the reverted range. The first event picks the variant: a creation means the attr did
 /// not exist before the range (`CreatedInRange`), anything else means it did
