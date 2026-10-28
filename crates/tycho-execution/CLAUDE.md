@@ -45,6 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
+| `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
 | `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
@@ -53,7 +54,7 @@ getTransferData [returns transferType, receiver, tokenIn, tokenOut, outputToRout
 fundsExpectedAddress), `ICallback` (handleCallback, verifyCallback, getCallbackTransferData), `IFeeCalculator` (
 calculateFee [takes FeeInput → FeeRecipient[]], mustOutputThroughRouter [takes clientFeeBps, client → bool],
 getAllClientFees [takes start, count → (address[] clients, CustomFees[] fees)]). Also
-`IPropAMM` (the pAMM standard) and `IUniversalRouter`.
+`IPropAMM` (the pAMM standard), `IUniversalRouter` and `ISubsidyPayer` (`pay`, the `Subsidy` struct, `SkipReason`).
 
 ### Vault (`Vault.sol`)
 
@@ -143,12 +144,12 @@ receivers, and `outputToRouter` are hardcoded per-executor -- not encodable in c
 simple: they just call the protocol. All balance tracking, output verification, and transfer logic lives in the
 Dispatcher/TransferManager.
 
-Supported: UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3, Slipstreams, MaverickV2,
-AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ), Hashflow (RFQ),
-Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other native wrappers),
-PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface; the pAMM
-address travels in the swap data), and Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
-fallback").
+Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
+Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
+native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
+the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
+fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -176,6 +177,8 @@ Each concrete router has its own executor, and each executor holds one router ad
 | `MetricFallbackRouter` | `MetricFallbackExecutor` | Simulated swap through `simulatePrimary` | `[tokenIn: 20][tokenOut: 20][pool: 20][zeroForOne: 1][fallback]` |
 | `BebopFallbackRouter` | `BebopFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][target: 20][bebopDataLength: 4][bebopData][fallback]` |
 | `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
+| `NativeFallbackRouter` | `NativeFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][nativeDataLength: 4][nativeData][fallback]` |
+| `LiquoriceFallbackRouter` | `LiquoriceFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][calldataLength: 4][settlement calldata][fallback]` |
 
 A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
 quoted, and the fallback runs only when the primary fails.
@@ -200,6 +203,23 @@ receiver. The order fills at most `originalFilledTakerAmount`; the rest of `amou
 `baseTokenAmount`, approves the Hashflow router for the fill, calls `tradeRFQT`, revokes the approval, and forwards the
 output to the receiver. The rest of `amountIn` goes back to the caller, as for Bebop. The quote's pool is the primary
 in `FallbackSwap`.
+
+`NativeFallbackRouter` runs a signed Native RFQ-T quote. `nativeData` is `[signedAmountIn: 32][tradeRFQT calldata]`, the
+same fields `NativeExecutor` takes after its target. The quote MUST name the fallback router as recipient. The router
+calls its immutable `nativeRouterV6`. `swap` checks the `tradeRFQT` selector, non-zero amounts and zero
+`actualSellerAmount`/`actualMinOutputAmount` before anything runs. The router trades all of `amountIn`: when `amountIn`
+differs from the signed amount, the router writes `amountIn` as `actualSellerAmount`, and Native scales the signed
+minimum output to `amountIn`. Native reverts an input too far from the signed amount, and the fallback then fills the
+leg. The router approves the Native router for `amountIn`, calls it, revokes the approval and forwards the output. Any
+input Native did not pull goes back to the caller.
+
+`LiquoriceFallbackRouter` runs a signed Liquorice quote through the immutable `liquoriceSettlement`. It takes the
+settlement calldata alone: Liquorice quotes do not partially fill, so the router carries none of `LiquoriceExecutor`'s
+partial-fill fields. The quote MUST name the fallback router as trader and receiver, and Liquorice MUST allow the router
+as a solver. `swap` checks the `settle`/`settleSingle` selector before anything runs. The router approves the
+`liquoriceBalanceManager` for `amountIn`, calls the settlement, revokes the approval and forwards the output. The
+settlement pulls the signed amount, so the rest of `amountIn` goes back to the caller, as for Bebop. An `amountIn` below
+the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
@@ -291,17 +311,21 @@ Constraints:
   `TychoFallbackRouter__ProtocolUnavailable` (checked in `_decodeFallback`, so it quotes as zero and reverts by name
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
-- `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`
-  or `bebop`) through the CREATE2 factory, reading `poolManager` and `fluidLiquidity` from the chain's `uniswap_v4`
-  and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
+- `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`,
+  `bebop`, `hashflow`, `native` or `liquorice`) through the CREATE2 factory, reading `poolManager` and
+  `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
   `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
-  the `rfq:hashflow` router.
+  the `rfq:hashflow` router; Native adds the `rfq:native` router; Liquorice adds the `rfq:liquorice` settlement
+  and balance manager.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
   to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
   `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
-  `fallback:rfq:hashflow` for `HashflowFallbackExecutor`). The Metric, Bebop and Hashflow entries hold the zero
-  address until their router is deployed; the executor constructor rejects it. A Bebop or Hashflow router also needs
-  its address as `fallback_router` under its protocol in `protocol_specific_addresses.json`.
+  `fallback:rfq:hashflow` for `HashflowFallbackExecutor`, `fallback:rfq:native` for `NativeFallbackExecutor`,
+  `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`). An entry holds the zero address until its router is
+  deployed; the executor constructor rejects it. A Bebop, Hashflow, Native or Liquorice router also needs its
+  address as `fallback_router` under its protocol in `protocol_specific_addresses.json`; the Native entry also needs
+  `router_v6`, and the Liquorice entry `settlement_address` and `balance_manager_address`. Liquorice must allow a
+  deployed `LiquoriceFallbackRouter` as a solver before it can settle.
 - The pAMM router and executor are deployed on Ethereum (router `0xA4bC389e87011fED8e902166bF421A29Fa6ef633`,
   executor `0x355d1D7bd40330c235e1132de8D2314b956584c9`) and Base (router
   `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
@@ -310,6 +334,44 @@ Constraints:
 - The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
   transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
+
+### Subsidies (`executors/TychoSubsidizingExecutor.sol`)
+
+`TychoSubsidizingExecutor` wraps one hop: it runs the hop through an inner executor named in its swap data, then calls
+`ISubsidyPayer.pay` to pay a signed subsidy in the hop's output token.
+
+Swap data: `[boundTo: 20][amount: 32][minAmountIn: 32][nonce: 32][deadline: 6][signature: 65][innerExecutor: 20]
+[innerData]`. The subsidy's `innerSwapHash` is `keccak256` over `innerExecutor ‖ innerData`, so the signature covers the
+pool and the hop. Data shorter than 207 bytes reverts `TychoSubsidizingExecutor__InvalidDataLength`.
+
+- The inner executor must be approved on the router with its timelock passed, and may not be the wrapper itself;
+  otherwise `TychoSubsidizingExecutor__UnapprovedInnerExecutor`. `getTransferData` and `fundsExpectedAddress` forward to
+  it and map the wrapper's own address back to the router, so every transfer type and sequential hops work unchanged.
+- Before the inner swap, the wrapper writes the inner executor into `CURRENTLY_SWAPPING_EXECUTOR_SLOT`, so the
+  router's fallback sends pool callbacks straight to it. It clears the slot before calling the payer, so a contract
+  the payer sends funds to cannot reach the inner executor through the fallback.
+- The payer pays into the Dispatcher's `measureAt` (`outputToRouter ? router : receiver`), inside `swap()`, so the
+  Dispatcher counts the subsidy as hop output. Fees, slippage capture, `minAmountOut`, vault credits and later hops
+  then see it like any other output. The quote's `expectedAmountOut` has to include the subsidy, or positive slippage
+  capture takes it.
+- `pay` runs in `try/catch`. A payer revert emits `SubsidyPayerReverted(nonce, reason)` from the router, with `nonce`
+  indexed like in the payer's events, and the swap fills without the subsidy. A payer that returns malformed data would
+  still revert; the constructor rejects a payer address with no code.
+- The payer, a separate contract, holds the budget, the signer and the nonces. The wrapper writes no storage and moves
+  no tokens. Tokens already held by the router would not raise the balance at `measureAt`, so a payment from them
+  would not count as output.
+
+Encoding (`src/encoding/evm/subsidy.rs`): `Solution::with_subsidy(SubsidyTerms)` makes the strategy encoders wrap one
+swap group in the subsidizing executor. `SubsidyTerms` documents which swap group can carry the subsidy, and
+`EncodedSolution::write_subsidy_signature` documents the signing order.
+
+- The encoder does not sign. It writes a 65-byte zero signature, which the payer skips as `InvalidSignature`.
+- The executor address is the `subsidy` entry of `config/executor_addresses.json`; the payer is `payer_address` under
+  `subsidy` in `config/protocol_specific_addresses.json`. No chain lists them until they are deployed.
+  `SwapEncoderRegistry::register_subsidy_contracts` sets both, for tests and forks.
+- `tests/subsidy_integration_tests.rs` signs with a test key and writes `<name>` and `<name>_unsigned` calldata;
+  `contracts/test/protocols/TychoSubsidizingEncoder.t.sol` deploys the payer and the executor at the addresses the
+  Rust tests name and checks the exact output of both.
 
 ### Executor Flow, Callbacks & Output Verification
 
@@ -323,7 +385,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
@@ -331,7 +393,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool
@@ -426,7 +488,8 @@ flags) into packed bytes. Each encoder holds its executor address.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,
-e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (request-for-quote, e.g. `rfq:bebop`), bare (on-chain,
+e.g. `vm:balancer_v2`, `vm:curve`), `rfq:` (off-chain book feeds — the RFQ venues and Metric,
+e.g. `rfq:bebop`, `rfq:metric`), bare (on-chain,
 e.g. `uniswap_v2`, `fluid_v1`), and `pricelevelstream:` (Titan pAMM price level stream, suffixed
 with the protocol name or, for auto-detected pAMMs, the protocol address). Price-level-stream protocols
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
@@ -449,8 +512,10 @@ parameters the contract decodes: a solver builds the variant for the pool it pic
 defined once. The encoder rejects a protocol the chain's router does not run with an
 `InvalidInput` error instead of letting it revert on chain.
 
-`fallback:rfq:metric`, `fallback:rfq:bebop` and `fallback:rfq:hashflow` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`,
-`BEBOP_FALLBACK_PROTOCOL_SYSTEM`, `HASHFLOW_FALLBACK_PROTOCOL_SYSTEM`) are RFQ venues behind their own fallback routers. Each has an
+`fallback:rfq:metric`, `fallback:rfq:bebop`, `fallback:rfq:hashflow`, `fallback:rfq:native` and
+`fallback:rfq:liquorice` (`METRIC_FALLBACK_PROTOCOL_SYSTEM`, `BEBOP_FALLBACK_PROTOCOL_SYSTEM`,
+`HASHFLOW_FALLBACK_PROTOCOL_SYSTEM`, `NATIVE_FALLBACK_PROTOCOL_SYSTEM`, `LIQUORICE_FALLBACK_PROTOCOL_SYSTEM`) are RFQ
+venues behind their own fallback routers. Each has an
 exact executor-config entry, which `get_encoder` matches before the `fallback` family. They read the
 same `FallbackSwapData` `user_data`:
 
@@ -461,16 +526,27 @@ same `FallbackSwapData` `user_data`:
   `bebopDataLength` prefix and appends the fallback.
 - `HashflowFallbackSwapEncoder` requests the signed quote with the chain's `HashflowFallbackRouter` as trader, read
   from `fallback_router` under `fallback:rfq:hashflow`, and wraps the 345-byte quote in the tokens and the fallback.
+- `NativeFallbackSwapEncoder` and `LiquoriceFallbackSwapEncoder` request the signed quote with the chain's fallback
+  router as recipient (and, for Liquorice, trader), read from `fallback_router` under their protocol. The Native one
+  also reads `router_v6` there, and rejects a swap in or out of the chain's native token, which the router cannot
+  trade. The Liquorice one passes its config to the inner `LiquoriceSwapEncoder`, which checks the quote's
+  settlement and approvals against `settlement_address` and `balance_manager_address` in the same entry. Each
+  inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
+  fields and keeps the settlement calldata.
 
-None of these routers is deployed, so no chain lists these entries yet. The gas estimator charges a
-Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop or Hashflow leg the router's approval
-and output forward.
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
+and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
+The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
+Hashflow, Native or Liquorice leg the router's approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
-executor configs. A chain missing from the list has no router and supports nothing. Only Ethereum
-and Base are listed today.
+executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
+Base, Robinhood, BSC, Arbitrum and Polygon are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
+with `fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no
+static quoter. On Polygon, QuickSwap V2 pairs encode as Uniswap V2 with `fee_bps` 30, and Uniswap V3
+and Ramses V3 pools are quoted by Eden's static quoter.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same

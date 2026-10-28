@@ -44,6 +44,7 @@ pub enum Executor {
     LiquidityParty,
     LunarBase,
     PropAMM,
+    TychoSubsidizing,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -64,7 +65,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 12] = [
+    pub const VARIANTS: [Executor; 13] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -77,6 +78,7 @@ impl Executor {
         Executor::LiquidityParty,
         Executor::LunarBase,
         Executor::PropAMM,
+        Executor::TychoSubsidizing,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -357,6 +359,10 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => {
+                subsidizing_inner(params, swap_index)?.get_transfer_data(params, _state, swap_index)
+            }
         }
     }
 
@@ -664,6 +670,15 @@ impl Executor {
                     })
                 }
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            // The subsidy payer is not modeled: it pays from its own balance.
+            Self::TychoSubsidizing => {
+                let inner = subsidizing_inner(params, swap_index)?;
+                state.tstore("currently_swapping_executor", inner);
+                inner.swap(params, state, vault, log, amount, _receiver, swap_index)?;
+                state.tdelete("currently_swapping_executor");
+                Ok(())
+            }
         }
     }
 
@@ -700,6 +715,9 @@ impl Executor {
             Self::LiquidityParty => unimplemented!(),
             Self::LunarBase => unimplemented!(),
             Self::PropAMM => unimplemented!(),
+            Self::TychoSubsidizing => {
+                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
+            }
         }
     }
 
@@ -729,6 +747,9 @@ impl Executor {
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
             Self::PropAMM => {
                 unimplemented!("PropAMM doesn't use callbacks")
+            }
+            Self::TychoSubsidizing => {
+                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
             }
         }
     }
@@ -798,6 +819,23 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
+            Self::TychoSubsidizing => subsidizing_inner(params, swap_index)?
+                .funds_expected_address(params, _state, swap_index)?,
         })
     }
+}
+
+/// The inner executor the caller names in a [Executor::TychoSubsidizing] swap's data. The
+/// executor rejects itself as its inner executor, and the model only has approved executors.
+///
+/// The contract maps its own address back to the router. The model needs no mapping: its inner
+/// executors already report the router.
+fn subsidizing_inner(params: &Params, swap_index: u8) -> Result<Executor, Error> {
+    Ok(params.request(
+        ParamKey::SwapIndexed { prefix: "subsidizing_inner_executor", swap_index },
+        Executor::VARIANTS
+            .into_iter()
+            .filter(|executor| *executor != Executor::TychoSubsidizing),
+    )?)
 }

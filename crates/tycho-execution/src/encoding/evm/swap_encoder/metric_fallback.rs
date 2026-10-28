@@ -75,7 +75,7 @@ mod tests {
     const METRIC_POOL: &str = "258be4ea05f674e0b26aa71dfc08e0c87c499fb0";
     const USDC_WETH_USV3: &str = "d0b53d9277642d899df5c87a3966a349a798f224";
 
-    fn encode_weth_usdc(user_data: Option<&str>) -> Result<String, EncodingError> {
+    fn encode_weth_usdc(chain: Chain, user_data: Option<&str>) -> Result<String, EncodingError> {
         let weth = Bytes::from(format!("0x{WETH}").as_str());
         let usdc = Bytes::from(format!("0x{USDC}").as_str());
         let component = ProtocolComponent {
@@ -97,9 +97,10 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: weth,
             group_token_out: usdc,
+            origin: None,
         };
 
-        MetricFallbackSwapEncoder::new(Bytes::default(), Chain::Base, None)
+        MetricFallbackSwapEncoder::new(Bytes::default(), chain, None)
             .unwrap()
             .encode_swap(&swap, &encoding_context)
             .map(|encoded| encode(&encoded))
@@ -107,9 +108,10 @@ mod tests {
 
     #[test]
     fn test_encode_metric_with_uniswap_v3_fallback() {
-        let hex_swap = encode_weth_usdc(Some(&format!(
-            r#"{{"fallback_protocol":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#
-        )))
+        let hex_swap = encode_weth_usdc(
+            Chain::Base,
+            Some(&format!(r#"{{"fallback_protocol":"uniswap_v3","pool":"0x{USDC_WETH_USV3}"}}"#)),
+        )
         .unwrap();
 
         // WETH is the pool's token0, so zeroForOne is 01; the fallback is protocol byte 01.
@@ -118,11 +120,61 @@ mod tests {
         write_calldata_to_file("test_encode_metric_fallback_for_solidity", &hex_swap);
     }
 
+    /// PancakeSwap forks encode as their Uniswap base protocol, V2 with Pancake's 25 bps fee.
+    #[test]
+    fn test_encode_pancakeswap_fallbacks_on_bsc() {
+        let pancake_v2 = "16b9a82891338f9ba80e2d6970fdda79d1eb0dae";
+        let pancake_v3 = "172fcd41e0913e95784454622d1c3724f546f849";
+
+        let v2_swap = encode_weth_usdc(
+            Chain::Bsc,
+            Some(&format!(
+                r#"{{"fallback_protocol":"pancakeswap_v2","pair":"0x{pancake_v2}","fee_bps":25}}"#
+            )),
+        )
+        .unwrap();
+        let v3_swap = encode_weth_usdc(
+            Chain::Bsc,
+            Some(&format!(r#"{{"fallback_protocol":"pancakeswap_v3","pool":"0x{pancake_v3}"}}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(v2_swap, format!("{WETH}{USDC}{METRIC_POOL}0100{pancake_v2}19"));
+        assert_eq!(v3_swap, format!("{WETH}{USDC}{METRIC_POOL}0101{pancake_v3}"));
+    }
+
+    /// QuickSwap V2 pairs encode as Uniswap V2 at their 30 bps fee, Ramses V3 pools as Uniswap V3.
+    #[test]
+    fn test_encode_polygon_fallbacks() {
+        let quickswap_v2 = "853ee4b2a13f8a742d64c8f088be7ba2131f670d";
+        // The encoder does not look the pool up, so any address stands in for a Ramses V3 pool.
+        let ramses_v3 = "5555555555555555555555555555555555555555";
+
+        let v2_swap = encode_weth_usdc(
+            Chain::Polygon,
+            Some(&format!(
+                r#"{{"fallback_protocol":"quickswap_v2","pair":"0x{quickswap_v2}","fee_bps":30}}"#
+            )),
+        )
+        .unwrap();
+        let v3_swap = encode_weth_usdc(
+            Chain::Polygon,
+            Some(&format!(r#"{{"fallback_protocol":"ramses_v3","pool":"0x{ramses_v3}"}}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(v2_swap, format!("{WETH}{USDC}{METRIC_POOL}0100{quickswap_v2}1e"));
+        assert_eq!(v3_swap, format!("{WETH}{USDC}{METRIC_POOL}0101{ramses_v3}"));
+    }
+
     #[test]
     fn test_rejects_fallback_the_chain_does_not_run() {
-        let err = encode_weth_usdc(Some(&format!(
-            r#"{{"fallback_protocol":"fluid_v1","dex":"0x{USDC_WETH_USV3}","zero2one":true}}"#
-        )))
+        let err = encode_weth_usdc(
+            Chain::Base,
+            Some(&format!(
+                r#"{{"fallback_protocol":"fluid_v1","dex":"0x{USDC_WETH_USV3}","zero2one":true}}"#
+            )),
+        )
         .unwrap_err();
 
         assert!(matches!(err, EncodingError::InvalidInput(message) if message.contains("base")));

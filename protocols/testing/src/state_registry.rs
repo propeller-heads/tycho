@@ -76,7 +76,12 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-        "uniswap_v4" | "uniswap_v4_hooks" => stream_builder
+        // PancakeSwap Infinity CL pools are Uniswap v4 pools with the same attribute schema; the
+        // hooked ones carry their hook in `hooks` for the registered native handler.
+        "uniswap_v4" |
+        "uniswap_v4_hooks" |
+        "pancakeswap_infinity_cl" |
+        "pancakeswap_infinity_cl_hooks" => stream_builder
             .exchange_with_decoder_context::<UniswapV4State>(
                 protocol_system,
                 tvl_filter,

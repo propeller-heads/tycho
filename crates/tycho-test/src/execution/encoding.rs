@@ -1,15 +1,18 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::{
-    eips::BlockNumberOrTag,
-    primitives::{keccak256, map::AddressHashMap, Address, FixedBytes, Keccak256, B256, U256},
+    primitives::{
+        keccak256,
+        map::{AddressHashMap, B256HashMap},
+        Address, FixedBytes, Keccak256, B256, U256,
+    },
     providers::Provider,
     rpc::types::{state::AccountOverride, Block, BlockId, TransactionRequest},
     sol_types::SolValue,
 };
 use miette::{miette, IntoDiagnostic, WrapErr};
 use num_bigint::BigUint;
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_common::{
     models::{token::Token, Chain, NativeAsset},
     simulation::protocol_sim::ProtocolSim,
@@ -24,7 +27,11 @@ use tycho_execution::encoding::{
     models::{ClientFeeParams, EncodedSolution, Solution, Swap},
 };
 use tycho_simulation::{
-    evm::protocol::u256_num::biguint_to_u256, protocol::models::ProtocolComponent,
+    evm::protocol::u256_num::biguint_to_u256,
+    price_level_stream::overrides::{
+        AccountOverride as PammAccountOverride, PammSimulationOverrides,
+    },
+    protocol::models::ProtocolComponent,
 };
 
 use crate::{
@@ -35,7 +42,8 @@ use crate::{
     rpc_tools::RPCTools,
 };
 
-const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
+/// Simulated end-user EOA used as sender/receiver of encoded test solutions.
+pub const USER_ADDR: &str = "0xf847a638E44186F3287ee9F8cAF73FF4d4B80784";
 const GAS_LIMIT: u64 = 100_000_000;
 // 1_000 native tokens (10^21 wei): covers 100M gas at up to ~10_000 gwei
 const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
@@ -509,22 +517,18 @@ pub fn setup_angstrom_overwrites(
 /// FermiSwap reads oracle state from PrioUpdateRegistry using a lane keyed by
 /// `keccak256(abi.encode(target, laneIndex))`. The first 4 bytes of that lane's
 /// slot store the update timestamp. To keep the lane payload intact, this reads
-/// each current slot value at the simulation block and only replaces the
-/// timestamp prefix with `block.timestamp`.
+/// each current slot value at `state_block`, the block whose state the simulation
+/// runs on, and only replaces the timestamp prefix with `block.timestamp`.
 pub async fn setup_fermiswap_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     pairs: &[(Address, Address)],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
     let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
     let timestamp = u32::try_from(block.header.timestamp)
         .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
 
     let mut state_diff = Vec::new();
     for &(base_asset, quote_asset) in pairs {
@@ -533,7 +537,7 @@ pub async fn setup_fermiswap_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {
@@ -585,22 +589,19 @@ fn overwrite_fermiswap_lane_timestamp(stored_value: B256, timestamp: u32) -> B25
 /// by `keccak256(abi.encode(module, assetId))` — the pricing module is the registry `target` and
 /// the book's `assetId` is the lane index. The first 4 bytes of that lane's slot store the update
 /// timestamp; the registry's exact-window `getState` gate reverts (`StaleUpdate`) unless
-/// `block.timestamp` matches it. This reads each lane's current value at the simulation block and
-/// only replaces the timestamp prefix with `block.timestamp`, leaving the quote payload intact.
+/// `block.timestamp` matches it. This reads each lane's current value at `state_block`, the block
+/// whose state the simulation runs on, and only replaces the timestamp prefix with
+/// `block.timestamp`, leaving the quote payload intact.
 pub async fn setup_bopamm_overwrites(
     rpc_tools: &RPCTools,
     block: &Block,
+    state_block: BlockId,
     asset_ids: &[U256],
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
     let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
     let timestamp = u32::try_from(block.header.timestamp)
         .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
-    let block_id = if block.header.hash == B256::ZERO {
-        BlockId::from(BlockNumberOrTag::Pending)
-    } else {
-        BlockId::from(block.number())
-    };
 
     let mut state_diff = Vec::new();
     for asset_id in asset_ids {
@@ -608,7 +609,7 @@ pub async fn setup_bopamm_overwrites(
         let stored_value = rpc_tools
             .provider
             .get_storage_at(registry_address, U256::from_be_slice(storage_slot.as_slice()))
-            .block_id(block_id)
+            .block_id(state_block)
             .await
             .into_diagnostic()
             .wrap_err_with(|| {
@@ -706,10 +707,126 @@ pub fn setup_router_overwrites(
     Ok(state_overwrites)
 }
 
+/// A pAMM quote's simulation overrides as account overwrites for
+/// [`TychoExecutionInput::account_overwrites`](crate::execution::models::TychoExecutionInput):
+/// each overridden account with its balance, nonce and storage slots, in the shape `eth_call`
+/// takes. The price level stream validated every address, slot and value, so an account that does
+/// not convert is a bug: it is logged and left out.
+pub fn pamm_account_overwrites(
+    overrides: &PammSimulationOverrides,
+) -> AddressHashMap<AccountOverride> {
+    overrides
+        .accounts
+        .iter()
+        .filter_map(|(address, account)| {
+            let converted = pamm_account_overwrite(address, account);
+            if converted.is_none() {
+                warn!(%address, "A simulation override account does not convert; leaving it out");
+            }
+            converted
+        })
+        .collect()
+}
+
+fn pamm_account_overwrite(
+    address: &Bytes,
+    account: &PammAccountOverride,
+) -> Option<(Address, AccountOverride)> {
+    let address = Address::try_from(address.as_ref()).ok()?;
+    let balance = match &account.balance {
+        Some(balance) => Some(U256::try_from_be_slice(balance)?),
+        None => None,
+    };
+    let state_diff = account
+        .state_diff
+        .iter()
+        .map(|(slot, value)| {
+            Some((B256::try_from(slot.as_ref()).ok()?, B256::try_from(value.as_ref()).ok()?))
+        })
+        .collect::<Option<B256HashMap<B256>>>()?;
+    let overwrite = AccountOverride {
+        balance,
+        nonce: account.nonce,
+        state_diff: (!state_diff.is_empty()).then_some(state_diff),
+        ..Default::default()
+    };
+    Some((address, overwrite))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::tenderly::SlotMetadata;
+
+    fn word(byte: u8) -> Bytes {
+        Bytes::from(vec![byte; 32])
+    }
+
+    fn pamm_overrides(accounts: Vec<(Bytes, PammAccountOverride)>) -> PammSimulationOverrides {
+        PammSimulationOverrides {
+            accounts: accounts.into_iter().collect(),
+            block_number: Some(1),
+            block_timestamp: Some(12),
+            built_at_ns: 0,
+        }
+    }
+
+    /// An account converts with its balance, its nonce and its storage slots.
+    #[test]
+    fn a_pamm_override_account_converts_with_its_balance_nonce_and_slots() {
+        let overrides = pamm_overrides(vec![(
+            Bytes::from(vec![0xaa; 20]),
+            PammAccountOverride {
+                balance: Some(Bytes::from(vec![0x01, 0x00])),
+                nonce: Some(5),
+                state_diff: [(word(0x01), word(0x02))]
+                    .into_iter()
+                    .collect(),
+            },
+        )]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        let account = &overwrites[&Address::repeat_byte(0xaa)];
+        assert_eq!((account.balance, account.nonce), (Some(U256::from(256)), Some(5)));
+        assert_eq!(
+            account.state_diff,
+            Some(B256HashMap::from_iter([(B256::repeat_byte(0x01), B256::repeat_byte(0x02))]))
+        );
+    }
+
+    /// An account that overrides no storage carries no storage overwrite, so it never replaces the
+    /// slots another overwrite set for it.
+    #[test]
+    fn a_pamm_override_account_without_slots_carries_no_storage() {
+        let overrides = pamm_overrides(vec![(
+            Bytes::from(vec![0xaa; 20]),
+            PammAccountOverride {
+                balance: Some(Bytes::from(vec![0x01])),
+                nonce: None,
+                state_diff: Default::default(),
+            },
+        )]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        assert_eq!(overwrites[&Address::repeat_byte(0xaa)].state_diff, None);
+    }
+
+    /// An account that does not convert is left out, and the others are kept.
+    #[test]
+    fn a_pamm_override_account_that_does_not_convert_is_left_out() {
+        let account =
+            PammAccountOverride { balance: None, nonce: Some(1), state_diff: Default::default() };
+        let overrides = pamm_overrides(vec![
+            (Bytes::from(vec![0xaa; 19]), account.clone()),
+            (Bytes::from(vec![0xbb; 20]), account),
+        ]);
+
+        let overwrites = pamm_account_overwrites(&overrides);
+
+        assert_eq!(overwrites.keys().collect::<Vec<_>>(), vec![&Address::repeat_byte(0xbb)]);
+    }
 
     const ROUTER: &str = "0x72C452506a551C7fe069f1F66Beb671AC58909E9";
     const TOKEN: &str = "0x3600000000000000000000000000000000000000";

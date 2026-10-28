@@ -139,3 +139,13 @@ tycho-client --help
 ```
 
 For extended explanation on how each parameter works, check our [#usage](./#usage "mention")guide.
+
+### Snapshot jitter
+
+When the Tycho server or one of its extractors restarts, every client reconnects at the same moment. To spread the load, the client waits a random time between 0 and `--snapshot-jitter` seconds before it requests a new snapshot. The client discards deltas during the wait and takes the snapshot at the next block. The default is 60 seconds and the minimum is 5 seconds.
+
+The first start has no delay. A restart that continues from the next expected block, or a stream with `--no-state`, requests no snapshot and has no delay. To shorten the wait, set a lower value:
+
+```bash
+tycho-client --exchange uniswap_v2 --snapshot-jitter 10
+```
