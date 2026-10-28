@@ -471,6 +471,8 @@ pub(crate) fn compute_start_block(
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use tycho_common::models::{blockchain::BlockAggregatedChanges, Chain};
 
     use super::*;
@@ -600,5 +602,76 @@ mod test {
         );
         // Should resume from last_committed + 1, ignoring config start block.
         assert_eq!(compute_start_block(Some(&block), 500), Ok(1001));
+    }
+
+    /// A subscriber of `kind` with a channel of `capacity`, holding `queued` messages.
+    fn subscriber(
+        kind: SubscriberKind,
+        capacity: usize,
+        queued: usize,
+    ) -> (Subscriber, Receiver<DeltaCommand>) {
+        let (sender, rx) = mpsc::channel(capacity);
+        for _ in 0..queued {
+            sender
+                .try_send(DeltaCommand::Block(one_msg()))
+                .expect("channel has room");
+        }
+        (Subscriber { sender, kind }, rx)
+    }
+
+    #[tokio::test]
+    async fn test_propagate_msg_removes_full_client_without_waiting() {
+        let (full_client, mut full_client_rx) = subscriber(SubscriberKind::Client, 1, 1);
+        let (client, mut client_rx) = subscriber(SubscriberKind::Client, 4, 0);
+        let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 4, 0);
+        let subscribers =
+            Arc::new(Mutex::new(HashMap::from([(0, full_client), (1, client), (2, internal)])));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ExtractorRunner::propagate_msg(&subscribers, one_msg()),
+        )
+        .await
+        .expect("a full client must not make the extractor wait");
+
+        let mut remaining: Vec<u64> = subscribers
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec![1, 2]);
+        assert!(matches!(client_rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        assert!(matches!(internal_rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        assert!(
+            matches!(full_client_rx.recv().await, Some(DeltaCommand::Block(_))),
+            "the removed client still gets the messages queued before its removal"
+        );
+        assert!(full_client_rx.recv().await.is_none(), "the removed client's stream ends");
+    }
+
+    #[tokio::test]
+    async fn test_propagate_msg_waits_for_full_internal_subscriber() {
+        let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 1, 1);
+        let subscribers = Arc::new(Mutex::new(HashMap::from([(0, internal)])));
+
+        let propagate = tokio::spawn({
+            let subscribers = subscribers.clone();
+            async move { ExtractorRunner::propagate_msg(&subscribers, one_msg()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!propagate.is_finished(), "the extractor must wait for an internal subscriber");
+
+        assert!(matches!(internal_rx.recv().await, Some(DeltaCommand::Block(_))));
+        tokio::time::timeout(Duration::from_secs(1), propagate)
+            .await
+            .expect("room in the channel unblocks the extractor")
+            .expect("propagate_msg must not panic");
+        assert!(matches!(internal_rx.recv().await, Some(DeltaCommand::Block(_))));
+        assert!(subscribers
+            .lock()
+            .await
+            .contains_key(&0));
     }
 }
