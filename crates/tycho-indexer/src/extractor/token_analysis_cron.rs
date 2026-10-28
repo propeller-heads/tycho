@@ -282,9 +282,10 @@ fn apply_analysis(
 }
 
 /// Lists the addresses that may hold a pool's tokens, in preference order: the pool's
-/// `balance_owner`, then its contract addresses, then its id. Indexed data does not say which
+/// `balance_owner`, then its id, then its contract addresses. Indexed data does not say which
 /// of these holds the tokens (a Curve pool lists its factory too), so the caller checks them
-/// on-chain. Values that are not 20-byte addresses (e.g. 32-byte Uniswap V4 pool ids) are left out.
+/// on-chain; the order only breaks ties between equal balances. Values that are not 20-byte
+/// addresses (e.g. 32-byte Uniswap V4 pool ids) are left out.
 fn pool_holder_candidates(
     balance_owner: Option<&Bytes>,
     contract_addresses: &[Bytes],
@@ -294,8 +295,8 @@ fn pool_holder_candidates(
     let mut candidates: Vec<Bytes> = Vec::new();
     for candidate in balance_owner
         .into_iter()
-        .chain(contract_addresses)
         .chain(id.as_ref())
+        .chain(contract_addresses)
     {
         if candidate.len() == 20 && !candidates.contains(candidate) {
             candidates.push(candidate.clone());
@@ -670,7 +671,7 @@ mod test {
     const V4_POOL_ID: &str = "0x59314e0cea576298222ac289dcf684c0a76758329c8bf164bbc759816dc4efa3";
 
     #[rstest]
-    #[case::curve_factory_listed_first(None, &[FACTORY, POOL], POOL, &[FACTORY, POOL])]
+    #[case::id_before_contract_addresses(None, &[FACTORY, POOL], POOL, &[POOL, FACTORY])]
     #[case::balance_owner_first(Some(POOL_MANAGER), &[POOL], POOL, &[POOL_MANAGER, POOL])]
     #[case::v4_pool_id_is_not_an_address(Some(POOL_MANAGER), &[], V4_POOL_ID, &[POOL_MANAGER])]
     #[case::native_pool_falls_back_to_id(None, &[], POOL, &[POOL])]
