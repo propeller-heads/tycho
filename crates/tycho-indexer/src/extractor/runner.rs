@@ -5,7 +5,11 @@ use metrics::gauge;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc::{self, error::SendError, Receiver, Sender},
+        mpsc::{
+            self,
+            error::{SendError, TrySendError},
+            Receiver, Sender,
+        },
         oneshot, Mutex,
     },
     task::JoinHandle,
@@ -88,6 +92,10 @@ impl<AE: AccountExtractor + Send + Sync> ExtractorExtension for DCIPlugin<AE> {
     }
 }
 
+/// Buffer size of a client subscription channel. A client is removed once it is full, so the
+/// buffer absorbs a short pause: about a minute of blocks on a chain with two blocks per second.
+const CLIENT_SUBSCRIPTION_CHANNEL_SIZE: usize = 128;
+
 pub enum ControlMessage {
     Stop,
     Subscribe(Sender<DeltaCommand>),
@@ -129,7 +137,7 @@ impl ExtractorHandle {
 impl MessageSender for ExtractorHandle {
     #[instrument(skip(self))]
     async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(CLIENT_SUBSCRIPTION_CHANNEL_SIZE);
         // Define a timeout duration
         let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
 
@@ -150,8 +158,40 @@ impl MessageSender for ExtractorHandle {
     }
 }
 
-// Define the SubscriptionsMap type alias
-pub(crate) type SubscriptionsMap = HashMap<u64, Sender<DeltaCommand>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubscriberKind {
+    /// An in-process consumer that must see every message, such as `PendingDeltas`.
+    Internal,
+    /// A websocket client, which reads at the speed of its own connection.
+    Client,
+}
+
+/// A receiver of an extractor's [`DeltaCommand`]s.
+pub struct Subscriber {
+    pub(crate) sender: Sender<DeltaCommand>,
+    pub(crate) kind: SubscriberKind,
+}
+
+impl Subscriber {
+    /// Sends `command`. Returns false when the subscriber must be removed: its receiver is gone,
+    /// or it is a client whose channel is full. Only an internal subscriber is waited for, so a
+    /// slow client cannot stall the extractor for the other subscribers.
+    pub(crate) async fn deliver(&self, command: DeltaCommand) -> bool {
+        match self.kind {
+            SubscriberKind::Internal => self.sender.send(command).await.is_ok(),
+            SubscriberKind::Client => match self.sender.try_send(command) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    warn!("Client subscriber is too slow, ending its subscription");
+                    false
+                }
+                Err(TrySendError::Closed(_)) => false,
+            },
+        }
+    }
+}
+
+pub(crate) type SubscriptionsMap = HashMap<u64, Subscriber>;
 
 pub struct ExtractorRunner {
     extractor: Arc<dyn Extractor>,
@@ -391,17 +431,12 @@ impl ExtractorRunner {
         let mut subscribers = subscribers.lock().await;
         tracing::Span::current().record("subscriber_count", subscribers.len());
 
-        for (counter, sender) in subscribers.iter_mut() {
-            match sender.send(command.clone()).await {
-                Ok(_) => {
-                    // Message sent successfully
-                    trace!(subscriber_id = %counter, "Message sent successfully.");
-                }
-                Err(err) => {
-                    // Receiver has been dropped, mark for removal
-                    to_remove.push(*counter);
-                    error!(error = %err, counter, "Error while sending message to subscriber");
-                }
+        for (counter, subscriber) in subscribers.iter() {
+            if !subscriber
+                .deliver(command.clone())
+                .await
+            {
+                to_remove.push(*counter);
             }
         }
 
