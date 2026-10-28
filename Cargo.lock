@@ -10318,6 +10318,7 @@ dependencies = [
  "lazy_static",
  "lru 0.16.3",
  "metrics",
+ "num-bigint",
  "pretty_assertions",
  "roaring",
  "rstest 0.24.0",

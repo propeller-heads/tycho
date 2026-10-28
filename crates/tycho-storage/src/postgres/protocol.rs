@@ -10,6 +10,7 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
+use num_bigint::BigUint;
 use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
@@ -2066,18 +2067,7 @@ fn largest_balance_per_token(
 /// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
 /// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
 fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
-    let (a, b) = (strip_leading_zeros(a), strip_leading_zeros(b));
-    a.len()
-        .cmp(&b.len())
-        .then_with(|| a.cmp(b))
-}
-
-fn strip_leading_zeros(value: &[u8]) -> &[u8] {
-    let start = value
-        .iter()
-        .position(|&byte| byte != 0)
-        .unwrap_or(value.len());
-    &value[start..]
+    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 #[cfg(test)]
