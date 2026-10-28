@@ -9,6 +9,7 @@ import {EkuboExecutor} from "../src/executors/EkuboExecutor.sol";
 import {EkuboV3Executor} from "../src/executors/ekubo_v3/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
+import {TesseraExecutor} from "../src/executors/TesseraExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
 import {
     LiquidityPartyExecutor
@@ -161,6 +162,7 @@ contract TychoRouterTestSetup is
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
+    TesseraExecutor public tesseraExecutor;
     RingSwapV2Executor public ringSwapV2Executor;
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
@@ -338,8 +340,15 @@ contract TychoRouterTestSetup is
         );
         aeroBasicExecutor = new AeroBasicExecutor();
 
+        // Deployed last so the other executors keep their addresses.
+        bool supportsTessera = block.chainid == 8453;
+        if (supportsTessera) {
+            tesseraExecutor =
+                new TesseraExecutor(0x55555522005BcAE1c2424D474BfD5ed477749E3e);
+        }
         address[] memory executors = new address[](
             30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+                + (supportsTessera ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -377,9 +386,12 @@ contract TychoRouterTestSetup is
             nextExecutorIndex++;
         }
         if (supportsNative) {
-            executors[nextExecutorIndex] = address(nativeExecutor);
+            executors[nextExecutorIndex++] = address(nativeExecutor);
         }
 
+        if (supportsTessera) {
+            executors[nextExecutorIndex] = address(tesseraExecutor);
+        }
         return executors;
     }
 
