@@ -27,6 +27,9 @@ use super::{overrides::PammSimulationOverrides, telemetry};
 /// the cases where it does not.
 pub const QUOTE_TTL: Duration = super::SLOT;
 
+/// The error of a query on the other direction once a swap filled this one.
+const ALREADY_QUOTED: &str = "Price level stream already quoted in this route";
+
 /// A single price level: the total `amount_out` a swap of exactly `amount_in` would deliver.
 ///
 /// Levels are absolute quotes, not marginal order book sizes: each one already includes all
@@ -43,12 +46,30 @@ impl PriceLevelStreamQuote {
     }
 }
 
+/// The merged swap an earlier swap on one direction has made so far, in atomic units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StreamFill {
+    token_in: Bytes,
+    token_out: Bytes,
+    /// The input of the merged swap so far.
+    amount_in: BigUint,
+    /// The output the merged swap has paid so far.
+    amount_out: BigUint,
+}
+
 /// State of a single pAMM pair fed from the price level stream.
 ///
 /// Holds the latest complete quotes for both trade directions. Quotes are absolute
 /// (`amount_in` → total `amount_out`), sorted ascending by `amount_in`; amounts between two
 /// quotes are interpolated linearly, mirroring how Titan itself densifies the simulated levels.
 /// Amounts outside the quoted range are not served.
+///
+/// A swap returns a state that records its fill. A later swap on the same direction continues
+/// that fill: it pays the quotes' output for the merged input less the output so far, at zero
+/// gas, and `get_limits` and `spot_price` answer for what is left. The other direction is refused
+/// with an "already quoted" error, as the quotes are cumulative from the pre-fill venue and say
+/// nothing about its price after a fill. So the caller merges all swaps on one direction into
+/// one swap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevelStreamState {
     pub token0: Bytes,
@@ -56,6 +77,9 @@ pub struct PriceLevelStreamState {
     pub quotes_0_to_1: Vec<PriceLevelStreamQuote>,
     pub quotes_1_to_0: Vec<PriceLevelStreamQuote>,
     pub gas_cost: BigUint,
+    /// What an earlier swap filled on this state. Older serialized states carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fill: Option<StreamFill>,
     /// Monotonic instant from which this state refuses every query. `None` means the state never
     /// expires. The field is never serialized and deserializes as `None`, so a replayed
     /// recording always quotes. Only [`with_quotable_until`](Self::with_quotable_until) sets it,
@@ -93,6 +117,7 @@ impl PriceLevelStreamState {
             quotes_0_to_1,
             quotes_1_to_0,
             gas_cost,
+            fill: None,
             quotable_until: None,
             overrides: None,
         }
@@ -204,62 +229,76 @@ impl PriceLevelStreamState {
         Ok(&lower.amount_out + out_span * offset / in_span)
     }
 
-    /// The state after a fill: both quote lists are consumed. The quotes price fills of the
-    /// pre-fill venue only: post-fill pricing is unknown in either direction until the next
-    /// message, and re-reading the cumulative quotes would double-count the maker's liquidity.
-    ///
-    /// The state after the fill keeps the simulation overrides: they are the state the fill was
-    /// priced on, and a consumer simulates the swap after quoting it.
-    fn consumed(&self) -> Box<dyn ProtocolSim> {
-        Box::new(Self {
-            token0: self.token0.clone(),
-            token1: self.token1.clone(),
-            quotes_0_to_1: Vec::new(),
-            quotes_1_to_0: Vec::new(),
-            gas_cost: self.gas_cost.clone(),
-            quotable_until: self.quotable_until,
-            overrides: self.overrides.clone(),
-        })
-    }
-}
-
-#[typetag::serde]
-impl ProtocolSim for PriceLevelStreamState {
-    fn fee(&self) -> f64 {
-        0.0
-    }
-
-    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        self.ensure_quotable(Instant::now())?;
-        let quotes = self.quotes(&base.address, &quote.address)?;
-        let best = quotes
-            .iter()
-            .find(|q| q.amount_in > BigUint::ZERO && q.amount_out > BigUint::ZERO)
-            .ok_or_else(|| {
-                telemetry::record_quote_refused(telemetry::QuoteRefusedReason::NoLiquidity);
-                SimulationError::RecoverableError("No liquidity available".to_string())
-            })?;
-        let amount_in = best.amount_in.to_f64().ok_or_else(|| {
-            SimulationError::RecoverableError("Can't convert amount in to f64".to_string())
-        })?;
-        let amount_out = best
-            .amount_out
-            .to_f64()
-            .ok_or_else(|| {
-                SimulationError::RecoverableError("Can't convert amount out to f64".to_string())
-            })?;
-        Ok((amount_out / 10f64.powi(quote.decimals as i32)) /
-            (amount_in / 10f64.powi(base.decimals as i32)))
-    }
-
-    fn get_amount_out(
+    /// The fill an earlier swap made on `token_in` into `token_out`, if any. Errors when the
+    /// state was filled on the other direction.
+    fn fill_on(
         &self,
-        amount_in: BigUint,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<GetAmountOutResult, SimulationError> {
-        self.ensure_quotable(Instant::now())?;
-        let quotes = self.quotes(&token_in.address, &token_out.address)?;
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> Result<Option<&StreamFill>, SimulationError> {
+        match &self.fill {
+            Some(fill) if &fill.token_in == token_in && &fill.token_out == token_out => {
+                Ok(Some(fill))
+            }
+            Some(_) => Err(SimulationError::RecoverableError(ALREADY_QUOTED.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// This state with `fill` recorded. It keeps the quotes, `quotable_until` and the simulation
+    /// overrides: the overrides are the state the fill was priced on, and a consumer simulates
+    /// the swap after quoting it.
+    fn with_fill(&self, fill: StreamFill) -> Box<dyn ProtocolSim> {
+        Box::new(Self { fill: Some(fill), ..self.clone() })
+    }
+
+    /// The marginal price of the next input unit after `filled` went into `quotes`, in whole
+    /// tokens of `quote` per whole token of `base`. Below the smallest quote it is the price of
+    /// the first segment. Errors when `filled` reaches the largest quote, or when the segment it
+    /// falls in pays nothing or is not monotonically increasing in `amount_out`.
+    fn marginal_price(
+        &self,
+        quotes: &[PriceLevelStreamQuote],
+        filled: &BigUint,
+        base: &Token,
+        quote: &Token,
+    ) -> Result<f64, SimulationError> {
+        let no_liquidity = || {
+            telemetry::record_quote_refused(telemetry::QuoteRefusedReason::NoLiquidity);
+            SimulationError::RecoverableError("No liquidity available".to_string())
+        };
+        let idx = quotes.partition_point(|level| &level.amount_in <= filled);
+        let upper = quotes
+            .get(idx)
+            .ok_or_else(no_liquidity)?;
+        let (lower_in, lower_out) = match idx
+            .checked_sub(1)
+            .and_then(|lower| quotes.get(lower))
+        {
+            Some(lower) => (&lower.amount_in, &lower.amount_out),
+            None => (&BigUint::ZERO, &BigUint::ZERO),
+        };
+        let Some(out_span) = upper.amount_out.checked_sub(lower_out) else {
+            telemetry::record_quote_refused(telemetry::QuoteRefusedReason::NotMonotonic);
+            return Err(SimulationError::RecoverableError(format!(
+                "Quotes {}/{} are not monotonically increasing in amount_out around the filled \
+                 amount {filled}",
+                self.token0, self.token1
+            )));
+        };
+        if out_span == BigUint::ZERO {
+            return Err(no_liquidity());
+        }
+        whole_unit_price(&(&upper.amount_in - lower_in), &out_span, base, quote)
+    }
+
+    /// The output of a swap of `amount_in` on `quotes`, priced by the quotes alone: below the
+    /// smallest quote nothing is served, above the largest the result is partial.
+    fn priced_amount_out(
+        &self,
+        quotes: &[PriceLevelStreamQuote],
+        amount_in: &BigUint,
+    ) -> Result<PricedAmount, SimulationError> {
         let (Some(first), Some(last)) = (quotes.first(), quotes.last()) else {
             telemetry::record_quote_refused(telemetry::QuoteRefusedReason::NoLiquidity);
             return Err(SimulationError::RecoverableError("No liquidity available".to_string()));
@@ -277,7 +316,7 @@ impl ProtocolSim for PriceLevelStreamState {
         // sample, and the extrapolated quotes land ~3e6x below the venue's own (measured
         // 2026-07). All the rejection gives up are trades smaller than the first level —
         // ~$10-30 on healthy quotes, negligible for routing. Hence no partial result either.
-        if amount_in < first.amount_in {
+        if amount_in < &first.amount_in {
             telemetry::record_quote_refused(telemetry::QuoteRefusedReason::BelowSmallestQuote);
             return Err(SimulationError::InvalidInput(
                 format!(
@@ -289,27 +328,117 @@ impl ProtocolSim for PriceLevelStreamState {
         }
         // The requested amount exceeds the largest quote; report the output at the limit as a
         // partial result, like other level-based protocols do.
-        if amount_in > last.amount_in {
-            let res = GetAmountOutResult {
+        if amount_in > &last.amount_in {
+            return Ok(PricedAmount::Partial {
                 amount: last.amount_out.clone(),
-                gas: self.gas_cost.clone(),
-                new_state: self.consumed(),
-            };
-            return Err(SimulationError::InvalidInput(
-                format!(
+                message: format!(
                     "Not enough liquidity to support complete swap. input amount: {amount_in}, maximum quoted amount: {}",
                     last.amount_in
                 ),
-                Some(res),
-            ));
+            });
         }
-        Ok(GetAmountOutResult {
-            amount: self.interpolate(quotes, &amount_in)?,
-            gas: self.gas_cost.clone(),
-            new_state: self.consumed(),
-        })
+        Ok(PricedAmount::Complete(self.interpolate(quotes, amount_in)?))
+    }
+}
+
+/// What the quotes alone pay for a swap.
+enum PricedAmount {
+    /// The quotes serve the whole input.
+    Complete(BigUint),
+    /// The input exceeds the largest quote: `amount` is the output at that quote, and `message`
+    /// says why the swap is partial.
+    Partial { amount: BigUint, message: String },
+}
+
+/// `amount_out` per `amount_in`, in whole tokens of `quote` per whole token of `base`.
+fn whole_unit_price(
+    amount_in: &BigUint,
+    amount_out: &BigUint,
+    base: &Token,
+    quote: &Token,
+) -> Result<f64, SimulationError> {
+    let amount_in = amount_in.to_f64().ok_or_else(|| {
+        SimulationError::RecoverableError("Can't convert amount in to f64".to_string())
+    })?;
+    let amount_out = amount_out.to_f64().ok_or_else(|| {
+        SimulationError::RecoverableError("Can't convert amount out to f64".to_string())
+    })?;
+    Ok((amount_out / 10f64.powi(quote.decimals as i32)) /
+        (amount_in / 10f64.powi(base.decimals as i32)))
+}
+
+/// `amount` less `taken`, or zero when `taken` is larger.
+fn saturating_sub(amount: BigUint, taken: &BigUint) -> BigUint {
+    amount
+        .checked_sub(taken)
+        .unwrap_or_default()
+}
+
+#[typetag::serde]
+impl ProtocolSim for PriceLevelStreamState {
+    fn fee(&self) -> f64 {
+        0.0
     }
 
+    /// Before a fill, the price of the smallest quote. After a fill, the marginal price at the
+    /// filled amount, and a refusal for the other direction.
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.ensure_quotable(Instant::now())?;
+        let quotes = self.quotes(&base.address, &quote.address)?;
+        if let Some(fill) = self.fill_on(&base.address, &quote.address)? {
+            return self.marginal_price(quotes, &fill.amount_in, base, quote);
+        }
+        let best = quotes
+            .iter()
+            .find(|q| q.amount_in > BigUint::ZERO && q.amount_out > BigUint::ZERO)
+            .ok_or_else(|| {
+                telemetry::record_quote_refused(telemetry::QuoteRefusedReason::NoLiquidity);
+                SimulationError::RecoverableError("No liquidity available".to_string())
+            })?;
+        whole_unit_price(&best.amount_in, &best.amount_out, base, quote)
+    }
+
+    /// Records the fill in the returned state. After a swap on the same direction it pays the
+    /// output of the merged input less the output so far, at zero gas. A swap on the other
+    /// direction fails: the venue already quoted. See [`PriceLevelStreamState`].
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        self.ensure_quotable(Instant::now())?;
+        let quotes = self.quotes(&token_in.address, &token_out.address)?;
+        let previous = self.fill_on(&token_in.address, &token_out.address)?;
+        let merged_in = match previous {
+            Some(previous) => &previous.amount_in + &amount_in,
+            None => amount_in,
+        };
+        let (merged_out, partial_message) = match self.priced_amount_out(quotes, &merged_in)? {
+            PricedAmount::Complete(amount) => (amount, None),
+            PricedAmount::Partial { amount, message } => (amount, Some(message)),
+        };
+        let (amount, gas) = match previous {
+            Some(previous) => {
+                (saturating_sub(merged_out.clone(), &previous.amount_out), BigUint::ZERO)
+            }
+            None => (merged_out.clone(), self.gas_cost.clone()),
+        };
+        let new_state = self.with_fill(StreamFill {
+            token_in: token_in.address.clone(),
+            token_out: token_out.address.clone(),
+            amount_in: merged_in,
+            amount_out: merged_out,
+        });
+        let result = GetAmountOutResult { amount, gas, new_state };
+        match partial_message {
+            Some(message) => Err(SimulationError::InvalidInput(message, Some(result))),
+            None => Ok(result),
+        }
+    }
+
+    /// The largest quote, less the fill after a swap on the same direction. A swap on the other
+    /// direction fails: the venue already quoted.
     fn get_limits(
         &self,
         sell_token: Bytes,
@@ -317,10 +446,17 @@ impl ProtocolSim for PriceLevelStreamState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         self.ensure_quotable(Instant::now())?;
         let quotes = self.quotes(&sell_token, &buy_token)?;
-        match quotes.last() {
-            Some(largest) => Ok((largest.amount_in.clone(), largest.amount_out.clone())),
-            None => Ok((BigUint::ZERO, BigUint::ZERO)),
-        }
+        let fill = self.fill_on(&sell_token, &buy_token)?;
+        let (max_in, max_out) = match quotes.last() {
+            Some(largest) => (largest.amount_in.clone(), largest.amount_out.clone()),
+            None => (BigUint::ZERO, BigUint::ZERO),
+        };
+        Ok(match fill {
+            Some(fill) => {
+                (saturating_sub(max_in, &fill.amount_in), saturating_sub(max_out, &fill.amount_out))
+            }
+            None => (max_in, max_out),
+        })
     }
 
     fn delta_transition(
@@ -344,9 +480,9 @@ impl ProtocolSim for PriceLevelStreamState {
         self
     }
 
-    /// Equal when the pair, both quote lists and the gas cost match, and either neither state
-    /// carries simulation overrides, or both carry overrides of the same block over the same
-    /// account addresses. A state that gains or loses its overrides is a changed state.
+    /// Equal when the pair, both quote lists, the gas cost and the fill match, and either neither
+    /// state carries simulation overrides, or both carry overrides of the same block over the
+    /// same account addresses. A state that gains or loses its overrides is a changed state.
     ///
     /// The overridden values are left out. Quoting never reads them, and Titan republishes a
     /// venue's accounts several times a second while its prices stand still, so comparing them
@@ -374,6 +510,7 @@ impl ProtocolSim for PriceLevelStreamState {
                     quotes_0_to_1,
                     quotes_1_to_0,
                     gas_cost,
+                    fill,
                     quotable_until: _,
                     overrides,
                 } = other;
@@ -392,6 +529,7 @@ impl ProtocolSim for PriceLevelStreamState {
                     &self.quotes_0_to_1 == quotes_0_to_1 &&
                     &self.quotes_1_to_0 == quotes_1_to_0 &&
                     &self.gas_cost == gas_cost &&
+                    &self.fill == fill &&
                     same_overrides
             })
     }
