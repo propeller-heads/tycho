@@ -1609,13 +1609,18 @@ mod test_serial_db_pool {
     }
 
     #[tokio::test]
-    async fn test_pool_sessions_set_server_side_keepalives() {
+    async fn test_pool_sessions_set_server_side_tcp_timeouts() {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = connect(&db_url).await.unwrap();
         let mut conn = pool.get().await.unwrap();
 
         let mut settings = Vec::new();
-        for name in ["tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"] {
+        for name in [
+            "tcp_keepalives_idle",
+            "tcp_keepalives_interval",
+            "tcp_keepalives_count",
+            "tcp_user_timeout",
+        ] {
             let setting: Setting =
                 diesel::sql_query(format!("SELECT current_setting('{name}') AS value"))
                     .get_result(&mut conn)
@@ -1624,7 +1629,7 @@ mod test_serial_db_pool {
             settings.push(setting.value);
         }
 
-        assert_eq!(settings, ["10", "5", "3"]);
+        assert_eq!(settings, ["10", "5", "3", "30000"]);
     }
 }
 
