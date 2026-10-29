@@ -228,11 +228,21 @@ the former leader left, instead of committing again from an old cursor:
   retained blocks and DCI state come from this process's own traces, and a trace that failed here
   but not on the former leader (or the opposite) makes them track other contracts than the
   database. On the first full block after the role turns `Leader`, it stops with
-  `ExtractionError::RestartToTakeOver` and commits nothing. The supervisor sends
-  `ExtractorRestarted` and builds it again at once, as leader, from the database cursor: no backoff,
-  no count toward `max_restarts` (`extractor_restarts_total` still counts it;
-  `extractor_stopped{reason="restart_to_take_over"}` names it). The new stream replays the blocks
-  above the cursor, about one finality window, and traces them again.
+  `ExtractionError::RestartToTakeOver` and commits nothing. The supervisor builds it again at once,
+  as leader, from the database cursor: no backoff, no count toward `max_restarts`
+  (`extractor_restarts_total` still counts it; `extractor_stopped{reason="restart_to_take_over"}`
+  names it). The new stream replays the blocks above the cursor, about one finality window, and
+  traces them again.
+- **Replay without a restart**: `SubscriberChannels` (`runner.rs`, kept by the supervisor across
+  restarts) records the number and hash of each full block sent (`sent_blocks.rs`, pruned to the
+  blocks above the committed height the messages report). On a restart to take over, the new
+  runner drops every message up to the newest full block sent, if the hash of each replayed full
+  block matches, so clients and the delta window keep their state and see only a pause (log
+  `ReplayStarts`). The first message past it must continue that block. A different hash, a revert
+  during the replay, or a gap sends `ExtractorRestarted` (log `ReplayDiffers`), and a revert
+  message is then dropped. The blocks not sent again keep the follower's version: a client keeps
+  what the follower's DCI produced for them. Every other restart sends `ExtractorRestarted` and
+  clears the record.
 - **No stream while the leader syncs**: before it builds an extractor (at start and on each
   restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
   follows and the leader's newest committed block for the extractor is missing (first sync) or

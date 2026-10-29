@@ -27,6 +27,7 @@ use crate::{
         dynamic_contract_indexer::{
             dci::DynamicContractIndexer, hooks::hook_dci::UniswapV4HookDCI,
         },
+        sent_blocks::{Delivery, SentBlocks},
         DeltaCommand, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::rpc::v2::BlockScopedData,
@@ -186,11 +187,108 @@ impl MessageSender for ExtractorHandle {
 // Define the SubscriptionsMap type alias
 pub(crate) type SubscriptionsMap = HashMap<u64, Sender<DeltaCommand>>;
 
+/// The subscribers of one extractor, and the record of the full blocks they received.
+///
+/// The supervisor keeps it across restarts and gives a clone to each runner.
+#[derive(Clone, Default)]
+pub struct SubscriberChannels {
+    subscriptions: Arc<Mutex<SubscriptionsMap>>,
+    sent_blocks: Arc<std::sync::Mutex<SentBlocks>>,
+}
+
+impl SubscriberChannels {
+    /// Registers `sender` as subscriber `subscriber_id`.
+    pub(crate) async fn add(&self, subscriber_id: u64, sender: Sender<DeltaCommand>) {
+        self.subscriptions
+            .lock()
+            .await
+            .insert(subscriber_id, sender);
+    }
+
+    /// Makes the next runner replay the blocks the subscribers received, instead of a restart.
+    /// Returns `false` when they received no full block, so they must get `ExtractorRestarted`.
+    pub(crate) fn begin_replay(&self) -> bool {
+        self.lock_sent_blocks().begin_replay()
+    }
+
+    /// Sends `ExtractorRestarted` to every subscriber, and forgets the blocks they received.
+    ///
+    /// Sent on the same channels as block messages, so it arrives after every block a runner
+    /// sent before. Each subscriber decides how to react: `PendingDeltas` folds its committed
+    /// blocks and clears its window, the WS service ends the affected client subscriptions.
+    pub(crate) async fn send_restart(&self, extractor: &str) {
+        self.lock_sent_blocks().clear();
+        self.send_to_all(DeltaCommand::ExtractorRestarted(extractor.to_string()))
+            .await;
+    }
+
+    /// Sends `msg` to the subscribers unless a replay drops it. A replay that differs from what
+    /// the subscribers received sends `ExtractorRestarted` first; a revert message is then dropped,
+    /// because the subscribers no longer hold the blocks it reverts.
+    async fn deliver(&self, msg: ExtractorMsg) {
+        let delivery = self.lock_sent_blocks().classify(&msg);
+        match delivery {
+            Delivery::Send => {}
+            Delivery::Skip => {
+                trace!(block = msg.block.number, "ReplaySkipsSentBlock");
+                return;
+            }
+            Delivery::Restart => {
+                warn!(
+                    block = msg.block.number,
+                    revert = msg.revert,
+                    "ReplayDiffers: the replay does not continue the blocks sent; restarting the \
+                     subscribers"
+                );
+                self.send_restart(&msg.extractor).await;
+                if msg.revert {
+                    return;
+                }
+            }
+        }
+        self.lock_sent_blocks().record(&msg);
+        self.send_to_all(DeltaCommand::Block(msg))
+            .await;
+    }
+
+    fn lock_sent_blocks(&self) -> std::sync::MutexGuard<'_, SentBlocks> {
+        // The record holds plain data, which a panic while it was locked cannot leave invalid.
+        self.sent_blocks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[instrument(skip_all, fields(subscriber_count))]
+    async fn send_to_all(&self, command: DeltaCommand) {
+        let mut to_remove = Vec::new();
+        let mut subscribers = self.subscriptions.lock().await;
+        tracing::Span::current().record("subscriber_count", subscribers.len());
+
+        for (counter, sender) in subscribers.iter_mut() {
+            match sender.send(command.clone()).await {
+                Ok(_) => {
+                    trace!(subscriber_id = %counter, "Message sent successfully.");
+                }
+                Err(err) => {
+                    // Receiver has been dropped, mark for removal
+                    to_remove.push(*counter);
+                    error!(error = %err, counter, "Error while sending message to subscriber");
+                }
+            }
+        }
+
+        for counter in to_remove {
+            subscribers.remove(&counter);
+            debug!("Subscriber {} has been dropped", counter);
+        }
+    }
+}
+
 pub struct ExtractorRunner {
     extractor: Arc<dyn Extractor>,
     substreams: SubstreamsStream,
     /// Subscribers — managed by the supervisor, shared across restarts.
-    subscriptions: Arc<Mutex<SubscriptionsMap>>,
+    subscribers: SubscriberChannels,
     /// Oneshot stop signal from the supervisor.
     stop_rx: oneshot::Receiver<()>,
     /// Handle of the tokio runtime on which the extraction tasks will be run.
@@ -203,7 +301,7 @@ impl ExtractorRunner {
     pub fn new(
         extractor: Arc<dyn Extractor>,
         substreams: SubstreamsStream,
-        subscriptions: Arc<Mutex<SubscriptionsMap>>,
+        subscribers: SubscriberChannels,
         stop_rx: oneshot::Receiver<()>,
         runtime_handle: Option<Handle>,
         partial_blocks: bool,
@@ -211,7 +309,7 @@ impl ExtractorRunner {
         ExtractorRunner {
             extractor,
             substreams,
-            subscriptions,
+            subscribers,
             stop_rx,
             runtime_handle,
             partial_blocks,
@@ -299,7 +397,7 @@ impl ExtractorRunner {
                                     })?;
                                     for msg in msgs {
                                         trace!("Propagating block data message.");
-                                        Self::propagate_msg(&self.subscriptions, msg).await;
+                                        self.subscribers.deliver(msg).await;
                                     }
 
                                     let duration_ms = start_time.elapsed().as_millis() as f64;
@@ -322,7 +420,7 @@ impl ExtractorRunner {
                                     match self.extractor.handle_revert(undo_signal.clone()).await {
                                         Ok(Some(msg)) => {
                                             trace!("Propagating block undo message.");
-                                            Self::propagate_msg(&self.subscriptions, msg).await;
+                                            self.subscribers.deliver(msg).await;
                                         }
                                         Ok(None) => {
                                             trace!("No message to propagate.");
@@ -415,40 +513,6 @@ impl ExtractorRunner {
         let mut copy: BlockAggregatedChanges = (**msg).clone();
         copy.partial_block_index = Some(0);
         Arc::new(copy)
-    }
-
-    // TODO: add message tracing_id to the log
-    #[instrument(skip_all, fields(subscriber_count))]
-    async fn propagate_msg(subscribers: &Arc<Mutex<SubscriptionsMap>>, message: ExtractorMsg) {
-        trace!(msg = %message, "Propagating message to subscribers.");
-
-        let command = DeltaCommand::Block(message);
-
-        let mut to_remove = Vec::new();
-
-        // Lock the subscribers HashMap for exclusive access
-        let mut subscribers = subscribers.lock().await;
-        tracing::Span::current().record("subscriber_count", subscribers.len());
-
-        for (counter, sender) in subscribers.iter_mut() {
-            match sender.send(command.clone()).await {
-                Ok(_) => {
-                    // Message sent successfully
-                    trace!(subscriber_id = %counter, "Message sent successfully.");
-                }
-                Err(err) => {
-                    // Receiver has been dropped, mark for removal
-                    to_remove.push(*counter);
-                    error!(error = %err, counter, "Error while sending message to subscriber");
-                }
-            }
-        }
-
-        // Remove inactive subscribers
-        for counter in to_remove {
-            subscribers.remove(&counter);
-            debug!("Subscriber {} has been dropped", counter);
-        }
     }
 }
 

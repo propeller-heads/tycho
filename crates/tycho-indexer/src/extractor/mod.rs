@@ -43,6 +43,7 @@ pub mod protocol_cache;
 pub mod protocol_extractor;
 pub mod reorg_buffer;
 pub mod runner;
+mod sent_blocks;
 pub mod supervisor;
 pub mod token_analysis_cron;
 mod u256_num;

@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::time::Duration;
 
 use tokio::{
     sync::{
         mpsc::{self, Receiver, Sender},
-        oneshot, watch, Mutex,
+        oneshot, watch,
     },
     task::JoinError,
 };
@@ -14,7 +14,7 @@ use tycho_common::{models::ExtractorIdentity, storage::StorageError};
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
     factory::ExtractorFactory,
-    runner::{ControlMessage, ExtractorHandle, StreamState, SubscriptionsMap},
+    runner::{ControlMessage, ExtractorHandle, StreamState, SubscriberChannels},
     writer_status::WriterStatus,
     DeltaCommand, ExtractionError,
 };
@@ -123,9 +123,10 @@ fn is_restart_to_take_over(result: &Result<Result<(), ExtractionError>, JoinErro
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
 ///   backoff, then rebuilds from scratch. Each subscriber decides how to handle the restart.
-/// - When the process becomes the leader and the extractor asks to restart to take over, sends
-///   `DeltaCommand::ExtractorRestarted` and rebuilds at once, without a backoff and without a count
-///   toward `max_restarts`.
+/// - When the process becomes the leader and the extractor asks to restart to take over, rebuilds
+///   at once, without a backoff and without a count toward `max_restarts`. The new runner replays
+///   the blocks the subscribers received without sending them again; only a replay that differs
+///   from them sends `DeltaCommand::ExtractorRestarted`.
 /// - Counts every rebuild in `extractor_restarts_total`, registered at zero when supervision
 ///   starts.
 /// - Forwards `ControlMessage::Subscribe` from the `ExtractorHandle` to the subscription map.
@@ -138,7 +139,7 @@ pub struct ExtractorSupervisor {
     ctrl_tx: Sender<ControlMessage>,
     control_rx: Receiver<ControlMessage>,
     stream_state: watch::Sender<StreamState>,
-    subscriptions: Arc<Mutex<SubscriptionsMap>>,
+    subscribers: SubscriberChannels,
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
@@ -162,7 +163,7 @@ impl ExtractorSupervisor {
             ctrl_tx,
             control_rx,
             stream_state,
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            subscribers: SubscriberChannels::default(),
             id,
             max_restarts,
             next_subscriber_id: 0,
@@ -179,10 +180,9 @@ impl ExtractorSupervisor {
         let subscriber_id = self.next_subscriber_id;
         self.next_subscriber_id += 1;
         info!(extractor = %self.id, subscriber_id, "New extractor subscription");
-        self.subscriptions
-            .lock()
-            .await
-            .insert(subscriber_id, sender);
+        self.subscribers
+            .add(subscriber_id, sender)
+            .await;
     }
 
     /// Waits until this process needs the extractor's stream, and rejects subscriptions
@@ -279,7 +279,7 @@ impl ExtractorSupervisor {
             let (stop_tx, stop_rx) = oneshot::channel();
             let runner = match self
                 .factory
-                .build_runner(self.subscriptions.clone(), stop_rx)
+                .build_runner(self.subscribers.clone(), stop_rx)
                 .await
             {
                 Ok(r) => r,
@@ -416,31 +416,15 @@ impl ExtractorSupervisor {
                     .map_err(|e| ExtractionError::Unknown(format!("Runner panicked: {e}")))?;
             }
 
-            // Notify all subscribers of the restart. Sent on the same channels as block
-            // messages, so it is guaranteed to arrive after all blocks the runner emitted
-            // before failing. Each subscriber decides how to react: `PendingDeltas` folds its
-            // committed blocks and clears its window, the WS service ends the affected client
-            // subscriptions.
-            {
-                let mut subs = self.subscriptions.lock().await;
-                let mut closed = Vec::new();
-                for (subscriber_id, sender) in subs.iter() {
-                    if sender
-                        .send(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
-                        .await
-                        .is_err()
-                    {
-                        closed.push(*subscriber_id);
-                    }
-                }
-                for subscriber_id in closed {
-                    subs.remove(&subscriber_id);
-                    info!(
-                        extractor = %self.id,
-                        subscriber_id,
-                        "Removed closed subscriber during restart"
-                    );
-                }
+            // A restart to take over replays the blocks the subscribers received, without
+            // sending them again, so clients keep their state. Every other restart, and a takeover
+            // before any full block was sent, notifies the subscribers instead.
+            if restart_to_take_over && self.subscribers.begin_replay() {
+                info!(extractor = %self.id, "ReplayStarts: the rebuilt extractor skips the blocks sent");
+            } else {
+                self.subscribers
+                    .send_restart(&self.id.name)
+                    .await;
             }
 
             if !restart_to_take_over {
@@ -474,7 +458,7 @@ impl ExtractorSupervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use metrics_util::{
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},

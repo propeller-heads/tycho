@@ -5,10 +5,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
 use prost::Message;
 use serde::Deserialize;
-use tokio::{
-    runtime::Handle,
-    sync::{oneshot, Mutex},
-};
+use tokio::{runtime::Handle, sync::oneshot};
 use tracing::info;
 use tycho_common::{
     models::{Address, Chain, ExtractorIdentity, FinancialType, ImplementationType, ProtocolType},
@@ -32,7 +29,7 @@ use crate::{
         post_processors::POST_PROCESSOR_REGISTRY,
         protocol_cache::ProtocolMemoryCache,
         protocol_extractor::{ExtractorPgGateway, ProtocolExtractor},
-        runner::{compute_start_block, DCIPlugin, ExtractorRunner, SubscriptionsMap},
+        runner::{compute_start_block, DCIPlugin, ExtractorRunner, SubscriberChannels},
         writer_status::WriterStatus,
         ExtractionError, Extractor,
     },
@@ -247,7 +244,7 @@ impl ExtractorFactory {
     /// run). The protocol cache and chain state are reused from factory construction.
     pub async fn build_runner(
         &self,
-        subscriptions: Arc<Mutex<SubscriptionsMap>>,
+        subscribers: SubscriberChannels,
         stop_rx: oneshot::Receiver<()>,
     ) -> Result<ExtractorRunner, ExtractionError> {
         let fresh_gw = self.cached_gw.new_instance();
@@ -410,7 +407,7 @@ impl ExtractorFactory {
         Ok(ExtractorRunner::new(
             extractor,
             stream,
-            subscriptions,
+            subscribers,
             stop_rx,
             self.runtime_handle.clone(),
             self.partial_blocks,
