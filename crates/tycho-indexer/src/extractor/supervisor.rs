@@ -12,7 +12,8 @@ pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig
 use crate::extractor::{
     factory::ExtractorFactory,
     runner::{
-        ControlMessage, Delivery, ExtractorHandle, Subscriber, SubscriberKind, SubscriptionsMap,
+        slow_client_removals, ControlMessage, Delivery, ExtractorHandle, Subscriber,
+        SubscriberKind, SubscriptionsMap,
     },
     DeltaCommand, ExtractionError,
 };
@@ -281,6 +282,7 @@ impl ExtractorSupervisor {
                                 subscriber_id,
                                 "Removed a client subscriber whose channel is full during restart"
                             );
+                            slow_client_removals(&self.id).increment(1);
                             removed.push(subscriber_id);
                         }
                     }
