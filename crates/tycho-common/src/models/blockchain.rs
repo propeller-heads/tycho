@@ -10,7 +10,7 @@ use crate::{
     models::{
         contract::{AccountBalance, AccountDelta, AccountToContractChanges},
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
-        token::Token,
+        token::{Token, TokenAnalysis},
         Address, Balance, BlockHash, Chain, Code, ComponentId, EntryPointId, MergeError, StoreKey,
         StoreVal,
     },
@@ -1087,6 +1087,9 @@ pub struct BlockChanges {
     pub finalized_block_height: u64,
     pub revert: bool,
     pub new_tokens: HashMap<Address, Token>,
+    /// Analyses of the tokens in `new_tokens` that were analysed for this block; stored with
+    /// them once the block is finalized.
+    pub new_token_analyses: HashMap<Address, TokenAnalysis>,
     /// Vec of updates at this block, aggregated by tx and sorted by tx index in ascending order
     pub txs_with_update: Vec<TxWithChanges>,
     // Raw block contract changes. This is intended as DCI input and is to be omitted from the
@@ -1117,6 +1120,7 @@ impl BlockChanges {
             finalized_block_height,
             revert,
             new_tokens: HashMap::new(),
+            new_token_analyses: HashMap::new(),
             txs_with_update,
             block_contract_changes,
             trace_results: Vec::new(),
@@ -1231,9 +1235,9 @@ impl BlockChanges {
     /// Merges another partial block into this one, preserving later changes.
     ///
     /// The partial block with the higher index represents later changes and takes precedence.
-    /// Merges `new_tokens`, `txs_with_update` (sorted by index), `block_contract_changes`,
-    /// and `trace_results`. When both blocks have the same token address, the token from the
-    /// block with the higher partial index is kept.
+    /// Merges `new_tokens`, `new_token_analyses`, `txs_with_update` (sorted by index),
+    /// `block_contract_changes` and `trace_results`. When both blocks have the same token
+    /// address, the token and its analysis from the block with the higher partial index are kept.
     ///
     /// Works regardless of merge order: `partial_0.merge_partial(partial_1)` and
     /// `partial_1.merge_partial(partial_0)` produce equivalent results.
@@ -1297,6 +1301,12 @@ impl BlockChanges {
                 .new_tokens
                 .entry(addr)
                 .or_insert(token);
+        }
+        for (addr, analysis) in previous.new_token_analyses {
+            current
+                .new_token_analyses
+                .entry(addr)
+                .or_insert(analysis);
         }
 
         current

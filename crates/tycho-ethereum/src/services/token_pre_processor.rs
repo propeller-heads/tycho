@@ -1,12 +1,13 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use alloy::{primitives::Address, rpc::types::BlockNumberOrTag, sol_types::SolCall};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use tracing::{instrument, warn};
 use tycho_common::{
     models::{
         blockchain::BlockTag,
-        token::{Token, TokenQuality},
+        token::{AnalyzedToken, Token, TokenVerdict},
         Chain,
     },
     traits::{TokenAnalyzer, TokenOwnerFinding, TokenPreProcessor},
@@ -17,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::{
     erc20::{decimalsCall, symbolCall},
     rpc::EthereumRpcClient,
-    services::token_analyzer::{call_request, EthCallDetector},
+    services::token_analyzer::{call_request, AnalyzerKind},
     BytesCodec,
 };
 
@@ -25,12 +26,12 @@ use crate::{
 pub struct EthereumTokenPreProcessor {
     rpc: EthereumRpcClient,
     chain: Chain,
-    settlement_contract: Address,
+    analyzer: AnalyzerKind,
 }
 
 impl EthereumTokenPreProcessor {
-    pub fn new(rpc: &EthereumRpcClient, chain: Chain, settlement_contract: Address) -> Self {
-        EthereumTokenPreProcessor { rpc: rpc.clone(), chain, settlement_contract }
+    pub fn new(rpc: &EthereumRpcClient, chain: Chain, analyzer: AnalyzerKind) -> Self {
+        EthereumTokenPreProcessor { rpc: rpc.clone(), chain, analyzer }
     }
 
     async fn call_symbol(&self, token: Address) -> String {
@@ -90,6 +91,54 @@ impl EthereumTokenPreProcessor {
     }
 }
 
+/// New tokens analysed at the same time.
+const ANALYSIS_CONCURRENCY: usize = 8;
+/// Longest a new token's analysis may hold up the block it appears in. A token that takes
+/// longer gets no analysis, and the analysis cron retries it.
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl EthereumTokenPreProcessor {
+    async fn get_token(
+        &self,
+        address: Bytes,
+        analyzer: &dyn TokenAnalyzer<Error = String>,
+        block: BlockTag,
+    ) -> AnalyzedToken {
+        let token_address = Address::from_bytes(&address);
+        let (symbol, decimals, analysis) = tokio::join!(
+            self.call_symbol(token_address),
+            self.call_decimals(token_address),
+            tokio::time::timeout(ANALYSIS_TIMEOUT, analyzer.analyze(address.clone(), block)),
+        );
+        let analysis = analysis
+            .unwrap_or_else(|_| Err(format!("analysis took longer than {ANALYSIS_TIMEOUT:?}")))
+            .inspect_err(|error| warn!(?address, error, "TokenDetectionFailure"))
+            .ok();
+
+        let mut token = Token {
+            address: address.clone(),
+            symbol: symbol
+                .replace('\0', "")
+                .graphemes(true)
+                .take(255)
+                .collect::<String>(),
+            decimals: decimals.into(),
+            tax: 0,
+            gas: Vec::new(),
+            chain: self.chain,
+            // Flag the token as bad; the analysis cron retries tokens of quality 6-10.
+            quality: TokenVerdict::Blocked.quality(),
+        };
+        if let Some(analysis) = &analysis {
+            if !matches!(analysis.verdict, TokenVerdict::Ok | TokenVerdict::Fee) {
+                warn!(?address, verdict = ?analysis.verdict, reason = ?analysis.reason, "BadToken");
+            }
+            token.apply_analysis(analysis);
+        }
+        AnalyzedToken { token, analysis }
+    }
+}
+
 #[async_trait]
 impl TokenPreProcessor for EthereumTokenPreProcessor {
     // Named explicitly: this span is an on-chain metadata fetch and would otherwise
@@ -104,59 +153,15 @@ impl TokenPreProcessor for EthereumTokenPreProcessor {
         addresses: Vec<Bytes>,
         token_finder: Arc<dyn TokenOwnerFinding>,
         block: BlockTag,
-    ) -> Vec<Token> {
-        let mut tokens_info = Vec::new();
-
-        for address in addresses {
-            let token_address = Address::from_bytes(&address);
-
-            // Make RPC calls directly for symbol and decimals
-            let symbol = self.call_symbol(token_address).await;
-            let decimals = self.call_decimals(token_address).await;
-
-            let detector =
-                EthCallDetector::new(&self.rpc, token_finder.clone(), self.settlement_contract);
-
-            let (token_quality, gas, tax) = detector
-                .analyze(address.clone(), block)
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(error=?e, "TokenDetectionFailure");
-                    (TokenQuality::bad("Detection failed"), None, None)
-                });
-
-            let mut quality = 100;
-
-            if let TokenQuality::Bad { reason } = token_quality {
-                warn!(address=?address, ?reason, "BadToken");
-                // Flag this token as bad using quality, an external script is responsible for
-                // analyzing these tokens again.
-                quality = 10;
-            };
-
-            // If quality is 100 but it's a fee token, set quality to 50
-            if quality == 100 && tax.is_some_and(|tax_value| tax_value > 0) {
-                quality = 50;
-            }
-
-            tokens_info.push(Token {
-                address,
-                symbol: symbol
-                    .replace('\0', "")
-                    .graphemes(true)
-                    .take(255)
-                    .collect::<String>(),
-                decimals: decimals.into(),
-                tax: tax.unwrap_or(0),
-                gas: gas
-                    .map(|g| vec![Some(g)])
-                    .unwrap_or_else(Vec::new),
-                chain: self.chain,
-                quality,
-            });
-        }
-
-        tokens_info
+    ) -> Vec<AnalyzedToken> {
+        let analyzer = self
+            .analyzer
+            .build(&self.rpc, token_finder);
+        stream::iter(addresses)
+            .map(|address| self.get_token(address, analyzer.as_ref(), block))
+            .buffered(ANALYSIS_CONCURRENCY)
+            .collect()
+            .await
     }
 }
 
@@ -177,7 +182,8 @@ mod tests {
             // We do not enable batching as the token pre-processor does not leverage it currently
             let rpc = self.create_rpc_client(false);
 
-            EthereumTokenPreProcessor::new(&rpc, Chain::Ethereum, COWSWAP_SETTLEMENT)
+            let analyzer = AnalyzerKind::EthCall { settlement_contract: COWSWAP_SETTLEMENT };
+            EthereumTokenPreProcessor::new(&rpc, Chain::Ethereum, analyzer)
         }
     }
 
@@ -244,7 +250,7 @@ mod tests {
         assert_eq!(results.len(), 3);
         let relevant_attrs: Vec<(String, u32, u32)> = results
             .iter()
-            .map(|t| (t.symbol.clone(), t.decimals, t.quality))
+            .map(|t| (t.token.symbol.clone(), t.token.decimals, t.token.quality))
             .collect();
         assert_eq!(
             relevant_attrs,

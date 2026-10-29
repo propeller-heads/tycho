@@ -53,7 +53,8 @@ use tycho_common::{
 use tycho_ethereum::{
     rpc::EthereumRpcClient,
     services::{
-        account_extractor::EVMAccountExtractor, token_pre_processor::EthereumTokenPreProcessor,
+        account_extractor::EVMAccountExtractor, token_analyzer::AnalyzerKind,
+        token_pre_processor::EthereumTokenPreProcessor,
     },
 };
 use tycho_indexer::{
@@ -595,7 +596,11 @@ async fn create_indexing_tasks(
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
-    let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
+    let token_processor = EthereumTokenPreProcessor::new(
+        &rpc_client,
+        chain,
+        AnalyzerKind::EthCall { settlement_contract },
+    );
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
         &extractors_config,
@@ -918,7 +923,8 @@ async fn run_analyze_tokens(
         .build()
         .await?;
     let cached_gw = Arc::new(cached_gw);
-    let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone());
+    let analyzer = AnalyzerKind::EthCall { settlement_contract: analyzer_args.settlement_contract };
+    let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone(), analyzer);
     select! {
          res = analyze_thread => {
             res?;

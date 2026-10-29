@@ -11,7 +11,7 @@ use alloy::{
 use tycho_common::{
     models::{
         blockchain::BlockTag,
-        token::{TokenQuality, TransferCost, TransferTax},
+        token::{TokenAnalysis, TokenQuality, TokenVerdict},
     },
     traits::{TokenAnalyzer, TokenOwnerFinding},
     Bytes,
@@ -27,6 +27,11 @@ use crate::{rpc::EthereumRpcClient, BytesCodec};
 /// Gas limit passed to the simulated `eth_call`. Set to the Ethereum block gas limit, which is
 /// a safe upper bound for a single token analysis call.
 const GAS_LIMIT: u64 = 30_000_000;
+/// Arbitrary amount that is large enough that small relative fees should be visible.
+const MIN_AMOUNT: u64 = 100_000;
+
+/// Identifies this analyzer and its version in stored analyses.
+pub const ANALYZER_NAME: &str = "ethcall/1";
 
 /// `TokenAnalyzer` implementation using `eth_call` with bytecode state overrides.
 ///
@@ -53,22 +58,52 @@ impl EthCallDetector {
 impl TokenAnalyzer for EthCallDetector {
     type Error = String;
 
-    async fn analyze(
-        &self,
-        token: Bytes,
-        block: BlockTag,
-    ) -> Result<(TokenQuality, Option<TransferCost>, Option<TransferTax>), String> {
-        let (quality, transfer_cost, tax) = self
-            .detect_impl(Address::from_bytes(&token), block)
-            .await
-            .map_err(|e| e.to_string())?;
+    /// Runs the transfer round trip and maps its result to a verdict: `Ok` or `Fee` when it
+    /// passes, `NoLiquidity` when no holder was found, `Blocked` otherwise. Only the transfer
+    /// fee is measured, as `LegFees::transfer`.
+    async fn analyze(&self, token: Bytes, block: BlockTag) -> Result<TokenAnalysis, String> {
+        let address = Address::from_bytes(&token);
+        let holder = self
+            .finder
+            .find_owner(token.clone(), MIN_AMOUNT.into())
+            .await?;
+        if holder.is_none() {
+            return Ok(TokenAnalysis::verdict_only(
+                TokenVerdict::NoLiquidity,
+                Some(no_holder_reason()),
+                block_number(block),
+                ANALYZER_NAME,
+            ));
+        }
+        let (quality, transfer_cost, tax) = self.detect_impl(address, block).await?;
         tracing::debug!(?token, ?quality, "ethcall detector: determined token quality");
-        Ok((
-            quality,
-            transfer_cost.map(|cost| cost.try_into().unwrap_or(8_000_000)),
-            tax.map(|cost| cost.try_into().unwrap_or(10_000)),
-        ))
+        let tax: Option<u64> = tax.map(|t| t.try_into().unwrap_or(10_000));
+        let (verdict, reason) = match quality {
+            TokenQuality::Good if tax.is_some_and(|t| t > 0) => (TokenVerdict::Fee, None),
+            TokenQuality::Good => (TokenVerdict::Ok, None),
+            TokenQuality::Bad { reason } => (TokenVerdict::Blocked, Some(reason)),
+        };
+        let mut analysis =
+            TokenAnalysis::verdict_only(verdict, reason, block_number(block), ANALYZER_NAME);
+        analysis.fees.transfer = tax.map(|t| i64::try_from(t).unwrap_or(10_000));
+        analysis.gas = transfer_cost.map(|cost| cost.try_into().unwrap_or(8_000_000));
+        Ok(analysis)
     }
+}
+
+fn block_number(block: BlockTag) -> Option<u64> {
+    match block {
+        BlockTag::Number(n) => Some(n),
+        BlockTag::Finalized |
+        BlockTag::Safe |
+        BlockTag::Latest |
+        BlockTag::Earliest |
+        BlockTag::Pending => None,
+    }
+}
+
+fn no_holder_reason() -> String {
+    format!("Could not find on chain source of the token with at least {MIN_AMOUNT} balance.")
 }
 
 impl EthCallDetector {
@@ -79,9 +114,6 @@ impl EthCallDetector {
     ) -> Result<(TokenQuality, Option<U256>, Option<U256>), String> {
         let block_tag = map_block_tag(block);
 
-        // Arbitrary amount that is large enough that small relative fees should be
-        // visible.
-        const MIN_AMOUNT: u64 = 100_000;
         let (holder, amount) = match self
             .finder
             .find_owner(token.to_bytes(), MIN_AMOUNT.into())
@@ -103,16 +135,7 @@ impl EthCallDetector {
                 tracing::debug!(?token, ?address, ?amount, "ethcall: found token owner");
                 (Address::from_bytes(&address), amount)
             }
-            None => {
-                return Ok((
-                    TokenQuality::bad(format!(
-                        "Could not find on chain source of the token with at least \
-                         {MIN_AMOUNT} balance.",
-                    )),
-                    None,
-                    None,
-                ))
-            }
+            None => return Ok((TokenQuality::bad(no_holder_reason()), None, None)),
         };
 
         let recipient = arbitrary_recipient();
@@ -426,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_impl_maps_execution_revert_to_bad() {
+    async fn analyze_maps_execution_revert_to_blocked() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
@@ -449,14 +472,14 @@ mod tests {
         )]));
         let detector = EthCallDetector::new(&rpc, Arc::new(finder), COWSWAP_SETTLEMENT);
 
-        let (quality, gas, tax) = detector
+        let analysis = detector
             .analyze(token, BlockTag::Latest)
             .await
-            .expect("a reverting simulation must yield a Bad verdict, not an error");
+            .expect("a reverting simulation must yield a Blocked verdict, not an error");
 
-        assert!(matches!(quality, TokenQuality::Bad { .. }));
-        assert!(gas.is_none());
-        assert!(tax.is_none());
+        assert_eq!(analysis.verdict, TokenVerdict::Blocked);
+        assert!(analysis.gas.is_none());
+        assert_eq!(analysis.fees.transfer, None);
         mock.assert_async().await;
     }
 

@@ -390,11 +390,11 @@ pub struct AnalyzeTokenArgs {
     /// should be at least `concurrency * update_batch_size`.
     #[clap(long)]
     pub fetch_batch_size: usize,
-    /// Also re-analyze quality-5 tokens that traded within this many days. Quality 5 is
-    /// the analysis floor and is otherwise never revisited; a recently traded token gets
-    /// a recovery pass because its behavior may have changed after listing (e.g. launch
-    /// transfer restrictions lifted). Set to 0 to disable; a large value re-checks every
-    /// quality-5 token with active liquidity (backfill).
+    /// Also re-analyze quality 1–5 tokens that traded within this many days. Quality 5 is
+    /// the analysis floor and 1 marks tokens never to quote; neither is otherwise revisited.
+    /// A recently traded token gets a recovery pass because its behavior may have changed
+    /// after listing (e.g. launch transfer restrictions lifted). Set to 0 to disable; a large
+    /// value re-checks every quality 1–5 token with active liquidity (backfill).
     #[clap(long, default_value_t = 1)]
     pub recovery_lookback_days: u32,
 }
