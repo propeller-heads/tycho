@@ -25,7 +25,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a leader waits for its lock session to answer before it gives up the lead.
 ///
-/// Shorter than the server-side keepalive timeout of the lock session, so a leader that cannot
+/// Shorter than the server-side TCP timeouts of the lock session, so a leader that cannot
 /// reach the database stops before Postgres can hand the lock to another process.
 const LOCK_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 

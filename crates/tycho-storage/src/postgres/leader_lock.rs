@@ -15,7 +15,7 @@ use diesel::{
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
 use tycho_common::storage::StorageError;
 
-use super::SESSION_KEEPALIVES;
+use super::SESSION_TCP_TIMEOUTS;
 
 /// Postgres advisory lock key of the leader election.
 const LEADER_LOCK_KEY: i64 = 0x7479_6368_6f5f_6c64;
@@ -29,8 +29,8 @@ struct LockResult {
 /// A dedicated database session competing for the leader lock.
 ///
 /// The session is not taken from a pool: the lock belongs to the session, so it must stay open for
-/// as long as this process is leader. The session sets the server-side TCP keepalives, so Postgres
-/// releases the lock about 25 seconds after the leader's host disappears, not hours later.
+/// as long as this process is leader. The session sets the server-side TCP timeouts, so Postgres
+/// releases the lock within about 30 seconds after the leader's host disappears, not hours later.
 pub struct LeaderLock {
     conn: AsyncPgConnection,
 }
@@ -43,11 +43,11 @@ impl LeaderLock {
             .map_err(|err| {
                 StorageError::Unexpected(format!("Failed to open the leader lock session: {err}"))
             })?;
-        conn.batch_execute(SESSION_KEEPALIVES)
+        conn.batch_execute(SESSION_TCP_TIMEOUTS)
             .await
             .map_err(|err| {
                 StorageError::Unexpected(format!(
-                    "Failed to set keepalives on the leader lock session: {err}"
+                    "Failed to set TCP timeouts on the leader lock session: {err}"
                 ))
             })?;
         Ok(Self { conn })
