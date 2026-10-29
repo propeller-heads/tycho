@@ -13,6 +13,7 @@ use tycho_substreams::{balances::aggregate_balances_changes, prelude::*};
 type PoolAddress = Vec<u8>;
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct Params {
     /// Protocol fee, per direction, that `initialize` sets on every pool. PancakeSwap V3 picks it
     /// by fee tier; forks that use one constant for every tier set it here.
@@ -298,8 +299,9 @@ fn default_protocol_fees(fee: u64, params: &Params) -> (u64, u64) {
 
 /// Returns the protocol fee, per direction, that `PancakeV3Pool.initialize` writes for a fee tier.
 /// `Initialize` does not emit it, so it is derived here and later replaced by `SetFeeProtocol`.
-/// The contract writes 3200 and overrides it only for the 100 and 500 tiers, so tiers a fork
-/// enables later also get 3200.
+/// The contract writes 3200 and overrides it only for the 100 and 500 tiers, so a fork that keeps
+/// this `initialize` also gets 3200 on the tiers it adds. Forks that change `initialize` pass
+/// `default_protocol_fee` instead and never reach this table.
 /// See https://github.com/pancakeswap/pancake-v3-contracts/blob/5cc479f0c5a98966c74d94700057b8c3ca629afd/projects/v3-core/contracts/PancakeV3Pool.sol#L294-L306
 fn fee_to_default_protocol_fees(fee: u64) -> (u64, u64) {
     match fee {
@@ -320,8 +322,9 @@ mod tests {
         assert_eq!(params, Params::default());
         assert_eq!(default_protocol_fees(100, &params), (3300, 3300));
         assert_eq!(default_protocol_fees(500, &params), (3400, 3400));
-        assert_eq!(default_protocol_fees(2500, &params), (3200, 3200));
-        assert_eq!(default_protocol_fees(10000, &params), (3200, 3200));
+        for fee in [80, 1800, 2500, 10000] {
+            assert_eq!(default_protocol_fees(fee, &params), (3200, 3200));
+        }
     }
 
     #[test]
@@ -334,14 +337,12 @@ mod tests {
     }
 
     #[test]
-    fn test_other_fee_tiers_keep_the_initialize_default_without_params() {
-        for fee in [80, 1800, 50, 20000] {
-            assert_eq!(default_protocol_fees(fee, &Params::default()), (3200, 3200));
-        }
+    fn test_invalid_default_protocol_fee_is_rejected() {
+        assert!(serde_qs::from_str::<Params>("default_protocol_fee=ten").is_err());
     }
 
     #[test]
-    fn test_invalid_default_protocol_fee_is_rejected() {
-        assert!(serde_qs::from_str::<Params>("default_protocol_fee=ten").is_err());
+    fn test_unknown_param_is_rejected() {
+        assert!(serde_qs::from_str::<Params>("default_protocol_fees=1000").is_err());
     }
 }

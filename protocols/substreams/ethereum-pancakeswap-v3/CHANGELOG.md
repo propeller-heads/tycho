@@ -6,6 +6,8 @@
   now sets the protocol fee to 3200 in both directions instead of panicking with
   `Unexpected fee value`. This matches `PancakeV3Pool.initialize`, which writes 3200 and overrides
   it only for the 100 and 500 tiers. Output for existing manifests is unchanged.
+- `map_protocol_changes` rejects unknown parameter keys, so a misspelled `default_protocol_fee`
+  fails instead of being ignored.
 - Add `robinhood-swaphood-v3.yaml` for SwapHood V3 on Robinhood Chain: PancakeSwap V3 with extra
   fee tiers `80` (tick spacing `10`) and `1800` (tick spacing `50`). It indexes the
   `PancakeV3Factory` `0x0ec554f0bff0be6c99d1e95c8015bb0950f6a2c7` from block `7020627` and emits

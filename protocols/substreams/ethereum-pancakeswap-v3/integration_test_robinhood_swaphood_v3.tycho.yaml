@@ -6,8 +6,8 @@ module_name: "map_protocol_changes"
 skip_balance_check: false
 initialized_accounts:
 tests:
-  # WETH / USDG at fee 80, a tier PancakeSwap V3 does not have. Covers the 3200 protocol fee
-  # default on Initialize.
+  # WETH / USDG at fee 80, a tier PancakeSwap V3 does not have. Covers Initialize on a fee tier
+  # outside PancakeSwap's table (0.1.3 panicked here).
   - name: test_weth_usdg_fee_80_pool
     # PoolCreated, Initialize and the first Mint all land in the creation tx.
     start_block: 10517593
