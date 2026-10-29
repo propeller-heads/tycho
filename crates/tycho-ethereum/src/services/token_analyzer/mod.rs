@@ -1,6 +1,8 @@
 mod bytecode;
 mod common;
 mod ethcall_detector;
+#[allow(dead_code)] // Nothing builds the simulation analyzer yet.
+mod simulation;
 
 use std::sync::Arc;
 

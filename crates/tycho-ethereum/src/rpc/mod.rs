@@ -12,6 +12,7 @@ use alloy::{
         client::{ClientBuilder, ReqwestClient},
         types::{
             debug::{StorageMap, StorageRangeResult, StorageResult},
+            simulate::SimulatePayload,
             state::{AccountOverride, StateOverride},
             trace::geth::{
                 GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingCallOptions,
@@ -659,6 +660,29 @@ impl EthereumRpcClient {
             .await
             .map_err(|e| {
                 RPCError::from_alloy("eth_call with state overrides failed".to_string(), e)
+            })
+    }
+
+    /// Executes `eth_simulateV1` on top of `block`.
+    ///
+    /// Returns one entry per simulated block, deserialized as `T`; callers pick the shape so
+    /// provider-specific fields such as revert data in `error.data` are not lost. A reverting
+    /// call does not abort the simulation; later calls see the state as if it had not happened.
+    #[instrument(level = "debug", skip(self, payload))]
+    pub(crate) async fn eth_simulate_v1<T: alloy::rpc::json_rpc::RpcRecv>(
+        &self,
+        payload: &SimulatePayload,
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<T>, RPCError> {
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("eth_simulateV1", (payload, block))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("eth_simulateV1 failed on top of block {block}"), e)
             })
     }
 
