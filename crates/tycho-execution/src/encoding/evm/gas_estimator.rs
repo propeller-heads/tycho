@@ -24,8 +24,12 @@ pub const USER_PERMIT2_TRANSFER: u64 = 80_000;
 /// which is inside `swap()`. The gas is thus already included in `get_amount_out`.
 ///
 /// Incomplete on its own: every Uniswap V3 and Slipstream fork qualifies too. Use
-/// [`is_callback_protocol`] for the full classification.
+/// [`is_callback_protocol`] for the full classification. The forks listed here before that
+/// function existed stay listed, so code that reads this public list directly keeps its answer
+/// for them.
 pub const PROTOCOLS_CALLBACK: &[&str] = &[
+    "uniswap_v3",
+    "pancakeswap_v3",
     "uniswap_v4",
     "uniswap_v4_hooks",
     "pancakeswap_infinity_cl",
@@ -33,6 +37,10 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "pancakeswap_infinity_bin",
     "ekubo_v2",
     "ekubo_v3",
+    "aerodrome_slipstreams",
+    "velodrome_slipstreams",
+    "up_v3",
+    "aero_cl",
     "vm:balancer_v3",
 ];
 
