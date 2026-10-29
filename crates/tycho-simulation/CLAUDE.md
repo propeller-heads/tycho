@@ -143,8 +143,11 @@ for any protocol indexed by Tycho.
   fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
-  the pool, no binding quote (Metric today; its state does not implement `IndicativelyPriced`,
-  and its client is held by the feed alone rather than by every state).
+  the pool, no binding quote (Metric and BaiBai; their states do not implement
+  `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
+  Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (two Multicall3
+  calls per poll) and prices it with the contract's arithmetic, and its router fee is a constant
+  in its `mod.rs`.
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
