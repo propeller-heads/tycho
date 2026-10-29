@@ -61,6 +61,12 @@ impl<R> From<Option<R>> for ComponentLayout<R> {
 }
 
 /// How often one route may take a quote from a venue published as [`ComponentLayout::AllPairs`].
+///
+/// A rule counts directed pairs, not swaps. The caller merges all the swaps of its route on one
+/// pair and direction into one swap and asks for one firm quote for it, on the state before the
+/// first of them. Each swap it simulates on the way takes the state the previous one returned,
+/// and the state prices a swap on a pair it already filled as the continuation of that merged
+/// swap. Only a swap on another pair or direction is held to the rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuoteRule {
     /// Each market maker signs once. For a venue that names its makers and lets the taker pick
