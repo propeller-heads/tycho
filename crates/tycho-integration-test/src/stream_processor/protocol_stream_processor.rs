@@ -450,9 +450,12 @@ impl ProtocolStreamProcessor {
                     Some(fluid_v1_paused_pools_filter),
                 );
             }
-            "aerodrome_slipstreams" => {
+            // UP and Raphael on Robinhood Chain, and Topaz CL on Robinhood Chain and BSC, deploy
+            // the Slipstream contracts, so they decode with the same state as
+            // Aerodrome.
+            "aerodrome_slipstreams" | "up_v3" | "topaz_cl" | "raphael_slipstreams" => {
                 stream = stream.exchange::<AerodromeSlipstreamsState>(
-                    "aerodrome_slipstreams",
+                    protocol,
                     tvl_filter.clone(),
                     None,
                 );
@@ -467,26 +470,6 @@ impl ProtocolStreamProcessor {
             "velodrome_slipstreams" => {
                 stream = stream.exchange::<VelodromeSlipstreamsState>(
                     "velodrome_slipstreams",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            // UP, Topaz CL and Raphael on Robinhood Chain deploy the Slipstream contracts, so they
-            // decode with the same state as Aerodrome.
-            "up_v3" => {
-                stream =
-                    stream.exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None);
-            }
-            "topaz_cl" => {
-                stream = stream.exchange::<AerodromeSlipstreamsState>(
-                    "topaz_cl",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "raphael_slipstreams" => {
-                stream = stream.exchange::<AerodromeSlipstreamsState>(
-                    "raphael_slipstreams",
                     tvl_filter.clone(),
                     None,
                 );
