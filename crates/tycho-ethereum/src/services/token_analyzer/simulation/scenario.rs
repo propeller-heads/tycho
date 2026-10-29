@@ -507,3 +507,178 @@ pub(super) fn first_word(data: &[u8]) -> U256 {
         .map(U256::from_be_slice)
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+
+    /// Legs where the transfer keeps 1% and the sell keeps `500 - arrived` of 500 sent.
+    pub fn legs(transfer_ok: bool, sell_ok: bool, arrived: u64) -> LegResult {
+        LegResult {
+            bought: U256::from(1000),
+            transferOk: transfer_ok,
+            transferSent: U256::from(500),
+            transferReceived: U256::from(if transfer_ok { 495 } else { 0 }),
+            transferGas: U256::from(40_000),
+            approveOk: true,
+            sellOk: sell_ok,
+            sellSent: U256::from(500),
+            sellArrived: U256::from(arrived),
+            sellGas: U256::from(60_000),
+            walletDrift: Default::default(),
+            transferRevert: Bytes::new(),
+            sellRevert: Revert { reason: "no sells".to_string() }
+                .abi_encode()
+                .into(),
+        }
+    }
+
+    pub fn outcome(legs: Option<LegResult>) -> Outcome {
+        Outcome {
+            prefix_ok: vec![],
+            sent: U256::from(1010),
+            buy_revert: None,
+            sell_arrived: legs
+                .as_ref()
+                .map(|l| l.sellArrived)
+                .unwrap_or_default(),
+            sell_logged: true,
+            pool_rejected_buy: false,
+            legs,
+            leg_logs: vec![],
+        }
+    }
+
+    #[test]
+    fn tax_bps_measures_shortfall_and_surplus() {
+        assert_eq!(tax_bps(U256::from(1000), U256::from(970)), Some(300));
+        assert_eq!(tax_bps(U256::from(1000), U256::from(1010)), Some(-100));
+        assert_eq!(tax_bps(U256::from(1000), U256::ZERO), Some(10_000));
+        assert_eq!(tax_bps(U256::ZERO, U256::from(5)), None);
+    }
+
+    #[test]
+    fn a_sell_that_delivers_nothing_is_a_sell_failure() {
+        let ok = outcome(Some(legs(true, true, 490)));
+        assert!(ok.all_legs_ok());
+        assert!(!ok.only_sell_failed());
+        assert_eq!(ok.failure_reason(), None);
+
+        let phantom = outcome(Some(legs(true, true, 0)));
+        assert!(!phantom.all_legs_ok());
+        assert!(phantom.only_sell_failed());
+
+        let reverted = outcome(Some(legs(true, false, 0)));
+        assert!(reverted.only_sell_failed());
+        assert_eq!(reverted.failure_reason().as_deref(), Some("sell reverted: no sells"));
+    }
+
+    fn transfer_log(token: Address, from: Address, to: Address, value: u64) -> Log {
+        let topic = keccak256("Transfer(address,address,uint256)");
+        Log {
+            inner: alloy::primitives::Log {
+                address: token,
+                data: alloy::primitives::LogData::new_unchecked(
+                    vec![topic, from.into_word(), to.into_word()],
+                    U256::from(value)
+                        .to_be_bytes::<32>()
+                        .to_vec()
+                        .into(),
+                ),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transferred_sums_the_events_to_the_receiver() {
+        let (token, from, to) =
+            (Address::repeat_byte(1), Address::repeat_byte(2), Address::repeat_byte(3));
+        let elsewhere = Address::repeat_byte(4);
+        let logs = [
+            transfer_log(token, from, to, 70),
+            transfer_log(token, from, elsewhere, 5),
+            transfer_log(token, from, to, 20),
+            transfer_log(elsewhere, from, to, 1000),
+        ];
+        assert_eq!(transferred(token, from, to, &logs), Some(U256::from(90)));
+    }
+
+    #[test]
+    fn transferred_tells_no_event_apart_from_nothing_received() {
+        let (token, from, to) =
+            (Address::repeat_byte(1), Address::repeat_byte(2), Address::repeat_byte(3));
+        assert_eq!(transferred(token, from, to, &[]), None);
+        let elsewhere = [transfer_log(token, from, Address::repeat_byte(4), 5)];
+        assert_eq!(transferred(token, from, to, &elsewhere), Some(U256::ZERO));
+    }
+
+    #[rstest::rstest]
+    #[case::eip_1474_revert(3, "execution reverted", Some(None))]
+    #[case::node_failure(-32000, "header not found", None)]
+    fn answered_tells_a_revert_apart_from_a_node_failure(
+        #[case] code: i64,
+        #[case] message: &str,
+        #[case] expected: Option<Option<tycho_common::Bytes>>,
+    ) {
+        let payload = alloy::rpc::json_rpc::ErrorPayload {
+            code,
+            message: message.to_string().into(),
+            data: None,
+        };
+        let error = RPCError::RequestError(crate::rpc::errors::RequestError::Reqwest(
+            crate::rpc::errors::ReqwestError {
+                msg: "eth_call failed".to_string(),
+                source: alloy::transports::RpcError::ErrorResp(payload),
+            },
+        ));
+        assert_eq!(return_data_unless_reverted(Err(error)).ok(), expected);
+        let data = tycho_common::Bytes::from("0x01");
+        assert_eq!(return_data_unless_reverted(Ok(data.clone())).ok(), Some(Some(data)));
+    }
+
+    #[test]
+    fn a_failed_transfer_is_not_a_sell_only_failure() {
+        let blocked = outcome(Some(legs(false, false, 0)));
+        assert!(!blocked.only_sell_failed());
+        assert!(!blocked.all_legs_ok());
+    }
+
+    #[test]
+    fn fees_cover_each_leg_that_ran() {
+        let fees = outcome(Some(legs(true, true, 490))).fees();
+        assert_eq!(fees.buy, Some(99));
+        assert_eq!(fees.transfer, Some(100));
+        assert_eq!(fees.sell, Some(200));
+        let sell_reverted = outcome(Some(legs(true, false, 0))).fees();
+        assert_eq!(sell_reverted.sell, None);
+        assert_eq!(outcome(None).fees(), Default::default());
+    }
+
+    #[test]
+    fn unlocked_needs_an_owner_call_that_went_through() {
+        let mut opened = outcome(Some(legs(true, true, 490)));
+        opened.prefix_ok = vec![false, true];
+        assert!(opened.unlocked());
+        opened.prefix_ok = vec![false];
+        assert!(!opened.unlocked());
+    }
+
+    #[test]
+    fn reads_revert_data_from_the_error_field() {
+        let data = Revert { reason: "Trading not open".to_string() }.abi_encode();
+        let result = SimCall {
+            error: Some(SimCallError {
+                message: "execution reverted: Trading not open".to_string(),
+                data: Some(Bytes::from(data)),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(result.revert_reason(), "Trading not open");
+        let out_of_gas = SimCall {
+            error: Some(SimCallError { message: "out of gas".to_string(), data: None }),
+            ..Default::default()
+        };
+        assert_eq!(out_of_gas.revert_reason(), "out of gas");
+    }
+}
