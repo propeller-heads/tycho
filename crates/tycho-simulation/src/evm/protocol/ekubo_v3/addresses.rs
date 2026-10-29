@@ -5,6 +5,9 @@ pub const ORACLE_ADDRESS: Address = address!("0x517E506700271AEa091b02f42756F5E1
 pub const TWAMM_ADDRESS_V1: Address = address!("0xd4F1060cB9c1A13e1d2d20379b8aa2cF7541eD9b");
 pub const TWAMM_ADDRESS_V2: Address = address!("0xd47f1B1eDCfEaBb08F6eBd8FC337c27E636C75BA");
 pub const MEV_CAPTURE_ADDRESS: Address = address!("0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be");
+// MEVCapture v2.1, deployed on Ethereum only. Its swaps go through `Core.forward`.
+pub const MEV_CAPTURE_V21_ETHEREUM_ADDRESS: Address =
+    address!("0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49");
 pub const BOOSTED_FEES_CONCENTRATED_ADDRESS: Address =
     address!("0xd4b54d0ca6979da05f25895e6e269e678ba00f9e");
 // SignedExclusiveSwap v3.2.0, deployed on Ethereum.

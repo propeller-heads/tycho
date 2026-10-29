@@ -1,7 +1,12 @@
 use std::{collections::HashMap, str::FromStr};
 
 use itertools::Itertools;
-use substreams::{key, pb::substreams::StoreDeltas, scalar::BigInt};
+use substreams::{
+    key,
+    pb::substreams::StoreDeltas,
+    scalar::BigInt,
+    store::{StoreGet, StoreGetProto},
+};
 use substreams_ethereum::pb::eth;
 use substreams_helper::hex::Hexable;
 use tycho_substreams::{
@@ -14,7 +19,7 @@ use tycho_substreams::{
 
 use crate::pb::ekubo::{
     block_transaction_events::transaction_events::pool_log::Event, ActiveLiquidityChanges,
-    ActiveRateChanges, BlockTransactionEvents, RateDeltas, TickDeltas,
+    ActiveRateChanges, BlockTransactionEvents, PoolDetails, RateDeltas, TickDeltas,
 };
 
 /// Aggregates protocol components and balance changes by transaction.
@@ -30,6 +35,8 @@ fn map_protocol_changes(
     balances_store_deltas: StoreDeltas,
     ticks_map_deltas: TickDeltas,
     ticks_store_deltas: StoreDeltas,
+    tick_liquidity_gross_store_deltas: StoreDeltas,
+    pool_details_store: StoreGetProto<PoolDetails>,
     rate_map_deltas: RateDeltas,
     rate_delta_store_deltas: StoreDeltas,
     active_liquidity_changes: ActiveLiquidityChanges,
@@ -92,12 +99,28 @@ fn map_protocol_changes(
     ticks_store_deltas
         .deltas
         .into_iter()
+        .zip(tick_liquidity_gross_store_deltas.deltas)
         .zip(ticks_map_deltas.deltas)
-        .for_each(|(store_delta, tick_delta)| {
+        .for_each(|((store_delta, gross_store_delta), tick_delta)| {
             let (old_value, new_value) = (
                 BigInt::from_store_bytes(&store_delta.old_value),
                 BigInt::from_store_bytes(&store_delta.new_value),
             );
+
+            // MEVCapture v2.1 cuts its Core calls at initialized ticks, so its
+            // pools keep a tick while any position references it, even when the
+            // tick's net liquidity delta is zero.
+            let change = if pool_details_store
+                .get_last(tick_delta.pool_id.to_hex())
+                .is_some_and(|details| details.is_mev_capture_v21)
+            {
+                change_type_from_delta(
+                    &BigInt::from_store_bytes(&gross_store_delta.old_value),
+                    &BigInt::from_store_bytes(&gross_store_delta.new_value),
+                )
+            } else {
+                change_type_from_delta(&old_value, &new_value)
+            };
 
             let tx = tick_delta.transaction.unwrap();
             let builder = transaction_changes
@@ -109,7 +132,7 @@ fn map_protocol_changes(
                 attributes: vec![Attribute {
                     name: format!("tick/{}", tick_delta.tick_index),
                     value: new_value.to_signed_bytes_be(),
-                    change: change_type_from_delta(&old_value, &new_value).into(),
+                    change: change.into(),
                 }],
             });
         });
@@ -263,6 +286,11 @@ fn maybe_attribute_updates(ev: Event, timestamp: u64) -> Option<Vec<Attribute>> 
         Event::SwapFeeUpdated(ev) => Some(vec![Attribute {
             name: "swap_fee".to_string(),
             value: ev.swap_fee,
+            change: ChangeType::Update.into(),
+        }]),
+        Event::ExtensionStateUpdated(ev) => Some(vec![Attribute {
+            name: "anchor_state".to_string(),
+            value: ev.state,
             change: ChangeType::Update.into(),
         }]),
         _ => None,

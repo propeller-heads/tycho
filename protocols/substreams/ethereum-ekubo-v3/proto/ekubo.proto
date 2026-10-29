@@ -17,6 +17,9 @@ message TickDelta {
   bytes liquidity_net_delta = 3; // int128
   uint64 ordinal = 4;
   Transaction transaction = 5;
+  // Change of the liquidity referencing the tick (Core's tick liquidityNet),
+  // which is non-zero exactly while the tick is initialized.
+  bytes liquidity_gross_delta = 6; // int128
 }
 
 message TickDeltas { repeated TickDelta deltas = 1; }
@@ -62,6 +65,8 @@ message PoolDetails {
   bytes token0 = 1; // address
   bytes token1 = 2; // address
   bool is_stableswap = 3;
+  // Initialized ticks with a zero net liquidity delta are indexed.
+  bool is_mev_capture_v21 = 4;
 }
 
 message BlockTransactionEvents {
@@ -83,6 +88,7 @@ message BlockTransactionEvents {
         VirtualExecution virtual_execution = 6;
         RateUpdated rate_updated = 7;
         SwapFeeUpdated swap_fee_updated = 8;
+        ExtensionStateUpdated extension_state_updated = 9;
       }
 
       message Swapped {
@@ -108,6 +114,7 @@ message BlockTransactionEvents {
         sint32 tick = 4;      // int32
         bytes sqrt_ratio = 5; // uint192
         bool has_time_rate_deltas = 6;
+        bool is_mev_capture_v21 = 7;
       }
 
       message VirtualExecution {
@@ -124,6 +131,11 @@ message BlockTransactionEvents {
 
       message SwapFeeUpdated {
         bytes swap_fee = 1; // uint64
+      }
+
+      // The extension's per-pool storage word, written without an event.
+      message ExtensionStateUpdated {
+        bytes state = 1; // bytes32
       }
     }
   }

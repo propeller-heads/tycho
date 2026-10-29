@@ -43,9 +43,16 @@ address payable constant CORE_ADDRESS =
 ICore constant CORE = ICore(CORE_ADDRESS);
 address constant MEV_CAPTURE_ADDRESS =
     0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be;
+// MEVCapture v2.1 (Ethereum). Like MEVCapture, it only accepts swaps
+// forwarded through Core with `abi.encode(poolKey, params)` and returns
+// `abi.encode(balanceUpdate, stateAfter)`. Core only initializes pools with a
+// registered extension, so no pool matches it on chains without a deployment.
+address constant MEV_CAPTURE_V21_ADDRESS =
+    0x51f831c23fa4051862881Ef8EfC0c3C37905Ce49;
 
 /// Chain-agnostic Ekubo V3 executor. The MEVCapture extension, deployed at the
-/// same deterministic address on every chain, is handled here.
+/// same deterministic address on every chain, and MEVCapture v2.1 are handled
+/// here.
 /// SignedExclusiveSwap is deployed per chain, so its address is a constructor
 /// argument. Deployment-specific extensions (Ve33) live in per-chain
 /// executors, which override `_swapHop` — and `_hopEnd` when their hops carry
@@ -250,12 +257,13 @@ contract EkuboV3Executor is IExecutor, ICallback {
                 ),
                 (PoolBalanceUpdate, PoolState)
             );
-        } else if (extension == MEV_CAPTURE_ADDRESS) {
+        } else if (
+            extension == MEV_CAPTURE_ADDRESS
+                || extension == MEV_CAPTURE_V21_ADDRESS
+        ) {
             (balanceUpdate,) = abi.decode(
                 // slither-disable-next-line calls-loop
-                CORE.forward(
-                    MEV_CAPTURE_ADDRESS, abi.encode(poolKey, swapParameters)
-                ),
+                CORE.forward(extension, abi.encode(poolKey, swapParameters)),
                 (PoolBalanceUpdate, PoolState)
             );
             nextOffset = offset;

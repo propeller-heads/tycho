@@ -117,3 +117,27 @@ tests:
           fee: "0x00c49ba5e353f7ce"
           pool_type_config: "0x00000000"
         creation_tx: "0x79c97f33b095982d051667b3335533cacb7915a491308907bd2205a5f4dc1216"
+
+  # Quoting needs the extension's config (read with an eth_call on creation) and its anchor state
+  - name: mev_capture_v21
+    start_block: 26248730
+    stop_block: 26248730
+    expected_components:
+      - id: "0x0ef8efeb49edc59b806501610bf7b7a2b0ee338d825afad50ba7c7e21b09a41a"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        static_attributes:
+          token0: "0x0000000000000000000000000000000000000000"
+          token1: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          extension: "0x51f831c23fa4051862881ef8efc0c3c37905ce49"
+          fee: "0x0020c49ba5e353f7"
+          pool_type_config: "0x800003e8"
+          half_life: "0x00000078"
+          slope_k: "0x04"
+          segment_exp: "0x00"
+          j_lin: "0x10"
+          max_fee: "0x8000000000000000"
+          clamp_ticks: "0x000009c4"
+          m_gate: "0x03"
+        creation_tx: "0x3894b82680093acb94f4bf91bd34a3f3a221ebe5478d6c8fd49392784f774e5f"
