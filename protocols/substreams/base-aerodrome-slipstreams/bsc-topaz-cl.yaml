@@ -2,7 +2,7 @@ specVersion: v0.1.0
 package:
   name: "bsc_topaz_cl"
   version: v0.1.6
-  url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/base-aerodrome-slipstreams"
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/base-aerodrome-slipstreams"
 
 protobuf:
   files:
