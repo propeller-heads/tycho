@@ -720,18 +720,90 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_amount_out_consumes_both_quote_lists() {
-        let result = state()
-            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
-            .unwrap();
-        let new_state = result
+    fn successor(result: &GetAmountOutResult) -> &PriceLevelStreamState {
+        result
             .new_state
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
-            .expect("price level state");
-        assert!(new_state.quotes_0_to_1.is_empty());
-        assert!(new_state.quotes_1_to_0.is_empty());
+            .expect("price level state")
+    }
+
+    /// The state after a swap of 1 WBTC for USDC.
+    fn state_after_one_wbtc() -> PriceLevelStreamState {
+        let result = state()
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .unwrap();
+        successor(&result).clone()
+    }
+
+    fn wbtc_to_usdc_fill(amount_in: u64, amount_out: u64) -> StreamFill {
+        StreamFill {
+            token_in: wbtc().address,
+            token_out: usdc().address,
+            amount_in: BigUint::from(amount_in),
+            amount_out: BigUint::from(amount_out),
+        }
+    }
+
+    #[test]
+    fn get_amount_out_records_the_fill_and_keeps_the_quotes() {
+        let after = state_after_one_wbtc();
+        assert_eq!(after.fill, Some(wbtc_to_usdc_fill(100_000_000, 100_000_000_000)));
+        assert_eq!(after.quotes_0_to_1, state().quotes_0_to_1);
+        assert_eq!(after.quotes_1_to_0, state().quotes_1_to_0);
+    }
+
+    #[test]
+    fn two_chunks_pay_what_one_merged_swap_pays() {
+        let merged = state()
+            .get_amount_out(BigUint::from(150_000_000u64), &wbtc(), &usdc())
+            .unwrap();
+        let first = state()
+            .get_amount_out(BigUint::from(100_000_000u64), &wbtc(), &usdc())
+            .unwrap();
+        let second = successor(&first)
+            .get_amount_out(BigUint::from(50_000_000u64), &wbtc(), &usdc())
+            .unwrap();
+        assert_eq!(first.amount + &second.amount, merged.amount);
+        assert_eq!(second.gas, BigUint::ZERO);
+        assert_eq!(successor(&second).fill, successor(&merged).fill);
+    }
+
+    #[test]
+    fn continued_chunk_beyond_largest_level_is_partial_and_carries_the_fill() {
+        let result =
+            state_after_one_wbtc().get_amount_out(BigUint::from(200_000_000u64), &wbtc(), &usdc());
+        let Err(SimulationError::InvalidInput(_, Some(partial))) = result else {
+            panic!("expected partial InvalidInput, got {result:?}");
+        };
+        // The largest quote pays 190k USDC, 100k of which the first chunk took.
+        assert_eq!(partial.amount, BigUint::from(90_000_000_000u64));
+        assert_eq!(partial.gas, BigUint::ZERO);
+        assert_eq!(successor(&partial).fill, Some(wbtc_to_usdc_fill(300_000_000, 190_000_000_000)));
+    }
+
+    /// After a fill on WBTC into USDC, every query on USDC into WBTC is refused.
+    #[test]
+    fn the_other_direction_after_a_fill_is_refused() {
+        let after = state_after_one_wbtc();
+        let refused = [
+            after
+                .get_amount_out(BigUint::from(100_000_000_000u64), &usdc(), &wbtc())
+                .map(|_| ()),
+            after
+                .get_limits(usdc().address, wbtc().address)
+                .map(|_| ()),
+            after
+                .spot_price(&usdc(), &wbtc())
+                .map(|_| ()),
+        ];
+        for result in refused {
+            assert!(matches!(
+                result,
+                Err(SimulationError::RecoverableError(message))
+                    if message == "Price level stream already quoted in this route"
+            ));
+        }
     }
 
     #[test]
@@ -788,6 +860,49 @@ mod tests {
     }
 
     #[test]
+    fn get_limits_after_a_fill_are_the_quote_limits_less_the_fill() {
+        let (max_in, max_out) = state_after_one_wbtc()
+            .get_limits(wbtc().address, usdc().address)
+            .unwrap();
+        assert_eq!(max_in, BigUint::from(100_000_000u64));
+        assert_eq!(max_out, BigUint::from(90_000_000_000u64));
+    }
+
+    #[test]
+    fn get_limits_after_a_fill_beyond_the_quotes_are_zero() {
+        let state = PriceLevelStreamState {
+            fill: Some(wbtc_to_usdc_fill(300_000_000, 190_000_000_000)),
+            ..state()
+        };
+        let limits = state
+            .get_limits(wbtc().address, usdc().address)
+            .unwrap();
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    #[test]
+    fn spot_price_after_a_fill_is_the_marginal_price_at_the_filled_amount() {
+        // Past 1 WBTC the quotes pay 90k USDC per WBTC, down from 100k.
+        let price = state_after_one_wbtc()
+            .spot_price(&wbtc(), &usdc())
+            .unwrap();
+        assert!((price - 90_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spot_price_after_a_fill_to_the_largest_level_has_no_liquidity() {
+        let state = PriceLevelStreamState {
+            fill: Some(wbtc_to_usdc_fill(200_000_000, 190_000_000_000)),
+            ..state()
+        };
+        let result = state.spot_price(&wbtc(), &usdc());
+        assert!(matches!(
+            result,
+            Err(SimulationError::RecoverableError(message)) if message == "No liquidity available"
+        ));
+    }
+
+    #[test]
     fn get_limits_without_liquidity() {
         let state = PriceLevelStreamState::new(
             wbtc().address,
@@ -810,6 +925,31 @@ mod tests {
         assert!(a.eq(&b as &dyn ProtocolSim));
         b.quotes_0_to_1[0].amount_out += 1u32;
         assert!(!a.eq(&b as &dyn ProtocolSim));
+    }
+
+    #[test]
+    fn eq_compares_fills() {
+        assert!(!state().eq(&state_after_one_wbtc() as &dyn ProtocolSim));
+        assert!(state_after_one_wbtc().eq(&state_after_one_wbtc() as &dyn ProtocolSim));
+    }
+
+    #[test]
+    fn a_state_serialized_without_a_fill_loads_with_none() {
+        let json = serde_json::to_value(state()).unwrap();
+        assert!(json
+            .as_object()
+            .unwrap()
+            .get("fill")
+            .is_none());
+        let loaded: PriceLevelStreamState = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fill, None);
+    }
+
+    #[test]
+    fn a_fill_survives_a_serde_round_trip() {
+        let json = serde_json::to_value(state_after_one_wbtc()).unwrap();
+        let loaded: PriceLevelStreamState = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fill, state_after_one_wbtc().fill);
     }
 
     #[rstest]
@@ -1034,8 +1174,7 @@ mod tests {
         fewer
     }
 
-    /// The consumed quotes are empty, but the successor still carries the state the fill was
-    /// priced on.
+    /// The successor still carries the state the fill was priced on.
     #[test]
     fn successor_state_keeps_the_overrides() {
         let state = state().with_simulation_overrides(test_overrides());
