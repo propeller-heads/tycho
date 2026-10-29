@@ -115,6 +115,11 @@ pub(super) struct Unlock {
 }
 
 impl Unlock {
+    #[cfg(test)]
+    pub fn for_test(selector: Bytes, argument: Argument) -> Self {
+        Self { selector, argument, tx: TransactionRequest::default() }
+    }
+
     pub fn name(&self) -> String {
         format!("{}{}", self.selector, self.argument.label())
     }

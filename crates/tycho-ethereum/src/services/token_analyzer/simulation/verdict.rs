@@ -423,3 +423,273 @@ fn role_rank(role: SlotRole) -> u8 {
         SlotRole::Fee => 3,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{keccak256, U256};
+
+    use super::*;
+    use crate::services::token_analyzer::simulation::{
+        code::{FunctionSummary, StorageField},
+        owner_calls::Unlock,
+        scenario::{
+            tests::{legs, outcome},
+            LegTiming, Scenario,
+        },
+    };
+
+    const VETO: Address = Address::repeat_byte(0x61);
+    const GATE: B256 = B256::repeat_byte(0x0a);
+
+    fn selector(signature: &str) -> Bytes {
+        Bytes::copy_from_slice(&keccak256(signature)[..4])
+    }
+
+    /// Legs without any fee.
+    fn clean() -> Outcome {
+        let mut legs = legs(true, true, 500);
+        legs.transferReceived = legs.transferSent;
+        let mut outcome = outcome(Some(legs));
+        outcome.sent = U256::from(1000);
+        outcome
+    }
+
+    fn reverted_buy() -> Outcome {
+        let mut outcome = outcome(None);
+        outcome.buy_revert = Some("Trading not open".to_string());
+        outcome
+    }
+
+    /// `transfer` reads a gate that `openTrading()` and `setFee(uint256)` write.
+    fn gated_code() -> CodeSummary {
+        let function = |signature: &str, arguments: &str| FunctionSummary {
+            selector: selector(signature),
+            arguments: Some(arguments.to_string()),
+            state_mutability: Some("nonpayable".to_string()),
+        };
+        CodeSummary {
+            functions: vec![
+                function("transfer(address,uint256)", "address,uint256"),
+                function("openTrading()", ""),
+                function("setFee(uint256)", "uint256"),
+            ],
+            storage: vec![StorageField {
+                slot: GATE,
+                offset: 0,
+                r#type: "bool".to_string(),
+                reads: vec![selector("transfer(address,uint256)")],
+                writes: vec![selector("openTrading()"), selector("setFee(uint256)")],
+            }],
+        }
+    }
+
+    fn probe(name: &str, signature: &str, argument: Argument, result: Outcome) -> (Probe, Outcome) {
+        let scenario = Scenario::new(name, vec![], LegTiming::SameBlock);
+        let unlock = Unlock::for_test(selector(signature), argument);
+        let mut result = result;
+        result.prefix_ok = vec![true];
+        (Probe { scenario, unlock: Some(unlock) }, result)
+    }
+
+    fn analyse(
+        base: Outcome,
+        others: &[(&str, Outcome)],
+        probes: &[(Probe, Outcome)],
+        calls: Vec<ExternalCall>,
+    ) -> TokenAnalysis {
+        let mut scenarios = HashMap::from([("base".to_string(), base)]);
+        for (name, outcome) in others {
+            scenarios.insert(name.to_string(), outcome.clone());
+        }
+        let code = gated_code();
+        let traces = TracedLegs { read_only_slots: BTreeSet::new(), calls };
+        let watchlist = HashSet::from([VETO]);
+        classify(&Evidence {
+            block: 1,
+            pool: Address::repeat_byte(2),
+            swapped: true,
+            implementation: None,
+            owner: Some(Address::repeat_byte(1)),
+            code: &code,
+            traces: &traces,
+            base: &scenarios["base"],
+            scenarios: &scenarios,
+            probes,
+            watchlist: &watchlist,
+        })
+    }
+
+    fn call_to(target: Address) -> ExternalCall {
+        ExternalCall {
+            leg: "transfer".to_string(),
+            target: target.to_bytes(),
+            selector: Some(
+                Bytes::from_static(&[1, 2, 3, 4])
+                    .to_vec()
+                    .into(),
+            ),
+            reverted: false,
+        }
+    }
+
+    #[test]
+    fn working_legs_are_ok_or_fee() {
+        assert_eq!(analyse(clean(), &[], &[], vec![]).verdict, TokenVerdict::Ok);
+        let taxed = analyse(outcome(Some(legs(true, true, 490))), &[], &[], vec![]);
+        assert_eq!(taxed.verdict, TokenVerdict::Fee);
+        assert_eq!(taxed.fees.sell, Some(200));
+        assert!(taxed
+            .flags
+            .contains(&TokenFlag::DirectionDependentFee));
+    }
+
+    /// Clean legs except that the transfer delivers `received` of the `sent` tokens.
+    fn transfer_delivering(sent: u64, received: u64) -> Outcome {
+        let mut outcome = clean();
+        let legs = outcome.legs.as_mut().expect("legs");
+        legs.transferSent = U256::from(sent);
+        legs.transferReceived = U256::from(received);
+        outcome
+    }
+
+    #[test]
+    fn a_loss_too_small_to_show_in_basis_points_is_still_a_fee() {
+        let one_wei = analyse(transfer_delivering(100_000, 99_999), &[], &[], vec![]);
+        assert_eq!(one_wei.fees.transfer, Some(0));
+        assert_eq!(one_wei.verdict, TokenVerdict::Fee);
+        let exact = analyse(transfer_delivering(100_000, 100_000), &[], &[], vec![]);
+        assert_eq!(exact.verdict, TokenVerdict::Ok);
+    }
+
+    #[test]
+    fn a_leg_that_delivers_more_than_was_sent_is_a_fee() {
+        let rebased = analyse(transfer_delivering(10_000, 10_010), &[], &[], vec![]);
+        assert_eq!(rebased.fees.transfer, Some(-10));
+        assert_eq!(rebased.verdict, TokenVerdict::Fee);
+    }
+
+    #[test]
+    fn a_sell_failing_from_the_next_block_on_is_a_honeypot() {
+        let later = outcome(Some(legs(true, false, 0)));
+        let analysis = analyse(clean(), &[("base_next_block", later)], &[], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::NoQuote);
+        assert_eq!(analysis.reason.as_deref(), Some("honeypot: sell reverted: no sells"));
+    }
+
+    #[test]
+    fn a_watch_listed_call_is_never_quoted() {
+        let analysis = analyse(clean(), &[], &[], vec![call_to(VETO)]);
+        assert_eq!(analysis.verdict, TokenVerdict::NoQuote);
+        assert!(analysis
+            .flags
+            .contains(&TokenFlag::CallsExternalContract));
+    }
+
+    #[test]
+    fn a_sell_only_failure_is_a_honeypot_even_if_the_owner_could_lift_it() {
+        let lifted = probe("unlock:x", "openTrading()", Argument::None, clean());
+        let analysis = analyse(outcome(Some(legs(true, false, 0))), &[], &[lifted], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::NoQuote);
+        assert!(analysis
+            .reason
+            .is_some_and(|r| r.starts_with("honeypot")));
+    }
+
+    #[test]
+    fn an_owner_unlock_makes_a_blocked_token_temporarily_blocked_and_proves_the_gate() {
+        let opened = probe("unlock:open", "openTrading()", Argument::None, clean());
+        let analysis = analyse(reverted_buy(), &[], &[opened], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::TemporarilyBlocked);
+        assert_eq!(analysis.reason.as_deref(), Some("buy reverted: Trading not open"));
+        assert_eq!(analysis.control_slots.len(), 1);
+        assert_eq!(analysis.control_slots[0].role, SlotRole::Gate);
+        assert_eq!(analysis.control_slots[0].writers.len(), 2);
+    }
+
+    #[test]
+    fn time_alone_can_lift_a_block() {
+        let analysis = analyse(reverted_buy(), &[("time+1d", clean())], &[], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::TemporarilyBlocked);
+    }
+
+    #[test]
+    fn nothing_lifting_the_block_leaves_it_blocked() {
+        let still_closed = probe("unlock:open", "openTrading()", Argument::None, reverted_buy());
+        let analysis = analyse(reverted_buy(), &[], &[still_closed], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::Blocked);
+        assert_eq!(analysis.control_slots[0].role, SlotRole::Unknown);
+    }
+
+    #[test]
+    fn a_setter_that_lowers_the_fee_proves_a_fee_slot() {
+        let zero = Argument::Uint(U256::ZERO);
+        let lowered = probe("fee:x", "setFee(uint256)", zero, clean());
+        let analysis = analyse(outcome(Some(legs(true, true, 400))), &[], &[lowered], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::Fee);
+        assert_eq!(analysis.control_slots[0].role, SlotRole::Fee);
+    }
+
+    #[test]
+    fn a_token_behaving_differently_when_simulated_is_never_quoted() {
+        let honeypot_for_real = outcome(Some(legs(true, false, 0)));
+        let analysis = analyse(honeypot_for_real, &[("base_bare", clean())], &[], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::NoQuote);
+        assert!(analysis
+            .flags
+            .contains(&TokenFlag::EnvironmentSensitive));
+        assert!(analysis
+            .reason
+            .is_some_and(|r| r.contains("looks simulated")));
+
+        let same = analyse(clean(), &[("base_bare", clean())], &[], vec![]);
+        assert_eq!(same.verdict, TokenVerdict::Ok);
+        assert!(!same
+            .flags
+            .contains(&TokenFlag::EnvironmentSensitive));
+    }
+
+    #[test]
+    fn behaviour_flags() {
+        let mut large = outcome(None);
+        large.buy_revert = Some("Max transaction".to_string());
+        let mut later = clean();
+        later
+            .legs
+            .as_mut()
+            .expect("legs")
+            .transferReceived = U256::from(400);
+        let analysis = analyse(clean(), &[("base_large", large), ("time+30d", later)], &[], vec![]);
+        assert!(analysis
+            .flags
+            .contains(&TokenFlag::SizeLimited));
+        assert!(analysis
+            .flags
+            .contains(&TokenFlag::TimeDependentFee));
+        assert!(!analysis
+            .flags
+            .contains(&TokenFlag::CallsExternalContract));
+    }
+
+    #[test]
+    fn a_large_trade_that_could_not_run_is_no_size_limit() {
+        let analysis = analyse(clean(), &[], &[], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::Ok);
+        assert!(!analysis
+            .flags
+            .contains(&TokenFlag::SizeLimited));
+    }
+
+    #[test]
+    fn a_sell_without_a_transfer_event_is_flagged() {
+        let mut base = clean();
+        base.sell_logged = false;
+        let analysis = analyse(base, &[], &[], vec![]);
+        assert_eq!(analysis.verdict, TokenVerdict::Ok);
+        assert!(analysis
+            .flags
+            .contains(&TokenFlag::UnloggedTransfer));
+        assert!(!analyse(clean(), &[], &[], vec![])
+            .flags
+            .contains(&TokenFlag::UnloggedTransfer));
+    }
+}
