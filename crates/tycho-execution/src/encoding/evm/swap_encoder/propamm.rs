@@ -10,14 +10,15 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Static attribute under which price-level-stream components carry their pAMM venue address.
+/// Static attribute under which pAMM components carry their venue address.
 const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 
-/// Encodes a swap on any pAMM implementing the standard `IPropAMM` interface pushed by Titan.
+/// Encodes a swap on any pAMM implementing the standard `IPropAMM` interface pushed by Titan,
+/// whether its components come from the price level stream or are indexed natively (`biconomy`).
 ///
 /// A single generic executor serves all such venues, so the pAMM address travels in the swap data
 /// (packed `pamm ++ token_in ++ token_out`), taken from the component's `pamm_address` static
-/// attribute, which every price-level-stream component carries.
+/// attribute, which every pAMM component carries.
 #[derive(Clone)]
 pub struct PropAMMSwapEncoder {
     executor_address: Bytes,
@@ -32,8 +33,8 @@ impl PropAMMSwapEncoder {
             .cloned()
             .ok_or_else(|| {
                 EncodingError::FatalError(format!(
-                    "Price level stream component {} is missing the {PAMM_ADDRESS_ATTRIBUTE} \
-                     static attribute",
+                    "pAMM component {} is missing the {PAMM_ADDRESS_ATTRIBUTE} static \
+                     attribute",
                     component.id
                 ))
             })
@@ -46,9 +47,9 @@ impl SwapEncoder for PropAMMSwapEncoder {
         chain: Chain,
         _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
-        if chain != Chain::Ethereum {
+        if !matches!(chain, Chain::Ethereum | Chain::Base) {
             return Err(EncodingError::FatalError(
-                "Price level stream swaps are only supported on Ethereum".to_string(),
+                "pAMM swaps are only supported on Ethereum and Base".to_string(),
             ));
         }
 
@@ -161,8 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn test_encoder_rejects_non_ethereum_chain() {
-        let result = PropAMMSwapEncoder::new(Bytes::zero(20), Chain::Base, None);
+    fn test_encoder_accepts_base() {
+        assert!(PropAMMSwapEncoder::new(Bytes::zero(20), Chain::Base, None).is_ok());
+    }
+
+    #[test]
+    fn test_encoder_rejects_unsupported_chain() {
+        let result = PropAMMSwapEncoder::new(Bytes::zero(20), Chain::Arbitrum, None);
         assert!(result.is_err());
     }
 }

@@ -9,7 +9,8 @@ error PropAMMExecutor__InvalidDataLength();
 
 /// @title PropAMMExecutor
 /// @notice Generic executor for any pAMM implementing the standard `IPropAMM`
-/// interface, priced off-chain via the Titan price level stream.
+/// interface pushed by Titan, whether it is priced off-chain via the price
+/// level stream or indexed natively (e.g. the Biconomy venue on Base).
 /// @dev The pAMM address is part of the swap data instead of an immutable, so
 /// a single deployment serves all venues following the standard interface and
 /// new pAMMs need no new executor. `IPropAMM` uses a push-payment model: the

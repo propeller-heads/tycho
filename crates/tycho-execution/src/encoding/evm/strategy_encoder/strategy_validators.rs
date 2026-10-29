@@ -161,11 +161,36 @@ impl SplitSwapValidator {
     }
 }
 
+/// Protocols whose venue is the next hop's `fundsExpectedAddress` and rejects itself as a swap
+/// recipient, so a sequential route through the same component twice in a row always reverts.
+const SELF_RECIPIENT_REJECTING_PROTOCOLS: &[&str] = &["biconomy"];
+
 /// Validates whether a sequence of sequential swaps represents a valid solution.
 #[derive(Clone)]
 pub struct SequentialSwapValidator;
 
 impl SwapValidator for SequentialSwapValidator {}
+
+impl SequentialSwapValidator {
+    /// Raises an error if two consecutive swaps run on the same component of a protocol whose
+    /// venue rejects itself as recipient: the router would pay the first hop's output to the
+    /// venue (the second hop's `fundsExpectedAddress`) and the venue would revert.
+    pub fn validate_no_back_to_back_venue_hops(&self, swaps: &[Swap]) -> Result<(), EncodingError> {
+        for pair in swaps.windows(2) {
+            let (first, second) = (pair[0].component(), pair[1].component());
+            if first.id == second.id &&
+                SELF_RECIPIENT_REJECTING_PROTOCOLS.contains(&first.protocol_system.as_str())
+            {
+                return Err(EncodingError::InvalidInput(format!(
+                    "Consecutive swaps on {} component {} always revert: the venue cannot \
+                     receive the first hop's output",
+                    first.protocol_system, first.id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -521,5 +546,41 @@ mod tests {
             validator.validate_split_percentages(&invalid_overflow_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must be <100%")
         ));
+    }
+
+    #[test]
+    fn test_validate_back_to_back_venue_hops() {
+        let weth = Bytes::from_str("0x4200000000000000000000000000000000000006").unwrap();
+        let usdc = Bytes::from_str("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913").unwrap();
+        let cbbtc = Bytes::from_str("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf").unwrap();
+        let hop = |id: &str, protocol_system: &str, token_in: &Bytes, token_out: &Bytes| {
+            Swap::new(
+                ProtocolComponent {
+                    id: id.to_string(),
+                    protocol_system: protocol_system.to_string(),
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+        };
+        let venue = "0x0000009e5f98cdb4dd1e1d2e15b220217c88b3b8";
+        let validator = SequentialSwapValidator;
+
+        let twice = [hop(venue, "biconomy", &weth, &usdc), hop(venue, "biconomy", &usdc, &cbbtc)];
+        assert!(matches!(
+            validator.validate_no_back_to_back_venue_hops(&twice),
+            Err(EncodingError::InvalidInput(_))
+        ));
+
+        let via_other_pool = [
+            hop(venue, "biconomy", &weth, &usdc),
+            hop("pool", "uniswap_v3", &usdc, &weth),
+            hop(venue, "biconomy", &weth, &cbbtc),
+        ];
+        assert!(validator
+            .validate_no_back_to_back_venue_hops(&via_other_pool)
+            .is_ok());
     }
 }

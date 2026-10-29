@@ -29,6 +29,7 @@ members = [
     "base-aerodrome-slipstreams",
     "evm-aero-cl",
     "base-lunarbase",
+    "base-biconomy",
     "ethereum-erc4626",
     "ethereum-rocketpool",
     "unichain-velodrome",

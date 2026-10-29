@@ -291,6 +291,11 @@ impl SwapEncoderRegistry {
             pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            // The Biconomy venue on Base implements the same IPropAMM interface, indexed natively
+            // instead of through the price level stream.
+            "biconomy" => {
+                Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "lido_v4" => {
                 Ok(Box::new(LidoV4SwapEncoder::new(executor_address, self.chain, config)?))
             }

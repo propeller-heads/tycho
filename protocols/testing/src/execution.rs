@@ -34,6 +34,7 @@ const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const BICONOMY_BYTECODE_JSON: &str = include_str!("../fixtures/Biconomy.runtime.json");
 const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
@@ -67,6 +68,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
     map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
+    map.insert("biconomy", BICONOMY_BYTECODE_JSON);
     map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("aero_basic", AERO_BASIC_BYTECODE_JSON);
