@@ -126,6 +126,28 @@ pub(super) enum LegTiming {
     AfterPrefix(BlockGap),
 }
 
+/// How the legs reach the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LegPath {
+    /// The pool calls `transfer` itself and `LegRunner` moves the tokens on. Works for any pool
+    /// but is not a real swap: the pool is `tx.origin` and `msg.sender` at once.
+    Direct,
+    /// Wallets trade through `SwapRunner` against a Uniswap V2 style pair, as with a router. Falls
+    /// back to `Direct` when the pool is not such a pair against the wrapped native token.
+    Swap,
+}
+
+/// The block and transaction environment of the simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Environment {
+    /// What the chain enforces: base fee, gas price paid, funded senders without code, a
+    /// non-zero `prevrandao`.
+    Realistic,
+    /// Validation off, zero gas price, zero base fee and `prevrandao`: what a careless simulator
+    /// looks like. Run only to catch tokens that behave differently under it.
+    Bare,
+}
+
 /// What to change before running the legs.
 #[derive(Debug, Clone)]
 pub(super) struct Scenario {
@@ -135,12 +157,31 @@ pub(super) struct Scenario {
     pub size: BuySize,
     pub time_shift_days: u64,
     pub timing: LegTiming,
+    pub path: LegPath,
+    pub environment: Environment,
 }
 
 impl Scenario {
-    /// A scenario with the small buy and no time shift.
+    /// A `Direct` scenario in the `Bare` environment, which accepts senders that have code.
     pub fn new(name: &str, prefix: Vec<TransactionRequest>, timing: LegTiming) -> Self {
-        Self { name: name.to_string(), prefix, size: BuySize::Small, time_shift_days: 0, timing }
+        Self {
+            name: name.to_string(),
+            prefix,
+            size: BuySize::Small,
+            time_shift_days: 0,
+            timing,
+            path: LegPath::Direct,
+            environment: Environment::Bare,
+        }
+    }
+
+    /// A `Swap` scenario in the `Realistic` environment.
+    pub fn swap(name: &str, timing: LegTiming) -> Self {
+        Self {
+            path: LegPath::Swap,
+            environment: Environment::Realistic,
+            ..Self::new(name, vec![], timing)
+        }
     }
 }
 
@@ -273,6 +314,18 @@ pub(super) struct TokenContext {
     pub trader: Address,
     pub wallet: Address,
     pub pool_balance: U256,
+    /// The pool as a Uniswap V2 style pair against the wrapped native token, when it is one.
+    pub v2: Option<V2Pair>,
+    /// Base fee of the analysed block; `None` before London.
+    pub base_fee: Option<u64>,
+}
+
+/// A Uniswap V2 style pair between the token and the chain's wrapped native token.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct V2Pair {
+    pub wrapped_native: Address,
+    /// The pair's reserve of the wrapped native token.
+    pub reserve: U256,
 }
 
 impl TokenContext {
@@ -292,6 +345,8 @@ impl TokenContext {
             trader: derived_address(b"tycho-token-analysis-trader"),
             wallet: derived_address(b"tycho-token-analysis-wallet"),
             pool_balance,
+            v2: None,
+            base_fee: None,
         }
     }
 
@@ -352,7 +407,10 @@ impl TokenContext {
 
     /// Simulates `scenario`; fails only when the simulation itself could not run.
     pub async fn run(&self, scenario: &Scenario) -> Result<Outcome, String> {
-        self.run_direct(scenario).await
+        match (scenario.path, &self.v2) {
+            (LegPath::Swap, Some(pair)) => super::swap::run(self, pair, scenario).await,
+            (LegPath::Swap, None) | (LegPath::Direct, _) => self.run_direct(scenario).await,
+        }
     }
 
     async fn run_direct(&self, scenario: &Scenario) -> Result<Outcome, String> {
@@ -506,6 +564,14 @@ pub(super) fn first_word(data: &[u8]) -> U256 {
     data.get(..32)
         .map(U256::from_be_slice)
         .unwrap_or_default()
+}
+
+/// `Swap` events of Uniswap V2 and V3 style pools.
+pub(super) fn swap_topics() -> [B256; 2] {
+    [
+        keccak256("Swap(address,uint256,uint256,uint256,uint256,address)"),
+        keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)"),
+    ]
 }
 
 #[cfg(test)]
