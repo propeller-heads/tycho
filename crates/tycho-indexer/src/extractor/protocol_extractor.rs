@@ -845,9 +845,17 @@ where
     /// Returns how drained blocks are handled now, taking over database commits first when
     /// this process became the leader since the previous block. The takeover's commit runs at
     /// `priority`.
+    ///
+    /// An extractor with a DCI plugin does not take over: it returns
+    /// [`ExtractionError::RestartToTakeOver`] and commits nothing. Its retained blocks and its DCI
+    /// state come from this process's own traces. A trace that failed here but not on the former
+    /// leader (or the opposite) makes them track other contracts than the database does.
     async fn commit_mode(&self, priority: WritePriority) -> Result<CommitMode, ExtractionError> {
         let mut mode = self.commit_mode.lock().await;
         if *mode == CommitMode::Following && self.writer.role() == Role::Leader {
+            if self.dci_plugin.is_some() {
+                return Err(ExtractionError::RestartToTakeOver(self.name.clone()));
+            }
             *mode = CommitMode::Committing { floor: self.take_over_commits(priority).await? };
         }
         Ok(*mode)
