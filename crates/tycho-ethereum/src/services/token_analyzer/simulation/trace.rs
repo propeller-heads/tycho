@@ -280,3 +280,119 @@ fn collect_calls(
         collect_calls(child, context, leg, out);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{Address, Bytes as AlloyBytes, U256};
+
+    use super::*;
+
+    fn context() -> TokenContext {
+        let rpc = crate::rpc::EthereumRpcClient::new("http://localhost:1").expect("client");
+        TokenContext::new(
+            &rpc,
+            Address::repeat_byte(7),
+            Address::repeat_byte(8),
+            U256::from(1000),
+            (1, 1),
+        )
+    }
+
+    fn frame(from: Address, to: Address, typ: &str, input: &[u8]) -> CallFrame {
+        CallFrame {
+            from,
+            to: Some(to),
+            typ: typ.to_string(),
+            input: AlloyBytes::copy_from_slice(input),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collects_token_calls_except_to_known_parties_and_delegates() {
+        let context = context();
+        let veto = Address::repeat_byte(9);
+        let mut root = frame(context.pool, context.token, "CALL", &[0xa9, 0x05, 0x9c, 0xbb]);
+        root.calls = vec![
+            frame(context.token, veto, "CALL", &[1, 2, 3, 4, 5]),
+            frame(context.token, context.pool, "STATICCALL", &[0x09, 0x02, 0xf1, 0xac]),
+            frame(context.token, Address::repeat_byte(3), "DELEGATECALL", &[1, 1, 1, 1]),
+            frame(context.token, Address::repeat_byte(4), "CALL", &[]),
+        ];
+        let mut calls = Vec::new();
+        collect_calls(&root, &context, "buy", &mut calls);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].target, veto.to_bytes());
+        assert_eq!(calls[0].selector, Some(Bytes::from(vec![1, 2, 3, 4])));
+        assert_eq!(calls[1].selector, None);
+    }
+
+    #[test]
+    fn labels_calls_with_the_leg_they_happen_under() {
+        let context = context();
+        let tax = Address::repeat_byte(9);
+        let under = |caller: Address, input: Vec<u8>| {
+            let mut frame = frame(caller, context.token, "CALL", &input);
+            frame.calls = vec![frame_to(context.token, tax)];
+            frame
+        };
+        let mut sell_tx = frame(context.wallet, swap::router(), "CALL", &[0; 4]);
+        sell_tx.calls = vec![under(
+            swap::router(),
+            transferFromCall { _from: context.wallet, _to: context.pool, _value: U256::from(1) }
+                .abi_encode(),
+        )];
+        let mut swap_frame = frame(swap::router(), context.pool, "CALL", &[0; 4]);
+        swap_frame.calls = vec![under(
+            context.pool,
+            transferCall { _to: swap::router(), _value: U256::from(1) }.abi_encode(),
+        )];
+        let mut buy_tx = frame(swap::buyer(), swap::router(), "CALL", &[0; 4]);
+        buy_tx.calls = vec![
+            swap_frame,
+            under(
+                swap::router(),
+                transferCall { _to: context.wallet, _value: U256::from(1) }.abi_encode(),
+            ),
+        ];
+
+        let mut calls = Vec::new();
+        collect_calls(&buy_tx, &context, "read", &mut calls);
+        collect_calls(&sell_tx, &context, "read", &mut calls);
+        let legs: Vec<&str> = calls
+            .iter()
+            .map(|c| c.leg.as_str())
+            .collect();
+        assert_eq!(legs, ["buy", "transfer", "sell"]);
+    }
+
+    fn frame_to(from: Address, to: Address) -> CallFrame {
+        frame(from, to, "CALL", &[1, 2, 3, 4])
+    }
+
+    #[test]
+    fn carry_forward_zeroes_slots_cleared_by_the_leg() {
+        let token = Address::repeat_byte(7);
+        let (kept, cleared) = (B256::repeat_byte(1), B256::repeat_byte(2));
+        let mut pre = AccountState::default();
+        pre.storage
+            .insert(kept, B256::repeat_byte(5));
+        pre.storage
+            .insert(cleared, B256::repeat_byte(6));
+        let mut post = AccountState::default();
+        post.storage
+            .insert(kept, B256::repeat_byte(9));
+        let diff = DiffMode {
+            pre: [(token, pre)].into_iter().collect(),
+            post: [(token, post)].into_iter().collect(),
+        };
+        let mut state = StateOverride::default();
+        apply_state_diff(&mut state, &diff);
+        let slots = state[&token]
+            .state_diff
+            .as_ref()
+            .expect("diff set");
+        assert_eq!(slots[&kept], B256::repeat_byte(9));
+        assert_eq!(slots[&cleared], B256::ZERO);
+    }
+}
