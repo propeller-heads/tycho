@@ -533,6 +533,45 @@ mod tests {
         let result = i32::try_from(data).unwrap();
         assert_eq!(result, i32::from_str("67305985").unwrap());
     }
+
+    #[test]
+    fn int_from_bytes_sign_extends_negative_values() {
+        assert_eq!(i32::try_from(Bytes::from(vec![0xff])).unwrap(), -1);
+        assert_eq!(i32::try_from(Bytes::from(vec![0xff, 0xff, 0xfe])).unwrap(), -2);
+        assert_eq!(i128::try_from(Bytes::from(vec![0x80])).unwrap(), -128);
+    }
+
+    #[test]
+    fn uint_from_bytes_accepts_leading_zero_bytes() {
+        let mut data = vec![0u8; 16];
+        data.insert(0, 0);
+        data[1] = 0x80;
+        assert_eq!(u128::try_from(Bytes::from(data)).unwrap(), 1u128 << 127);
+        assert_eq!(u8::try_from(Bytes::from(vec![0, 0, 0, 7])).unwrap(), 7);
+        assert_eq!(u8::try_from(Bytes::from(vec![0, 0])).unwrap(), 0);
+        assert_eq!(u8::try_from(Bytes::from(vec![])).unwrap(), 0);
+    }
+
+    #[test]
+    fn int_from_bytes_accepts_redundant_sign_extension_bytes() {
+        assert_eq!(i8::try_from(Bytes::from(vec![0xff, 0xff, 0x80])).unwrap(), -128);
+        assert_eq!(i8::try_from(Bytes::from(vec![0x00, 0x00, 0x7f])).unwrap(), 127);
+        assert_eq!(i16::try_from(Bytes::from(vec![0x00, 0x80])).unwrap(), 128);
+    }
+
+    #[test]
+    fn int_from_bytes_rejects_values_that_do_not_fit() {
+        let address = Bytes::from(vec![0x11u8; 20]);
+        let err = u128::try_from(address.clone()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("{address} (20 bytes) does not fit into u128: at most 16 significant bytes")
+        );
+        assert!(i128::try_from(address).is_err());
+        assert!(u8::try_from(Bytes::from(vec![0x01, 0x00])).is_err());
+        assert!(i8::try_from(Bytes::from(vec![0x00, 0x80])).is_err());
+        assert!(i8::try_from(Bytes::from(vec![0xff, 0x7f])).is_err());
+    }
 }
 
 #[cfg(feature = "diesel")]

@@ -964,6 +964,26 @@ mod tests {
         assert!(message.contains("hooks"), "{message}");
     }
 
+    /// A `liquidity` attribute longer than a `u128` is a bad snapshot, not a panic: the stream
+    /// decoder logs the component and skips it, and every other pool keeps decoding.
+    #[tokio::test]
+    async fn oversized_liquidity_attribute_is_rejected_without_panicking() {
+        let mut snapshot = hookless_snapshot_with_hook(ZERO_HOOK);
+        let address_sized = Bytes::from(vec![0x11_u8; 20]);
+        snapshot
+            .state
+            .attributes
+            .insert("liquidity".to_string(), address_sized.clone());
+
+        let result = decode_with_chain(snapshot, Some(Chain::Ethereum)).await;
+
+        let Err(InvalidSnapshotError::ValueError(message)) = result else {
+            panic!("a 20-byte liquidity attribute must not decode");
+        };
+        assert!(message.contains(&address_sized.to_string()), "{message}");
+        assert!(message.contains("u128"), "{message}");
+    }
+
     #[tokio::test]
     async fn test_usv4_zero_hook_pool_with_no_ticks_still_decodes() {
         // Tick leniency is keyed on the `hooks` attribute being present, not on the address being
