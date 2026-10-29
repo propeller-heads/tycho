@@ -200,6 +200,7 @@ impl RefusesQuote for LiquoriceAllPairsState {}
 mod tests {
     use std::str::FromStr;
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
@@ -277,6 +278,32 @@ mod tests {
             market_maker: "test_mm".to_string(),
             client: Some(empty_client()),
         }
+    }
+
+    /// After some input went in, the next unit is priced at the level where the fill stopped,
+    /// and a reverse swap is rejected like a token outside the pair.
+    #[rstest]
+    #[case::in_the_first_level(250_000_000_000_000_000, Some(3000.0))]
+    #[case::on_the_second_boundary(2_000_000_000_000_000_000, Some(2999.0))]
+    #[case::past_the_depth(7_000_000_000_000_000_000, None)]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = create_test_liquorice_state();
+
+        let price = state.marginal_price(&weth().address, &usdc().address, &BigUint::from(filled));
+        let reverse =
+            state.marginal_price(&usdc().address, &weth().address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+        assert!(matches!(reverse, Err(SimulationError::InvalidInput(_, None))), "{reverse:?}");
     }
 
     /// A Liquorice book prices one direction, so the reverse direction is rejected like a token

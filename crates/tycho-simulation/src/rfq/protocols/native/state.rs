@@ -402,6 +402,36 @@ mod tests {
         ));
     }
 
+    /// After some input went in, the next unit is priced at the level where the fill stopped, on
+    /// the side of the book a swap in that direction fills.
+    #[rstest]
+    #[case::selling_base_in_the_level(true, 500_000_000_000_000_000, Some(2_000.0))]
+    #[case::selling_base_past_the_depth(true, 1_000_000_000_000_000_000, None)]
+    #[case::selling_quote_in_the_level(false, 1_000_000_000, Some(1.0 / 2_000.0))]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] sell_base: bool,
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = state();
+        let (token_in, token_out) = if sell_base {
+            (&state.base_token, &state.quote_token)
+        } else {
+            (&state.quote_token, &state.base_token)
+        };
+
+        let price =
+            state.marginal_price(&token_in.address, &token_out.address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+    }
+
     #[rstest]
     #[case::sell_base(true, 2_500_000_000_000_000_000, 3_500_000_000)]
     #[case::sell_quote(false, 8_192_000_000, 2_500_000_000_000_000_000)]

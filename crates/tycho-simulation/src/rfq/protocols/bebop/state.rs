@@ -416,6 +416,33 @@ mod tests {
         }
     }
 
+    /// After some input went in, the next unit is priced at the level where the fill stopped, on
+    /// the side of the book a swap in that direction fills.
+    #[rstest]
+    #[case::selling_base_in_the_first_level(true, 100_000_000, Some(65000.0))]
+    #[case::selling_base_on_the_first_boundary(true, 150_000_000, Some(64950.0))]
+    #[case::selling_base_past_the_depth(true, 400_000_000, None)]
+    #[case::selling_quote_before_any_fill(false, 0, Some(1.0 / 65100.0))]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] sell_base: bool,
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = create_test_bebop_state();
+        let (token_in, token_out) = if sell_base { (wbtc(), usdc()) } else { (usdc(), wbtc()) };
+
+        let price =
+            state.marginal_price(&token_in.address, &token_out.address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+    }
+
     #[test]
     fn spot_price_matching_base_and_quote() {
         let state = create_test_bebop_state();
