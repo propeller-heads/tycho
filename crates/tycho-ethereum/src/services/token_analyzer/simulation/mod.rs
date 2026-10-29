@@ -3,3 +3,4 @@
 mod runner;
 mod scenario;
 mod swap;
+mod trace;
