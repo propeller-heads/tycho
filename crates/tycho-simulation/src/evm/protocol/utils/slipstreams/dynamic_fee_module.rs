@@ -16,6 +16,12 @@ const SCALING_PRECISION: u128 = 1_000_000;
 const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
 
 /// A deployed fee module whose `getFee` `get_dynamic_fee` reproduces.
+///
+/// The defaults below are snapshots of on-chain values, not indexed state. The module's swap fee
+/// manager can change them at any time (`setDefaultFeeCap`, `setDefaultScalingFactor` and
+/// `setSecondsAgo`, emitting `DefaultFeeCapSet`, `DefaultScalingFactorSet` and `SecondsAgoSet`;
+/// `secondsAgo` is `DEFAULT_SECONDS_AGO` here). If one changes, this table needs a code change;
+/// until then, pools without a config of their own are quoted at the old value.
 struct SupportedModule {
     address: Address,
     /// The module's `defaultFeeCap`: the cap on a pool that has no scaling factor of its own.
@@ -68,8 +74,9 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 7] = [
         default_scaling_factor: DEFAULT_SCALING_FACTOR,
     },
     // Raphael on Robinhood Chain. Same module code as the Base deployments above. Its swap fee
-    // manager set `defaultFeeCap` to 10_000 and `defaultScalingFactor` to 10_000_000 at block
-    // 70,897,094, so a pool without a scaling factor of its own still pays a dynamic fee.
+    // manager set `defaultFeeCap` to 10_000 at block 70,897,071 and `defaultScalingFactor` to
+    // 10_000_000 at block 70,897,094, so a pool without a scaling factor of its own still pays a
+    // dynamic fee.
     SupportedModule {
         address: address!("8649D7A63499a6Cd5E400EF2DdB4AD317359c23c"),
         default_fee_cap: 10_000,
@@ -603,7 +610,19 @@ mod tests {
         let dfc: DynamicFeeConfig =
             serde_json::from_str(serialized).expect("pre-existing serialized config");
 
-        assert_eq!(dfc, DynamicFeeConfig::new(500, 700, 6_000_000, false, 0));
+        // Literal values, not the constants: older snapshots need exactly these.
+        assert_eq!(
+            dfc,
+            DynamicFeeConfig {
+                base_fee: 500,
+                fee_cap: 700,
+                scaling_factor: 6_000_000,
+                initial_fee_enabled: false,
+                initial_fee: 0,
+                default_fee_cap: 30_000,
+                default_scaling_factor: 0,
+            }
+        );
     }
 
     #[test]

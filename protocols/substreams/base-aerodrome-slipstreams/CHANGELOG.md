@@ -39,11 +39,12 @@ v0.1.6 was never released; its changes ship in this version.
 ### Known limitations
 
 - The simulation takes each fee module's `defaultFeeCap` and `defaultScalingFactor` from a table
-  in `tycho-simulation`, not from indexed state. Both are owner-settable on chain
-  (`setDefaultFeeCap`/`setDefaultScalingFactor`, emitting `DefaultFeeCapSet` and
-  `DefaultScalingFactorSet`), and Raphael's changed at blocks 70,897,071 and 70,897,094. If an
-  owner changes them again, the table needs a code change; until then pools without their own
-  config are quoted at the old defaults.
+  in `tycho-simulation`, and its `secondsAgo` from a constant (600), not from indexed state. The
+  module's swap fee manager can change all three (`setDefaultFeeCap`, `setDefaultScalingFactor`,
+  `setSecondsAgo`, emitting `DefaultFeeCapSet`, `DefaultScalingFactorSet`, `SecondsAgoSet`), and
+  Raphael's defaults changed at blocks 70,897,071 (`defaultFeeCap`) and 70,897,094
+  (`defaultScalingFactor`). If an owner changes them again, the table needs a code change; until
+  then pools without a config of their own are quoted at the old values.
 
 ### Deployment notes
 
