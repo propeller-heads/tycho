@@ -19,7 +19,7 @@ use tycho_simulation::{
 
 use crate::{
     metrics,
-    stream_processor::{StreamUpdate, UpdateType},
+    stream_processor::{StreamUpdate, StreamUpdatePayload},
 };
 
 /// Streams Titan pAMM price level updates and forwards throttled, sampled [`StreamUpdate`]s.
@@ -59,18 +59,21 @@ impl PriceLevelStreamProcessor {
         // The default venues are served under their names, auto-detection additionally serves
         // any newly streamed pAMM under its address.
         //
-        // Venues go through `TychoFallbackRouter`, as they do for consumers. The venue itself
-        // fills whenever execution overrides its registry slot (see `oracle_overrides`). Without
-        // those overrides the venue reverts and the router fills on the fallback pool instead,
-        // which reads as a quote mismatch rather than a stale quote — so every swap that lacks
-        // them is counted, by `tycho_integration_price_level_oracle_override_misses_total` when
-        // Titan published nothing for the venue at that block, and by
-        // `tycho_integration_price_level_oracle_override_unserved_total` for Metric, TaurusFi and
-        // auto-detected venues, which Titan's override stream does not serve at all.
+        // Venues are called directly rather than through `TychoFallbackRouter`, the stream's
+        // default: the router needs `user_data` naming a fallback pool for the pair, which the
+        // test has no pool to name under `--disable-onchain`, and a fill on that pool would
+        // measure the pool rather than the venue's quote.
+        //
+        // The stream's simulation overrides stay on, its default: each state carries the account
+        // state Titan priced its quote on, and the venue fills the quote when its swap is
+        // simulated with it. A swap whose state carries none is simulated against the venue's
+        // mined state, where its freshness guard usually reverts, and is counted by
+        // `tycho_integration_price_level_simulation_overrides_missing_total`.
         let stream = PriceLevelStreamBuilder::new()
             .with_known_pamms()
             .auto_detect(true)
             .with_tokens(all_tokens.clone())
+            .without_fallback_router()
             .build();
 
         let mut emitter = SampledEmitter::new(self.sample_size, self.block_interval);
@@ -163,10 +166,10 @@ impl SampledEmitter {
 
         // Emit before folding the current message into the caches, so the emitted update is a
         // consistent view as of the chosen block's last snapshot.
-        let block = update.block_number_or_timestamp;
+        let block = update.block_number;
         let emitted = self
             .chosen
-            .take_if(|snapshot| block > snapshot.block_number_or_timestamp)
+            .take_if(|snapshot| block > snapshot.block_number)
             .map(|snapshot| self.emit(snapshot));
 
         // Keep the caches in sync with every message, including skipped ones, so later samples
@@ -187,7 +190,7 @@ impl SampledEmitter {
 
         if let Some(snapshot) = &mut self.chosen {
             // A fresher snapshot of the chosen block supersedes the held one.
-            if snapshot.block_number_or_timestamp == block {
+            if snapshot.block_number == block {
                 *snapshot = update;
             }
         } else if block >= self.next_emission_block {
@@ -223,8 +226,7 @@ impl SampledEmitter {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| miette!(e).wrap_err("Error getting current timestamp"))?;
         let stream_update = StreamUpdate {
-            update_type: UpdateType::PriceLevelStream,
-            update: emitted,
+            payload: StreamUpdatePayload::PriceLevelStream(emitted),
             is_first_update: self.is_first_update,
             received_at,
         };
@@ -286,8 +288,16 @@ mod tests {
         ))
     }
 
+    /// The emitted update's inner `Update` (always a `PriceLevelStream` payload here).
+    fn inner(emitted: &StreamUpdate) -> &Update {
+        match &emitted.payload {
+            StreamUpdatePayload::PriceLevelStream(update) => update,
+            other => panic!("expected a price level payload, got {other}"),
+        }
+    }
+
     fn marker(emitted: &StreamUpdate, id: &str) -> u64 {
-        let state = emitted.update.states[id]
+        let state = inner(emitted).states[id]
             .as_any()
             .downcast_ref::<PriceLevelStreamState>()
             .expect("price level state");
@@ -331,11 +341,10 @@ mod tests {
             .expect("emission expected")
             .unwrap();
         assert!(emitted.is_first_update);
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number, 100);
         assert_eq!(marker(&emitted, "a"), 2);
         // The component was announced two messages ago; the emitted update re-joins it.
-        assert!(emitted
-            .update
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("a"));
 
@@ -344,7 +353,7 @@ mod tests {
             .expect("emission expected")
             .unwrap();
         assert!(!emitted.is_first_update);
-        assert_eq!(emitted.update.block_number_or_timestamp, 101);
+        assert_eq!(inner(&emitted).block_number, 101);
         assert_eq!(marker(&emitted, "a"), 3);
     }
 
@@ -366,7 +375,7 @@ mod tests {
             .handle(update(101, &[("a", 2), ("b", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number, 100);
         assert_eq!(marker(&emitted, "a"), 1);
 
         // The stale message's announcement of pair b resolves this emission's component lookup.
@@ -374,8 +383,7 @@ mod tests {
             .handle(update(102, &[("a", 3)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted
-            .update
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("b"));
     }
@@ -389,7 +397,7 @@ mod tests {
             .handle(update(101, &[("a", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
+        assert_eq!(inner(&emitted).block_number, 100);
 
         // Block 101 fell into the throttle window, so its snapshot is never chosen: block 102's
         // arrival emits nothing, but is chosen itself.
@@ -400,7 +408,7 @@ mod tests {
             .handle(update(103, &[("a", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 102);
+        assert_eq!(inner(&emitted).block_number, 102);
         assert_eq!(marker(&emitted, "a"), 3);
     }
 
@@ -415,19 +423,18 @@ mod tests {
             .handle(update(101, &[("a", 3)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.block_number_or_timestamp, 100);
-        assert!(emitted
-            .update
+        assert_eq!(inner(&emitted).block_number, 100);
+        assert!(inner(&emitted)
             .removed_pairs
             .contains_key("b"));
-        assert!(!emitted.update.states.contains_key("b"));
+        assert!(!inner(&emitted).states.contains_key("b"));
 
         // Flushed removals do not linger into later emissions.
         let emitted = emitter
             .handle(update(102, &[("a", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted.update.removed_pairs.is_empty());
+        assert!(inner(&emitted).removed_pairs.is_empty());
     }
 
     #[test]
@@ -441,10 +448,9 @@ mod tests {
             .handle(update(101, &[("a", 4), ("b", 4)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert!(emitted.update.removed_pairs.is_empty());
-        assert!(emitted.update.states.contains_key("b"));
-        assert!(emitted
-            .update
+        assert!(inner(&emitted).removed_pairs.is_empty());
+        assert!(inner(&emitted).states.contains_key("b"));
+        assert!(inner(&emitted)
             .new_pairs
             .contains_key("b"));
     }
@@ -458,16 +464,14 @@ mod tests {
             .handle(update(101, &[("a", 2)], &[], &[]))
             .expect("emission expected")
             .unwrap();
-        assert_eq!(emitted.update.states.len(), 2);
+        assert_eq!(inner(&emitted).states.len(), 2);
         // Exactly the sampled pairs carry their component.
         assert_eq!(
-            emitted
-                .update
+            inner(&emitted)
                 .new_pairs
                 .keys()
                 .collect::<HashSet<_>>(),
-            emitted
-                .update
+            inner(&emitted)
                 .states
                 .keys()
                 .collect::<HashSet<_>>()

@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use rand::Rng;
 use thiserror::Error;
 use tokio::{
     select,
@@ -12,7 +13,7 @@ use tokio::{
         oneshot,
     },
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{sleep, timeout, Instant},
 };
 use tracing::{debug, error, info, instrument, warn};
 use tycho_common::{
@@ -39,6 +40,11 @@ use crate::{
     },
     DeltasError,
 };
+
+/// Default maximum random delay before a restarted synchronizer requests a snapshot.
+pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
+/// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
+pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -129,6 +135,7 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     compression: bool,
     partial_blocks: bool,
     uses_dci: bool,
+    snapshot_jitter: Duration,
     /// Background snapshot tasks spawned for new components. Each task may be in-flight or
     /// finished; completed ones are harvested at the start of each delta iteration and their
     /// results included in that block's message.
@@ -439,6 +446,7 @@ where
             compression,
             partial_blocks: false,
             uses_dci: false,
+            snapshot_jitter: DEFAULT_SNAPSHOT_JITTER,
             snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
@@ -458,6 +466,24 @@ where
         self
     }
 
+    /// Sets the maximum random delay before a restarted synchronizer requests a snapshot.
+    ///
+    /// After a restart that needs a snapshot, the synchronizer waits a random time in
+    /// `[0, jitter]` before it requests the snapshot. The first start has no delay.
+    /// A `jitter` below [`MIN_SNAPSHOT_JITTER`] is raised to it.
+    pub fn with_snapshot_jitter(mut self, jitter: Duration) -> Self {
+        if jitter < MIN_SNAPSHOT_JITTER {
+            warn!(
+                extractor_id=%self.extractor_id,
+                requested_ms=jitter.as_millis(),
+                min_ms=MIN_SNAPSHOT_JITTER.as_millis(),
+                "Snapshot jitter is below the minimum; using the minimum"
+            );
+        }
+        self.snapshot_jitter = jitter.max(MIN_SNAPSHOT_JITTER);
+        self
+    }
+
     /// Main method that does all the work.
     ///
     /// ## Return Value
@@ -470,11 +496,15 @@ where
     ///
     /// The returned `end_rx` (if any) should be reused for retry attempts since the close
     /// signal may still arrive and we want to remain cancellable across retries.
+    ///
+    /// If the first block needs a snapshot, the synchronizer discards deltas for
+    /// `snapshot_delay` and requests the snapshot at the first block after the delay.
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
         block_tx: &mut Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
         mut end_rx: oneshot::Receiver<()>,
+        snapshot_delay: Duration,
     ) -> Result<(), Box<SyncError>> {
         // initialisation
         let subscription_options = SubscriptionOptions::new()
@@ -502,6 +532,9 @@ where
             // up without tearing down the WS subscription and rebuilding state from scratch.
             const MAX_STALE_RETRIES: u32 = 5;
             let mut stale_retries: u32 = 0;
+            // Messages keep arriving during the delay, so we discard them instead of sleeping:
+            // a sleep would overflow the subscription buffer on fast chains.
+            let mut snapshot_not_before: Option<Instant> = None;
             let (msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
@@ -574,6 +607,19 @@ where
                             }
                             continue;
                         }
+                    }
+                    match snapshot_not_before {
+                        Some(not_before) if Instant::now() < not_before => continue,
+                        None if !snapshot_delay.is_zero() && !self.is_next_expected(&incoming) => {
+                            info!(
+                                extractor=%self.extractor_id,
+                                delay_ms=snapshot_delay.as_millis(),
+                                "Syncing. Delaying snapshot request"
+                            );
+                            snapshot_not_before = Some(Instant::now() + snapshot_delay);
+                            continue;
+                        }
+                        _ => {}
                     }
                     break msg;
                 };
@@ -1121,8 +1167,21 @@ where
                     .last_synced_block
                     .as_ref()
                     .map(|h| h.number);
+                // Restarts of many clients happen at once after a server or extractor restart;
+                // a random delay spreads their snapshot requests. A stream that requests no
+                // snapshot puts no load to spread and would only lose deltas.
+                let requests_snapshot = self.include_snapshots &&
+                    !self
+                        .component_tracker
+                        .components
+                        .is_empty();
+                let snapshot_delay = if prev_block.is_some() && requests_snapshot {
+                    rand::thread_rng().gen_range(Duration::ZERO..=self.snapshot_jitter)
+                } else {
+                    Duration::ZERO
+                };
                 let res = self
-                    .state_sync(&mut tx, current_end_rx)
+                    .state_sync(&mut tx, current_end_rx, snapshot_delay)
                     .await;
                 let made_progress = self
                     .last_synced_block
@@ -2873,7 +2932,7 @@ mod test {
         // Call state_sync directly - this should error during processing
         let (_end_tx, end_rx) = oneshot::channel::<()>();
         let result = state_sync
-            .state_sync(&mut block_tx, end_rx)
+            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
             .await;
         // Verify that state_sync returned an error
         assert!(result.is_err(), "state_sync should have errored during processing");
@@ -2928,7 +2987,7 @@ mod test {
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx)
+                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3036,7 +3095,7 @@ mod test {
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx)
+                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3356,7 +3415,7 @@ mod test {
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx)
+                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3563,7 +3622,7 @@ mod test {
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx)
+                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3611,6 +3670,303 @@ mod test {
                 // Channel closed is also acceptable
             }
         }
+    }
+
+    fn header_of(changes: &BlockAggregatedChanges) -> BlockHeader {
+        changes.into()
+    }
+
+    /// Mocks one tracked component and records the block of every snapshot request.
+    fn mock_rpc_recording_snapshot_blocks() -> (MockRPCClient, Arc<std::sync::Mutex<Vec<u64>>>) {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let snapshot_blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = snapshot_blocks.clone();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(move |request, _chunk_size, _concurrency| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(request.block_number);
+                Ok(Snapshot::default())
+            });
+        (rpc_client, snapshot_blocks)
+    }
+
+    /// Returns a deltas client whose subscription emits `blocks` 50 ms apart.
+    fn mock_deltas_emitting(blocks: Vec<u64>) -> MockDeltasClient {
+        let mut deltas_client = MockDeltasClient::new();
+        let (tx, rx) = channel(128);
+        deltas_client
+            .expect_subscribe()
+            .return_once(move |_, _| {
+                tokio::spawn(async move {
+                    for block in blocks {
+                        let _ = tx
+                            .send(make_block_changes(block, None))
+                            .await;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                Ok((Uuid::default(), rx))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .return_once(|_| Ok(()));
+        deltas_client
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_snapshot_delay_discards_deltas_until_it_ends() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let deltas_client = mock_deltas_emitting((10..=20).collect());
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let first = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let second = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive second message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        // Blocks 10-15 arrive within the 300 ms delay, 50 ms apart.
+        let snapshot_blocks = snapshot_blocks.lock().unwrap().clone();
+        assert_eq!(snapshot_blocks.len(), 1, "Should request one snapshot");
+        assert!(
+            snapshot_blocks[0] >= 16,
+            "Snapshot at block {} is inside the delay",
+            snapshot_blocks[0]
+        );
+        assert_eq!(first.header.number, snapshot_blocks[0]);
+        assert_eq!(second.header.number, snapshot_blocks[0] + 1);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_snapshot_delay_skipped_when_next_block_expected() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let deltas_client = mock_deltas_emitting(vec![10, 11]);
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
+
+        let (mut block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .await
+        });
+
+        let msg = timeout(Duration::from_millis(10), block_rx.recv())
+            .await
+            .expect("Should receive the next expected block at once")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = end_tx.send(());
+        let _ = handle
+            .await
+            .expect("Task should not panic");
+
+        assert_eq!(msg.header.number, 10);
+        assert!(msg.snapshots.states.is_empty());
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_first_start_has_no_snapshot_delay() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let deltas_client = mock_deltas_emitting(vec![1]);
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        assert_eq!(state_sync.snapshot_jitter, DEFAULT_SNAPSHOT_JITTER);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+
+        let msg = timeout(Duration::from_millis(10), block_rx.recv())
+            .await
+            .expect("Should receive the first block at once")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        assert_eq!(msg.header.number, 1);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn test_snapshot_jitter_has_a_minimum() {
+        let state_sync = with_mocked_clients(true, false, None, None);
+        let state_sync = state_sync.with_snapshot_jitter(Duration::ZERO);
+        assert_eq!(state_sync.snapshot_jitter, MIN_SNAPSHOT_JITTER);
+
+        let state_sync = state_sync.with_snapshot_jitter(Duration::from_secs(10));
+        assert_eq!(state_sync.snapshot_jitter, Duration::from_secs(10));
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_retry_before_first_block_has_no_snapshot_delay() {
+        let (rpc_client, snapshot_blocks) = mock_rpc_recording_snapshot_blocks();
+        let mut deltas_client = MockDeltasClient::new();
+        deltas_client
+            .expect_subscribe()
+            .times(1)
+            .returning(|_, _| Err(DeltasError::ServerError("unavailable".to_string())));
+        let (tx, rx) = channel(128);
+        deltas_client
+            .expect_subscribe()
+            .return_once(move |_, _| {
+                tokio::spawn(async move {
+                    for block in 1..=5 {
+                        let _ = tx
+                            .send(make_block_changes(block, None))
+                            .await;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                Ok((Uuid::default(), rx))
+            });
+        deltas_client
+            .expect_unsubscribe()
+            .return_once(|_| Ok(()));
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        state_sync.max_retries = 2;
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+
+        let msg = timeout(Duration::from_secs(1), block_rx.recv())
+            .await
+            .expect("Should receive the first block")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+
+        assert_eq!(msg.header.number, 1);
+        assert_eq!(*snapshot_blocks.lock().unwrap(), vec![1]);
+    }
+
+    /// Starts `state_sync` as a restart after block 5 and returns the first block it emits.
+    async fn first_block_after_restart(
+        mut state_sync: ProtocolStateSynchronizer<
+            ArcRPCClient<MockRPCClient>,
+            ArcDeltasClient<MockDeltasClient>,
+        >,
+    ) -> u64 {
+        state_sync
+            .initialize()
+            .await
+            .expect("Init should succeed");
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+
+        let (handle, mut block_rx) = state_sync.start().await;
+        let (jh, close_tx) = handle.split();
+        let msg = timeout(Duration::from_millis(10), block_rx.recv())
+            .await
+            .expect("Should receive the first block at once")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        let _ = close_tx.send(());
+        jh.await.expect("Task should not panic");
+        msg.header.number
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_no_state_restart_has_no_snapshot_delay() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let deltas_client = mock_deltas_emitting((10..=14).collect());
+        let mut state_sync =
+            with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+        state_sync.include_snapshots = false;
+
+        assert_eq!(first_block_after_restart(state_sync).await, 10);
+    }
+
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_restart_without_components_has_no_snapshot_delay() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| Ok(Page::new(vec![], 0, 0, 100)));
+        rpc_client
+            .expect_get_snapshots()
+            .never();
+        let deltas_client = mock_deltas_emitting((10..=14).collect());
+        let state_sync = with_mocked_clients(true, false, Some(rpc_client), Some(deltas_client));
+
+        assert_eq!(first_block_after_restart(state_sync).await, 10);
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
@@ -3734,6 +4090,8 @@ mod test {
             timestamp: 0,
             partial_block_index: None,
         });
+        // This test checks block selection, not the restart delay.
+        state_sync.snapshot_jitter = Duration::ZERO;
 
         let (handle, mut block_rx) = state_sync.start().await;
         let (jh, close_tx) = handle.split();

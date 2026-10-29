@@ -1,5 +1,6 @@
 use tycho_common::simulation::protocol_sim::Price;
 
+pub(crate) mod aero_hook_fee;
 pub(crate) mod dynamic_fee_module;
 pub(crate) mod observations;
 

@@ -2,10 +2,11 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BEBOP_FALLBACK_PROTOCOL_SYSTEM, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
     },
     group_swaps::group_swaps,
+    subsidy::encoded_subsidy,
 };
 use crate::encoding::models::{Solution, Strategy, UserTransferType};
 
@@ -26,11 +27,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "pancakeswap_v3",
     "uniswap_v4",
     "uniswap_v4_hooks",
+    "pancakeswap_infinity_cl",
+    "pancakeswap_infinity_cl_hooks",
+    "pancakeswap_infinity_bin",
     "ekubo_v2",
     "ekubo_v3",
     "aerodrome_slipstreams",
     "velodrome_slipstreams",
     "up_v3",
+    "aero_cl",
     "vm:balancer_v3",
 ];
 
@@ -84,6 +89,14 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
+/// Gas for `MetricFallbackRouter`'s `quoteFallback` call, which prices the fallback protocol
+/// before the router picks a side. The cost depends on how much of the fallback pool's liquidity
+/// the quote walks; this covers most quotes on a concentrated-liquidity pool.
+pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
+
+/// Extra gas of a subsidized swap.
+pub const SUBSIDY_GAS: u64 = 65_000;
+
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
 pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
@@ -135,10 +148,14 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
-        // `MetricFallbackRouter` quotes the pool by running its swap.
+        // `MetricFallbackRouter` quotes the pool by running its swap, then quotes the fallback.
         if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
             total_gas += &group.estimated_gas;
+            total_gas += BigUint::from(METRIC_FALLBACK_QUOTE_GAS);
         }
+    }
+    if encoded_subsidy(solution).is_some() {
+        total_gas += BigUint::from(SUBSIDY_GAS);
     }
 
     // Add user transfer overhead
@@ -250,10 +267,8 @@ fn estimate_transfer_overhead(
         overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
     }
 
-    // The Bebop and Hashflow routers approve the venue themselves and forward the output.
-    if protocol_system == BEBOP_FALLBACK_PROTOCOL_SYSTEM ||
-        protocol_system == HASHFLOW_FALLBACK_PROTOCOL_SYSTEM
-    {
+    // The signed-quote routers approve the venue themselves and forward the output.
+    if SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
         overhead += transfer_token_gas(token_out);
     }
@@ -269,10 +284,17 @@ fn estimate_transfer_overhead(
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
     use super::*;
-    use crate::encoding::models::{default_token, Solution, Strategy, Swap, UserTransferType};
+    use crate::encoding::{
+        evm::constants::{
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+        },
+        models::{default_token, Solution, Strategy, Swap, UserTransferType},
+    };
 
     fn lido_swap(token_in: Bytes, token_out: Bytes) -> Swap {
         Swap::new(
@@ -404,10 +426,11 @@ mod tests {
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // fallback quote                      100_000  ← METRIC_FALLBACK_QUOTE_GAS
         // pool gas                            100_000
         // simulated quote                     100_000  ← the pool gas again
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(340_000u64));
+        assert_eq!(gas, BigUint::from(440_000u64));
     }
 
     #[test]
@@ -424,9 +447,12 @@ mod tests {
         assert_eq!(gas, BigUint::from(325_000u64));
     }
 
-    #[test]
-    fn test_single_hashflow_fallback_router() {
-        let solution = make_solution(vec![make_swap(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]);
+    #[rstest]
+    #[case::hashflow(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::native(NATIVE_FALLBACK_PROTOCOL_SYSTEM)]
+    #[case::liquorice(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)]
+    fn test_single_signed_quote_fallback_router(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // The same charges as the Bebop fallback router.

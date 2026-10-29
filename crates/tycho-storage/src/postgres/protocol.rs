@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap, HashSet},
+};
 
 use chrono::{NaiveDateTime, Utc};
 use diesel::{
@@ -7,6 +10,7 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
+use num_bigint::BigUint;
 use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
@@ -134,6 +138,19 @@ impl PostgresGateway {
         }
     }
 
+    /// Returns the components of `chain` that match all given filters, and the number of matching
+    /// components on all pages.
+    ///
+    /// - `system`: only components of this protocol system.
+    /// - `ids`: only components with these external ids.
+    /// - `min_tvl`: only components with a TVL greater than this value. A component without a TVL
+    ///   row never matches; a NaN TVL matches every value.
+    /// - `pagination`: the page to return, in ascending database id order. Without it, all matching
+    ///   components are returned, in no particular order.
+    ///
+    /// Soft-deleted components are returned too. When the component index is enabled and `system`
+    /// is given without `ids`, the index selects the page and counts the matches; Postgres then
+    /// loads only the components on the page.
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_protocol_components(
         &self,
@@ -146,6 +163,19 @@ impl PostgresGateway {
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
         use super::schema::{protocol_component::dsl::*, transaction::dsl::*};
         let chain_id_value = self.get_chain_id(chain)?;
+
+        if let (Some(component_index), Some(system_name), None) =
+            (&self.component_index, &system, ids)
+        {
+            let system_id = self.get_protocol_system_id(system_name)?;
+            if let Some(page) = component_index.query(chain, system_id, min_tvl, pagination_params)
+            {
+                let components = self
+                    .get_protocol_components_by_db_ids(chain, &page.ids, conn)
+                    .await?;
+                return Ok(WithTotal { entity: components, total: Some(page.total) });
+            }
+        }
 
         let mut count_query = protocol_component
             .left_join(schema::component_tvl::table)
@@ -238,6 +268,43 @@ impl PostgresGateway {
             .await?;
 
         Ok(WithTotal { entity: res, total: Some(count) })
+    }
+
+    /// Loads the components with the given database ids, in ascending id order. Ids without a row
+    /// are skipped.
+    async fn get_protocol_components_by_db_ids(
+        &self,
+        chain: &Chain,
+        db_ids: &[i64],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<Vec<ProtocolComponent>, StorageError> {
+        if db_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = schema::protocol_component::table
+            .inner_join(
+                schema::transaction::table
+                    .on(schema::protocol_component::creation_tx.eq(schema::transaction::id)),
+            )
+            .filter(schema::protocol_component::id.eq_any(db_ids))
+            .order_by(schema::protocol_component::id.asc())
+            .select((orm::ProtocolComponent::as_select(), schema::transaction::hash))
+            .load::<(orm::ProtocolComponent, TxHash)>(conn)
+            .await
+            .map_err(PostgresError::from)?;
+        if rows.len() != db_ids.len() {
+            warn!(
+                n_requested = db_ids.len(),
+                n_found = rows.len(),
+                "Requested component ids without a component row"
+            );
+        }
+        let rows = rows
+            .into_iter()
+            .map(|(component, tx_hash)| (component, Some(tx_hash)))
+            .collect();
+        self.build_protocol_components(rows, chain, conn)
+            .await
     }
 
     #[instrument(level = Level::DEBUG, skip(self, orm_protocol_components, conn))]
@@ -381,8 +448,7 @@ impl PostgresGateway {
             .into_iter()
             .collect();
 
-        let mut res: HashMap<Address, (String, Bytes)> = HashMap::new();
-        schema::protocol_component::table
+        let rows = schema::protocol_component::table
             .inner_join(schema::protocol_component_holds_token::table)
             .inner_join(schema::component_balance::table)
             .select((
@@ -396,23 +462,9 @@ impl PostgresGateway {
             .filter(schema::component_balance::token_id.eq_any(token_ids.keys()))
             .get_results::<(i64, String, Bytes)>(conn)
             .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .for_each(|(tid, cid, bal)| {
-                if let Some(address) = token_ids.get(&tid) {
-                    res.entry(address.clone())
-                        .and_modify(|v| {
-                            // Bytes uses lexicographical order which in case lengths
-                            // are equal, is equivalent to big-endian numerical order.
-                            if v.1.len() == bal.len() && v.1 < bal {
-                                *v = (cid.clone(), bal.clone());
-                            }
-                        })
-                        .or_insert_with(|| (cid, bal));
-                }
-            });
+            .map_err(PostgresError::from)?;
 
-        Ok(res)
+        Ok(largest_balance_per_token(rows, &token_ids))
     }
 
     pub async fn add_protocol_components(
@@ -1960,6 +2012,7 @@ impl PostgresGateway {
 
         if let Some(pagination) = pagination_params {
             query = query
+                .order_by(ct::protocol_component_id)
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }
@@ -1987,6 +2040,34 @@ impl PostgresGateway {
 
         Ok(WithTotal { entity: result, total: Some(count) })
     }
+}
+
+/// Keeps, per token, the component with the largest balance. Rows are `(token_id, component_id,
+/// balance)`. On a tie the first row stays. Rows whose token id is not in `token_ids` are ignored.
+fn largest_balance_per_token(
+    rows: impl IntoIterator<Item = (i64, ComponentId, Bytes)>,
+    token_ids: &HashMap<i64, Address>,
+) -> HashMap<Address, (ComponentId, Bytes)> {
+    let mut largest: HashMap<Address, (ComponentId, Bytes)> = HashMap::new();
+    for (token_id, component_id, balance) in rows {
+        let Some(token) = token_ids.get(&token_id) else {
+            continue;
+        };
+        let replace = match largest.get(token) {
+            Some((_, current)) => compare_balances(&balance, current) == Ordering::Greater,
+            None => true,
+        };
+        if replace {
+            largest.insert(token.clone(), (component_id, balance));
+        }
+    }
+    largest
+}
+
+/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
+/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
+fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
+    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 #[cfg(test)]
@@ -3794,6 +3875,54 @@ mod test {
             .expect("retrieving components failed");
 
         assert_eq!(res, exp);
+    }
+
+    const USDTB: &str = "0xc139190f447e929f090edeb554d95abb8b18ac1c";
+
+    #[rstest]
+    #[case::short_row_last(&[
+        ("hooks", "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"),
+        ("curve", "0x08c7be39eaf21f5b7efb68"),
+        ("v3", "0x029c07c98d"),
+    ])]
+    #[case::short_row_first(&[
+        ("v3", "0x029c07c98d"),
+        ("curve", "0x08c7be39eaf21f5b7efb68"),
+        ("hooks", "0x000000000000000000000000000000000000000000000470a6f46c608baff22b"),
+    ])]
+    fn test_largest_balance_per_token_compares_numerically(#[case] rows: &[(&str, &str)]) {
+        let token = Bytes::from(USDTB);
+        let token_ids = HashMap::from([(1_i64, token.clone())]);
+        let rows = rows
+            .iter()
+            .map(|(component_id, balance)| {
+                (1_i64, component_id.to_string(), Bytes::from(*balance))
+            });
+
+        let res = largest_balance_per_token(rows, &token_ids);
+
+        assert_eq!(
+            res,
+            HashMap::from([(
+                token,
+                ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))
+            )])
+        );
+    }
+
+    #[test]
+    fn test_largest_balance_per_token_keeps_first_on_equal_value() {
+        let token = Bytes::from(USDTB);
+        let token_ids = HashMap::from([(1_i64, token.clone())]);
+        let rows = vec![
+            (1_i64, "first".to_string(), Bytes::from("0x00ff")),
+            (1_i64, "second".to_string(), Bytes::from("0xff")),
+            (2_i64, "unknown_token".to_string(), Bytes::from("0xffff")),
+        ];
+
+        let res = largest_balance_per_token(rows, &token_ids);
+
+        assert_eq!(res, HashMap::from([(token, ("first".to_string(), Bytes::from("0x00ff")))]));
     }
 
     #[tokio::test]

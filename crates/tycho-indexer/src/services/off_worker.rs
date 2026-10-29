@@ -10,7 +10,14 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tycho_common::dto;
 
-use crate::services::{rpc::RpcError, state::shadow::Endpoint};
+use crate::services::{
+    rpc::RpcError,
+    state::{
+        service::{FallbackReason, StateServiceError},
+        shadow::Endpoint,
+        view::{ContractStateView, ProtocolStateView},
+    },
+};
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
 /// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
@@ -27,11 +34,20 @@ const JSON_BYTES_PER_ACCOUNT: usize = 512;
 /// JSON bytes of the fixed fields of one component state.
 const JSON_BYTES_PER_COMPONENT: usize = 100;
 
+/// What the entity cache did with a request.
+pub(super) enum CacheReply {
+    /// The cache answered; the response holds its JSON.
+    Answered(HttpResponse),
+    /// The cache cannot answer; the database path answers instead.
+    Fallback(FallbackReason),
+}
+
 /// Runs the CPU-heavy steps of state responses off the actix request workers. Each endpoint and
 /// step (build, serialize) has its own pool of one permit per request worker, so a job never
 /// waits behind jobs of another endpoint or step: a protocol state response, built in
 /// milliseconds, does not queue behind contract state builds that take seconds, and a built
-/// response does not queue behind builds that started after it.
+/// response does not queue behind builds that started after it. A large view is built again in
+/// its serialize job, so it holds no cache entry while it waits for a serialize permit.
 pub(super) struct OffWorker {
     contract_state: EndpointPools,
     protocol_state: EndpointPools,
@@ -48,25 +64,44 @@ impl OffWorker {
         }
     }
 
-    /// Runs `build` for `endpoint` on the blocking thread pool, in the caller's tracing span, and
-    /// returns its result. The job keeps its permit until `build` returns, also when the caller
-    /// stops waiting.
+    /// Builds a view, a response of `endpoint`, with `build` on the blocking thread pool, in the
+    /// caller's tracing span, and answers it as a `200 OK` JSON response, the same as
+    /// [`HttpResponse::json`]. A view estimated below [`OFF_WORKER_MIN_JSON_BYTES`] is serialized
+    /// on the request worker. A larger one is dropped, and `build` runs again in the serialize
+    /// job, so no view exists while the answer waits for a serialize permit. Each job keeps its
+    /// permit until it returns, also when the caller stops waiting.
+    ///
+    /// A fallback from either build gives [`CacheReply::Fallback`].
     ///
     /// # Errors
     ///
-    /// Returns [`RpcError::Unknown`] if `build` panics.
-    pub(super) async fn build<R>(
+    /// Returns the [`RpcError`] of a build error other than a fallback. Returns
+    /// [`RpcError::Unknown`] if a build panics, or if serialization fails or panics.
+    pub(super) async fn view_json<V>(
         &self,
         endpoint: Endpoint,
-        build: impl FnOnce() -> R + Send + 'static,
-    ) -> Result<R, RpcError>
+        build: impl Fn() -> Result<V, StateServiceError> + Clone + Send + 'static,
+    ) -> Result<CacheReply, RpcError>
     where
-        R: Send + 'static,
+        V: Serialize + JsonSizeHint + Send + 'static,
     {
-        self.pools(endpoint)
-            .build
-            .run(build)
-            .await
+        let pools = self.pools(endpoint);
+        let view = match pools.build.run(build.clone()).await? {
+            Ok(view) => view,
+            Err(err) => return fallback_or_error(err),
+        };
+        if view.json_size_hint() < OFF_WORKER_MIN_JSON_BYTES {
+            return Ok(CacheReply::Answered(HttpResponse::Ok().json(view)));
+        }
+        drop(view);
+        let serialized = pools
+            .serialize
+            .run(move || build().map(|view| serde_json::to_vec(&view)))
+            .await?;
+        match serialized {
+            Ok(body) => json_response(body).map(CacheReply::Answered),
+            Err(err) => fallback_or_error(err),
+        }
     }
 
     /// Answers `value`, a response of `endpoint`, as a `200 OK` JSON response, the same as
@@ -91,11 +126,8 @@ impl OffWorker {
             .pools(endpoint)
             .serialize
             .run(move || serde_json::to_vec(value.as_ref()))
-            .await?
-            .map_err(|err| RpcError::Unknown(format!("Failed to serialize response: {err}")))?;
-        Ok(HttpResponse::Ok()
-            .content_type(ContentType::json())
-            .body(body))
+            .await?;
+        json_response(body)
     }
 
     fn pools(&self, endpoint: Endpoint) -> &EndpointPools {
@@ -103,6 +135,31 @@ impl OffWorker {
             Endpoint::ContractState => &self.contract_state,
             Endpoint::ProtocolState => &self.protocol_state,
         }
+    }
+}
+
+/// A `200 OK` response with `body`, serialized JSON, the same as [`HttpResponse::json`].
+///
+/// # Errors
+///
+/// Returns [`RpcError::Unknown`] if serialization failed.
+fn json_response(body: serde_json::Result<Vec<u8>>) -> Result<HttpResponse, RpcError> {
+    let body =
+        body.map_err(|err| RpcError::Unknown(format!("Failed to serialize response: {err}")))?;
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(body))
+}
+
+/// Answers a fallback as [`CacheReply::Fallback`]; any other state service error is a failure.
+fn fallback_or_error(err: StateServiceError) -> Result<CacheReply, RpcError> {
+    match err {
+        StateServiceError::Fallback(reason) => Ok(CacheReply::Fallback(reason)),
+        StateServiceError::InvalidVersion(_) |
+        StateServiceError::VersionAboveTip(_) |
+        StateServiceError::ContractNotFound(_) |
+        StateServiceError::LockPoisoned { .. } |
+        StateServiceError::WindowRead(_) => Err(err.into()),
     }
 }
 
@@ -185,6 +242,18 @@ impl JsonSizeHint for dto::StateRequestResponse {
     }
 }
 
+impl JsonSizeHint for ContractStateView {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
+        for account in &self.accounts {
+            size += account.json_key_count_hint() * JSON_BYTES_PER_SLOT;
+            // Code is a hex string: two characters per byte.
+            size += 2 * account.code_len() + JSON_BYTES_PER_ACCOUNT;
+        }
+        size
+    }
+}
+
 impl JsonSizeHint for dto::ProtocolStateRequestResponse {
     fn json_size_hint(&self) -> usize {
         let mut size = 0;
@@ -196,20 +265,45 @@ impl JsonSizeHint for dto::ProtocolStateRequestResponse {
     }
 }
 
+impl JsonSizeHint for ProtocolStateView {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
+        for state in &self.states {
+            size += state.json_key_count_hint() * JSON_BYTES_PER_ATTRIBUTE;
+            size += JSON_BYTES_PER_COMPONENT;
+        }
+        size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
         time::Duration,
     };
 
     use actix_web::http::StatusCode;
-    use tycho_common::{dto::PaginationResponse, Bytes};
+    use tycho_common::{
+        dto::PaginationResponse,
+        models::{contract::AccountDelta, protocol::ProtocolComponentState, Chain, ChangeType},
+        storage::WriteTimestamp,
+        Bytes,
+    };
 
     use super::*;
+    use crate::{
+        extractor::models::fixtures,
+        services::state::{
+            cache::{CachedAccount, CachedComponentState},
+            view::{AccountView, ComponentView},
+        },
+        testing,
+    };
 
     /// Waits until `pool` has `n` permits available, and fails after one second.
     async fn wait_for_available_permits(pool: &Pool, n: usize) {
@@ -446,20 +540,282 @@ mod tests {
         let large = contract_state_response(slots_at_threshold(), 0);
         let wait = Duration::from_millis(50);
 
-        let built =
-            tokio::time::timeout(wait, off_worker.build(Endpoint::ProtocolState, || 1)).await;
-        let contract_built =
-            tokio::time::timeout(wait, off_worker.build(Endpoint::ContractState, || 1)).await;
+        let built = tokio::time::timeout(
+            wait,
+            off_worker.view_json(Endpoint::ProtocolState, || {
+                Ok::<_, StateServiceError>(protocol_state_response(1, 1))
+            }),
+        )
+        .await;
+        let contract_built = tokio::time::timeout(
+            wait,
+            off_worker.view_json(Endpoint::ContractState, || {
+                Ok::<_, StateServiceError>(contract_state_view(&cached_account(10)))
+            }),
+        )
+        .await;
         let contract_serialized =
             tokio::time::timeout(wait, off_worker.json(Endpoint::ContractState, large)).await;
 
-        assert_eq!(
-            built
-                .expect("a protocol state build must not wait")
-                .unwrap(),
-            1
-        );
+        let built = built
+            .expect("a protocol state build must not wait")
+            .unwrap();
+        let built = answered(built);
+        assert_eq!(built.status(), StatusCode::OK);
         assert!(contract_built.is_err(), "a contract state build must wait for a permit");
         assert!(contract_serialized.is_err(), "a contract state serialization must wait");
+    }
+
+    fn answered(reply: CacheReply) -> HttpResponse {
+        match reply {
+            CacheReply::Answered(response) => response,
+            CacheReply::Fallback(reason) => panic!("expected an answer, got {reason:?}"),
+        }
+    }
+
+    /// A cached account with `n_slots` storage slots.
+    fn cached_account(n_slots: u64) -> Arc<CachedAccount> {
+        let creation = AccountDelta::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            fixtures::optional_slots((0..n_slots).map(|n| (n, n))),
+            Some(Bytes::from(1u64)),
+            Some(Bytes::from(vec![0u8])),
+            ChangeType::Creation,
+        );
+        Arc::new(CachedAccount::from_creation(
+            &creation,
+            None,
+            WriteTimestamp::from(&testing::block(1)),
+        ))
+    }
+
+    /// A contract state view of `account` alone.
+    fn contract_state_view(account: &Arc<CachedAccount>) -> ContractStateView {
+        ContractStateView {
+            accounts: vec![AccountView::new(Arc::clone(account))],
+            pagination: PaginationResponse::new(0, 100, 1),
+        }
+    }
+
+    /// An off-worker whose contract state serialize pool has no permits.
+    fn off_worker_without_contract_state_serialize_permits() -> OffWorker {
+        OffWorker {
+            contract_state: EndpointPools {
+                build: Pool::new(Endpoint::ContractState, "build", 1),
+                serialize: Pool::new(Endpoint::ContractState, "serialize", 0),
+            },
+            protocol_state: EndpointPools::new(Endpoint::ProtocolState, 1),
+        }
+    }
+
+    /// Waits until `condition` holds, and fails with `failure` after one second.
+    async fn wait_until(condition: impl Fn() -> bool, failure: &str) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect(failure);
+    }
+
+    #[actix_web::test]
+    async fn view_json_builds_a_large_view_again_to_serialize_it() {
+        let account = cached_account(2_000);
+        let expected = serde_json::to_vec(&contract_state_view(&account)).unwrap();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let builds = Arc::clone(&builds);
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StateServiceError>(contract_state_view(&account))
+            }
+        };
+
+        let response = OffWorker::new()
+            .view_json(Endpoint::ContractState, build)
+            .await
+            .unwrap();
+        let response = answered(response);
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/json"
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(body, expected);
+    }
+
+    // The serialize pool has no permits, so only a view serialized on the worker can return.
+    #[actix_web::test]
+    async fn view_json_builds_a_small_view_once_and_serializes_it_on_the_worker() {
+        let account = cached_account(10);
+        let expected = serde_json::to_vec(&contract_state_view(&account)).unwrap();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let builds = Arc::clone(&builds);
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StateServiceError>(contract_state_view(&account))
+            }
+        };
+        let off_worker = off_worker_without_contract_state_serialize_permits();
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(50),
+            off_worker.view_json(Endpoint::ContractState, build),
+        )
+        .await
+        .expect("a small view must not wait for a serialize permit")
+        .unwrap();
+        let response = answered(response);
+
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(body, expected);
+    }
+
+    // While no view exists, only the cache holds the entry. A fold must copy an entry that a
+    // waiting answer holds.
+    #[actix_web::test]
+    async fn view_json_holds_no_entry_while_it_waits_for_a_serialize_permit() {
+        // Stands in for the cache: the build reaches the entry through it, as the service does.
+        let cache = Arc::new(cached_account(2_000));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let cache = Arc::clone(&cache);
+            let builds = Arc::clone(&builds);
+            move || {
+                let view = contract_state_view(&cache);
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StateServiceError>(view)
+            }
+        };
+        let off_worker = off_worker_without_contract_state_serialize_permits();
+        let waits = async {
+            wait_until(|| builds.load(Ordering::SeqCst) == 1, "the view was not built").await;
+            wait_until(
+                || Arc::strong_count(&*cache) == 1,
+                "the answer holds the entry while it waits",
+            )
+            .await;
+        };
+
+        tokio::select! {
+            _ = off_worker.view_json(Endpoint::ContractState, build) => {
+                panic!("a large view must wait for a serialize permit")
+            }
+            () = waits => {}
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    #[actix_web::test]
+    async fn view_json_falls_back_when_the_first_build_falls_back() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let builds = Arc::clone(&builds);
+            move || -> Result<ContractStateView, _> {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Err(StateServiceError::Fallback(FallbackReason::EmptyWindow))
+            }
+        };
+
+        let reply = OffWorker::new()
+            .view_json(Endpoint::ContractState, build)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(reply, CacheReply::Fallback(FallbackReason::EmptyWindow)),
+            "expected a fallback"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    #[actix_web::test]
+    async fn view_json_falls_back_when_the_second_build_falls_back() {
+        let account = cached_account(2_000);
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let builds = Arc::clone(&builds);
+            move || match builds.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(contract_state_view(&account)),
+                _ => Err(StateServiceError::Fallback(FallbackReason::EntryNewer)),
+            }
+        };
+
+        let reply = OffWorker::new()
+            .view_json(Endpoint::ContractState, build)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(reply, CacheReply::Fallback(FallbackReason::EntryNewer)),
+            "expected a fallback"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[actix_web::test]
+    async fn view_json_returns_the_rpc_error_of_a_failed_second_build() {
+        let account = cached_account(2_000);
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = {
+            let builds = Arc::clone(&builds);
+            move || match builds.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(contract_state_view(&account)),
+                _ => Err(StateServiceError::InvalidVersion("bad version".to_string())),
+            }
+        };
+
+        let result = OffWorker::new()
+            .view_json(Endpoint::ContractState, build)
+            .await;
+
+        assert!(
+            matches!(&result, Err(RpcError::Parse(reason)) if reason == "bad version"),
+            "expected a parse error, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn contract_state_view_with_many_slots_is_serialized_off_the_worker() {
+        let response = contract_state_view(&cached_account(2_000));
+
+        assert!(response.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
+        assert!(
+            serde_json::to_vec(&response)
+                .unwrap()
+                .len() >=
+                OFF_WORKER_MIN_JSON_BYTES
+        );
+    }
+
+    #[test]
+    fn protocol_state_view_with_many_attributes_is_serialized_off_the_worker() {
+        let attributes = (0..6_000u64)
+            .map(|n| (format!("ticks/{n}/net-liquidity"), Bytes::from(n)))
+            .collect();
+        let entry = CachedComponentState::from_snapshot(
+            ProtocolComponentState::new("c1", attributes, HashMap::new()),
+            WriteTimestamp::from(&testing::block(1)),
+        );
+        let response = ProtocolStateView {
+            states: vec![ComponentView::new("c1", Some(Arc::new(entry)), true)],
+            pagination: PaginationResponse::new(0, 100, 1),
+        };
+
+        assert!(response.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
     }
 }

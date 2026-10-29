@@ -21,6 +21,7 @@ const UNISWAP_V3_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV3.runti
 const UNISWAP_V4_BYTECODE_JSON: &str = include_str!("../fixtures/UniswapV4.runtime.json");
 const UNISWAP_V4_ANGSTROM_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Angstrom.runtime.json");
+const AERO_BASIC_BYTECODE_JSON: &str = include_str!("../fixtures/AeroBasic.runtime.json");
 const BALANCER_V2_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV2.runtime.json");
 const BALANCER_V3_BYTECODE_JSON: &str = include_str!("../fixtures/BalancerV3.runtime.json");
 const CURVE_BYTECODE_JSON: &str = include_str!("../fixtures/Curve.runtime.json");
@@ -33,9 +34,14 @@ const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
+const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtime.json");
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 const LIDO_V4_BYTECODE_JSON: &str = include_str!("../fixtures/LidoV4.runtime.json");
+const PANCAKESWAP_INFINITY_CL_BYTECODE_JSON: &str =
+    include_str!("../fixtures/PancakeswapInfinity.runtime.json");
+const PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON: &str =
+    include_str!("../fixtures/PancakeswapInfinityRobinhood.runtime.json");
 
 /// Mapping from protocol component patterns to executor bytecode JSON strings
 static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -61,10 +67,15 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("ekubo_v3", EKUBO_V3_BYTECODE_JSON);
     map.insert("fluid_v1", FLUIDV1_BYTECODE_JSON);
     map.insert("vm:liquidityparty", LIQUIDITYPARTY_BYTECODE_JSON);
+    map.insert("lunarbase", LUNARBASE_BYTECODE_JSON);
     map.insert("sky", SKY_BYTECODE_JSON);
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("aero_basic", AERO_BASIC_BYTECODE_JSON);
+    map.insert("aero_cl", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
     map
 });
 
@@ -77,6 +88,10 @@ static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'stati
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+            (
+                (Chain::Robinhood, "pancakeswap_infinity_cl"),
+                PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON,
+            ),
         ])
     });
 

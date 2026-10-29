@@ -1,0 +1,73 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_aero_basic"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/evm-aero-basic"
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/entity.proto
+  importPaths:
+    - ../../../proto/
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/evm_aero_basic.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 26237985
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 26237985
+    updatePolicy: set_if_not_exists
+    valueType: proto:tycho.evm.v1.ProtocolComponent
+    inputs:
+      - map: map_pools_created
+
+  - name: store_kind_pools
+    kind: store
+    initialBlock: 26237985
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - map: map_pools_created
+
+  # Must start at the factory deployment: the constructors emit the initial default fee and fee
+  # module, and pool creation fails without them.
+  - name: store_factory_settings
+    kind: store
+    initialBlock: 26237985
+    updatePolicy: set
+    valueType: bytes
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 26237985
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - store: store_pools
+      - store: store_kind_pools
+      - store: store_factory_settings
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+# AERO v1.1.0 basic deployment; addresses are identical on every chain.
+params:
+  map_pools_created: "volatile_factory=0x8E6a9FCd1d638CC760Ffba397605Fe3355dE76D2&stable_factory=0x78589E876edcEbdce72ee3436ab3c9AD3a7cEF2D&volatile_fee_module=0x7949DE8d67E4F6b8509Bdbb43FF0503aF1247a7A&stable_fee_module=0x0195fC76Da986D66B2A468133a1be41E90893Da6"
+  store_factory_settings: "volatile_factory=0x8E6a9FCd1d638CC760Ffba397605Fe3355dE76D2&stable_factory=0x78589E876edcEbdce72ee3436ab3c9AD3a7cEF2D&volatile_fee_module=0x7949DE8d67E4F6b8509Bdbb43FF0503aF1247a7A&stable_fee_module=0x0195fC76Da986D66B2A468133a1be41E90893Da6"
+  map_protocol_changes: "volatile_factory=0x8E6a9FCd1d638CC760Ffba397605Fe3355dE76D2&stable_factory=0x78589E876edcEbdce72ee3436ab3c9AD3a7cEF2D&volatile_fee_module=0x7949DE8d67E4F6b8509Bdbb43FF0503aF1247a7A&stable_fee_module=0x0195fC76Da986D66B2A468133a1be41E90893Da6"

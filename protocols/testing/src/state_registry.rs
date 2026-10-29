@@ -2,6 +2,7 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aero_basic::state::AeroBasicState,
             aerodrome_slipstreams::state::AerodromeSlipstreamsState, ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
             filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
@@ -75,7 +76,12 @@ pub fn register_protocol(
             None,
             decoder_context,
         ),
-        "uniswap_v4" | "uniswap_v4_hooks" => stream_builder
+        // PancakeSwap Infinity CL pools are Uniswap v4 pools with the same attribute schema; the
+        // hooked ones carry their hook in `hooks` for the registered native handler.
+        "uniswap_v4" |
+        "uniswap_v4_hooks" |
+        "pancakeswap_infinity_cl" |
+        "pancakeswap_infinity_cl_hooks" => stream_builder
             .exchange_with_decoder_context::<UniswapV4State>(
                 protocol_system,
                 tvl_filter,
@@ -125,12 +131,19 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
-        "up_v3" => stream_builder.exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+        "aero_basic" => stream_builder.exchange_with_decoder_context::<AeroBasicState>(
             protocol_system,
             tvl_filter,
             None,
             decoder_context,
         ),
+        "up_v3" | "aero_cl" => stream_builder
+            .exchange_with_decoder_context::<AerodromeSlipstreamsState>(
+                protocol_system,
+                tvl_filter,
+                None,
+                decoder_context,
+            ),
         // Default to EVMPoolState for all other protocols
         _ => stream_builder.exchange_with_decoder_context::<EVMPoolState<PreCachedDB>>(
             protocol_system,

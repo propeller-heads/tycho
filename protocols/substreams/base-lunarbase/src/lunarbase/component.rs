@@ -1,5 +1,6 @@
-use crate::lunarbase::Address;
 use tycho_substreams::prelude as tycho;
+
+use crate::lunarbase::Address;
 
 pub const PROTOCOL_TYPE_NAME: &str = "lunarbase_pool";
 

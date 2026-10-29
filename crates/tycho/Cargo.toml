@@ -21,7 +21,6 @@ tycho-execution  = { workspace = true, optional = true }
 default = ["evm"]
 evm = ["dep:tycho-simulation", "dep:tycho-execution", "tycho-simulation/evm", "tycho-execution/evm"]
 book-feeds = ["evm", "tycho-simulation/book-feeds"]
-rfq = ["evm", "tycho-simulation/rfq"]
 
 [dev-dependencies]
 tokio = { workspace = true }

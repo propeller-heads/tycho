@@ -77,6 +77,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // the entries the deployment script deploys from. The compiler settings are the test
         // profile's (foundry.toml), not the deployment's, so the bytecode is not the deployed one.
         // Listed by fixture name.
+        _executor("AeroBasic", "base", "aero_basic");
         _executor("BalancerV2", "ethereum", "vm:balancer_v2");
         _executor("BalancerV3", "ethereum", "vm:balancer_v3");
         _executor("Curve", "ethereum", "vm:curve");
@@ -88,6 +89,12 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("LiquidityParty", "ethereum", "vm:liquidityparty");
         _executor("LunarBase", "base", "lunarbase");
         _executor("MaverickV2", "ethereum", "vm:maverick_v2");
+        _executor("PancakeswapInfinity", "base", "pancakeswap_infinity_cl");
+        _executor(
+            "PancakeswapInfinityRobinhood",
+            "robinhood",
+            "pancakeswap_infinity_cl"
+        );
         _executor("RingSwapV2", "ethereum", "ring_swap_v2");
         _executor("RingSwapV2Bsc", "bsc", "ring_swap_v2");
         _executor("Sky", "ethereum", "sky");

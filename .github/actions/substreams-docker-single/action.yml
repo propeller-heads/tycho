@@ -26,7 +26,7 @@ runs:
 
         # Update docker-compose for this specific run
         export DB_NAME
-        export PROTOCOL
+        export PROTOCOLS="$PROTOCOL"
 
         # Run with unique database and protocol
         docker compose -f protocols/testing/docker-compose.yaml up \
