@@ -31,6 +31,7 @@ v0.1.6 was never released; its changes ship in this version.
   spacings 10 (fee 500) and 60 (fee 3000) at block 70,874,306 and later.
 - `creation_dynamic_fee_module` parameter. When set, `map_pools_created` marks every new pool with
   that `dynamic_fee_module` at creation instead of waiting for the pool's first fee-module event.
+  The value must be one of the `dynamic_fee_modules` addresses; the module fails otherwise.
   Raphael's module has a non-zero `defaultScalingFactor` (10,000,000 since block 70,897,094), so
   it charges a dynamic fee to pools it holds no config for; 8 of its 49 pools have never had a
   fee-module event.

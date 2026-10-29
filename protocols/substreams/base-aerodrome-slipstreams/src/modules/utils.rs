@@ -134,6 +134,42 @@ impl Params {
         self.first_dynamic_fee_module_block
             .is_none_or(|first_block| block_number >= first_block)
     }
+
+    /// The `creation_dynamic_fee_module` as a raw 20-byte address, or `None` when it is not set.
+    ///
+    /// Fails when the value is not a 20-byte hex address or is not one of `dynamic_fee_modules`:
+    /// a marker naming a module this package does not index would send every pool without a
+    /// fee-module event to its tick spacing fee instead of the module's default.
+    pub fn creation_dynamic_fee_module_address(&self) -> Result<Option<Vec<u8>>> {
+        let Some(module) = self
+            .creation_dynamic_fee_module
+            .as_deref()
+        else {
+            return Ok(None);
+        };
+        let address = hex::decode(module).map_err(|e| {
+            anyhow!("creation_dynamic_fee_module {module:?} is not a hex address: {e}")
+        })?;
+        if address.len() != 20 {
+            return Err(anyhow!(
+                "creation_dynamic_fee_module {module:?} has {} bytes, expected a 20-byte address",
+                address.len()
+            ));
+        }
+        for configured in &self.dynamic_fee_modules {
+            let configured_address = hex::decode(configured).map_err(|e| {
+                anyhow!("dynamic_fee_modules entry {configured:?} is not a hex address: {e}")
+            })?;
+            if configured_address == address {
+                return Ok(Some(address));
+            }
+        }
+        Err(anyhow!(
+            "creation_dynamic_fee_module {module:?} is not one of dynamic_fee_modules {:?}; add it \
+             there or remove the marker",
+            self.dynamic_fee_modules
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +191,63 @@ mod tests {
             with.creation_dynamic_fee_module
                 .as_deref(),
             Some("22")
+        );
+    }
+
+    const MODULE: &str = "8649D7A63499a6Cd5E400EF2DdB4AD317359c23c";
+
+    fn params_with_marker(marker: &str) -> Params {
+        Params::parse_from_query(&format!(
+            "factories[]=11&dynamic_fee_modules[]={MODULE}&protocol_type_name=pool\
+             &creation_dynamic_fee_module={marker}"
+        ))
+        .expect("valid params")
+    }
+
+    #[test]
+    fn creation_dynamic_fee_module_address_decodes_a_configured_module() {
+        let without = Params::parse_from_query(&format!(
+            "factories[]=11&dynamic_fee_modules[]={MODULE}&protocol_type_name=pool"
+        ))
+        .expect("valid params");
+
+        assert_eq!(
+            without
+                .creation_dynamic_fee_module_address()
+                .expect("no marker"),
+            None
+        );
+        // Membership compares addresses, not their spelling.
+        assert_eq!(
+            params_with_marker(&MODULE.to_lowercase())
+                .creation_dynamic_fee_module_address()
+                .expect("configured module"),
+            Some(hex::decode(MODULE).expect("hex"))
+        );
+    }
+
+    #[test]
+    fn creation_dynamic_fee_module_address_rejects_a_malformed_address() {
+        for marker in ["0x8649D7A63499a6Cd5E400EF2DdB4AD317359c23c", "8649D7A6", "zz"] {
+            let error = params_with_marker(marker)
+                .creation_dynamic_fee_module_address()
+                .expect_err("malformed marker");
+
+            assert!(error.to_string().contains(marker), "{error}");
+        }
+    }
+
+    #[test]
+    fn creation_dynamic_fee_module_address_rejects_an_unconfigured_module() {
+        let error = params_with_marker("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb")
+            .creation_dynamic_fee_module_address()
+            .expect_err("module missing from dynamic_fee_modules");
+
+        assert!(
+            error
+                .to_string()
+                .contains("is not one of dynamic_fee_modules"),
+            "{error}"
         );
     }
 
