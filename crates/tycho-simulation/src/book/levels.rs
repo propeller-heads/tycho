@@ -153,6 +153,21 @@ impl Levels {
             })
     }
 
+    /// The price of the next input unit after `filled` units went in: the price of the level
+    /// where a fill of `filled` stops, which is the following level when it ends exactly on a
+    /// boundary. `None` once `filled` reaches the depth of the ladder, and for an amount that is
+    /// not a number.
+    pub fn marginal_price(&self, filled: f64) -> Option<f64> {
+        let mut depth = 0.0;
+        for level in &self.0 {
+            depth += level.quantity;
+            if filled < depth {
+                return Some(level.price);
+            }
+        }
+        None
+    }
+
     /// Average output per input unit for filling `amount_in`, priced on the part the ladder
     /// absorbs when it cannot absorb everything. `None` when nothing is consumed — an empty
     /// ladder, or an amount that is not a positive number, or one too large to subtract.
