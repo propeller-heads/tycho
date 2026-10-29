@@ -210,6 +210,45 @@ mod test_serial_db {
     }
 
     #[tokio::test]
+    async fn test_leader_records_the_duration_of_each_lock_check() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let mut lock = LeaderLock::connect(&database_url())
+            .await
+            .expect("the lock session should open");
+        lock.try_acquire()
+            .await
+            .expect("the lock query should run");
+        let (confirmed_tx, _confirmed_rx) = watch::channel(Instant::now());
+
+        let held = tokio::time::timeout(POLL_INTERVAL * 3, hold_lead(lock, confirmed_tx)).await;
+
+        assert!(held.is_err(), "a leader with a live lock session keeps the lead");
+        let durations: Vec<f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "leader_lock_check_duration_seconds")
+            .flat_map(|(_, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Histogram(samples) = value else {
+                    panic!("leader_lock_check_duration_seconds must be a histogram");
+                };
+                samples
+                    .into_iter()
+                    .map(|sample| sample.into_inner())
+            })
+            .collect();
+        assert!(durations.len() >= 2, "expected one sample per check, got {durations:?}");
+        assert!(
+            durations
+                .iter()
+                .all(|seconds| *seconds < LOCK_CHECK_TIMEOUT.as_secs_f64()),
+            "unexpected durations: {durations:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_follower_takes_over_when_the_leader_session_ends() {
         run_against_db(|_| async move {
             let (leader_gw, _leader_executor) = writer_gateway().await;
