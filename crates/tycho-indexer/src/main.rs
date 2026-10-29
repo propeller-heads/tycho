@@ -53,14 +53,13 @@ use tycho_common::{
 use tycho_ethereum::{
     rpc::EthereumRpcClient,
     services::{
-        account_extractor::EVMAccountExtractor, token_analyzer::AnalyzerKind,
-        token_pre_processor::EthereumTokenPreProcessor,
+        account_extractor::EVMAccountExtractor, token_pre_processor::EthereumTokenPreProcessor,
     },
 };
 use tycho_indexer::{
     cli::{
         AnalyzeTokenArgs, Cli, Command, GlobalArgs, IndexArgs, RpcServerArgs, RunSpkgArgs,
-        SubstreamsArgs,
+        SubstreamsArgs, TokenAnalyzerArgs,
     },
     extractor::{
         factory::ExtractorFactory,
@@ -383,7 +382,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
                 retention_horizon,
                 extractors_config,
                 Some(extraction_runtime.handle()),
-                index_args.settlement_contract,
+                &index_args.token_analyzer,
             )
             .await?;
 
@@ -503,7 +502,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
         Utc::now().naive_utc(),
         config,
         None,
-        run_args.settlement_contract,
+        &run_args.token_analyzer,
     )
     .await?;
 
@@ -568,7 +567,7 @@ async fn create_indexing_tasks(
     retention_horizon: NaiveDateTime,
     extractors_config: ExtractorConfigs,
     extraction_runtime: Option<&Handle>,
-    settlement_contract: alloy::primitives::Address,
+    token_analyzer: &TokenAnalyzerArgs,
 ) -> Result<(ExtractionTasks, ServerTasks), ExtractionError> {
     let rpc_client = global_args.rpc.build_client()?;
 
@@ -599,7 +598,9 @@ async fn create_indexing_tasks(
     let token_processor = EthereumTokenPreProcessor::new(
         &rpc_client,
         chain,
-        AnalyzerKind::EthCall { settlement_contract },
+        token_analyzer
+            .analyzer_kind(&rpc_client, chain)
+            .await,
     );
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
@@ -923,7 +924,10 @@ async fn run_analyze_tokens(
         .build()
         .await?;
     let cached_gw = Arc::new(cached_gw);
-    let analyzer = AnalyzerKind::EthCall { settlement_contract: analyzer_args.settlement_contract };
+    let analyzer = analyzer_args
+        .token_analyzer
+        .analyzer_kind(&rpc_client, analyzer_args.chain)
+        .await;
     let analyze_thread = analyze_tokens(analyzer_args, &rpc_client, cached_gw.clone(), analyzer);
     select! {
          res = analyze_thread => {

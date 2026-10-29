@@ -290,7 +290,7 @@ mod test {
     };
 
     use super::*;
-    use crate::testing;
+    use crate::{cli::TokenAnalyzerArgs, testing};
 
     fn test_token(quality: u32) -> Token {
         Token::new(
@@ -308,6 +308,10 @@ mod test {
         "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
             .parse()
             .unwrap()
+    }
+
+    fn token_analyzer_args() -> TokenAnalyzerArgs {
+        TokenAnalyzerArgs { settlement_contract: settlement_contract(), token_watchlist: vec![] }
     }
 
     fn eth_call_analyzer() -> AnalyzerKind {
@@ -388,7 +392,7 @@ mod test {
         let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
         let args = AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: settlement_contract(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 1,
             update_batch_size: 2,
             fetch_batch_size: 2,
@@ -446,7 +450,7 @@ mod test {
     fn wiring_args(recovery_lookback_days: u32) -> AnalyzeTokenArgs {
         AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: settlement_contract(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 1,
             update_batch_size: 10,
             fetch_batch_size: 10,
@@ -563,7 +567,7 @@ mod test {
 
         let args = AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: settlement_contract(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 10,
             update_batch_size: 100,
             fetch_batch_size: 100,
