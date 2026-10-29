@@ -8,6 +8,8 @@ use substreams::scalar::BigInt;
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
 use substreams_helper::hex::Hexable;
 
+pub const DYNAMIC_FEE_MODULE_ATTRIBUTE: &str = "dynamic_fee_module";
+
 pub const DYNAMIC_FEE_CONFIG_ATTRIBUTES: [&str; 5] =
     ["dfc_baseFee", "dfc_scalingFactor", "dfc_feeCap", "dfc_initialFeeEnabled", "dfc_initialFee"];
 

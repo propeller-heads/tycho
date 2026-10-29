@@ -2,7 +2,7 @@ use crate::{
     events::get_log_changed_attributes,
     modules::utils::{
         dynamic_fee_config_initialized_key, dynamic_fee_config_key, DynamicFeeEvent, Params,
-        DYNAMIC_FEE_CONFIG_ATTRIBUTES,
+        DYNAMIC_FEE_CONFIG_ATTRIBUTES, DYNAMIC_FEE_MODULE_ATTRIBUTE,
     },
     pb::tycho::evm::aerodrome::Pool,
 };
@@ -146,7 +146,7 @@ pub fn map_protocol_changes(
                             change: ChangeType::Update.into(),
                         })
                         .chain(std::iter::once(Attribute {
-                            name: "dynamic_fee_module".into(),
+                            name: DYNAMIC_FEE_MODULE_ATTRIBUTE.into(),
                             value: log.address.clone(),
                             change: ChangeType::Update.into(),
                         }))

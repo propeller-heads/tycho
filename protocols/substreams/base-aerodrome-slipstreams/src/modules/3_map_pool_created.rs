@@ -1,6 +1,8 @@
 use crate::{
     abi::factory::events::PoolCreated,
-    modules::utils::{tick_spacing_fee_key, Params},
+    modules::utils::{
+        tick_spacing_fee_key, Params, DYNAMIC_FEE_CONFIG_ATTRIBUTES, DYNAMIC_FEE_MODULE_ATTRIBUTE,
+    },
 };
 use ethabi::ethereum_types::Address;
 use std::str::FromStr;
@@ -11,6 +13,10 @@ use substreams::{
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 use tycho_substreams::prelude::*;
+
+/// Pool state attributes that start at zero and are set by the pool's own events.
+const POOL_STATE_ATTRIBUTES: [&str; 5] =
+    ["liquidity", "tick", "sqrt_price_x96", "observationIndex", "observationCardinality"];
 
 #[substreams::handlers::map]
 pub fn map_pools_created(
@@ -58,61 +64,18 @@ fn get_new_pools(
         let Some(default_fee) = tick_spacing_to_fee_store.get_last(&fee_key) else {
             return;
         };
-        let mut attributes = vec![
-            Attribute {
-                name: "liquidity".to_string(),
+        let mut attributes: Vec<Attribute> = POOL_STATE_ATTRIBUTES
+            .into_iter()
+            .chain(DYNAMIC_FEE_CONFIG_ATTRIBUTES)
+            .map(|name| Attribute {
+                name: name.to_string(),
                 value: BigInt::from(0).to_signed_bytes_be(),
                 change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "tick".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "sqrt_price_x96".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "observationIndex".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "observationCardinality".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "dfc_baseFee".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "dfc_scalingFactor".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "dfc_feeCap".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "dfc_initialFeeEnabled".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-            Attribute {
-                name: "dfc_initialFee".to_string(),
-                value: BigInt::from(0).to_signed_bytes_be(),
-                change: ChangeType::Creation.into(),
-            },
-        ];
+            })
+            .collect();
         if let Some(module) = creation_dynamic_fee_module {
             attributes.push(Attribute {
-                name: "dynamic_fee_module".to_string(),
+                name: DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(),
                 value: module.to_vec(),
                 change: ChangeType::Creation.into(),
             });
