@@ -93,7 +93,8 @@ impl<AE: AccountExtractor + Send + Sync> ExtractorExtension for DCIPlugin<AE> {
 }
 
 /// Buffer size of a client subscription channel. A client is removed once it is full, so the
-/// buffer absorbs a short pause: about a minute of blocks on a chain with two blocks per second.
+/// buffer absorbs a short pause: about a minute on BSC (about 2.2 blocks per second), but about
+/// 25 seconds on Base with partial blocks, where partials and full blocks share the channel.
 const CLIENT_SUBSCRIPTION_CHANNEL_SIZE: usize = 128;
 
 pub enum ControlMessage {
