@@ -177,3 +177,18 @@ async fn eip1967_implementation(
     let implementation = Address::from_slice(&value[12..]);
     Ok((!implementation.is_zero()).then_some(implementation))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_minimal_proxies() {
+        let target = Address::repeat_byte(0x42);
+        let code =
+            [MINIMAL_PROXY_PREFIX.as_slice(), target.as_slice(), &MINIMAL_PROXY_SUFFIX].concat();
+        assert_eq!(minimal_proxy_target(&code), Some(target));
+        assert_eq!(minimal_proxy_target(&code[..code.len() - 1]), None);
+        assert_eq!(minimal_proxy_target(&[0x60, 0x80]), None);
+    }
+}
