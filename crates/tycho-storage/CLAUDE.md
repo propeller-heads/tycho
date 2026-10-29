@@ -54,13 +54,16 @@ All public DB operations go through one of two gateway structs:
   with a serialization error; the retry then sees the new epoch. Writes that bypass the executor
   (migrations, `ensure_*` at startup, `add_protocol_types`, `update_tokens`) are not fenced.
   An increment waits for every open write transaction (it logs a warning every 10s). So that a
-  vanished writer cannot block it for long, every pool session sets server-side TCP keepalives
-  (`SESSION_KEEPALIVES`): Postgres drops a dead peer's session, and its lock, after about 25s.
+  vanished writer cannot block it for long, every pool session sets server-side TCP timeouts
+  (`SESSION_TCP_TIMEOUTS`): keepalives drop an idle session of a dead peer after about 25s, and
+  `tcp_user_timeout` drops a session that waits for the peer to acknowledge sent data after 30s.
+  Postgres then releases its lock. `tcp_user_timeout` needs Postgres 12 or later on a server that
+  supports `TCP_USER_TIMEOUT` (Linux).
   The executor of `GatewayBuilder::build` rejects every write until the process increments the
   epoch. The epoch lives on `PostgresGateway` (`ClaimedEpoch`), so the executor and every
   `CachedGateway` clone share it.
 - **Leader election**: `LeaderLock` holds a session advisory lock on a dedicated, non-pooled
-  connection with the same server-side TCP keepalives, so Postgres frees the lock about 25s after a
+  connection with the same server-side TCP timeouts, so Postgres frees the lock within about 30s after a
   leader's host disappears. The lock elects the writer; the epoch fences it.
 - **Non-writer support**: `CachedGateway::get_committed_blocks` returns the number and timestamp
   of the block each extractor's `extraction_state` points to (the newest block committed for it), and
