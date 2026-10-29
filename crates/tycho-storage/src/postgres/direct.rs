@@ -19,7 +19,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenAnalysis},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -422,6 +422,29 @@ impl ProtocolGateway for DirectGateway {
         })
         .await
         .map_err(|e| StorageError::Unexpected(format!("Failed to update tokens: {}", e.0)))
+    }
+
+    #[instrument(skip_all)]
+    async fn upsert_token_analyses(
+        &self,
+        analyses: &[(Address, TokenAnalysis)],
+    ) -> Result<(), StorageError> {
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
+            })?;
+
+        conn.transaction(|conn| {
+            async {
+                self.state_gateway
+                    .upsert_token_analyses(analyses, conn)
+                    .await?;
+                Result::<(), PostgresError>::Ok(())
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(|e| StorageError::Unexpected(format!("Failed to store token analyses: {}", e.0)))
     }
 
     #[instrument(skip_all)]

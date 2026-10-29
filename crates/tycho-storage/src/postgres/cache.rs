@@ -72,6 +72,8 @@ pub(crate) enum WriteOp {
     // Currently unused but supported, please see `CacheGateway.update_tokens` docs.
     #[allow(dead_code)]
     UpdateTokens(Vec<models::token::Token>),
+    // Simply merge; after the tokens they belong to
+    UpsertTokenAnalyses(Vec<(Address, models::token::TokenAnalysis)>),
     // Simply merge
     InsertComponentBalances(Vec<models::protocol::ComponentBalance>),
     // Simply merge
@@ -98,6 +100,7 @@ impl WriteOp {
             WriteOp::InsertProtocolComponents(_) => "InsertProtocolComponents",
             WriteOp::InsertTokens(_) => "InsertTokens",
             WriteOp::UpdateTokens(_) => "UpdateTokens",
+            WriteOp::UpsertTokenAnalyses(_) => "UpsertTokenAnalyses",
             WriteOp::InsertComponentBalances(_) => "InsertComponentBalances",
             WriteOp::UpsertProtocolState(_) => "UpsertProtocolState",
             WriteOp::InsertEntryPoints(_) => "InsertEntryPoints",
@@ -114,14 +117,15 @@ impl WriteOp {
             WriteOp::UpdateContracts(_) => 3,
             WriteOp::InsertTokens(_) => 4,
             WriteOp::UpdateTokens(_) => 5,
-            WriteOp::InsertAccountBalances(_) => 6,
-            WriteOp::InsertProtocolComponents(_) => 7,
-            WriteOp::InsertComponentBalances(_) => 8,
-            WriteOp::UpsertProtocolState(_) => 9,
-            WriteOp::InsertEntryPoints(_) => 10,
-            WriteOp::InsertEntryPointTracingParams(_) => 11,
-            WriteOp::UpsertTracedEntryPoints(_) => 12,
-            WriteOp::SaveExtractionState(_) => 13,
+            WriteOp::UpsertTokenAnalyses(_) => 6,
+            WriteOp::InsertAccountBalances(_) => 7,
+            WriteOp::InsertProtocolComponents(_) => 8,
+            WriteOp::InsertComponentBalances(_) => 9,
+            WriteOp::UpsertProtocolState(_) => 10,
+            WriteOp::InsertEntryPoints(_) => 11,
+            WriteOp::InsertEntryPointTracingParams(_) => 12,
+            WriteOp::UpsertTracedEntryPoints(_) => 13,
+            WriteOp::SaveExtractionState(_) => 14,
         }
     }
 }
@@ -212,6 +216,11 @@ impl DBTransaction {
                     return Ok(());
                 }
                 (WriteOp::UpdateTokens(l), WriteOp::InsertTokens(r)) => {
+                    self.size += r.len();
+                    l.extend(r.iter().cloned());
+                    return Ok(());
+                }
+                (WriteOp::UpsertTokenAnalyses(l), WriteOp::UpsertTokenAnalyses(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
                     return Ok(());
@@ -516,6 +525,11 @@ impl DBCacheWriteExecutor {
             WriteOp::UpdateTokens(tokens) => {
                 self.state_gateway
                     .update_tokens(tokens.as_slice(), conn)
+                    .await?
+            }
+            WriteOp::UpsertTokenAnalyses(analyses) => {
+                self.state_gateway
+                    .upsert_token_analyses(analyses.as_slice(), conn)
                     .await?
             }
             WriteOp::InsertComponentBalances(balances) => {
@@ -1079,6 +1093,37 @@ impl ProtocolGateway for CachedGateway {
         self.add_op(WriteOp::InsertTokens(tokens.to_vec()))
             .await?;
         Ok(())
+    }
+
+    /// Inside a block transaction, buffers the analyses with that block so they are written
+    /// after its tokens. Outside one, writes them immediately in their
+    /// own database transaction, like `update_tokens`.
+    #[instrument(skip_all)]
+    async fn upsert_token_analyses(
+        &self,
+        analyses: &[(Address, models::token::TokenAnalysis)],
+    ) -> Result<(), StorageError> {
+        {
+            let mut open_tx = self.open_tx.lock().await;
+            if let Some((tx, _)) = open_tx.as_mut() {
+                return tx.add_operation(WriteOp::UpsertTokenAnalyses(analyses.to_vec()));
+            }
+        }
+        let mut conn =
+            self.pool.get().await.map_err(|e| {
+                StorageError::Unexpected(format!("Failed to retrieve connection: {e}"))
+            })?;
+        conn.transaction(|conn| {
+            async {
+                self.state_gateway
+                    .upsert_token_analyses(analyses, conn)
+                    .await?;
+                Result::<(), PostgresError>::Ok(())
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(|e| StorageError::Unexpected(format!("Failed to store token analyses: {}", e.0)))
     }
 
     /// Updates tokens without using the write cache.

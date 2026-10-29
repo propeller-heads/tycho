@@ -18,7 +18,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenAnalysis},
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
         PaginationParams, ProtocolType, StoreVal, TxHash,
     },
@@ -1047,7 +1047,7 @@ impl PostgresGateway {
 
         let mut query = token
             .inner_join(account)
-            .select((token::all_columns(), schema::account::address))
+            .select((orm::Token::as_select(), schema::account::address))
             .filter(schema::account::chain_id.eq(chain_db_id))
             .into_boxed();
 
@@ -1296,6 +1296,75 @@ impl PostgresGateway {
             token_cache.upsert_tokens(&updated);
         }
 
+        Ok(())
+    }
+
+    /// Writes each analysis's scalars onto its token and its details to `token_analysis`,
+    /// replacing what an earlier analysis wrote. Unknown tokens are skipped with a warning.
+    pub async fn upsert_token_analyses(
+        &self,
+        analyses: &[(Address, TokenAnalysis)],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        let addresses: HashSet<&Address> = analyses
+            .iter()
+            .map(|(address, _)| address)
+            .collect();
+        let token_ids: HashMap<Bytes, i64> = schema::account::table
+            .inner_join(schema::token::table)
+            .select((schema::account::address, schema::token::id))
+            .filter(schema::account::address.eq_any(addresses))
+            .get_results(conn)
+            .await
+            .map_err(PostgresError::from)?
+            .into_iter()
+            .collect();
+
+        let mut details = Vec::with_capacity(analyses.len());
+        for (address, analysis) in analyses {
+            let Some(&token_id) = token_ids.get(address) else {
+                warn!(?address, "Tried to store the analysis of an unknown token");
+                continue;
+            };
+            let verdict = serde_json::to_value(analysis.verdict)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string));
+            let to_i64 = |v: Option<u64>| v.map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+            diesel::update(schema::token::table.filter(schema::token::id.eq(token_id)))
+                .set((
+                    schema::token::verdict.eq(verdict),
+                    schema::token::buy_tax.eq(analysis.fees.buy),
+                    schema::token::transfer_tax.eq(analysis.fees.transfer),
+                    schema::token::sell_tax.eq(analysis.fees.sell),
+                    schema::token::analyzed_block.eq(to_i64(analysis.block)),
+                ))
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(err, "Token", &address.to_string(), None)
+                })?;
+            details.push(orm::NewTokenAnalysis::from_analysis(token_id, analysis).map_err(
+                |err| {
+                    StorageError::Unexpected(format!(
+                        "Failed to serialise the analysis of token {address}: {err}"
+                    ))
+                },
+            )?);
+        }
+
+        use schema::token_analysis::dsl as ta;
+        for row in &details {
+            diesel::insert_into(ta::token_analysis)
+                .values(row)
+                .on_conflict(ta::token_id)
+                .do_update()
+                .set(row)
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(err, "TokenAnalysis", &row.token_id.to_string(), None)
+                })?;
+        }
         Ok(())
     }
 
@@ -3587,7 +3656,7 @@ mod test {
         assert_eq!(component_token_junction.0, inserted_data.id);
 
         let token = schema::token::table
-            .select(schema::token::all_columns)
+            .select(orm::Token::as_select())
             .filter(schema::token::id.eq(component_token_junction.1))
             .load::<orm::Token>(&mut conn)
             .await;
