@@ -2,26 +2,7 @@
 
 ## v0.1.7
 
-### Added
-
-- Index Raphael on Robinhood Chain via a fourth manifest, `robinhood-raphael-slipstreams.yaml`
-  (factory `0x5481864ddd46a2d798df0925c23b7846e776e5e3`, swap fee module
-  `0x8649D7A63499a6Cd5E400EF2DdB4AD317359c23c`, initial block 54,366,500). Raphael's pool, its
-  libraries and its fee modules are Aerodrome Slipstream's source verbatim; its factory adds tick
-  spacings 10 (fee 500) and 60 (fee 3000) at block 70,874,306 and later.
-- `creation_dynamic_fee_module` parameter. When set, `map_pools_created` marks every new pool with
-  that `dynamic_fee_module` at creation instead of waiting for the pool's first fee-module event.
-  Raphael's module has a non-zero `defaultScalingFactor` (10,000,000 since block 70,897,094), so
-  it charges a dynamic fee to pools it holds no config for; 8 of its 49 pools have never had a
-  fee-module event.
-
-### Deployment notes
-
-- Base, UP V3 and Topaz CL do not set the new parameter, so their output is unchanged. Only the
-  package version moves.
-- Raphael back-processes from block 54,366,500.
-
-## v0.1.6
+v0.1.6 was never released; its changes ship in this version.
 
 ### Added
 
@@ -43,11 +24,35 @@
   module (`0xa0462a52af4f8cbf7766efbba75355b30b6bcce2`) was replaced at block 98,757,673, before
   the first pool, so the manifest lists only its replacement, with
   `first_dynamic_fee_module_block=98757661`.
+- Index Raphael on Robinhood Chain via `robinhood-raphael-slipstreams.yaml` (factory
+  `0x5481864ddd46a2d798df0925c23b7846e776e5e3`, swap fee module
+  `0x8649D7A63499a6Cd5E400EF2DdB4AD317359c23c`, initial block 54,366,500). Raphael's pool, its
+  libraries and its fee modules are Aerodrome Slipstream's source verbatim; its factory adds tick
+  spacings 10 (fee 500) and 60 (fee 3000) at block 70,874,306 and later.
+- `creation_dynamic_fee_module` parameter. When set, `map_pools_created` marks every new pool with
+  that `dynamic_fee_module` at creation instead of waiting for the pool's first fee-module event.
+  Raphael's module has a non-zero `defaultScalingFactor` (10,000,000 since block 70,897,094), so
+  it charges a dynamic fee to pools it holds no config for; 8 of its 49 pools have never had a
+  fee-module event.
+
+### Known limitations
+
+- The simulation takes each fee module's `defaultFeeCap` and `defaultScalingFactor` from a table
+  in `tycho-simulation`, not from indexed state. Both are owner-settable on chain
+  (`setDefaultFeeCap`/`setDefaultScalingFactor`, emitting `DefaultFeeCapSet` and
+  `DefaultScalingFactorSet`), and Raphael's changed at blocks 70,897,071 and 70,897,094. If an
+  owner changes them again, the table needs a code change; until then pools without their own
+  config are quoted at the old defaults.
 
 ### Deployment notes
 
-- No module code changed, so Base and UP V3 output is unchanged. Only the package version moves.
-- Topaz back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC.
+- The shared wasm changed (`map_pools_created` and the module parameters), so every module hash
+  changes in every manifest, but Base, UP V3 and Topaz CL do not set the new parameter and their
+  output is unchanged. Do not redeploy Base or UP V3 for this version: each would back-process
+  from its initial block (13,843,704 and 6,184,096) for no change in indexed state. The same holds
+  for a Topaz CL deployment made from an earlier build of this package.
+- Topaz CL back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC; Raphael from
+  block 54,366,500.
 
 ## v0.1.5
 
