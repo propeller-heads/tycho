@@ -96,6 +96,7 @@ impl SwapEncoder for BebopSwapEncoder {
                 token_out,
                 sender: router_address.clone(),
                 receiver: router_address,
+                origin: encoding_context.origin.clone(),
             };
             let signed_quote = on_blocking_thread(|| {
                 self.runtime_handle.block_on(async {
@@ -252,6 +253,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in.clone(),
             group_token_out: token_out.clone(),
+            origin: None,
         };
 
         let encoder = BebopSwapEncoder::new(

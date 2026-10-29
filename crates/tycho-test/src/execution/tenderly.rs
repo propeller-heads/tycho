@@ -184,6 +184,11 @@ pub fn get_overwrites_string(
             token_overwrites.push(format!("native_balance: {balance}"));
         }
 
+        // Add nonce if present
+        if let Some(nonce) = account_override.nonce {
+            token_overwrites.push(format!("nonce: {nonce}"));
+        }
+
         // Add storage slots if present
         if let Some(state_diff) = &account_override.state_diff {
             for (slot, value) in state_diff {

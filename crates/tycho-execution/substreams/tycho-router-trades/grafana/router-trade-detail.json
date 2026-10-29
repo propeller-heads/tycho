@@ -1,0 +1,1150 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Everything the router-trades indexer holds about one transaction: the router calls it contains, the parties and amounts, the fees and the configuration behind them, the executed route, and any recorded call errors. Paste a transaction hash into the tx variable, or click one in Recent settled trades.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Router Trades overview",
+      "tooltip": "",
+      "type": "link",
+      "url": "/d/tycho-router-trades/router-trades"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 900,
+      "panels": [],
+      "title": "Find a transaction",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "A starting point when you do not have a hash to hand: the latest settled trades in the dashboard time range, on the selected chains. total_captured_usd is the revenue that trade produced (router fee plus client fee); it is blank where the pricer has not stamped the output token. Click a tx_hash to load it into the tx variable above. Independent of the tx and call variables, so it stays usable while they are set.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tx_hash"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Open this transaction",
+                    "url": "/d/tycho-router-trade-detail/router-trade-detail?var-tx=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_captured_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 21,
+        "w": 19,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT block_time,\n       chain,\n       tx_hash,\n       strategy,\n       router_version,\n       volume_usd,\n       (coalesce(router_fee_amount, 0) + coalesce(client_fee_amount, 0)) / power(10, decimals_out) * price_out_usd AS total_captured_usd\nFROM trades_settled\nWHERE $__timeFilter(block_time)\n  AND chain IN (${chain:sqlstring})\nORDER BY block_time DESC\nLIMIT 50",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Recent settled trades",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "The largest settled trades by USD volume in the dashboard time range, on the selected chains. total_captured_usd is the revenue that trade produced (router fee plus client fee), so you can see what the biggest trades actually earned; it is blank where the pricer has not stamped the output token. Click a tx_hash to load it into the tx variable above. Rows without a USD volume are excluded.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tx_hash"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Open this transaction",
+                    "url": "/d/tycho-router-trade-detail/router-trade-detail?var-tx=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_captured_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 18,
+        "w": 19,
+        "x": 0,
+        "y": 22
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "volume_usd"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT block_time,\n       chain,\n       tx_hash,\n       call_index,\n       strategy,\n       router_version,\n       volume_usd,\n       (coalesce(router_fee_amount, 0) + coalesce(client_fee_amount, 0)) / power(10, decimals_out) * price_out_usd AS total_captured_usd\nFROM trades_settled\nWHERE $__timeFilter(block_time)\n  AND chain IN (${chain:sqlstring})\n  AND volume_usd IS NOT NULL\nORDER BY volume_usd DESC\nLIMIT 50",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Top settled trades by volume",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "The settled trades that captured the most revenue (router fee plus client fee, in USD) in the dashboard time range, on the selected chains. One row is one router call, matching the two panels above, so a transaction holding several calls appears once per call. total_captured_usd minus router_fee_usd is the client fee. Click a tx_hash to load it into the tx variable above. Rows the pricer has not stamped are excluded.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tx_hash"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Open this transaction",
+                    "url": "/d/tycho-router-trade-detail/router-trade-detail?var-tx=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 205
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_captured_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "router_fee_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 19,
+        "w": 19,
+        "x": 0,
+        "y": 40
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "total_captured_usd"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT tx_hash,\n       block_time,\n       chain,\n       call_index,\n       (coalesce(router_fee_amount, 0) + coalesce(client_fee_amount, 0)) / power(10, decimals_out) * price_out_usd AS total_captured_usd,\n       (coalesce(router_fee_amount, 0)) / power(10, decimals_out) * price_out_usd AS router_fee_usd,\n       volume_usd\nFROM trades_settled\nWHERE $__timeFilter(block_time)\n  AND chain IN (${chain:sqlstring})\n  AND price_out_usd IS NOT NULL AND decimals_out IS NOT NULL\nORDER BY total_captured_usd DESC NULLS LAST\nLIMIT 50",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Top settled trades by fee captured",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "id": 909,
+      "panels": [],
+      "title": "Transaction",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "One row per router call. A single transaction can hold many -- an aggregator settling a batch has produced 26 -- so every panel below is filtered by the call variable as well, and shows call_index so rows can be lined up.\n\nstate separates a settled trade from a call the chain discarded: a caller can quote the router by calling it and reverting, and that probe carries tx_success and call_success like a fill. 'unflagged' is a row indexed before state_committed existed.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 2,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.call_index,\n       t.chain,\n       t.block_time,\n       t.block_number,\n       CASE WHEN NOT tx_success THEN 'tx reverted'\n            WHEN NOT call_success THEN 'call reverted'\n            WHEN state_committed IS NULL THEN 'unflagged'\n            WHEN state_committed THEN 'settled'\n            ELSE 'probe (discarded)' END AS state,\n       t.router,\n       t.router_version,\n       t.strategy,\n       t.funding,\n       t.n_hops,\n       t.n_tokens,\n       t.gas_used,\n       t.volume_usd,\n       t.price_source\nFROM trades t\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(t.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring})))\nORDER BY t.call_index",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Router calls in this transaction",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "Who called and what moved. msg_sender is the immediate caller, so an aggregator or contract wallet appears there while eoa is the signer.\n\nAmounts are shown raw and scaled. Scaling needs decimals, which the pricer writes, so the scaled columns are blank on an unpriced call while the raw ones are always there.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 67
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.call_index,\n       t.eoa,\n       t.msg_sender,\n       t.receiver,\n       CASE\n         WHEN coalesce(t.watermark, '') = '' THEN '(untagged)'\n         WHEN t.watermark !~* '^0x([0-9a-f]{2})+$' THEN t.watermark\n         WHEN left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END)) = '' THEN '(untagged)'\n         WHEN left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END)) ~ '^(66796e642f(?:3[0-9]|2e)+2f(?:3[0-9]|6[1-6]){16})'\n           THEN convert_from(decode(substring(left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END)) from '^(66796e642f(?:3[0-9]|2e)+2f(?:3[0-9]|6[1-6]){16})'), 'hex'), 'LATIN1')\n         WHEN left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END)) ~ '^(2[0-9a-f]|[3-6][0-9a-f]|7[0-9a-e])+$'\n           THEN convert_from(decode(left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END)), 'hex'), 'LATIN1')\n         ELSE '0x' || left(lower(substring(t.watermark, 3)), greatest(0, length(lower(substring(t.watermark, 3))) - CASE WHEN lower(substring(t.watermark, 3)) ~ '(8021){8}$' THEN 36 + 2 * (('x' || substr(lower(substring(t.watermark, 3)), length(lower(substring(t.watermark, 3))) - 35, 2))::bit(8)::int) ELSE 0 END))\n       END AS watermark,\n       t.token_in,\n       t.token_out,\n       t.amount_in AS amount_in_raw,\n       t.amount_in / power(10, t.decimals_in) AS amount_in_tokens,\n       t.amount_out / power(10, t.decimals_out) AS amount_out_tokens,\n       t.expected_amount_out / power(10, t.decimals_out) AS expected_out_tokens,\n       t.min_amount_out / power(10, t.decimals_out) AS min_out_tokens,\n       t.slippage_tolerance_bps,\n       t.wrap_eth,\n       t.unwrap_eth,\n       t.native_value\nFROM trades t\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(t.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring}))) AND t.call_index IN (${call})\nORDER BY t.call_index",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Parties, tokens and amounts",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "What each call paid and the configuration that decided it.\n\npositive_slippage is the surplus the swaps produced over the quote. The router keeps it only when positive_slippage_enabled and the client is not exempt -- captured_slippage applies that rule, and it is part of router_fee, not an addition to it. output_fee is the remainder of the router fee.\n\nrouter_fee_on_output_bps only means a rate together with fee_bps_scale, and the two FeeCalculator generations use different denominators, so read them as a pair.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "router_fee_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.call_index,\n       t.router_fee_amount / power(10, t.decimals_out) AS router_fee_tokens,\n       t.router_fee_amount / power(10, t.decimals_out) * t.price_out_usd AS router_fee_usd,\n       (CASE WHEN t.positive_slippage_enabled AND NOT coalesce(t.positive_slippage_exempt, false)\n             THEN coalesce(t.positive_slippage, 0) ELSE 0 END)\n         / power(10, t.decimals_out) AS captured_slippage_tokens,\n       (coalesce(t.router_fee_amount, 0)\n         - CASE WHEN t.positive_slippage_enabled AND NOT coalesce(t.positive_slippage_exempt, false)\n                THEN coalesce(t.positive_slippage, 0) ELSE 0 END)\n         / power(10, t.decimals_out) AS output_fee_tokens,\n       t.positive_slippage / power(10, t.decimals_out) AS slippage_produced_tokens,\n       t.positive_slippage_enabled,\n       t.positive_slippage_exempt,\n       t.client_fee_amount / power(10, t.decimals_out) AS client_fee_tokens,\n       t.client_fee_bps,\n       t.client_fee_receiver,\n       t.has_client_signature,\n       t.fee_calculator,\n       t.router_fee_on_output_bps,\n       t.fee_bps_scale\nFROM trades t\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(t.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring}))) AND t.call_index IN (${call})\nORDER BY t.call_index",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Fees and fee configuration",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "id": 931,
+      "panels": [],
+      "title": "Route and settlement",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "The executed route, one row per hop. Protocol names resolve at query time from the executors table through the trade_hop_protocols view, so a hop through a newly deployed executor is named without re-indexing; an executor missing from that table shows no names.\n\nsplit is the raw uint24 share, where 0 means 'all remaining input'. protocol_data is truncated -- open the panel inspector for the full value.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.call_index,\n       h.hop_index,\n       h.executor,\n       hp.protocol_systems,\n       h.token_in_index,\n       h.token_out_index,\n       h.split,\n       left(h.protocol_data, 40) AS protocol_data\nFROM trade_hops h\n  JOIN trades t ON t.id = h.trade_id\n  LEFT JOIN trade_hop_protocols hp ON hp.trade_id = h.trade_id AND hp.hop_index = h.hop_index\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(t.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring}))) AND t.call_index IN (${call})\nORDER BY t.call_index, h.hop_index",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Route hops",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "The FeesTaken rows behind the fee columns, one per recipient. A v3 router credits its own ERC-6909 vault rather than transferring, so a row here is a vault credit -- Router vault balances on the main dashboard shows whether it is still there.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.call_index,\n       f.role,\n       f.recipient,\n       coalesce(pt.symbol, f.token) AS token,\n       f.amount AS amount_raw,\n       f.amount / power(10, coalesce(pt.decimals, t.decimals_out)) AS amount_tokens\nFROM fees_taken f\n  JOIN trades t ON t.id = f.trade_id\n  LEFT JOIN preferred_tokens pt ON pt.chain = f.chain AND lower(pt.address) = lower(f.token)\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(t.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring}))) AND t.call_index IN (${call})\nORDER BY t.call_index, f.role, f.recipient",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Fee transfers",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "Rows from router_call_errors for this transaction: a router call the package saw fail, with the stage it failed at. Not filtered by the call variable, because an error is not always tied to a call_index that produced a trade row. Empty is the normal case.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.call_index,\n       e.chain,\n       e.block_number,\n       e.router,\n       e.router_version,\n       e.stage,\n       e.error,\n       e.tx_success,\n       e.call_success,\n       e.state_committed\nFROM router_call_errors e\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(e.tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring})))\nORDER BY e.call_index",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Router call errors in this transaction",
+      "type": "table"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": [
+    "tycho",
+    "router-trades"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "grafana-postgres-router-trades",
+          "value": "P9765F9F6D1C728C8"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "grafana-postgresql-datasource",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "/router-trades/",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "chains present in settled trades",
+        "description": "Which blockchains the finder panels list. Does not affect the per-transaction panels below, whose chain is fixed by the transaction hash.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "chain",
+        "multi": true,
+        "name": "chain",
+        "options": [],
+        "query": "SELECT DISTINCT chain FROM trades_settled ORDER BY chain",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        },
+        "description": "Transaction hash. With or without the 0x prefix, any case. Leave it empty and pick one from Recent settled trades instead.",
+        "hide": 0,
+        "label": "tx",
+        "name": "tx",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "call indices found in the transaction",
+        "description": "Which router call within the transaction to show. A transaction can hold many; All is usually what you want.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "call",
+        "multi": true,
+        "name": "call",
+        "options": [],
+        "query": "SELECT DISTINCT call_index\nFROM trades\nWHERE lower(btrim(${tx:sqlstring})) <> ''\n  AND lower(tx_hash) IN (lower(btrim(${tx:sqlstring})), '0x' || lower(btrim(${tx:sqlstring})))\nORDER BY call_index",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 3,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Router Trade Detail",
+  "uid": "tycho-router-trade-detail",
+  "weekStart": ""
+}

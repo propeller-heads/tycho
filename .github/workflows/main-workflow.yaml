@@ -141,3 +141,14 @@ jobs:
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+  # ── Grafana: push changed router-trades dashboards ────────────────────────
+  sync-router-trades-dashboards:
+    uses: propeller-heads/ci-cd-templates/.github/workflows/sync-grafana-dashboards.yaml@main
+    permissions:
+      contents: read
+    with:
+      dashboards_path: crates/tycho-execution/substreams/tycho-router-trades/grafana
+      folder_uid: cedg0rrcu7h1cb # "tycho"
+    secrets:
+      grafana_token: ${{ secrets.GRAFANA_SA_TOKEN }}

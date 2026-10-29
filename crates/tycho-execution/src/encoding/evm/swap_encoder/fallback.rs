@@ -77,6 +77,30 @@ static SUPPORTED_PROTOCOLS: LazyLock<HashMap<Chain, &'static [FallbackProtocol]>
                     FallbackProtocol::UniswapV4,
                 ][..],
             ),
+            (
+                Chain::Bsc,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
+            (
+                Chain::Arbitrum,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
+            (
+                Chain::Polygon,
+                &[
+                    FallbackProtocol::UniswapV2,
+                    FallbackProtocol::UniswapV3,
+                    FallbackProtocol::UniswapV4,
+                ][..],
+            ),
         ])
     });
 
@@ -404,6 +428,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
 
         encoder(chain)
@@ -536,6 +561,12 @@ mod tests {
         assert!(!FallbackProtocol::Curve.supported_on(Chain::Base));
         assert!(FallbackProtocol::UniswapV4.supported_on(Chain::Robinhood));
         assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Robinhood));
+        assert!(FallbackProtocol::UniswapV2.supported_on(Chain::Bsc));
+        assert!(!FallbackProtocol::Curve.supported_on(Chain::Bsc));
+        assert!(FallbackProtocol::UniswapV3.supported_on(Chain::Arbitrum));
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Arbitrum));
+        assert!(FallbackProtocol::UniswapV4.supported_on(Chain::Polygon));
+        assert!(!FallbackProtocol::FluidV1.supported_on(Chain::Polygon));
         // No router.
         assert!(!FallbackProtocol::UniswapV3.supported_on(Chain::Plasma));
     }
@@ -599,6 +630,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
 
         let err = encoder
@@ -802,6 +834,7 @@ mod tests {
             router_address: Some(Bytes::zero(20)),
             group_token_in: Bytes::from(format!("0x{USDC}").as_str()),
             group_token_out: Bytes::from(format!("0x{WETH}").as_str()),
+            origin: None,
         };
 
         let result = encoder(Chain::Ethereum).encode_swap(&swap, &encoding_context);

@@ -8,12 +8,12 @@
 //! # Read order
 //!
 //! A read holds the window lock while it resolves the version and copies the window changes for
-//! its ids, releases it, then takes the cache read lock and copies the entries out. Folds hold the
-//! window lock while they take the cache write lock, so a fold can land between the two steps.
-//! That is harmless: the fold moves blocks from the copied changes into the entries, and a change
-//! applies only when it is newer than the entry's write timestamp, so nothing is applied twice or
-//! lost. Accounts check the timestamp of each value, because several extractors can write one
-//! account. For the same reason an account read also copies the other windows' blocks up to the
+//! its ids, releases it, then takes the cache read lock and copies the `Arc`s of the entries out.
+//! Folds hold the window lock while they take the cache write lock, so a fold can land between the
+//! two steps. That is harmless: the fold moves blocks from the copied changes into the entries, and
+//! a change applies only when it is newer than the entry's write timestamp, so nothing is applied
+//! twice or lost. Accounts check the timestamp of each value, because several extractors can write
+//! one account. For the same reason an account read also copies the other windows' blocks up to the
 //! resolved version, one window lock at a time. Components check one timestamp for the whole
 //! entry, because one extractor writes each component, in order.
 //! A fold can also carry an entry past the requested version; the request then falls back with
@@ -37,16 +37,14 @@ use thiserror::Error;
 use tracing::debug;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{
-        blockchain::BlockAggregatedChanges, contract::Account, protocol::ProtocolComponentState,
-        MergeError, PaginationParams,
-    },
+    models::{blockchain::BlockAggregatedChanges, PaginationParams},
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
 use super::{
-    cache::{CachedAccount, CachedComponentState, EntityCache},
+    cache::{CachedAccount, EntityCache},
+    view::{AccountView, ComponentView, ContractStateView, ProtocolStateView},
     window::{account_changes, component_changes, DeltaWindow, WindowResolution},
 };
 
@@ -148,9 +146,6 @@ pub(crate) enum StateServiceError {
     /// The window cannot be read.
     #[error("Window cannot be read: {0}")]
     WindowRead(StorageError),
-    /// A window change cannot be merged into an entry.
-    #[error("Window change cannot be merged: {0}")]
-    Merge(#[from] MergeError),
 }
 
 /// What a read depends on besides the request: the window of the requested system and the entity
@@ -236,12 +231,12 @@ impl StateService {
     ///   delta in any window.
     /// - [`StateServiceError::InvalidVersion`] when the version is malformed.
     /// - [`StateServiceError::VersionAboveTip`] when the version is a block number above the tip.
-    /// - [`StateServiceError::LockPoisoned`], [`StateServiceError::WindowRead`] or
-    ///   [`StateServiceError::Merge`] when the window cannot be read or a change cannot be merged.
-    pub(crate) fn contract_state(
+    /// - [`StateServiceError::LockPoisoned`] or [`StateServiceError::WindowRead`] when the window
+    ///   cannot be read.
+    pub(crate) fn contract_state_view(
         &self,
         request: &dto::StateRequestBody,
-    ) -> Result<dto::StateRequestResponse, StateServiceError> {
+    ) -> Result<ContractStateView, StateServiceError> {
         // The cache serves explicit ids only; the database path lists every entity.
         let Some(ids) = request.contract_ids.as_deref() else {
             return Err(StateServiceError::Fallback(FallbackReason::NoIds));
@@ -288,16 +283,15 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock. The full copy of
-        // an entry happens here, unless a fold already replaced it in the cache.
+        // Lay the window changes over each entry, without holding any lock. The entry itself is
+        // not copied.
         let mut accounts = Vec::with_capacity(page.len());
         for (address, entry) in page.iter().zip(entries) {
-            let entry = entry.map(Arc::unwrap_or_clone);
             let changes = window_changes
                 .get(address)
                 .map_or(&[][..], Vec::as_slice);
-            let (mut entry, changes) = match entry {
-                Some(entry) => (entry, changes),
+            let (mut view, changes) = match entry {
+                Some(entry) => (AccountView::new(entry), changes),
                 // Not cached: build the account from its first delta in the windows and apply the
                 // rest. An address with no delta fails the whole request.
                 // Token balances from blocks before the first delta are dropped, as on the
@@ -321,27 +315,39 @@ impl StateService {
                         return Err(StateServiceError::ContractNotFound(address.clone()));
                     };
                     let first = &changes[start];
-                    (
-                        CachedAccount::from_creation(delta, first.balances.as_ref(), first.at),
-                        &changes[start + 1..],
-                    )
+                    let entry =
+                        CachedAccount::from_creation(delta, first.balances.as_ref(), first.at);
+                    (AccountView::new(Arc::new(entry)), &changes[start + 1..])
                 }
             };
             for change in changes {
-                entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
+                view.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts.push(dto::ResponseAccount::from(Account::from(entry)));
+            accounts.push(view);
         }
 
-        Ok(dto::StateRequestResponse::new(
+        Ok(ContractStateView {
             accounts,
-            PaginationResponse::new(pagination.page, pagination.page_size, ids.len() as i64),
-        ))
+            pagination: PaginationResponse::new(
+                pagination.page,
+                pagination.page_size,
+                ids.len() as i64,
+            ),
+        })
+    }
+
+    /// [`Self::contract_state_view`] as an owned DTO.
+    pub(crate) fn contract_state(
+        &self,
+        request: &dto::StateRequestBody,
+    ) -> Result<dto::StateRequestResponse, StateServiceError> {
+        self.contract_state_view(request)
+            .map(dto::StateRequestResponse::from)
     }
 
     /// Serves `/protocol_state` from the cache.
     ///
-    /// Same shape as [`Self::contract_state`]. Components are looked up under
+    /// Same shape as [`Self::contract_state_view`]. Components are looked up under
     /// `request.protocol_system`, the key folds use. An id the cache does not hold is served as an
     /// empty state with its window changes applied, so no id fails the request. The database path
     /// does the same only at an uncommitted version; at a committed version it leaves the id out.
@@ -351,12 +357,12 @@ impl StateService {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::contract_state`], with `protocol_ids` in place of `contract_ids`, except
-    /// that an unknown id is never an error.
-    pub(crate) fn protocol_state(
+    /// Same as [`Self::contract_state_view`], with `protocol_ids` in place of `contract_ids`,
+    /// except that an unknown id is never an error.
+    pub(crate) fn protocol_state_view(
         &self,
         request: &dto::ProtocolStateRequestBody,
-    ) -> Result<dto::ProtocolStateRequestResponse, StateServiceError> {
+    ) -> Result<ProtocolStateView, StateServiceError> {
         // The cache serves explicit ids only; the database path lists every entity.
         let Some(ids) = request.protocol_ids.as_deref() else {
             return Err(StateServiceError::Fallback(FallbackReason::NoIds));
@@ -378,7 +384,7 @@ impl StateService {
         let (version, blocks) = self.read_window(system, &request.version)?;
         let window_changes = component_changes(&blocks, &page);
 
-        // Copy the cached entries under the cache read lock; folds wait until it is released.
+        // Copy only the `Arc` of each cached entry under the cache read lock.
         let mut entries = Vec::with_capacity(page.len());
         {
             let cache = self.cache.read();
@@ -401,46 +407,43 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock, with the
-        // database path's merge.
+        // Lay the window changes over each entry, without holding any lock. The entry itself is
+        // not copied.
         let mut states = Vec::with_capacity(page.len());
         for (id, entry) in page.iter().zip(entries) {
-            // Not cached: start from an empty state. An id the window never changed is served as
-            // that empty state. The database path does this only at an uncommitted version; at a
-            // committed version it leaves the id out.
+            // Not cached: the view starts from an empty state. An id the window never changed is
+            // served as that empty state. The database path does this only at an uncommitted
+            // version; at a committed version it leaves the id out.
             // TODO: serve unknown ids the same way for accounts and components: both as an empty
             // entity or both as an error.
-            let updated_at = entry
-                .as_ref()
-                .map(CachedComponentState::updated_at);
-            let mut state = entry.map_or_else(
-                || ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
-                ProtocolComponentState::from,
-            );
+            let mut view = ComponentView::new(id, entry, request.include_balances);
             for change in window_changes
                 .get(*id)
                 .into_iter()
                 .flatten()
-                // Skip blocks a fold already moved into the entry.
-                .filter(|change| updated_at.is_none_or(|at| change.at > at))
             {
-                if let Some(delta) = &change.delta {
-                    state.apply_state_delta(delta)?;
-                }
-                if let Some(balances) = &change.balances {
-                    state.apply_balance_delta(balances)?;
-                }
+                view.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            if !request.include_balances {
-                state.balances.clear();
-            }
-            states.push(dto::ResponseProtocolState::from(state));
+            states.push(view);
         }
 
-        Ok(dto::ProtocolStateRequestResponse::new(
+        Ok(ProtocolStateView {
             states,
-            PaginationResponse::new(pagination.page, pagination.page_size, ids.len() as i64),
-        ))
+            pagination: PaginationResponse::new(
+                pagination.page,
+                pagination.page_size,
+                ids.len() as i64,
+            ),
+        })
+    }
+
+    /// [`Self::protocol_state_view`] as an owned DTO.
+    pub(crate) fn protocol_state(
+        &self,
+        request: &dto::ProtocolStateRequestBody,
+    ) -> Result<dto::ProtocolStateRequestResponse, StateServiceError> {
+        self.protocol_state_view(request)
+            .map(dto::ProtocolStateRequestResponse::from)
     }
 
     /// Resolves `version` in the window of `protocol_system` and copies the window's blocks up to
@@ -977,6 +980,29 @@ mod test {
         assert_eq!(response.accounts[0].slots[&word(1)], word(1));
     }
 
+    /// The view answer, a cached and an uncached account, writes the JSON of its owned DTO.
+    #[test]
+    fn contract_state_view_serializes_like_its_owned_answer() {
+        let harness = accounts();
+        harness.push(with_account(msg(6), account_delta(&addr(2), 6, ChangeType::Creation)));
+        let request = contract_request(vec![addr(1), addr(2)], dto::VersionParam::default());
+
+        let view = harness
+            .service
+            .contract_state_view(&request)
+            .unwrap();
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["accounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(json, serde_json::to_value(dto::StateRequestResponse::from(view)).unwrap());
+    }
+
     #[test]
     fn contract_state_builds_an_uncached_account_from_another_extractors_window() {
         let harness = Harness::new(10);
@@ -1327,6 +1353,26 @@ mod test {
         assert_eq!(response.states[1].attributes["x"], Bytes::from(6u64));
         assert_eq!(response.states[2].attributes["x"], Bytes::from(6u64));
         assert!(response.states[3].attributes.is_empty() && response.states[3].balances.is_empty());
+    }
+
+    /// The view answer, cached and uncached ids, writes the JSON of its owned DTO.
+    #[test]
+    fn protocol_state_view_serializes_like_its_owned_answer() {
+        let harness = components();
+        harness.push(testing::with_state_delta(with_component(msg(6), "c2"), "c2", 6));
+        let request = protocol_request(&["c1", "c2", "c4"], dto::VersionParam::default());
+
+        let view = harness
+            .service
+            .protocol_state_view(&request)
+            .unwrap();
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["states"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            json,
+            serde_json::to_value(dto::ProtocolStateRequestResponse::from(view)).unwrap()
+        );
     }
 
     #[test]

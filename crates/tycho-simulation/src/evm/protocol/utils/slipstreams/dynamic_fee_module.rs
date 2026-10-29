@@ -24,7 +24,7 @@ struct SupportedModule {
     default_scaling_factor: u64,
 }
 
-const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 6] = [
+const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 7] = [
     SupportedModule {
         address: address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
         default_fee_cap: DEFAULT_FEE_CAP,
@@ -57,6 +57,14 @@ const SUPPORTED_DYNAMIC_FEE_MODULES: [SupportedModule; 6] = [
     SupportedModule {
         address: address!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"),
         default_fee_cap: 50_000,
+        default_scaling_factor: DEFAULT_SCALING_FACTOR,
+    },
+    // Topaz CL on BSC. The Robinhood module's code with `MAX_BASE_FEE` 30_000 and `MAX_FEE_CAP`
+    // 50_000; its `defaultFeeCap` has been 10_000 and its `defaultScalingFactor` 0 since
+    // deployment.
+    SupportedModule {
+        address: address!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"),
+        default_fee_cap: 10_000,
         default_scaling_factor: DEFAULT_SCALING_FACTOR,
     },
     // Raphael on Robinhood Chain. Same module code as the Base deployments above. Its swap fee
@@ -508,13 +516,15 @@ mod tests {
     #[rstest]
     #[case::up(hex!("a8Bdc945bE050E451C97f935d7c0D6B0087cF94c"), 30_000)]
     #[case::topaz_cl(hex!("0Dca13b1039277d82B27ADd86d06195B8E9BBfDb"), 40_000)]
+    #[case::topaz_cl_bsc(hex!("656cf5d2f1A70177E011e2c27DeafBeE4C7B0541"), 10_000)]
     #[case::raphael(hex!("8649D7A63499a6Cd5E400EF2DdB4AD317359c23c"), 10_000)]
     fn base_fee_without_scaling_factor_is_capped_by_the_module_default(
         #[case] module: [u8; 20],
         #[case] expected_fee: u32,
     ) {
         // A custom base fee with no scaling factor of its own: the module caps it at its
-        // `defaultFeeCap`, 30_000 for UP, 50_000 for Topaz and 10_000 for Raphael.
+        // `defaultFeeCap`, 30_000 for UP, 50_000 for Topaz on Robinhood, 10_000 for Topaz on BSC
+        // and 10_000 for Raphael.
         let attributes = HashMap::from([
             (DYNAMIC_FEE_MODULE_ATTRIBUTE.to_string(), Bytes::from(module)),
             ("dfc_baseFee".to_string(), Bytes::from(40_000_u32.to_be_bytes())),

@@ -276,6 +276,10 @@ fn normalize_accounts(accounts: &mut [dto::ResponseAccount]) {
         // The database path does not recompute the hash when a window delta carries code (TODO in
         // `Account::apply_delta`). The code itself is compared.
         account.code_hash = Bytes::default();
+        // A token account keeps the `{chain}_{symbol}` title from `add_tokens` in the database
+        // when its token row commits in an earlier DB transaction than its `Creation`. The cache
+        // sees blocks, not DB transactions, and uses the address.
+        account.title = String::new();
     }
     accounts.sort_by(|a, b| a.address.cmp(&b.address));
 }
@@ -693,6 +697,9 @@ mod test {
     })]
     #[case::stale_code_hash(|account: &mut dto::ResponseAccount| {
         account.code_hash = Bytes::from(7u64);
+    })]
+    #[case::token_title(|account: &mut dto::ResponseAccount| {
+        account.title = "Ethereum_MARG".to_string();
     })]
     fn known_account_differences_match(#[case] change: fn(&mut dto::ResponseAccount)) {
         let mut db = account(1);

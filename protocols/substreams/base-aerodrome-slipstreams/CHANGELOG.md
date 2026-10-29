@@ -34,11 +34,20 @@
   The factory's first fee module (`0x3ae3642ecebb720e48fe3f8feff5f7b5c50f98f6`, replaced at block
   60,854,672) emitted no events, so the manifest lists only its replacement, with
   `first_dynamic_fee_module_block=60854474`.
+- Index Topaz CL on BSC via `bsc-topaz-cl.yaml` (factory
+  `0x73DC984D9490286E735548f61dfCCec67Af82ed9`, swap fee module
+  `0x656cf5d2f1A70177E011e2c27DeafBeE4C7B0541`, initial block 98,756,164). The factory, pool
+  implementation and fee module are the Robinhood contracts: the pool implementation is
+  byte-identical, the factory differs only in its immutables, and the fee module only in its
+  `factory` immutable, `MAX_BASE_FEE` (30,000) and `MAX_FEE_CAP` (50,000). The factory's first fee
+  module (`0xa0462a52af4f8cbf7766efbba75355b30b6bcce2`) was replaced at block 98,757,673, before
+  the first pool, so the manifest lists only its replacement, with
+  `first_dynamic_fee_module_block=98757661`.
 
 ### Deployment notes
 
 - No module code changed, so Base and UP V3 output is unchanged. Only the package version moves.
-- Topaz back-processes from block 60,744,015.
+- Topaz back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC.
 
 ## v0.1.5
 

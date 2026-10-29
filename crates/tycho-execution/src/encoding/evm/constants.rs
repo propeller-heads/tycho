@@ -165,6 +165,12 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 /// `PRICE_LEVEL_STREAM_KEY`.
 pub const FALLBACK_KEY: &str = "fallback";
 
+/// Config key of `TychoSubsidizingExecutor` and of its `payer_address`.
+pub(crate) const SUBSIDY_KEY: &str = "subsidy";
+
+/// Protocol system of the native token wrap/unwrap.
+pub(crate) const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 
@@ -173,6 +179,21 @@ pub const BEBOP_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:bebop";
 
 /// Hashflow components executed through `HashflowFallbackRouter`.
 pub const HASHFLOW_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:hashflow";
+
+/// Native components executed through `NativeFallbackRouter`.
+pub const NATIVE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:native";
+
+/// Liquorice components executed through `LiquoriceFallbackRouter`.
+pub const LIQUORICE_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:liquorice";
+
+/// Components whose fallback router runs a signed RFQ quote first, approving the venue itself and
+/// forwarding the output.
+pub const SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS: [&str; 4] = [
+    BEBOP_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+    NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+    LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+];
 
 #[cfg(test)]
 mod tests {
@@ -187,6 +208,8 @@ mod tests {
         assert!(METRIC_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(BEBOP_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
         assert!(HASHFLOW_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(NATIVE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
+        assert!(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM.starts_with(FALLBACK_PREFIX));
     }
 
     /// The timings only keep inline fetches off the encoding path while a timed-out refresh plus

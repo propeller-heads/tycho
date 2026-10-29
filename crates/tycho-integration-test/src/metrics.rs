@@ -46,9 +46,8 @@ pub fn initialize_metrics() {
     );
     describe_counter!(
         "tycho_integration_execution_stale_quotes_total",
-        "Price level stream executions skipped because the quoted block was not built by Titan \
-         or the pAMM's oracle update did not land on-chain (freshness-guard revert; expected \
-         outcome)"
+        "Price level stream swaps simulated without simulation overrides that reverted on the \
+         venue's freshness guard (expected outcome; the execution comparison is skipped)"
     );
     describe_counter!(
         "tycho_integration_price_level_target_block_misses_total",
@@ -56,14 +55,9 @@ pub fn initialize_metrics() {
          block within the poll window"
     );
     describe_counter!(
-        "tycho_integration_price_level_oracle_override_misses_total",
-        "Price level stream swaps simulated without their venue's overrides, because Titan \
-         published none for the venue at the quoted block"
-    );
-    describe_counter!(
-        "tycho_integration_price_level_oracle_override_unserved_total",
-        "Price level stream swaps simulated without overrides, because Titan's state override \
-         stream carries no channel for the venue at all"
+        "tycho_integration_price_level_simulation_overrides_missing_total",
+        "Price level stream swaps simulated without simulation overrides, because the stream \
+         attached none to the quote's state"
     );
     describe_histogram!(
         "tycho_integration_simulation_execution_slippage_ratio",
@@ -176,7 +170,8 @@ pub fn record_simulation_execution_revert(protocol: &str, error_category: &str) 
     .increment(1);
 }
 
-/// Record a price level stream execution that reverted `StaleUpdate()`.
+/// Record a price level stream swap that was simulated without simulation overrides and reverted
+/// on the venue's freshness guard.
 pub fn record_execution_stale_quote(protocol: &str) {
     counter!(
         "tycho_integration_execution_stale_quotes_total",
@@ -257,20 +252,11 @@ pub fn record_price_level_target_block_miss() {
     counter!("tycho_integration_price_level_target_block_misses_total").increment(1);
 }
 
-/// Record a swap of `protocol` simulated without the overrides Titan publishes for its venue.
-pub fn record_price_level_oracle_override_miss(protocol: &str) {
+/// Record a swap of `protocol` simulated without simulation overrides, because the stream attached
+/// none to its quote's state.
+pub fn record_price_level_simulation_overrides_missing(protocol: &str) {
     counter!(
-        "tycho_integration_price_level_oracle_override_misses_total",
-        "protocol" => protocol.to_string()
-    )
-    .increment(1);
-}
-
-/// Record a swap of `protocol` simulated without overrides because Titan's state override stream
-/// serves no channel for its venue.
-pub fn record_price_level_oracle_override_unserved(protocol: &str) {
-    counter!(
-        "tycho_integration_price_level_oracle_override_unserved_total",
+        "tycho_integration_price_level_simulation_overrides_missing_total",
         "protocol" => protocol.to_string()
     )
     .increment(1);

@@ -10,6 +10,10 @@ import {
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
+import {
+    LIQUORICE_SETTLE_SELECTOR,
+    LIQUORICE_SETTLE_SINGLE_SELECTOR
+} from "../../lib/LiquoriceSelectors.sol";
 
 /// @title LiquoriceExecutor
 /// @notice Executor for Liquorice RFQ (Request for Quote) swaps
@@ -24,9 +28,6 @@ contract LiquoriceExecutor is IExecutor {
     error LiquoriceExecutor__NotAContract();
     error LiquoriceExecutor__AmountBelowMinimum();
     error LiquoriceExecutor__InvalidSelector();
-
-    bytes4 private constant _SETTLE_SINGLE_SELECTOR = 0x9935c868;
-    bytes4 private constant _SETTLE_SELECTOR = 0xcba673a7;
 
     /// @notice The Liquorice settlement contract address
     address public immutable liquoriceSettlement;
@@ -84,8 +85,10 @@ contract LiquoriceExecutor is IExecutor {
             _clampAmount(amountIn, originalBaseTokenAmount, minBaseTokenAmount);
 
         bytes4 selector = bytes4(liquoriceCalldata);
-        if (selector != _SETTLE_SINGLE_SELECTOR && selector != _SETTLE_SELECTOR)
-        {
+        if (
+            selector != LIQUORICE_SETTLE_SINGLE_SELECTOR
+                && selector != LIQUORICE_SETTLE_SELECTOR
+        ) {
             revert LiquoriceExecutor__InvalidSelector();
         }
 

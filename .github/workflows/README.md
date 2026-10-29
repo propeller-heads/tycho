@@ -10,7 +10,7 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `main-workflow.yaml` | push to `main` | Orchestrates full CI → release → Docker build → dev deploy |
+| `main-workflow.yaml` | push to `main` | Orchestrates full CI → release → Docker build → dev deploy, and Grafana dashboard sync |
 | `ci-rust.yaml` | PR (Rust paths), push to `main`, `workflow_call` | Rust lint, test, and doc checks |
 | `ci-foundry.yaml` | PR/push (`foundry/`), manual | Solidity fmt, tests, gas snapshot, static analysis |
 | `ci-substreams.yaml` | PR (`substreams/`), manual | Lint and unit tests for changed substreams packages |
@@ -39,6 +39,10 @@ The entry point for all automated delivery. Runs only on pushes to `main`.
 5. **`promote-tycho-indexer-to-dev`** / **`promote-tycho-integration-test-to-dev`** — Roll out the new images to the dev environment.
 
 Steps 4 and 5 are gated on `release` completing, so no image is built on dry-run commits.
+
+**`sync-router-trades-dashboards`** runs independently of the jobs above. It calls `sync-grafana-dashboards.yaml` from ci-cd-templates, which pushes the dashboard JSON files under `crates/tycho-execution/substreams/tycho-router-trades/grafana/` to the `tycho` folder in Grafana. Only files changed by the push are sent; if none changed, nothing is sent. It uses the `GRAFANA_SA_TOKEN` secret.
+
+These files are the source of truth: an edit made in the Grafana UI is overwritten the next time its file changes. To change a dashboard, edit it in Grafana, export it (*Export → Export as JSON*), and commit the result over the file. Keep the `uid` unchanged.
 
 ---
 
