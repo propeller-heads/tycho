@@ -350,3 +350,200 @@ fn is_own_swap(log: &Log, context: &TokenContext) -> bool {
         swap_topics().contains(&topics[0]) &&
         [router(), context.wallet].contains(&Address::from_word(topics[2]))
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{LogData, B256},
+        sol_types::{Revert, SolError},
+    };
+
+    use super::*;
+    use crate::services::token_analyzer::simulation::scenario::SimCallError;
+
+    fn context() -> TokenContext {
+        let rpc = EthereumRpcClient::new("http://localhost:1").expect("client");
+        TokenContext::new(
+            &rpc,
+            Address::repeat_byte(7),
+            Address::repeat_byte(8),
+            U256::from(1000),
+            (1, 1),
+        )
+    }
+
+    fn ok(return_data: Vec<u8>, logs: Vec<Log>) -> SimCall {
+        SimCall {
+            return_data: return_data.into(),
+            logs,
+            status: alloy::primitives::U64::from(1),
+            error: None,
+        }
+    }
+
+    fn log(address: Address, topics: Vec<B256>, data: U256) -> Log {
+        Log {
+            inner: alloy::primitives::Log {
+                address,
+                data: LogData::new_unchecked(topics, data.to_be_bytes::<32>().to_vec().into()),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn bought() -> Vec<u8> {
+        buyCall::abi_encode_returns(&buy_result())
+    }
+
+    fn buy_result() -> super::super::runner::BuyResult {
+        super::super::runner::BuyResult {
+            swapOk: true,
+            expected: U256::from(1000),
+            bought: U256::from(950),
+            forwardOk: true,
+            forwardSent: U256::from(950),
+            forwardReceived: U256::from(950),
+            forwardGas: U256::from(50_000),
+            swapRevert: Bytes::new(),
+            forwardRevert: Bytes::new(),
+        }
+    }
+
+    fn sold(arrived: u64) -> Vec<u8> {
+        sellCall::abi_encode_returns(&SellResult {
+            transferOk: true,
+            sent: U256::from(950),
+            arrived: U256::from(arrived),
+            swapOk: true,
+            wethOut: U256::from(1),
+            gas: U256::from(70_000),
+            transferRevert: Bytes::new(),
+            swapRevert: Bytes::new(),
+        })
+    }
+
+    #[test]
+    fn maps_a_round_trip_and_ignores_its_own_swaps() {
+        let context = context();
+        let transfer = keccak256("Transfer(address,address,uint256)");
+        let sell_transfer = log(
+            context.token,
+            vec![transfer, context.wallet.into_word(), context.pool.into_word()],
+            U256::from(900),
+        );
+        let own_swap = log(
+            context.pool,
+            vec![swap_topics()[0], router().into_word(), context.wallet.into_word()],
+            U256::ZERO,
+        );
+        let token_swap = log(
+            context.pool,
+            vec![swap_topics()[0], router().into_word(), Address::repeat_byte(9).into_word()],
+            U256::ZERO,
+        );
+        let results = [
+            ok(bought(), vec![]),
+            ok(vec![], vec![]),
+            ok(sold(1500), vec![sell_transfer, own_swap, token_swap]),
+        ];
+        let outcome = outcome(&context, &[], &results);
+        assert!(outcome.all_legs_ok());
+        assert_eq!(outcome.fees().buy, Some(500));
+        // A swap-back moved more into the pool than the wallet sent; the events show 900.
+        assert_eq!(outcome.sell_arrived, U256::from(900));
+        assert_eq!(outcome.leg_logs.len(), 2);
+    }
+
+    #[test]
+    fn a_reverted_sell_transaction_is_a_sell_failure() {
+        let context = context();
+        let reason = Revert { reason: "no sells".to_string() }.abi_encode();
+        let sell = SimCall {
+            status: alloy::primitives::U64::ZERO,
+            error: Some(SimCallError {
+                message: "execution reverted".to_string(),
+                data: Some(reason.into()),
+            }),
+            ..Default::default()
+        };
+        let outcome = outcome(&context, &[], &[ok(bought(), vec![]), ok(vec![], vec![]), sell]);
+        assert!(outcome.only_sell_failed());
+        assert_eq!(outcome.failure_reason().as_deref(), Some("sell reverted: no sells"));
+    }
+
+    #[test]
+    fn a_sell_without_a_transfer_event_counts_what_reached_the_pool() {
+        let context = context();
+        let results = [ok(bought(), vec![]), ok(vec![], vec![]), ok(sold(900), vec![])];
+        let outcome = outcome(&context, &[], &results);
+        assert!(outcome.all_legs_ok());
+        assert!(!outcome.sell_logged);
+        assert_eq!(outcome.sell_arrived, U256::from(900));
+    }
+
+    #[test]
+    fn a_swap_the_pool_rejects_is_marked_as_such() {
+        let context = context();
+        let mut rejected = buy_result();
+        rejected.swapOk = false;
+        rejected.swapRevert = Revert { reason: "UniswapV2: K".to_string() }
+            .abi_encode()
+            .into();
+        let buy = buyCall::abi_encode_returns(&rejected);
+        let outcome =
+            outcome(&context, &[], &[ok(buy, vec![]), ok(vec![], vec![]), ok(vec![], vec![])]);
+        assert!(outcome.pool_rejected_buy);
+        assert_eq!(outcome.failure_reason().as_deref(), Some("buy reverted: UniswapV2: K"));
+    }
+
+    #[rstest::rstest]
+    #[case::realistic(Environment::Realistic, Some(10))]
+    #[case::bare(Environment::Bare, Some(10))]
+    #[case::legacy(Environment::Realistic, None)]
+    fn wallets_hold_what_their_transactions_can_spend(
+        #[case] environment: Environment,
+        #[case] base_fee: Option<u64>,
+    ) {
+        let mut context = context();
+        context.base_fee = base_fee;
+        let pair = V2Pair { wrapped_native: Address::repeat_byte(9), reserve: U256::from(10_000) };
+        let legs = transactions(&context, &pair, environment, BuySize::Large);
+        let state = wallet_and_router_state(&legs);
+
+        let price = U256::from(match (environment, base_fee) {
+            (Environment::Realistic, Some(base_fee)) => u128::from(base_fee) * 2 + PRIORITY_FEE_WEI,
+            (Environment::Realistic, None) => LEGACY_GAS_PRICE_WEI,
+            (Environment::Bare, _) => 0,
+        });
+        let gas = U256::from(SWAP_GAS) * price;
+        let balance = |address: Address| state[&address].balance;
+        assert_eq!(balance(buyer()), Some(eth_spent_on_buy(&pair, BuySize::Large) + gas));
+        assert_eq!(balance(context.wallet), Some(gas + gas));
+        assert!(state[&router()].code.is_some());
+    }
+
+    #[test]
+    fn the_large_buy_takes_two_percent_of_the_token_reserve() {
+        let (weth, tokens) = (U256::from(2_000_000_000u64), U256::from(9_000_000_000u64));
+        let pair = V2Pair { wrapped_native: Address::repeat_byte(9), reserve: weth };
+        let paid = eth_spent_on_buy(&pair, BuySize::Large) * U256::from(950);
+        let bought = paid * tokens / (weth * U256::from(1000) + paid);
+        assert_eq!(bought, tokens / U256::from(50) - U256::from(1));
+    }
+
+    #[test]
+    fn realistic_transactions_pay_the_base_fee_and_bare_ones_nothing() {
+        let mut context = context();
+        context.base_fee = Some(10);
+        let realistic =
+            wallet_transaction(&context, Environment::Realistic, buyer(), router(), vec![]);
+        assert_eq!(realistic.max_fee_per_gas, Some(20 + PRIORITY_FEE_WEI));
+        assert_eq!(realistic.gas_price, None);
+        let bare = wallet_transaction(&context, Environment::Bare, buyer(), router(), vec![]);
+        assert_eq!(bare.gas_price, Some(0));
+        context.base_fee = None;
+        let legacy =
+            wallet_transaction(&context, Environment::Realistic, buyer(), router(), vec![]);
+        assert_eq!(legacy.gas_price, Some(LEGACY_GAS_PRICE_WEI));
+    }
+}
