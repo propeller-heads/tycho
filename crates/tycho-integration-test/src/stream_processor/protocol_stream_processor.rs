@@ -346,6 +346,7 @@ impl ProtocolStreamProcessor {
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
                     "topaz_cl".to_string(),
+                    "raphael_slipstreams".to_string(),
                     "pancakeswap_infinity_cl".to_string(),
                 ]
             }
@@ -449,9 +450,9 @@ impl ProtocolStreamProcessor {
                     Some(fluid_v1_paused_pools_filter),
                 );
             }
-            // UP and Topaz CL deploy the Aerodrome Slipstream contracts, so they decode with the
-            // same state.
-            "aerodrome_slipstreams" | "up_v3" | "topaz_cl" => {
+            // UP, Topaz CL and Raphael deploy the Aerodrome Slipstream contracts, so they decode
+            // with the same state.
+            "aerodrome_slipstreams" | "up_v3" | "topaz_cl" | "raphael_slipstreams" => {
                 stream = stream.exchange::<AerodromeSlipstreamsState>(
                     protocol,
                     tvl_filter.clone(),

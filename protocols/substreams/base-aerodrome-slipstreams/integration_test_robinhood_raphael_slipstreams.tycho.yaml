@@ -1,0 +1,72 @@
+substreams_yaml_path: ./robinhood-raphael-slipstreams.yaml
+protocol_system: "raphael_slipstreams"
+protocol_type_names:
+  - "raphael_slipstreams_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The range starts at the factory's deployment block because a pool is only emitted once its
+  # tick spacing has a stored fee, and the factory enables its tick spacings in its constructor.
+  # Tick spacing 60 was enabled at block 70,874,422. The fee module's defaults moved to a 10_000
+  # cap and a 10_000_000 scaling factor at blocks 70,897,071 and 70,897,094.
+  - name: weth_usdg_configured_and_unconfigured_pools
+    start_block: 54366500
+    # Stop at the first swap on the tick spacing 60 pool:
+    #   WETH / USDG PoolCreated:                       block 58,834,739
+    #   WETH / USDG CustomFeeSet 100, FeeCapSet 3000,
+    #     ScalingFactorSet 5_000_000:                  blocks 70,895,242 - 70,895,288
+    #   tick spacing 60 PoolCreated (no fee config):   block 76,782,576
+    #   tick spacing 60 Swap:                          block 76,828,903
+    stop_block: 76828903
+    expected_components:
+      # Configured pool: its own fee cap and scaling factor.
+      - id: "0x0759985d218520b758d257d17c8b1e8050adf42c"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          default_fee: "0x0bb8"
+          tick_spacing: "0x00c8"
+        creation_tx: "0x9b5021fca14fac3c7331a96f8639ca0578e61fed983ad0a4dac87ca64a061521"
+        skip_simulation: false
+        skip_execution: false
+      # Pool the fee module emitted no event for: covers the creation marker, which makes the pool
+      # resolve its fee through the module. Its observation cardinality is 1 at the stop block, so
+      # the module adds no dynamic component and its fee is the tick spacing fee whatever the
+      # module defaults; the next test covers the defaults.
+      - id: "0x24247fa16b8707f53a9b52bc619a5fd476e672a7"
+        tokens:
+          - "0x0339f5459FC690aC85F1782e15782A151b4A9E1b"
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          default_fee: "0x0bb8"
+          tick_spacing: "0x3c"
+        creation_tx: "0x886cd78ac67611666b072e9dc48dbaa9b6222901995c562a25bfc5580f81bd5d"
+        skip_simulation: false
+        skip_execution: false
+  # A pool with a base fee of its own but no scaling factor or fee cap, so its dynamic fee comes
+  # from the module's defaults (a 10_000 cap since block 70,897,071 and a 10_000_000 scaling
+  # factor since block 70,897,094). The TWAP part of the fee needs an observation cardinality of at
+  # least 300 (`secondsAgo` 600 / 2).
+  - name: meme_usdg_module_default_scaling_factor
+    start_block: 54366500
+    # Stop at the first swap once both defaults and the cardinality apply:
+    #   MEME / USDG PoolCreated:                       block 58,847,770
+    #   observationCardinality 1 -> 300:               block 70,893,654
+    #   CustomFeeSet 2000 (no fee cap or scaling):     block 70,896,522
+    #   Swap:                                          block 70,899,043
+    # On chain at the stop block, `getFee` is 3030: the base fee 2000 plus 1030 from the
+    # default scaling factor over a 103-tick gap between the current tick and the 600 s TWAP.
+    stop_block: 70899043
+    expected_components:
+      - id: "0x7523b749773bb4272adfa81eeb6ad2f12398530c"
+        tokens:
+          - "0x385F4f8ae47651ce5F58F5265395a669f8281e18" # MEME
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes:
+          default_fee: "0x0bb8"
+          tick_spacing: "0x00c8"
+        creation_tx: "0xc7f408caa5a85620195273d7777c8961044263219dd8dbab04887efb0bf8f311"
+        skip_simulation: false
+        skip_execution: false

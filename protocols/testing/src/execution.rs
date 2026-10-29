@@ -70,8 +70,10 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("aerodrome_slipstreams", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
-    // Production routes Topaz CL through the chains' UniswapV3Executor, like ramses_v3.
+    // Production routes Topaz CL and Raphael through Robinhood's and BSC's UniswapV3Executor, like
+    // ramses_v3.
     map.insert("topaz_cl", UNISWAP_V3_BYTECODE_JSON);
+    map.insert("raphael_slipstreams", UNISWAP_V3_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
     map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
     map

@@ -1,6 +1,8 @@
 # Changelog
 
-## v0.1.6
+## v0.1.7
+
+v0.1.6 was never released; its changes ship in this version.
 
 ### Added
 
@@ -22,17 +24,40 @@
   module (`0xa0462a52af4f8cbf7766efbba75355b30b6bcce2`) was replaced at block 98,757,673, before
   the first pool, so the manifest lists only its replacement, with
   `first_dynamic_fee_module_block=98757661`.
+- Index Raphael on Robinhood Chain via `robinhood-raphael-slipstreams.yaml` (factory
+  `0x5481864ddd46a2d798df0925c23b7846e776e5e3`, swap fee module
+  `0x8649D7A63499a6Cd5E400EF2DdB4AD317359c23c`, initial block 54,366,500). Raphael's pool, its
+  libraries and its fee modules are Aerodrome Slipstream's source verbatim; its factory adds tick
+  spacings 10 (fee 500) and 60 (fee 3000) at block 70,874,306 and later.
+- `creation_dynamic_fee_module` parameter. When set, `map_pools_created` marks every new pool with
+  that `dynamic_fee_module` at creation instead of waiting for the pool's first fee-module event.
+  The value must be one of the `dynamic_fee_modules` addresses; the module fails otherwise.
+  Raphael's module has a non-zero `defaultScalingFactor` (10,000,000 since block 70,897,094), so
+  it charges a dynamic fee to pools it holds no config for; 8 of its 49 pools have never had a
+  fee-module event.
+
+### Known limitations
+
+- The simulation takes each fee module's `defaultFeeCap` and `defaultScalingFactor` from a table
+  in `tycho-simulation`, and its `secondsAgo` from a constant (600), not from indexed state. The
+  module's swap fee manager can change all three (`setDefaultFeeCap`, `setDefaultScalingFactor`,
+  `setSecondsAgo`, emitting `DefaultFeeCapSet`, `DefaultScalingFactorSet`, `SecondsAgoSet`), and
+  Raphael's defaults changed at blocks 70,897,071 (`defaultFeeCap`) and 70,897,094
+  (`defaultScalingFactor`). If an owner changes them again, the table needs a code change; until
+  then pools without a config of their own are quoted at the old values.
+- The package does not index the factory's `SwapFeeModuleChanged` either. If a factory switches
+  to another fee module, its pools price at their static fee until the simulator's module table
+  and the manifest's `dynamic_fee_modules` list the new module.
 
 ### Deployment notes
 
-- No module code changed, so Base and UP V3 output is unchanged. Only the package version moves.
-- Topaz back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC.
-- The package does not index module-wide fee settings: `DefaultFeeCapSet`,
-  `DefaultScalingFactorSet`, `SecondsAgoSet`, or the factory's `SwapFeeModuleChanged`. The
-  simulator applies each supported module's default cap, default scaling factor and seconds-ago
-  window as constants (Topaz: 50,000 cap on Robinhood, 10,000 on BSC). The swap fee manager can
-  change them, and the factory can switch to another module; either change needs a simulator
-  release, and a module missing from the simulator's table prices its pools at their static fee.
+- The shared wasm changed (`map_pools_created` and the module parameters), so every module hash
+  changes in every manifest, but Base, UP V3 and Topaz CL do not set the new parameter and their
+  output is unchanged. Do not redeploy Base or UP V3 for this version: each would back-process
+  from its initial block (13,843,704 and 6,184,096) for no change in indexed state. The same holds
+  for a Topaz CL deployment made from an earlier build of this package.
+- Topaz CL back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC; Raphael from
+  block 54,366,500.
 
 ## v0.1.5
 

@@ -131,7 +131,7 @@ pub fn register_protocol(
                 None,
                 decoder_context,
             ),
-        "up_v3" | "topaz_cl" => stream_builder
+        "up_v3" | "topaz_cl" | "raphael_slipstreams" => stream_builder
             .exchange_with_decoder_context::<AerodromeSlipstreamsState>(
                 protocol_system,
                 tvl_filter,
