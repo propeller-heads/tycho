@@ -15,7 +15,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; on a follower, waits to build the extractor while the leader syncs history
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -222,6 +222,15 @@ the former leader left, instead of committing again from an old cursor:
   `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
   and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
   extractor from its cursor.
+- **Restart to take over (DCI)**: an extractor with a DCI plugin does not take over in place. Its
+  retained blocks and DCI state come from this process's own traces, and a trace that failed here
+  but not on the former leader (or the opposite) makes them track other contracts than the
+  database. On the first full block after the role turns `Leader`, it stops with
+  `ExtractionError::RestartToTakeOver` and commits nothing. The supervisor sends
+  `ExtractorRestarted` and builds it again at once, as leader, from the database cursor: no backoff,
+  no count toward `max_restarts` (`extractor_restarts_total` still counts it;
+  `extractor_stopped{reason="restart_to_take_over"}` names it). The new stream replays the blocks
+  above the cursor, about one finality window, and traces them again.
 - **No stream while the leader syncs**: before it builds an extractor (at start and on each
   restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false: the process
   follows and the leader's newest committed block for the extractor is missing (first sync) or

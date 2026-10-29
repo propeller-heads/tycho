@@ -1,8 +1,11 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    oneshot, watch, Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot, watch, Mutex,
+    },
+    task::JoinError,
 };
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, warn};
@@ -99,6 +102,18 @@ fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
     Some(ExtractionError::Storage(StorageError::Fenced { claimed: *claimed, current: *current }))
 }
 
+/// Returns whether `result` asks to build the extractor again at once, without a failure.
+///
+/// An extractor with a DCI plugin stops with [`ExtractionError::RestartToTakeOver`] when this
+/// process becomes the leader. The rebuild reads its state back from the database, so it waits
+/// for no backoff and does not count toward `max_restarts`.
+fn is_restart_to_take_over(result: &Result<Result<(), ExtractionError>, JoinError>) -> bool {
+    let Ok(Err(ExtractionError::RestartToTakeOver(_))) = result else {
+        return false;
+    };
+    true
+}
+
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
 ///
 /// The supervisor:
@@ -108,6 +123,9 @@ fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
 ///   backoff, then rebuilds from scratch. Each subscriber decides how to handle the restart.
+/// - When the process becomes the leader and the extractor asks to restart to take over, sends
+///   `DeltaCommand::ExtractorRestarted` and rebuilds at once, without a backoff and without a count
+///   toward `max_restarts`.
 /// - Counts every rebuild in `extractor_restarts_total`, registered at zero when supervision
 ///   starts.
 /// - Forwards `ControlMessage::Subscribe` from the `ExtractorHandle` to the subscription map.
@@ -205,6 +223,30 @@ impl ExtractorSupervisor {
         }
     }
 
+    /// Waits `backoff` before a restart. Returns `false` when a `Stop` arrives first.
+    ///
+    /// Serves control messages while it waits: a `Stop` must not have to sit out a backoff of up
+    /// to `MAX_RESTART_BACKOFF`, and new subscribers registered now take effect on the next run.
+    async fn wait_for_restart_backoff(&mut self, backoff: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + backoff;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => return true,
+                Some(ctrl) = self.control_rx.recv() => {
+                    match ctrl {
+                        ControlMessage::Stop => {
+                            info!(extractor = %self.id, "Stop signal received during restart backoff");
+                            return false;
+                        }
+                        ControlMessage::Subscribe(sender) => {
+                            self.add_subscriber(sender).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
     pub fn handle(&self) -> ExtractorHandle {
         ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone(), self.stream_state.subscribe())
@@ -283,6 +325,7 @@ impl ExtractorSupervisor {
                 }
             };
 
+            let restart_to_take_over = is_restart_to_take_over(&runner_result);
             // Runner exited — classify the result.
             match runner_result {
                 Ok(Ok(())) => {
@@ -294,6 +337,19 @@ impl ExtractorSupervisor {
                     )
                     .increment(1);
                     return Ok(());
+                }
+                Ok(Err(ref err)) if restart_to_take_over => {
+                    info!(
+                        extractor = %self.id,
+                        error = %err,
+                        "RestartToTakeOver: building the extractor again from the database cursor"
+                    );
+                    metrics::counter!(
+                        "extractor_stopped",
+                        "extractor" => self.id.name.clone(),
+                        "reason" => err.variant_name()
+                    )
+                    .increment(1);
                 }
                 Ok(Err(ref err)) => {
                     error!(
@@ -331,7 +387,7 @@ impl ExtractorSupervisor {
             // consecutive, so the failure counting starts afresh. Without this, sporadic
             // failures accumulate over the process lifetime: the backoff ratchets up to its
             // cap and `max_restarts` eventually stops a healthy extractor for good.
-            if run_started.elapsed() >= HEALTHY_RUN_THRESHOLD {
+            if !restart_to_take_over && run_started.elapsed() >= HEALTHY_RUN_THRESHOLD {
                 info!(
                     extractor = %self.id,
                     run_duration = ?run_started.elapsed(),
@@ -342,9 +398,9 @@ impl ExtractorSupervisor {
                 backoff_strategy = restart_backoff();
             }
 
-            if self
-                .max_restarts
-                .is_some_and(|max| restart_count >= max)
+            if !restart_to_take_over &&
+                self.max_restarts
+                    .is_some_and(|max| restart_count >= max)
             {
                 error!(
                     extractor = %self.id,
@@ -387,45 +443,30 @@ impl ExtractorSupervisor {
                 }
             }
 
-            let backoff = backoff_strategy
-                .next()
-                .expect("backoff strategy is infinite");
-            warn!(
-                extractor = %self.id,
-                ?backoff,
-                restart_count,
-                "Waiting for backoff before restarting extractor"
-            );
-            // Keep servicing control messages while waiting: a `Stop` must not have to sit
-            // out a backoff of up to `MAX_RESTART_BACKOFF`, and new subscribers registered
-            // now take effect on the next run.
-            let deadline = tokio::time::Instant::now() + backoff;
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    Some(ctrl) = self.control_rx.recv() => {
-                        match ctrl {
-                            ControlMessage::Stop => {
-                                info!(
-                                    extractor = %self.id,
-                                    "Stop signal received during restart backoff"
-                                );
-                                return Ok(());
-                            }
-                            ControlMessage::Subscribe(sender) => {
-                                self.add_subscriber(sender).await;
-                            }
-                        }
-                    }
+            if !restart_to_take_over {
+                let backoff = backoff_strategy
+                    .next()
+                    .expect("backoff strategy is infinite");
+                warn!(
+                    extractor = %self.id,
+                    ?backoff,
+                    restart_count,
+                    "Waiting for backoff before restarting extractor"
+                );
+                if !self
+                    .wait_for_restart_backoff(backoff)
+                    .await
+                {
+                    return Ok(());
                 }
+                warn!(
+                    extractor = %self.id,
+                    ?backoff,
+                    restart_count,
+                    "Restarting extractor after backoff"
+                );
+                restart_count += 1;
             }
-            warn!(
-                extractor = %self.id,
-                ?backoff,
-                restart_count,
-                "Restarting extractor after backoff"
-            );
-            restart_count += 1;
             restarts.increment(1);
         }
     }
