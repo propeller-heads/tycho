@@ -346,6 +346,7 @@ impl ProtocolStreamProcessor {
                     "sushiswap_v3".to_string(),
                     "robinswap_v3".to_string(),
                     "gigadex_v3".to_string(),
+                    "swaphood_v3".to_string(),
                     "ramses_v3".to_string(),
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
@@ -390,23 +391,9 @@ impl ProtocolStreamProcessor {
                     None,
                 );
             }
-            "uniswap_v3" => {
-                stream = stream.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
-            }
-            "sushiswap_v3" => {
-                stream =
-                    stream.exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None);
-            }
-            "robinswap_v3" => {
-                stream =
-                    stream.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None);
-            }
-            "gigadex_v3" => {
-                stream = stream.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None);
-            }
-            "pancakeswap_v3" => {
-                stream =
-                    stream.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None);
+            "uniswap_v3" | "sushiswap_v3" | "robinswap_v3" | "gigadex_v3" | "pancakeswap_v3" |
+            "swaphood_v3" => {
+                stream = stream.exchange::<UniswapV3State>(protocol, tvl_filter.clone(), None);
             }
             "vm:balancer_v2" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(

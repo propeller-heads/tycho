@@ -3,7 +3,7 @@ use num_bigint::BigUint;
 use super::{
     constants::{
         FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
-        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -20,8 +20,13 @@ pub const TOKEN_APPROVAL_GAS: u64 = 25_000;
 /// Gas usage for a permit2 transfer from the user
 pub const USER_PERMIT2_TRANSFER: u64 = 80_000;
 
-/// Callback-based protocols: the input `transferFrom` happens inside the callback, which is
-/// inside `swap()`. The gas is thus already included in `get_amount_out`.
+/// Exact-name callback-based protocols: the input `transferFrom` happens inside the callback,
+/// which is inside `swap()`. The gas is thus already included in `get_amount_out`.
+///
+/// Incomplete on its own: every Uniswap V3 and Slipstream fork qualifies too. Use
+/// [`is_callback_protocol`] for the full classification. The forks listed here before that
+/// function existed stay listed, so code that reads this public list directly keeps its answer
+/// for them.
 pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "uniswap_v3",
     "pancakeswap_v3",
@@ -38,6 +43,15 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
     "aero_cl",
     "vm:balancer_v3",
 ];
+
+/// Whether `protocol_system` pulls its input inside a swap callback (see
+/// [`PROTOCOLS_CALLBACK`]). Uniswap V3 and Slipstream forks all swap through the Uniswap V3 pool
+/// ABI and pay in its callback, so a fork added to either list is covered without a second edit.
+pub fn is_callback_protocol(protocol_system: &str) -> bool {
+    PROTOCOLS_CALLBACK.contains(&protocol_system) ||
+        UNISWAP_V3_FORKS.contains(&protocol_system) ||
+        SLIPSTREAMS_FORKS.contains(&protocol_system)
+}
 
 /// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
 /// directly without an intermediate router hop). The input transfer cost is therefore not
@@ -167,7 +181,7 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             // - for the permit2 case we need to deduct the transfer usage already included
             // - for the regular transfer from and vault, do nothing, everything is already
             //   accounted
-            if PROTOCOLS_CALLBACK.contains(&protocol) {
+            if is_callback_protocol(protocol) {
                 if *solution.user_transfer_type() == UserTransferType::TransferFromPermit2 {
                     total_gas += BigUint::from(USER_PERMIT2_TRANSFER - DEFAULT_TOKEN_TRANSFER_GAS);
                 }
@@ -250,7 +264,7 @@ fn estimate_transfer_overhead(
     // - Callback protocols handle it inside the callback (part of swap gas).
     // - Protocols that can have an optimizable transfer in should not be included here either
     //   because the extra transfer is skipped but only if the strategy is not Split
-    if !PROTOCOLS_CALLBACK.contains(&protocol_system) &&
+    if !is_callback_protocol(protocol_system) &&
         (!optimizable_transfer_in(protocol_system) || *strategy == Strategy::Split)
     {
         overhead += transfer_token_gas(token_in);
@@ -494,9 +508,9 @@ mod tests {
 
     #[test]
     fn test_single_callback_protocol() {
-        // uniswap_v3 is a callback protocol: the pool pulls funds inside the callback, so that
-        // cost is already in pool gas. The only extra is the fee path's output transfer.
-        let solution = make_solution(vec![make_swap("uniswap_v3")]);
+        // The pool pulls funds inside the callback, so that cost is already in pool gas. The only
+        // extra is the fee path's output transfer.
+        let solution = make_solution(vec![make_swap("uniswap_v4")]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer                             0  ← callback + TransferFrom, nothing extra
@@ -504,6 +518,21 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← TOKEN_GAS, fee path adds _transferOut
         assert_eq!(gas, BigUint::from(160_000u64));
+    }
+
+    #[test]
+    fn test_single_callback_protocol_covers_every_v3_and_slipstream_fork() {
+        // Every fork in either list pays inside the Uniswap V3 swap callback, so each costs the
+        // same as `test_single_callback_protocol`, including a fork added to a list later.
+        for protocol_system in UNISWAP_V3_FORKS
+            .iter()
+            .chain(SLIPSTREAMS_FORKS)
+        {
+            let solution = make_solution(vec![make_swap(protocol_system)]);
+            let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+            assert_eq!(gas, BigUint::from(160_000u64), "{protocol_system}");
+        }
     }
 
     #[test]

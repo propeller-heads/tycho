@@ -117,7 +117,7 @@ Your `get_amount_out` implementation must return a gas estimate. Measure only wh
 
 After implementing, add your protocol to the relevant constant slices in `gas_estimator.rs`:
 
-* **`PROTOCOLS_CALLBACK`**: The pool pulls tokens inside a callback fired during `swap()`. The simulation captures that transfer, so the estimator adds no separate input-transfer cost.
+* **`PROTOCOLS_CALLBACK`**: The pool pulls tokens inside a callback fired during `swap()`. The simulation captures that transfer, so the estimator adds no separate input-transfer cost. Uniswap V3 and Slipstream forks need no entry here: listing them in `UNISWAP_V3_FORKS` or `SLIPSTREAMS_FORKS` in `constants.rs` covers them.
 * **`PROTOCOLS_OPTIMIZABLE_TRANSFER_IN`**: The router might send tokens directly to the pool, skipping the router-to-pool hop. The estimator adds no router-to-pool transfer cost for non-split strategies.
 * **`PROTOCOLS_NEEDING_APPROVAL`**: The pool pulls tokens from the router via `approve` + `transferFrom` (ProtocolWillDebit). The simulation includes the `transferFrom` gas, but not the `approve` (25,000 gas); the estimator adds it separately.
 * **`PROTOCOLS_OUTPUT_TO_ROUTER`**: The pool sends output to `msg.sender` (the router) instead of to an explicit receiver. The estimator adds an extra forward transfer from the router to the final receiver.
