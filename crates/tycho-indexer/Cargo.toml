@@ -108,6 +108,7 @@ mockito.workspace = true
 actix-rt = "2.9.0"
 actix-test = "0.1.2"
 test-log = { version = "0.2.14", features = ["trace"] }
+tokio = { workspace = true, features = ["test-util"] }
 float_eq = "1.0.1"
 tycho-common = { workspace = true, features = ["test-utils"] }
 metrics-util = { version = "0.20.0", features = ["debugging"] }
