@@ -41,3 +41,20 @@ tests:
         creation_tx: "0x23d20ef9d66c309110fb6c24a5b00d08b9623b2d935913dc5bd4e51f23feb121"
         skip_simulation: false
         skip_execution: false
+  # The same pool once it is active: 139 more Swaps and 5 more Mints after the previous case's
+  # range, the pool's first CollectProtocol at 16722835, then a Burn + Collect at 16723329.
+  - name: test_weth_pons_fee_1800_pool_collect_protocol
+    start_block: 16632396
+    # Fourth Swap after the CollectProtocol.
+    stop_block: 16724165
+    expected_components:
+      - id: "0xdd598ba9acfdcb2e09a8cb64041962536e946ae4"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x39dbed3a2bd333467115de45665cc57f813c4571" # PONS
+        static_attributes:
+          fee: "0x0708"
+          tick_spacing: "0x32"
+        creation_tx: "0x23d20ef9d66c309110fb6c24a5b00d08b9623b2d935913dc5bd4e51f23feb121"
+        skip_simulation: false
+        skip_execution: false
