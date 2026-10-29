@@ -506,16 +506,11 @@ mod tests {
         assert_eq!(gas, BigUint::from(285_000u64));
     }
 
-    #[rstest]
-    #[case::uniswap_v3("uniswap_v3")]
-    #[case::swaphood_v3("swaphood_v3")]
-    #[case::gigadex_v3("gigadex_v3")]
-    #[case::ramses_v3_slipstream_fork("ramses_v3")]
-    #[case::uniswap_v4("uniswap_v4")]
-    fn test_single_callback_protocol(#[case] protocol_system: &str) {
+    #[test]
+    fn test_single_callback_protocol() {
         // The pool pulls funds inside the callback, so that cost is already in pool gas. The only
         // extra is the fee path's output transfer.
-        let solution = make_solution(vec![make_swap(protocol_system)]);
+        let solution = make_solution(vec![make_swap("uniswap_v4")]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer                             0  ← callback + TransferFrom, nothing extra
@@ -523,6 +518,21 @@ mod tests {
         // pool gas                            100_000
         // fee output transfer                  60_000  ← TOKEN_GAS, fee path adds _transferOut
         assert_eq!(gas, BigUint::from(160_000u64));
+    }
+
+    #[test]
+    fn test_single_callback_protocol_covers_every_v3_and_slipstream_fork() {
+        // Every fork in either list pays inside the Uniswap V3 swap callback, so each costs the
+        // same as `test_single_callback_protocol`, including a fork added to a list later.
+        for protocol_system in UNISWAP_V3_FORKS
+            .iter()
+            .chain(SLIPSTREAMS_FORKS)
+        {
+            let solution = make_solution(vec![make_swap(protocol_system)]);
+            let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+            assert_eq!(gas, BigUint::from(160_000u64), "{protocol_system}");
+        }
     }
 
     #[test]
