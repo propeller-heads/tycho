@@ -167,10 +167,16 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 // +262142-12-31T23:59:59.999999999
 const MAX_TS: NaiveDateTime = NaiveDateTime::MAX;
 
-/// Server-side TCP keepalive settings of every database session: Postgres drops a session about
-/// 25 seconds (10 + 3 × 5) after its peer stops answering.
-const SESSION_KEEPALIVES: &str =
-    "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; SET tcp_keepalives_count = 3;";
+/// Server-side TCP timeouts of every database session.
+///
+/// The keepalives make Postgres drop an idle session about 25 seconds (10 + 3 × 5) after its peer
+/// stops answering. Keepalives do not apply while Postgres waits for the peer to acknowledge data
+/// it sent: without `tcp_user_timeout`, that session stays for the TCP retransmission timeout
+/// (about 15 minutes on Linux), and keeps its locks. `tcp_user_timeout` (milliseconds) drops it
+/// after 30 seconds.
+const SESSION_TCP_TIMEOUTS: &str =
+    "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; \
+     SET tcp_keepalives_count = 3; SET tcp_user_timeout = 30000;";
 
 lazy_static! {
     /// Simplifies querying current and historical versions by introducing a special marker version.
@@ -710,16 +716,16 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 
 /// Creates a connection pool without running migrations.
 ///
-/// Every session of the pool sets [`SESSION_KEEPALIVES`]. A write transaction holds a share lock
+/// Every session of the pool sets [`SESSION_TCP_TIMEOUTS`]. A write transaction holds a share lock
 /// on the writer epoch row until it ends. If the writer's host disappears with a transaction
 /// open, Postgres keeps that session and its lock until it notices that the peer is gone, and no
 /// new writer can increment the epoch until then. With the operating system defaults that can
-/// take hours; with these settings Postgres drops the session about 25 seconds after the peer
-/// stops answering.
+/// take hours; with these settings Postgres drops the session within about 30 seconds after the
+/// peer stops answering.
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
     let mut manager_config = ManagerConfig::default();
     manager_config.custom_setup =
-        Box::new(|url| Box::pin(establish_with_keepalives(url.to_string())));
+        Box::new(|url| Box::pin(establish_with_tcp_timeouts(url.to_string())));
     let config =
         AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, manager_config);
     Pool::builder(config)
@@ -727,9 +733,9 @@ fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
         .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
-async fn establish_with_keepalives(url: String) -> ConnectionResult<AsyncPgConnection> {
+async fn establish_with_tcp_timeouts(url: String) -> ConnectionResult<AsyncPgConnection> {
     let mut conn = AsyncPgConnection::establish(&url).await?;
-    conn.batch_execute(SESSION_KEEPALIVES)
+    conn.batch_execute(SESSION_TCP_TIMEOUTS)
         .await
         .map_err(ConnectionError::CouldntSetupConfiguration)?;
     Ok(conn)
