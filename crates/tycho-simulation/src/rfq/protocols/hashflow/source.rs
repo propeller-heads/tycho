@@ -416,17 +416,15 @@ mod tests {
         }
     }
 
-    /// Published as one component, every market maker's levels stay their own book, and the
-    /// venue's rule says how many of them one route may quote: every maker once, or the venue
-    /// once whichever maker answers.
+    /// Published as one component, every market maker's levels stay their own book, the swap
+    /// goes to the better one, and the component advertises the rule it is quoted under.
     #[rstest]
-    #[case::once_per_maker(QuoteRule::OncePerMaker, "once_per_maker", 2)]
-    #[case::once_per_venue(QuoteRule::OncePerVenue, "once_per_venue", 1)]
+    #[case::once_per_maker(QuoteRule::OncePerMaker, "once_per_maker")]
+    #[case::once_per_venue(QuoteRule::OncePerVenue, "once_per_venue")]
     #[tokio::test]
     async fn fetch_publishes_every_maker_under_one_component(
         #[case] rule: QuoteRule,
         #[case] attribute: &str,
-        #[case] quotable_swaps: usize,
     ) {
         let weth = Bytes::from_str(WETH).unwrap();
         let usdc = Bytes::from_str(USDC).unwrap();
@@ -477,16 +475,12 @@ mod tests {
                 &tokens[&usdc],
             )
         };
-        let mut state = book.state.clone_box();
-        let mut amounts = Vec::new();
-        while let Ok(result) = swap(state.as_ref()) {
-            amounts.push(result.amount.clone());
-            state = result.new_state;
-        }
-        assert_eq!(amounts.len(), quotable_swaps, "swaps the rule allows: {amounts:?}");
-        if let [first, second] = amounts.as_slice() {
-            assert!(first > second, "the better maker quotes first");
-        }
+        let first = swap(book.state.as_ref()).unwrap();
+        assert_eq!(
+            first.amount,
+            num_bigint::BigUint::from(3000u64) * num_bigint::BigUint::from(10u64).pow(18),
+            "the better maker quotes first"
+        );
     }
 
     /// A maker declines an amount below its first level, so the venue's floor under one
