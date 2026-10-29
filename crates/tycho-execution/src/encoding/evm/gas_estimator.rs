@@ -2,8 +2,8 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
-        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
+        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -73,6 +73,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    BAIBAI_PROTOCOL_SYSTEM,
 ];
 
 /// Whether the router must approve the protocol before swapping (see
