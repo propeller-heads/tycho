@@ -107,6 +107,9 @@ where
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    /// Protocol systems to publish an exchange's components under, keyed by exchange. Decoding
+    /// is unaffected: states still decode with the exchange's registered decoder.
+    component_labels: HashMap<String, String>,
     /// Seconds between blocks, used to project a confirmed block header onto the next block when
     /// deriving the execution block for block-sensitive states.
     block_time_secs: u64,
@@ -142,6 +145,7 @@ where
             inclusion_filters: HashMap::new(),
             protocols_skip_unknown_tokens: HashSet::new(),
             override_providers: HashMap::new(),
+            component_labels: HashMap::new(),
             block_time_secs: chain.block_time_secs(),
             chain,
         }
@@ -295,6 +299,23 @@ where
             .insert(exchange.to_string(), decoder);
     }
 
+    /// Publishes `exchange`'s components under `protocol_system` instead of the indexer's name.
+    ///
+    /// Used to route a native protocol through another execution path, e.g. `fallback:biconomy`
+    /// for a natively indexed `IPropAMM` venue: the components keep their id, attributes and
+    /// decoder, and only `protocol_system` changes, so the encoder registry picks the other path.
+    pub fn label_components(&mut self, exchange: &str, protocol_system: String) {
+        self.component_labels
+            .insert(exchange.to_string(), protocol_system);
+    }
+
+    fn labelled(&self, exchange: &str, mut component: ProtocolComponent) -> ProtocolComponent {
+        if let Some(label) = self.component_labels.get(exchange) {
+            component.protocol_system = label.clone();
+        }
+        component
+    }
+
     /// Registers a decoder for a given exchange.
     ///
     /// This method maps an exchange identifier to a specific protocol simulation type.
@@ -441,7 +462,10 @@ where
                         if tokens.len() == comp.tokens.len() {
                             Ok(Some((
                                 id.clone(),
-                                ProtocolComponent::from_with_tokens(comp.clone(), tokens),
+                                self.labelled(
+                                    protocol.as_str(),
+                                    ProtocolComponent::from_with_tokens(comp.clone(), tokens),
+                                ),
                             )))
                         } else {
                             Ok(None)
@@ -678,9 +702,12 @@ where
                             }
                         }
                     }
-                    let component = ProtocolComponent::from_with_tokens(
-                        snapshot.component.clone(),
-                        component_tokens,
+                    let component = self.labelled(
+                        protocol.as_str(),
+                        ProtocolComponent::from_with_tokens(
+                            snapshot.component.clone(),
+                            component_tokens,
+                        ),
                     );
 
                     // Add new tokens to the simulation engine
@@ -1713,6 +1740,29 @@ mod tests {
         assert_eq!(res2.states.len(), 1);
         assert_eq!(res1.sync_states.len(), 1);
         assert_eq!(res2.sync_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_decode_publishes_labelled_components() {
+        let mut decoder = setup_decoder(true).await;
+        decoder.label_components("uniswap_v2", "fallback:uniswap_v2".to_string());
+
+        let msg = load_test_msg("uniswap_v2_snapshot");
+        let update = decoder
+            .decode(&msg)
+            .await
+            .expect("decode failure");
+
+        // The label changes only the protocol system: the id and the decoded state stay.
+        assert_eq!(update.states.len(), 1);
+        let (id, component) = update
+            .new_pairs
+            .iter()
+            .next()
+            .expect("one new pair");
+        assert_eq!(component.protocol_system, "fallback:uniswap_v2");
+        assert_eq!(component.id.to_string(), *id);
+        assert!(update.states.contains_key(id));
     }
 
     #[tokio::test]
