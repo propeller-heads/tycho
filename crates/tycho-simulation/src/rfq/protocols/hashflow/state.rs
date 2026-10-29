@@ -269,7 +269,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        book::levels::{Levels, PriceLevel},
+        book::{
+            all_pairs::{AllPairs, MarketMaker, QuoteRule, VenueBook},
+            levels::{Levels, PriceLevel},
+        },
         rfq::protocols::hashflow::models::HashflowPair,
     };
 
@@ -370,6 +373,34 @@ mod tests {
             (price, _) => panic!("expected {expected:?}, got {price:?}"),
         }
         assert!(matches!(reverse, Err(SimulationError::InvalidInput(_, None))), "{reverse:?}");
+    }
+
+    /// The venue's minimum is checked against the whole merged swap: a chunk below it is refused
+    /// alone and accepted as the continuation of a swap that already reached it.
+    #[test]
+    fn the_minimum_applies_to_the_merged_amount() {
+        let book = VenueBook {
+            signer: MarketMaker("test_mm".to_string()),
+            updated_at: None,
+            state: create_test_hashflow_state(),
+        };
+        let venue = HashflowAllPairsState::from(AllPairs::new(vec![book], QuoteRule::OncePerMaker));
+        let minimum = venue.0.books()[0].state.min_amount_in();
+        let chunk = minimum.clone() / 5u8;
+
+        let alone = venue.get_amount_out(chunk.clone(), &weth(), &usdc());
+        let first = venue
+            .get_amount_out(minimum, &weth(), &usdc())
+            .unwrap();
+        let continued = first
+            .new_state
+            .get_amount_out(chunk, &weth(), &usdc());
+
+        assert!(
+            matches!(alone, Err(SimulationError::RecoverableError(_))),
+            "a chunk below the minimum is refused on its own: {alone:?}"
+        );
+        assert!(continued.is_ok(), "{continued:?}");
     }
 
     /// A book of one level advertises that level as both its minimum and its depth, so the

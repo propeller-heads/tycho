@@ -978,6 +978,21 @@ mod tests {
         }
     }
 
+    impl PricesAfterFill for TestBook {
+        fn marginal_price(
+            &self,
+            _token_in: &Bytes,
+            _token_out: &Bytes,
+            filled: &BigUint,
+        ) -> Result<f64, SimulationError> {
+            if filled < &whole(self.depth) {
+                Ok(self.out_per_in as f64)
+            } else {
+                Err(SimulationError::RecoverableError("No liquidity".to_string()))
+            }
+        }
+    }
+
     #[typetag::serde]
     impl ProtocolSim for TestBook {
         fn fee(&self) -> f64 {
@@ -1154,6 +1169,40 @@ mod tests {
         }
     }
 
+    /// A book of `maker` paying `out_per_in` of the token `quote` for every `base` up to `depth`
+    /// of them.
+    fn book_on(
+        maker: &str,
+        (base, quote): (u8, u8),
+        out_per_in: u64,
+        depth: u64,
+    ) -> VenueBook<TestBook, MarketMaker> {
+        let tokens = tokens();
+        VenueBook {
+            signer: MarketMaker(maker.to_string()),
+            updated_at: None,
+            state: TestBook {
+                base: tokens[&addr(base)].clone(),
+                quote: tokens[&addr(quote)].clone(),
+                out_per_in,
+                depth,
+            },
+        }
+    }
+
+    /// Sells `count` whole tokens of the token named by the byte `sell` for the one named by
+    /// `buy`, on whatever state a previous swap returned.
+    fn swap(
+        state: &dyn ProtocolSim,
+        count: u64,
+        (sell, buy): (u8, u8),
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        let tokens = tokens();
+        state.get_amount_out(whole(count), &tokens[&addr(sell)], &tokens[&addr(buy)])
+    }
+
+    const A_TO_B: (u8, u8) = (0xaa, 0xbb);
+
     fn venue(books: Vec<VenueBook<TestBook, MarketMaker>>, rule: QuoteRule) -> TestVenue {
         TestVenue(AllPairs::new(books, rule))
     }
@@ -1188,54 +1237,136 @@ mod tests {
         }
     }
 
-    /// What one swap spends is what the next is held to: another maker may still quote where
-    /// the venue as a whole may not, and the partial fill's state is the venue's, not the book's.
+    /// A swap on another pair or direction is held to the rule: the maker that signed the first
+    /// swap has spent its turn there, and under the venue rule so has everyone else.
     #[rstest]
-    #[case::once_per_maker(QuoteRule::OncePerMaker, Some(2))]
-    #[case::once_per_venue(QuoteRule::OncePerVenue, None)]
-    fn the_second_swap_is_held_to_the_rule(
+    #[case::other_pair_once_per_maker(QuoteRule::OncePerMaker, (0xbb, 0xcc), Some(2))]
+    #[case::other_pair_once_per_venue(QuoteRule::OncePerVenue, (0xbb, 0xcc), None)]
+    #[case::opposite_direction_once_per_maker(QuoteRule::OncePerMaker, (0xbb, 0xaa), None)]
+    #[case::opposite_direction_once_per_venue(QuoteRule::OncePerVenue, (0xbb, 0xaa), None)]
+    fn a_swap_on_another_pair_is_held_to_the_rule(
         #[case] rule: QuoteRule,
-        #[case] second_pays: Option<u64>,
+        #[case] other: (u8, u8),
+        #[case] other_pays: Option<u64>,
     ) {
-        let venue = venue(vec![book("generous", 3, 10), book("cheap", 2, 10)], rule);
-
-        let first = venue
-            .amount_out(&whole(1), &addr(0xaa), &addr(0xbb))
-            .unwrap();
+        let venue = venue(
+            vec![
+                book_on("m1", (0xaa, 0xbb), 3, 10),
+                book_on("m1", (0xbb, 0xcc), 7, 10),
+                book_on("m2", (0xbb, 0xcc), 2, 10),
+                book_on("m1", (0xbb, 0xaa), 4, 10),
+            ],
+            rule,
+        );
+        let first = swap(&venue, 1, A_TO_B).unwrap();
         assert_eq!(first.amount, whole(3));
 
-        let second = first.new_state.get_amount_out(
-            whole(1),
-            &tokens()[&addr(0xaa)],
-            &tokens()[&addr(0xbb)],
-        );
-        match (second, second_pays) {
+        match (swap(first.new_state.as_ref(), 1, other), other_pays) {
             (Ok(second), Some(pays)) => assert_eq!(second.amount, whole(pays)),
             (Err(SimulationError::RecoverableError(message)), None) => {
                 assert_eq!(message, "Every book pricing this swap already quoted in this route")
             }
-            (second, _) => panic!("expected a second swap paying {second_pays:?}, got {second:?}"),
+            (second, _) => panic!("expected a swap paying {other_pays:?}, got {second:?}"),
         }
     }
 
-    /// The state a partial fill carries on is the venue's, so what the route learns about the
-    /// quote it spent survives a shortfall.
+    /// Chunks on one pair pay what one swap of their sum pays, and only the first costs gas. The
+    /// maker may change for the merged amount, and the quote goes to the one that prices it.
     #[test]
-    fn a_partial_fill_carries_the_venue_on() {
-        let venue = venue(vec![book("shallow", 2, 1)], QuoteRule::OncePerVenue);
+    fn chunks_on_one_pair_pay_what_one_merged_swap_pays() {
+        // One A pays 5 B at the shallow maker; three A are 9 B at the deep one.
+        let venue =
+            venue(vec![book("shallow", 5, 2), book("deep", 3, 10)], QuoteRule::OncePerMaker);
+
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let second = swap(first.new_state.as_ref(), 2, A_TO_B).unwrap();
+
+        assert_eq!(first.amount, whole(5));
+        assert_eq!(first.gas, BigUint::from(100u64));
+        assert_eq!(second.amount, whole(9) - whole(5));
+        assert_eq!(second.gas, BigUint::zero());
+        let merged = swap(&venue, 3, A_TO_B).unwrap();
+        assert_eq!(&first.amount + &second.amount, merged.amount);
+        let quoted = venue
+            .0
+            .quoting_book(&whole(3), &addr(0xaa), &addr(0xbb))
+            .unwrap();
+        assert_eq!(quoted.out_per_in, 3, "the merged amount goes to the deep maker");
+    }
+
+    /// The state a first swap returned names the book for the merged swap, not the book that
+    /// priced the first chunk.
+    #[test]
+    fn the_quoting_book_of_a_filled_pair_prices_the_merged_amount() {
+        let venue =
+            venue(vec![book("shallow", 5, 2), book("deep", 3, 10)], QuoteRule::OncePerMaker);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let filled = first
+            .new_state
+            .as_any()
+            .downcast_ref::<TestVenue>()
+            .unwrap();
+
+        let quoted = filled
+            .0
+            .quoting_book(&whole(2), &addr(0xaa), &addr(0xbb))
+            .unwrap();
+
+        assert_eq!(quoted.out_per_in, 3);
+    }
+
+    /// A chunk that passes the depth of the merged swap is a partial fill, and the state it
+    /// carries is the one that continues from the depth.
+    #[test]
+    fn a_chunk_past_the_depth_is_a_partial_fill_that_carries_the_fill() {
+        let venue = venue(vec![book("m1", 2, 3)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 2, A_TO_B).unwrap();
 
         let Err(SimulationError::InvalidInput(_, Some(partial))) =
-            venue.amount_out(&whole(4), &addr(0xaa), &addr(0xbb))
+            swap(first.new_state.as_ref(), 3, A_TO_B)
         else {
             panic!("expected a partial fill");
         };
-        let after = partial.new_state.get_amount_out(
-            whole(1),
-            &tokens()[&addr(0xaa)],
-            &tokens()[&addr(0xbb)],
-        );
+        assert_eq!(partial.amount, whole(2), "the three A the book holds pay 6, 4 were paid");
+        assert_eq!(partial.gas, BigUint::zero());
 
-        assert!(matches!(after, Err(SimulationError::RecoverableError(_))), "got {after:?}");
+        let Err(SimulationError::InvalidInput(_, Some(again))) =
+            swap(partial.new_state.as_ref(), 1, A_TO_B)
+        else {
+            panic!("expected a partial fill");
+        };
+        assert_eq!(again.amount, BigUint::zero(), "the book has paid everything it holds");
+    }
+
+    /// What a route has filled survives serialization, which is what a consumer's recording
+    /// replays.
+    #[test]
+    fn a_serialized_fill_still_continues() {
+        let venue = venue(vec![book("m1", 3, 10)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let filled = first
+            .new_state
+            .as_any()
+            .downcast_ref::<TestVenue>()
+            .unwrap();
+
+        let replayed: TestVenue =
+            serde_json::from_str(&serde_json::to_string(filled).unwrap()).unwrap();
+
+        assert!(ProtocolSim::eq(&replayed, filled));
+        assert_eq!(swap(&replayed, 1, A_TO_B).unwrap().gas, BigUint::zero());
+    }
+
+    /// A swap changes the state, so a state that filled something is not the one that did not.
+    #[test]
+    fn states_with_different_fills_are_different_states() {
+        let venue = venue(vec![book("m1", 3, 10)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let second = swap(first.new_state.as_ref(), 1, A_TO_B).unwrap();
+
+        assert!(!ProtocolSim::eq(&venue, first.new_state.as_ref()));
+        assert!(!ProtocolSim::eq(first.new_state.as_ref(), second.new_state.as_ref()));
+        assert!(ProtocolSim::eq(&venue, &venue.clone()));
     }
 
     /// A direction no book prices is the invalid input it is for a per-pair book, not an
@@ -1251,8 +1382,7 @@ mod tests {
         assert!(matches!(unknown, Err(SimulationError::InvalidInput(_, None))), "got {unknown:?}");
     }
 
-    /// Spot price and limits come from the best book available, and a spent venue reports
-    /// neither.
+    /// Spot price and limits come from the best book available.
     #[test]
     fn the_price_and_the_limits_are_the_best_books() {
         // The cheap book takes more A in total, the generous one buys more B with what it takes.
@@ -1274,15 +1404,68 @@ mod tests {
             (whole(8), whole(24)),
             "the limits of the book that buys most, not the sum of both"
         );
+    }
 
-        let spent = venue
-            .amount_out(&whole(1), &addr(0xaa), &addr(0xbb))
-            .unwrap()
-            .new_state;
-        assert!(matches!(
-            spent.get_limits(addr(0xaa), addr(0xbb)),
-            Err(SimulationError::RecoverableError(_))
-        ));
+    /// The state a partial fill carries on is the venue's, so the turn the quote spent survives
+    /// a shortfall.
+    #[test]
+    fn a_partial_fill_spends_the_turn_like_a_full_one() {
+        let venue = venue(
+            vec![book_on("m1", (0xaa, 0xbb), 2, 1), book_on("m1", (0xbb, 0xcc), 1, 1)],
+            QuoteRule::OncePerVenue,
+        );
+
+        let Err(SimulationError::InvalidInput(_, Some(partial))) = swap(&venue, 4, A_TO_B) else {
+            panic!("expected a partial fill");
+        };
+        let after = swap(partial.new_state.as_ref(), 1, (0xbb, 0xcc));
+
+        assert!(matches!(after, Err(SimulationError::RecoverableError(_))), "got {after:?}");
+    }
+
+    /// After a fill, the limits are what the books have left of it.
+    #[test]
+    fn the_limits_of_a_filled_pair_are_what_is_left() {
+        let venue =
+            venue(vec![book("cheap", 2, 10), book("generous", 3, 8)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+
+        // The generous book had (8, 24) and the fill took (1, 3); the cheap one has (9, 17) left.
+        assert_eq!(
+            first
+                .new_state
+                .get_limits(addr(0xaa), addr(0xbb))
+                .unwrap(),
+            (whole(7), whole(21))
+        );
+    }
+
+    /// After a fill, the price is that of the next unit, from the best book that still has one.
+    #[test]
+    fn the_price_of_a_filled_pair_is_the_next_unit() {
+        let venue =
+            venue(vec![book("cheap", 2, 10), book("generous", 3, 8)], QuoteRule::OncePerVenue);
+        let spot = |state: &dyn ProtocolSim| {
+            let tokens = tokens();
+            state.spot_price(&tokens[&addr(0xaa)], &tokens[&addr(0xbb)])
+        };
+
+        let within_both = swap(&venue, 1, A_TO_B).unwrap();
+        let past_one = swap(&venue, 9, A_TO_B).unwrap();
+        let past_both = swap(&venue, 11, A_TO_B);
+        let Err(SimulationError::InvalidInput(_, Some(past_both))) = past_both else {
+            panic!("expected a partial fill");
+        };
+
+        assert_eq!(spot(within_both.new_state.as_ref()).unwrap(), 3.0);
+        assert_eq!(spot(past_one.new_state.as_ref()).unwrap(), 2.0);
+        assert!(
+            matches!(
+                spot(past_both.new_state.as_ref()),
+                Err(SimulationError::RecoverableError(message)) if message == "No liquidity"
+            ),
+            "the whole depth is used"
+        );
     }
 
     /// A venue whose books all price nothing is a component with no tokens and no directions,
