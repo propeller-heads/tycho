@@ -165,6 +165,32 @@ pub mod events {
             #[prost(uint32, tag="1")]
             pub plugin_config: u32,
         }
+        /// The plugin's MEVX router. The zero address disables the plugin's after-swap back-run and
+        /// its gas check.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct MevxRouter {
+            #[prost(bytes="vec", tag="1")]
+            pub router: ::prost::alloc::vec::Vec<u8>,
+        }
+        /// Gas the plugin requires to remain when the pool calls its afterSwap hook; the swap reverts
+        /// with less. Unsigned bigint.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct MinGasLeft {
+            #[prost(bytes="vec", tag="1")]
+            pub min_gas_left: ::prost::alloc::vec::Vec<u8>,
+        }
+        /// Gas the plugin forwards to its back-run self-call. Unsigned bigint.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct CallGasBudget {
+            #[prost(bytes="vec", tag="1")]
+            pub call_gas_budget: ::prost::alloc::vec::Vec<u8>,
+        }
+        /// The farming incentive the plugin's afterSwap updates. The zero address means none.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct Incentive {
+            #[prost(bytes="vec", tag="1")]
+            pub incentive: ::prost::alloc::vec::Vec<u8>,
+        }
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
         pub enum Typ {
             #[prost(message, tag="1")]
@@ -187,6 +213,14 @@ pub mod events {
             Plugin(Plugin),
             #[prost(message, tag="10")]
             PluginConfig(PluginConfig),
+            #[prost(message, tag="16")]
+            MevxRouter(MevxRouter),
+            #[prost(message, tag="17")]
+            MinGasLeft(MinGasLeft),
+            #[prost(message, tag="18")]
+            CallGasBudget(CallGasBudget),
+            #[prost(message, tag="19")]
+            Incentive(Incentive),
         }
     }
 }

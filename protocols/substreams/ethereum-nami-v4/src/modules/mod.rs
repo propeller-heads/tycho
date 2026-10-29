@@ -1,3 +1,4 @@
+pub use map_plugin_events::map_plugin_events;
 pub use map_pool_created::map_pools_created;
 pub use map_protocol_changes::map_protocol_changes;
 pub use store_pools::store_pools;
@@ -22,6 +23,9 @@ mod map_store_liquidity;
 
 #[path = "4_store_pool_plugins.rs"]
 mod store_pool_plugins;
+
+#[path = "4_map_plugin_events.rs"]
+mod map_plugin_events;
 
 #[path = "5_map_protocol_changes.rs"]
 mod map_protocol_changes;

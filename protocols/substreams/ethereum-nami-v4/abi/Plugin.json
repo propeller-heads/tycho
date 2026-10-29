@@ -47,5 +47,68 @@
         "type": "uint24"
       }
     ]
+  },
+  {
+    "type": "event",
+    "name": "MevxRouterSet",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "oldMevxRouter",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "newMevxRouter",
+        "type": "address",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "MinGasLeftSet",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "oldMinGasLeft",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "newMinGasLeft",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "CallGasBudgetSet",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "oldCallGasBudget",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "newCallGasBudget",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Incentive",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "newIncentive",
+        "type": "address",
+        "indexed": false
+      }
+    ]
   }
 ]

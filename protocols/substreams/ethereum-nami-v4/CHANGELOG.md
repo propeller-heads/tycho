@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.0
+
+- Index the plugin's MEVX settings per pool as the `mevx_router`, `min_gas_left` and
+  `call_gas_budget` attributes, from the plugin's `MevxRouterSet`, `MinGasLeftSet` and
+  `CallGasBudgetSet` events. The new `map_plugin_events` module attributes a plugin's logs to its
+  pool through a reverse entry in `store_pool_plugins`.
+- Index the plugin's farming `incentive` from its `Incentive` event. When a pool switches plugin,
+  the plugin-scoped attributes reset so nothing carries over from the detached plugin, whose
+  later events no longer reach the pool.
+- Re-register the plugin's `beforeSwap` entrypoint on every swap of a pool that enables it, so a
+  plugin whose trace failed before trading started is traced again once a swap shows it works.
+
 ## v0.1.0
 
 - Initial release: Nami V4 (Algebra Integral 1.2 fork) indexing on Ethereum (factory

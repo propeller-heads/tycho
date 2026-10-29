@@ -85,6 +85,14 @@ pub struct NamiV4State {
     last_fee: u32,
     plugin: Option<Address>,
     plugin_config: u8,
+    /// The plugin's MEVX router. While it is set and the pool calls `afterSwap`, the plugin
+    /// requires `min_gas_left` gas to remain at that hook and reverts the swap otherwise.
+    mevx_router: Option<Address>,
+    min_gas_left: u64,
+    /// Gas the plugin forwards to its back-run self-call. It does not change a quote.
+    call_gas_budget: u64,
+    /// The farming incentive the plugin's `afterSwap` updates, when one is set.
+    incentive: Option<Address>,
     /// Block the next quote is expected to execute in.
     execution_block_number: u64,
     execution_block_timestamp: u64,
@@ -127,10 +135,39 @@ impl NamiV4State {
             last_fee,
             plugin,
             plugin_config,
+            mevx_router: None,
+            min_gas_left: 0,
+            call_gas_budget: 0,
+            incentive: None,
             execution_block_number: execution_block.number(),
             execution_block_timestamp: execution_block.timestamp(),
             plugin_storage: StorageOverrides::new(),
         }
+    }
+
+    /// Sets the plugin's settings, as indexed from its setter events: the MEVX router and gas
+    /// requirements, and the farming incentive.
+    pub fn with_plugin_settings(
+        mut self,
+        mevx_router: Option<Address>,
+        min_gas_left: u64,
+        call_gas_budget: u64,
+        incentive: Option<Address>,
+    ) -> Self {
+        self.mevx_router = mevx_router;
+        self.min_gas_left = min_gas_left;
+        self.call_gas_budget = call_gas_budget;
+        self.incentive = incentive;
+        self
+    }
+
+    /// The fee a swap in the given direction would pay now, as a ratio, falling back to the
+    /// stored fee when the plugin cannot be queried.
+    fn fee_ratio(&self, zero_for_one: bool) -> f64 {
+        let fee = Self::default_price_limit(zero_for_one)
+            .and_then(|limit| self.resolve_fee(zero_for_one, I256::ONE, limit))
+            .map_or(self.last_fee, |resolved| resolved.fee);
+        fee as f64 / 1_000_000.0
     }
 
     fn has_dynamic_fee_plugin(&self) -> bool {
@@ -344,36 +381,42 @@ fn decode_error(err: impl ToString) -> TransitionError {
     TransitionError::DecodeError(err.to_string())
 }
 
-/// Decodes a `plugin` attribute; an empty value means the pool has no plugin.
-pub(super) fn decode_plugin(value: &Bytes) -> Result<Option<Address>, String> {
+/// Decodes an address attribute; an empty value or the zero address means none.
+pub(super) fn decode_optional_address(value: &Bytes) -> Result<Option<Address>, String> {
     match value.len() {
         0 => Ok(None),
         20 => {
             let address = Address::from_slice(value);
             Ok((address != Address::ZERO).then_some(address))
         }
-        len => Err(format!("plugin attribute must be 0 or 20 bytes, got {len}")),
+        len => Err(format!("address attribute must be 0 or 20 bytes, got {len}")),
     }
+}
+
+/// Decodes an unsigned big-endian integer attribute, saturating at `u64::MAX`.
+pub(super) fn decode_u64(value: &Bytes) -> u64 {
+    u64::try_from(U256::from_be_slice(value)).unwrap_or(u64::MAX)
 }
 
 #[typetag::serde]
 impl ProtocolSim for NamiV4State {
     /// The fee a zero-for-one swap would pay now, falling back to the stored fee when the plugin
-    /// cannot be queried.
+    /// cannot be queried. The plugin may charge the other direction a different fee; `spot_price`
+    /// accounts for that, this single value cannot.
     fn fee(&self) -> f64 {
-        let fee = Self::default_price_limit(true)
-            .and_then(|limit| self.resolve_fee(true, I256::ONE, limit))
-            .map_or(self.last_fee, |resolved| resolved.fee);
-        fee as f64 / 1_000_000.0
+        self.fee_ratio(true)
     }
 
+    /// The price of `a` in `b` including the fee a swap in that direction would pay. The plugin
+    /// may charge the two directions different fees.
     fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
-        let price = if a < b {
+        let zero_for_one = a < b;
+        let price = if zero_for_one {
             sqrt_price_q96_to_f64(self.sqrt_price, a.decimals, b.decimals)?
         } else {
             1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
         };
-        Ok(add_fee_markup(price, self.fee()))
+        Ok(add_fee_markup(price, self.fee_ratio(zero_for_one)))
     }
 
     fn get_amount_out(
@@ -492,13 +535,37 @@ impl ProtocolSim for NamiV4State {
             .updated_attributes
             .remove("plugin")
         {
-            self.plugin = decode_plugin(&plugin).map_err(decode_error)?;
+            self.plugin = decode_optional_address(&plugin).map_err(decode_error)?;
         }
         if let Some(plugin_config) = delta
             .updated_attributes
             .remove("plugin_config")
         {
             self.plugin_config = u8::from(plugin_config);
+        }
+        if let Some(router) = delta
+            .updated_attributes
+            .remove("mevx_router")
+        {
+            self.mevx_router = decode_optional_address(&router).map_err(decode_error)?;
+        }
+        if let Some(min_gas_left) = delta
+            .updated_attributes
+            .remove("min_gas_left")
+        {
+            self.min_gas_left = decode_u64(&min_gas_left);
+        }
+        if let Some(call_gas_budget) = delta
+            .updated_attributes
+            .remove("call_gas_budget")
+        {
+            self.call_gas_budget = decode_u64(&call_gas_budget);
+        }
+        if let Some(incentive) = delta
+            .updated_attributes
+            .remove("incentive")
+        {
+            self.incentive = decode_optional_address(&incentive).map_err(decode_error)?;
         }
 
         for (key, value) in delta.updated_attributes {
@@ -514,6 +581,14 @@ impl ProtocolSim for NamiV4State {
         for key in delta.deleted_attributes {
             if key == "plugin" {
                 self.plugin = None;
+                continue;
+            }
+            if key == "mevx_router" {
+                self.mevx_router = None;
+                continue;
+            }
+            if key == "incentive" {
+                self.incentive = None;
                 continue;
             }
             let Some(tick) = key.strip_prefix("ticks/") else {
@@ -780,9 +855,77 @@ mod tests {
     }
 
     #[test]
-    fn decode_plugin_treats_empty_and_zero_as_no_plugin() {
-        assert_eq!(decode_plugin(&Bytes::new()), Ok(None));
-        assert_eq!(decode_plugin(&Bytes::from(vec![0u8; 20])), Ok(None));
-        assert!(decode_plugin(&Bytes::from(vec![1u8; 3])).is_err());
+    fn decode_optional_address_treats_empty_and_zero_as_none() {
+        assert_eq!(decode_optional_address(&Bytes::new()), Ok(None));
+        assert_eq!(decode_optional_address(&Bytes::from(vec![0u8; 20])), Ok(None));
+        assert!(decode_optional_address(&Bytes::from(vec![1u8; 3])).is_err());
+    }
+
+    #[test]
+    fn decode_u64_reads_any_width_and_saturates() {
+        assert_eq!(decode_u64(&Bytes::new()), 0);
+        assert_eq!(decode_u64(&Bytes::from(vec![0x0F, 0x42, 0x40])), 1_000_000);
+        assert_eq!(decode_u64(&Bytes::from(1_000_000_u64)), 1_000_000);
+        assert_eq!(decode_u64(&Bytes::from(vec![0xFF; 32])), u64::MAX);
+    }
+
+    // The static pool with the plugin's `afterSwap` enabled and a minimum gas left of 1M.
+    fn gated_pool() -> NamiV4State {
+        let mut pool = static_fee_pool();
+        pool.plugin = Some(Address::repeat_byte(0x22));
+        pool.plugin_config = AFTER_SWAP_FLAG;
+        pool.with_plugin_settings(
+            Some(Address::repeat_byte(0x33)),
+            1_000_000,
+            5_000_000,
+            Some(Address::repeat_byte(0x44)),
+        )
+    }
+
+    #[test]
+    fn delta_transition_updates_and_clears_the_plugin_settings() {
+        let mut pool = gated_pool();
+        let updated_attributes: HashMap<String, Bytes> = [
+            ("min_gas_left".to_string(), Bytes::from(vec![0x03, 0xD0, 0x90])),
+            ("call_gas_budget".to_string(), Bytes::from(1_000_000_u64)),
+            ("incentive".to_string(), Bytes::from(vec![0x55; 20])),
+        ]
+        .into_iter()
+        .collect();
+        let delta = ProtocolStateDelta {
+            component_id: "pool".to_owned(),
+            updated_attributes,
+            deleted_attributes: HashSet::new(),
+        };
+
+        pool.delta_transition(delta, &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert_eq!(pool.min_gas_left, 250_000);
+        assert_eq!(pool.call_gas_budget, 1_000_000);
+        assert_eq!(pool.incentive, Some(Address::repeat_byte(0x55)));
+
+        let zero_router = ProtocolStateDelta {
+            component_id: "pool".to_owned(),
+            updated_attributes: HashMap::from([(
+                "mevx_router".to_string(),
+                Bytes::from(vec![0u8; 20]),
+            )]),
+            deleted_attributes: HashSet::new(),
+        };
+        pool.delta_transition(zero_router, &HashMap::new(), &Balances::default())
+            .unwrap();
+        assert_eq!(pool.mevx_router, None);
+
+        let mut pool = gated_pool();
+        let removed = ProtocolStateDelta {
+            component_id: "pool".to_owned(),
+            updated_attributes: HashMap::new(),
+            deleted_attributes: HashSet::from(["mevx_router".to_string(), "incentive".to_string()]),
+        };
+        pool.delta_transition(removed, &HashMap::new(), &Balances::default())
+            .unwrap();
+        assert_eq!(pool.mevx_router, None);
+        assert_eq!(pool.incentive, None);
     }
 }

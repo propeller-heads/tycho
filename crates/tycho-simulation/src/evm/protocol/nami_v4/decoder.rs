@@ -4,7 +4,7 @@ use alloy::primitives::{Address, U256};
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, simulation::protocol_sim::BlockContext, Bytes};
 
-use super::state::{decode_plugin, NamiV4State};
+use super::state::{decode_optional_address, decode_u64, NamiV4State};
 use crate::protocol::{
     errors::InvalidSnapshotError,
     models::{DecoderContext, TryFromWithBlock},
@@ -37,10 +37,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for NamiV4State {
         let sqrt_price = U256::from_be_slice(attribute(&attrs, "sqrt_price_x96")?);
         let tick = i32::from(attribute(&attrs, "tick")?.clone());
         let last_fee = u32::from(attribute(&attrs, "fee")?.clone());
-        let plugin = match attrs.get("plugin") {
-            Some(value) => decode_plugin(value).map_err(InvalidSnapshotError::ValueError)?,
-            None => None,
+        let optional_address = |key: &str| match attrs.get(key) {
+            Some(value) => decode_optional_address(value).map_err(InvalidSnapshotError::ValueError),
+            None => Ok(None),
         };
+        let plugin = optional_address("plugin")?;
+        let mevx_router = optional_address("mevx_router")?;
+        let incentive = optional_address("incentive")?;
+        let min_gas_left = attrs
+            .get("min_gas_left")
+            .map_or(0, decode_u64);
+        let call_gas_budget = attrs
+            .get("call_gas_budget")
+            .map_or(0, decode_u64);
         let plugin_config = attrs
             .get("plugin_config")
             .map_or(0, |value| u8::from(value.clone()));
@@ -68,7 +77,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for NamiV4State {
             // Seed value only: the stream decoder points every state at the execution block
             // before the snapshot reaches a consumer.
             BlockContext::new(block.number, block.timestamp),
-        ))
+        )
+        .with_plugin_settings(mevx_router, min_gas_left, call_gas_budget, incentive))
     }
 }
 
@@ -156,6 +166,38 @@ mod tests {
             Some(Address::repeat_byte(0x22)),
             0xC3,
             BlockContext::default(),
+        );
+        assert_eq!(decoded, expected);
+    }
+
+    #[tokio::test]
+    async fn decodes_the_plugin_settings() {
+        let mut attributes = attributes();
+        attributes.insert("mevx_router".to_string(), Bytes::from(vec![0x33; 20]));
+        attributes.insert("min_gas_left".to_string(), Bytes::from(vec![0x0F, 0x42, 0x40]));
+        attributes.insert("call_gas_budget".to_string(), Bytes::from(5_000_000_u64));
+        attributes.insert("incentive".to_string(), Bytes::from(vec![0x44; 20]));
+
+        let decoded: NamiV4State = try_decode_snapshot_with_defaults(snapshot(attributes))
+            .await
+            .unwrap();
+
+        let expected = NamiV4State::new(
+            Address::from_str(POOL).unwrap(),
+            100,
+            U256::from(200),
+            -300,
+            vec![(60, 400), (-60, 0)],
+            3000,
+            Some(Address::repeat_byte(0x22)),
+            0xC3,
+            BlockContext::default(),
+        )
+        .with_plugin_settings(
+            Some(Address::repeat_byte(0x33)),
+            1_000_000,
+            5_000_000,
+            Some(Address::repeat_byte(0x44)),
         );
         assert_eq!(decoded, expected);
     }

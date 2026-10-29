@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-nami-v4"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",

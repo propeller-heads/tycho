@@ -70,6 +70,10 @@ message Events {
       Fee fee = 8;
       Plugin plugin = 9;
       PluginConfig plugin_config = 10;
+      MevxRouter mevx_router = 16;
+      MinGasLeft min_gas_left = 17;
+      CallGasBudget call_gas_budget = 18;
+      Incentive incentive = 19;
     }
     uint64 log_ordinal = 11;
     bytes pool_address = 12;
@@ -131,6 +135,28 @@ message Events {
 
     message PluginConfig {
       uint32 plugin_config = 1;
+    }
+
+    // The plugin's MEVX router. The zero address disables the plugin's after-swap back-run and
+    // its gas check.
+    message MevxRouter {
+      bytes router = 1;
+    }
+
+    // Gas the plugin requires to remain when the pool calls its afterSwap hook; the swap reverts
+    // with less. Unsigned bigint.
+    message MinGasLeft {
+      bytes min_gas_left = 1;
+    }
+
+    // Gas the plugin forwards to its back-run self-call. Unsigned bigint.
+    message CallGasBudget {
+      bytes call_gas_budget = 1;
+    }
+
+    // The farming incentive the plugin's afterSwap updates. The zero address means none.
+    message Incentive {
+      bytes incentive = 1;
     }
   }
 }

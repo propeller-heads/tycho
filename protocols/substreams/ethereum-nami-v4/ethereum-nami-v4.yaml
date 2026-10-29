@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "ethereum_nami_v4"
-  version: v0.1.0
+  version: v0.2.0
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-nami-v4"
 
 protobuf:
@@ -107,6 +107,14 @@ modules:
     inputs:
       - map: map_events
 
+  - name: map_plugin_events
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pool_plugins
+    output:
+      type: proto:nami.v4.Events
+
   - name: map_protocol_changes
     kind: map
     inputs:
@@ -122,6 +130,7 @@ modules:
       - store: store_liquidity
         mode: deltas
       - store: store_pool_plugins
+      - map: map_plugin_events
     output:
       type: proto:tycho.evm.v1.BlockChanges
 

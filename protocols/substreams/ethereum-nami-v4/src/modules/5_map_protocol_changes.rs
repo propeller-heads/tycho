@@ -1,6 +1,9 @@
 use crate::{
     abi::plugin::functions::BeforeSwap,
-    modules::map_store_ticks::{gross_liquidity_key, net_liquidity_key},
+    modules::{
+        map_store_ticks::{gross_liquidity_key, net_liquidity_key},
+        store_pool_plugins::pool_config_key,
+    },
     pb::nami::v4::{events::pool_event::Typ, Events, LiquidityChanges, TickDeltas},
 };
 use itertools::Itertools;
@@ -42,6 +45,7 @@ pub fn map_protocol_changes(
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
     pool_plugins_store: StoreGetString,
+    plugin_events: Events,
 ) -> BlockChanges {
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
 
@@ -157,7 +161,9 @@ pub fn map_protocol_changes(
     // Indexer whenever a pool enables it, so the plugin's code and storage (and the pool's) are
     // indexed for fee simulation. It is registered on `PluginConfig` rather than on `Plugin`
     // because the plugin's oracle is only initialized once the pool is, and a trace before that
-    // reverts.
+    // reverts. It is registered again on every swap: a plugin that refuses swaps until a start
+    // time fails its trace too, and the indexer traces a failed entrypoint again when it is
+    // emitted again, while one it already traced costs it a lookup.
     let mut registered_entrypoints = HashSet::new();
     for event in events.pool_events {
         let typ = event.typ.unwrap();
@@ -165,21 +171,35 @@ pub fn map_protocol_changes(
         let builder = transaction_changes
             .entry(tx.index)
             .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+        let pool = hex::encode(&event.pool_address);
 
-        if let Typ::PluginConfig(config) = &typ {
-            let plugin = pool_plugins_store
-                .get_at(event.log_ordinal, hex::encode(&event.pool_address))
-                .and_then(|plugin| hex::decode(plugin).ok())
-                .filter(|plugin| plugin.iter().any(|byte| *byte != 0));
+        let plugin_config = match &typ {
+            Typ::PluginConfig(config) => Some(config.plugin_config),
+            Typ::Swap(_) => pool_plugins_store
+                .get_at(event.log_ordinal, pool_config_key(&event.pool_address))
+                .and_then(|config| config.parse().ok()),
+            _ => None,
+        };
+        if plugin_config.is_some_and(|config| config & BEFORE_SWAP_FLAG != 0) {
+            let plugin = decode_plugin(pool_plugins_store.get_at(event.log_ordinal, &pool));
             if let Some(plugin) = plugin {
-                let enables_before_swap = config.plugin_config & BEFORE_SWAP_FLAG != 0;
-                if enables_before_swap &&
-                    registered_entrypoints.insert((event.pool_address.clone(), plugin.clone()))
-                {
+                if registered_entrypoints.insert((event.pool_address.clone(), plugin.clone())) {
                     let (entrypoint, params) = before_swap_entrypoint(&event.pool_address, plugin);
                     builder.add_entrypoint(&entrypoint);
                     builder.add_entrypoint_params(&params);
                 }
+            }
+        }
+
+        // A pool that switches plugin drops the detached plugin's settings. The new plugin's own
+        // events are applied after this loop, so whatever it emits in this block stays.
+        if let Typ::Plugin(plugin) = &typ {
+            let previous = decode_plugin(pool_plugins_store.get_first(&pool));
+            if previous.is_some_and(|previous| previous != plugin.plugin) {
+                builder.add_entity_change(&EntityChanges {
+                    component_id: event.pool_address.to_hex(),
+                    attributes: plugin_settings_reset(),
+                });
             }
         }
 
@@ -190,6 +210,18 @@ pub fn map_protocol_changes(
         builder.add_entity_change(&EntityChanges {
             component_id: event.pool_address.to_hex(),
             attributes,
+        });
+    }
+
+    // Settings the pool's plugin emits from its own address.
+    for event in plugin_events.pool_events {
+        let tx = event.transaction.unwrap();
+        let builder = transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx));
+        builder.add_entity_change(&EntityChanges {
+            component_id: event.pool_address.to_hex(),
+            attributes: event_to_attributes_updates(event.typ.unwrap()),
         });
     }
 
@@ -225,12 +257,29 @@ fn before_swap_entrypoint(pool: &[u8], plugin: Vec<u8>) -> (EntryPoint, EntryPoi
     )
 }
 
+/// A stored plugin address, or `None` when the store has no entry or holds the zero address.
+fn decode_plugin(stored: Option<String>) -> Option<Vec<u8>> {
+    stored
+        .and_then(|plugin| hex::decode(plugin).ok())
+        .filter(|plugin| plugin.iter().any(|byte| *byte != 0))
+}
+
+fn update_attribute(name: &str, value: Vec<u8>) -> Attribute {
+    Attribute { name: name.to_string(), value, change: ChangeType::Update.into() }
+}
+
+/// The attributes a pool's plugin sets for itself, cleared when the pool switches plugin.
+fn plugin_settings_reset() -> Vec<Attribute> {
+    vec![
+        update_attribute("mevx_router", vec![]),
+        update_attribute("min_gas_left", BigInt::from(0).to_bytes_be().1),
+        update_attribute("call_gas_budget", BigInt::from(0).to_bytes_be().1),
+        update_attribute("incentive", vec![]),
+    ]
+}
+
 fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
-    let update = |name: &str, value: Vec<u8>| Attribute {
-        name: name.to_string(),
-        value,
-        change: ChangeType::Update.into(),
-    };
+    let update = update_attribute;
     match ty {
         Typ::Initialize(init) => vec![
             update("sqrt_price_x96", init.sqrt_price),
@@ -250,6 +299,10 @@ fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
                     .1,
             )]
         }
+        Typ::MevxRouter(router) => vec![update("mevx_router", router.router)],
+        Typ::MinGasLeft(gas) => vec![update("min_gas_left", gas.min_gas_left)],
+        Typ::CallGasBudget(gas) => vec![update("call_gas_budget", gas.call_gas_budget)],
+        Typ::Incentive(incentive) => vec![update("incentive", incentive.incentive)],
         Typ::Mint(_) | Typ::Burn(_) | Typ::Collect(_) | Typ::Flash(_) | Typ::Skim(_) => vec![],
     }
 }
