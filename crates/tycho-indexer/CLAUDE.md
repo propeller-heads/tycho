@@ -195,7 +195,9 @@ tries the `LeaderLock` once:
   accounts are a testing aid to start indexing from a later block, and the first leader wrote them.
 - **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
   it fails. The task is one of the service tasks, so the process then shuts down; it restarts as a
-  follower. `tycho_leader` (gauge, 0/1) shows the role.
+  follower. `tycho_leader` (gauge, 0/1) shows the role. `leader_lock_check_duration_seconds`
+  (histogram) records each check. The check runs on the main runtime, so checks close to the 5s
+  timeout show a runtime too busy to keep the lead.
 - **Health**: each successful lock check is published in the `WriterStatus`
   (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
   confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
