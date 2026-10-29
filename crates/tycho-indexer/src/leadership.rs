@@ -121,13 +121,21 @@ async fn publish_committed_blocks(
 /// Publishes the time of each successful check on `confirmed_tx`. The health endpoint uses it to
 /// report a leader whose checks stopped, for example because its runtime is stuck while it still
 /// holds the lock.
+///
+/// Records the duration of each check in `leader_lock_check_duration_seconds`. The check runs on
+/// the main runtime, so a busy runtime makes it slower. A check that does not end within
+/// [`LOCK_CHECK_TIMEOUT`] makes the leader give up the lead.
 async fn hold_lead(
     mut lock: LeaderLock,
     confirmed_tx: watch::Sender<Instant>,
 ) -> Result<(), ExtractionError> {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        let failure = match tokio::time::timeout(LOCK_CHECK_TIMEOUT, lock.check_alive()).await {
+        let check_started = Instant::now();
+        let check = tokio::time::timeout(LOCK_CHECK_TIMEOUT, lock.check_alive()).await;
+        metrics::histogram!("leader_lock_check_duration_seconds")
+            .record(check_started.elapsed().as_secs_f64());
+        let failure = match check {
             Ok(Ok(())) => {
                 confirmed_tx.send_replace(Instant::now());
                 continue;
