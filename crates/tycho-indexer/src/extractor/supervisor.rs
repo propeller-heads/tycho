@@ -640,6 +640,16 @@ mod tests {
         assert!(matches!(near_head, Ok(StreamWait::Needed)));
     }
 
+    #[test]
+    fn test_only_a_restart_to_take_over_skips_the_backoff() {
+        let take_over = Ok(Err(ExtractionError::RestartToTakeOver(EXTRACTOR.to_string())));
+        let failure = Ok(Err(ExtractionError::SubstreamsError("stream ended".to_string())));
+
+        assert!(is_restart_to_take_over(&take_over));
+        assert!(!is_restart_to_take_over(&failure));
+        assert!(!is_restart_to_take_over(&Ok(Ok(()))));
+    }
+
     #[tokio::test]
     async fn test_follower_needs_the_stream_once_promoted() {
         let (channels, writer) = WriterChannels::follower();
