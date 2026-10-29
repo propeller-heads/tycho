@@ -16,7 +16,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByMakers},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByMakers},
         component::PairState,
         sim::{self, SwapDirection},
     },
@@ -78,6 +78,18 @@ impl PairState for LiquoriceState {
     /// under — and the venue publishes the other way round as its own book.
     fn directions(&self) -> Vec<(Bytes, Bytes)> {
         sim::directions(&self.base_token, &self.quote_token, !self.book.levels.is_empty(), false)
+    }
+}
+
+impl PricesAfterFill for LiquoriceState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        self.valid_direction_guard(token_in, token_out)?;
+        sim::marginal_price(&self.book.levels, filled, self.base_token.decimals)
     }
 }
 

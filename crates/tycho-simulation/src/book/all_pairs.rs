@@ -520,6 +520,20 @@ fn rank(answer: &Result<GetAmountOutResult, SimulationError>) -> (u8, Option<&Bi
     }
 }
 
+/// A book that can price the next unit once part of its ladder is already filled.
+pub(crate) trait PricesAfterFill {
+    /// The price of the next unit of `token_in` into `token_out` after `filled` atomic units of
+    /// it went in, at the ladder a swap in that direction fills. A recoverable error once the
+    /// ladder has no liquidity left, and the same invalid input a swap reports for tokens the
+    /// book does not price.
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError>;
+}
+
 /// What a venue refuses whatever book would price it, such as a size below every maker's floor.
 ///
 /// A venue that refuses on size alone answers it here rather than letting a book price something

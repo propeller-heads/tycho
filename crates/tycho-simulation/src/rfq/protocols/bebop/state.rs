@@ -16,7 +16,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByVenue},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByVenue},
         component::PairState,
         levels::Levels,
         sim::{self, SwapDirection},
@@ -86,6 +86,20 @@ impl PairState for BebopState {
             !self.book.bids.is_empty(),
             !self.book.asks.is_empty(),
         )
+    }
+}
+
+impl PricesAfterFill for BebopState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        let direction =
+            SwapDirection::require(&self.base_token, &self.quote_token, token_in, token_out)?;
+        let (sell_decimals, _) = direction.decimals(&self.base_token, &self.quote_token);
+        sim::marginal_price(&self.ladder(direction), filled, sell_decimals)
     }
 }
 
