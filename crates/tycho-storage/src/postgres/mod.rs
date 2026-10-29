@@ -1463,7 +1463,7 @@ pub mod db_fixtures {
     pub async fn get_token_by_symbol(conn: &mut AsyncPgConnection, symbol: String) -> orm::Token {
         schema::token::table
             .filter(schema::token::symbol.eq(symbol.clone()))
-            .select(schema::token::all_columns)
+            .select(orm::Token::as_select())
             .first::<orm::Token>(conn)
             .await
             .unwrap()

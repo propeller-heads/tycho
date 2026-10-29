@@ -17,10 +17,17 @@ services/
   ├─ account_extractor.rs     Fetches code, balance, storage for accounts at a block height
   ├─ token_pre_processor.rs   Fetches symbol + decimals; gracefully handles non-standard tokens
   ├─ token_analyzer/
-  │    ├─ mod.rs              Public API; re-exports EthCallDetector (primary) and TraceCallDetector (deprecated)
-  │    ├─ ethcall_detector.rs EthCallDetector — simulates token transfers via eth_call with bytecode state overrides; works on all EVM chains
-  │    ├─ trace_detector.rs   TraceCallDetector — legacy trace_callMany approach; deprecated, use EthCallDetector
-  │    ├─ common.rs           Shared helpers (token quality classification, transfer cost parsing)
+  │    ├─ mod.rs              Public API; AnalyzerKind picks SimulationDetector when the RPC supports it, else EthCallDetector
+  │    ├─ simulation/         SimulationDetector — buy, forward and sell against the token's pool via eth_simulateV1; verdict, per-leg fees, flags, control slots
+  │    │    ├─ scenario.rs    One scenario's legs in eth_simulateV1; LegRunner injected at the trader
+  │    │    ├─ swap.rs        V2 pair detection and the router-path legs (SwapRunner) in a realistic or bare environment
+  │    │    ├─ trace.rs       debug_traceCall of the legs: external calls, storage slots read
+  │    │    ├─ code.rs        Bytecode summary via evmole; EIP-1967/1167 proxy resolution; owner()
+  │    │    ├─ owner_calls.rs     Owner calls that may lift a gate or change a fee, discovered from bytecode
+  │    │    ├─ verdict.rs     Outcomes → TokenAnalysis (honeypot and watch-list rules, flags, slot roles)
+  │    │    └─ runner.rs      Compiled bytecode + ABI of contracts/LegRunner.sol and contracts/SwapRunner.sol
+  │    ├─ ethcall_detector.rs EthCallDetector — transfer round trip via eth_call with bytecode state overrides; fallback for RPCs without eth_simulateV1/debug_traceCall
+  │    ├─ common.rs           Shared helpers (transfer fee from balance deltas, block tag mapping)
   │    └─ bytecode.rs         Compiled bytecode + ABI for Analyzer and Forwarder Solidity contracts
   └─ entrypoint_tracer/
        ├─ tracer.rs                   Traces contract execution; returns access lists + state diffs

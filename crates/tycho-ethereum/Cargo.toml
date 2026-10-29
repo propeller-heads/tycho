@@ -25,6 +25,7 @@ futures = "0.3"
 backoff = { version = "0.4.0", features = ["tokio"], default-features = false }
 num-bigint = { version = "0.4", features = ["serde"] }
 serde_with = { workspace = true }
+evmole = "=0.9.3"
 
 # Required dependencies
 alloy = { workspace = true, default-features = false, features = [
@@ -46,3 +47,6 @@ tracing-test = "0.2.5"
 
 [[example]]
 name = "run-analysis"
+
+[[example]]
+name = "analyze-tokens-bench"

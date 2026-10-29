@@ -12,13 +12,11 @@ use alloy::{
         client::{ClientBuilder, ReqwestClient},
         types::{
             debug::{StorageMap, StorageRangeResult, StorageResult},
+            simulate::SimulatePayload,
             state::{AccountOverride, StateOverride},
-            trace::{
-                geth::{
-                    GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingCallOptions,
-                    GethDebugTracingOptions, GethTrace,
-                },
-                parity::{TraceResults, TraceType},
+            trace::geth::{
+                GethDebugBuiltInTracerType, GethDebugTracerType, GethDebugTracingCallOptions,
+                GethDebugTracingOptions, GethTrace,
             },
             AccessListResult, Block, BlockId, BlockNumberOrTag, TransactionRequest,
         },
@@ -608,33 +606,6 @@ impl EthereumRpcClient {
         Ok(result)
     }
 
-    /// Use the trace_callMany API to simulate multiple call requests applied together one after
-    /// another. See https://openethereum.github.io/JSONRPC-trace-module#trace_callmany
-    ///
-    /// Returns error if communication with the node failed.
-    #[instrument(level = "debug", skip(self, requests))]
-    pub(crate) async fn trace_call_many(
-        &self,
-        requests: Vec<TransactionRequest>,
-        block: BlockNumberOrTag,
-    ) -> Result<Vec<TraceResults>, RPCError> {
-        let trace_requests: Vec<(TransactionRequest, Vec<TraceType>)> = requests
-            .into_iter()
-            .map(|request| (request, vec![TraceType::Trace]))
-            .collect();
-
-        self.retry_policy
-            .call_with_retry(|| async {
-                self.inner
-                    .request("trace_callMany", (&trace_requests, block))
-                    .await
-            })
-            .await
-            .map_err(|e| {
-                RPCError::from_alloy(format!("Failed to get trace call many for block {block}"), e)
-            })
-    }
-
     /// Executes a new message call immediately without creating a transaction on the blockchain.
     /// See https://ethereum.org/en/developers/docs/apis/json-rpc/#eth_call
     ///
@@ -689,6 +660,49 @@ impl EthereumRpcClient {
             .await
             .map_err(|e| {
                 RPCError::from_alloy("eth_call with state overrides failed".to_string(), e)
+            })
+    }
+
+    /// Executes `eth_simulateV1` on top of `block`.
+    ///
+    /// Returns one entry per simulated block, deserialized as `T`; callers pick the shape so
+    /// provider-specific fields such as revert data in `error.data` are not lost. A reverting
+    /// call does not abort the simulation; later calls see the state as if it had not happened.
+    #[instrument(level = "debug", skip(self, payload))]
+    pub(crate) async fn eth_simulate_v1<T: alloy::rpc::json_rpc::RpcRecv>(
+        &self,
+        payload: &SimulatePayload,
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<T>, RPCError> {
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("eth_simulateV1", (payload, block))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("eth_simulateV1 failed on top of block {block}"), e)
+            })
+    }
+
+    /// Executes `debug_traceCall` for a single transaction with the given tracer options.
+    #[instrument(level = "debug", skip(self, tx, options))]
+    pub(crate) async fn debug_trace_call(
+        &self,
+        tx: &TransactionRequest,
+        block: BlockNumberOrTag,
+        options: &GethDebugTracingCallOptions,
+    ) -> Result<GethTrace, RPCError> {
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("debug_traceCall", (tx, block, options))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(format!("debug_traceCall failed on block {block}"), e)
             })
     }
 
@@ -1445,56 +1459,6 @@ mod tests {
                 Some(value)
             ); // Storage value exists and matches
         }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore = "require RPC connection"]
-    async fn test_trace_call_many() -> Result<(), RPCError> {
-        let fixture = TestFixture::new();
-        let client = fixture.create_rpc_client(false);
-
-        // Create a simple trace_callMany request: check USDC balance
-        let usdc = parse_address(USDC_STR);
-        let balance_holder = parse_address(USDC_HOLDER_ADDR);
-
-        // Request balance of a known holder at TEST_BLOCK_NUMBER
-        let calldata = balanceOfCall { _owner: balance_holder }.abi_encode();
-        let request = TransactionRequest::default()
-            .to(usdc)
-            .input(TransactionInput::both(calldata.into()));
-
-        let traces = client
-            .trace_call_many(vec![request], BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
-            .await?;
-
-        // Verify we got a response
-        assert_eq!(traces.len(), 1);
-        assert!(!traces[0].trace.is_empty());
-
-        // Verify the trace doesn't have an error
-        let first_trace = &traces[0].trace[0];
-        assert!(first_trace.error.is_none(), "trace should not have an error");
-
-        // Decode and verify the output
-        let output_bytes = &traces[0].output;
-        assert_eq!(output_bytes.len(), 32, "balance should be 32 bytes");
-
-        let balance = U256::from_be_bytes::<32>(
-            output_bytes
-                .as_ref()
-                .try_into()
-                .unwrap(),
-        );
-
-        // Expected balance: 74743132960379 (74,743,132.960379 USDC with 6 decimals)
-        let expected_balance = U256::from(USDC_HOLDER_BALANCE);
-        assert_eq!(
-            balance, expected_balance,
-            "USDC balance from trace mismatch. Expected: {}, Got: {}",
-            expected_balance, balance
-        );
 
         Ok(())
     }

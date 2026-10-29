@@ -34,7 +34,7 @@ use super::{
         entry_point_tracing_result, extraction_state, protocol_component,
         protocol_component_has_entry_point_tracing_params, protocol_component_holds_contract,
         protocol_component_holds_token, protocol_component_uses_entry_point, protocol_state,
-        protocol_state_default, protocol_system, protocol_type, token, transaction,
+        protocol_state_default, protocol_system, protocol_type, token, token_analysis, transaction,
     },
     versioning::{StoredVersionedRow, VersionedRow},
     PostgresError, MAX_TS, MAX_VERSION_TS,
@@ -1420,6 +1420,43 @@ impl NewToken {
                 .collect(),
             quality: token.quality as i32,
         }
+    }
+}
+
+/// The details of a token's latest analysis; its scalars live on `token`.
+#[derive(Insertable, AsChangeset, Debug)]
+#[diesel(table_name = token_analysis)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+// A new analysis replaces the old one in full: a field it leaves empty must clear the column.
+#[diesel(treat_none_as_null = true)]
+pub struct NewTokenAnalysis {
+    pub token_id: i64,
+    pub analyzer: String,
+    pub reason: Option<String>,
+    pub pool: Option<Bytes>,
+    pub gas: Option<i64>,
+    pub flags: serde_json::Value,
+    pub external_calls: serde_json::Value,
+    pub control_slots: serde_json::Value,
+}
+
+impl NewTokenAnalysis {
+    pub fn from_analysis(
+        token_id: i64,
+        analysis: &models::token::TokenAnalysis,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            token_id,
+            analyzer: analysis.analyzer.clone(),
+            reason: analysis.reason.clone(),
+            pool: analysis.pool.clone(),
+            gas: analysis
+                .gas
+                .map(|g| i64::try_from(g).unwrap_or(i64::MAX)),
+            flags: serde_json::to_value(&analysis.flags)?,
+            external_calls: serde_json::to_value(&analysis.external_calls)?,
+            control_slots: serde_json::to_value(&analysis.control_slots)?,
+        })
     }
 }
 

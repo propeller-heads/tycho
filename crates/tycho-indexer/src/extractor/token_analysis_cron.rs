@@ -8,14 +8,13 @@ use tycho_common::{
     models::{
         blockchain::BlockTag,
         protocol::QualityRange,
-        token::{Token, TokenOwnerStore, TokenQuality, TransferCost, TransferTax},
+        token::{Token, TokenAnalysis, TokenOwnerStore, TokenVerdict},
         Chain, PaginationParams,
     },
     storage::ProtocolGateway,
-    traits::TokenAnalyzer,
     Bytes,
 };
-use tycho_ethereum::{rpc::EthereumRpcClient, services::token_analyzer::EthCallDetector};
+use tycho_ethereum::{rpc::EthereumRpcClient, services::token_analyzer::AnalyzerKind};
 
 use crate::cli::AnalyzeTokenArgs;
 
@@ -23,12 +22,14 @@ pub async fn analyze_tokens(
     analyze_args: AnalyzeTokenArgs,
     rpc: &EthereumRpcClient,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
+    analyzer: AnalyzerKind,
 ) -> anyhow::Result<()> {
     // Skip tokens that failed previously and ones we already analyzed successfully
     run_analysis_pass(
         &analyze_args,
         rpc,
         gw.clone(),
+        &analyzer,
         QualityRange::new(6, 10),
         None,
         AnalysisPass::Retry,
@@ -36,17 +37,18 @@ pub async fn analyze_tokens(
     .await?;
 
     if analyze_args.recovery_lookback_days > 0 {
-        // Quality 5 is the analysis floor: the pass above never revisits it. Re-check
-        // floored tokens that traded recently — their behavior may have changed since
-        // analysis gave up (e.g. launch transfer restrictions lifted). A Bad verdict
-        // keeps them at 5 instead of demoting further.
+        // Quality 5 is the analysis floor and 1 marks tokens never to quote: the pass above
+        // revisits neither. Re-check those that traded recently — their behavior may have
+        // changed since (e.g. launch transfer restrictions lifted), or the verdict was wrong.
+        // A blocked verdict keeps them where they are instead of demoting further.
         let traded_since = chrono::Utc::now().naive_utc() -
             chrono::Duration::days(analyze_args.recovery_lookback_days as i64);
         run_analysis_pass(
             &analyze_args,
             rpc,
             gw,
-            QualityRange::new(5, 5),
+            &analyzer,
+            QualityRange::new(1, 5),
             Some(traded_since),
             AnalysisPass::Recovery,
         )
@@ -56,9 +58,9 @@ pub async fn analyze_tokens(
     Ok(())
 }
 
-/// The retry pass demotes on a Bad verdict so tokens eventually leave the 6–10 retry
-/// window. The recovery pass re-checks floored (quality-5) tokens, which stay at the
-/// floor on Bad.
+/// The retry pass demotes on a `Blocked`, `TemporarilyBlocked` or `NoLiquidity` verdict so
+/// tokens eventually leave the 6–10 retry window. The recovery pass re-checks floored (quality
+/// 1–5) tokens that traded recently, which stay where they are on those verdicts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AnalysisPass {
     Retry,
@@ -69,6 +71,7 @@ async fn run_analysis_pass(
     analyze_args: &AnalyzeTokenArgs,
     rpc: &EthereumRpcClient,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
+    analyzer: &AnalyzerKind,
     quality_range: QualityRange,
     traded_since: Option<NaiveDateTime>,
     pass: AnalysisPass,
@@ -110,7 +113,7 @@ async fn run_analysis_pass(
                 chunk.to_vec(),
                 sem.clone(),
                 gw.clone(),
-                analyze_args.settlement_contract,
+                analyzer,
                 pass,
             )
             .boxed()
@@ -154,7 +157,7 @@ async fn analyze_batch(
     mut tokens: Vec<Token>,
     sem: Arc<Semaphore>,
     gw: Arc<dyn ProtocolGateway + Send + Sync>,
-    settlement_contract: alloy::primitives::Address,
+    analyzer: &AnalyzerKind,
     pass: AnalysisPass,
 ) -> anyhow::Result<PassOutcome> {
     let _guard = sem.acquire().await?;
@@ -215,19 +218,16 @@ async fn analyze_batch(
             }
         })
         .collect::<HashMap<_, _>>();
-    let analyzer = EthCallDetector::new(
-        rpc,
-        Arc::new(TokenOwnerStore::new(liquidity_token_owners)),
-        settlement_contract,
-    );
+    let analyzer = analyzer.build(rpc, Arc::new(TokenOwnerStore::new(liquidity_token_owners)));
     let mut outcome = PassOutcome::default();
+    let mut analyses = Vec::with_capacity(tokens.len());
     for t in tokens.iter_mut() {
         debug!(?t.address, "Analyzing token");
-        let (token_quality, gas, tax) = match analyzer
+        let analysis = match analyzer
             .analyze(t.address.clone(), BlockTag::Latest)
             .await
         {
-            Ok(res) => res,
+            Ok(analysis) => analysis,
             Err(error) => {
                 warn!(?t.address, ?error, "Token quality detection failed");
                 outcome.failed += 1;
@@ -236,7 +236,8 @@ async fn analyze_batch(
         };
 
         let quality_before = t.quality;
-        apply_analysis(t, token_quality, gas, tax, pass);
+        apply_analysis(t, &analysis, pass);
+        analyses.push((t.address.clone(), analysis));
         if t.quality > quality_before {
             outcome.promoted += 1;
         } else if t.quality < quality_before {
@@ -249,45 +250,33 @@ async fn analyze_batch(
     if !tokens.is_empty() {
         gw.update_tokens(&tokens).await?;
     }
+    if !analyses.is_empty() {
+        gw.upsert_token_analyses(&analyses)
+            .await?;
+    }
     Ok(outcome)
 }
 
-/// Applies an analysis verdict to the token's quality, gas and tax fields.
+/// Sets the token's quality, tax and gas from `analysis`.
 ///
-/// Good tokens go to 100 and fee tokens to 50. A Bad verdict lowers quality by one in the
-/// retry pass so the token eventually leaves the 6–10 retry window; the recovery pass
-/// keeps quality-5 tokens at the floor.
-fn apply_analysis(
-    t: &mut Token,
-    token_quality: TokenQuality,
-    gas: Option<TransferCost>,
-    tax: Option<TransferTax>,
-    pass: AnalysisPass,
-) {
-    match token_quality {
-        TokenQuality::Good => {
-            t.quality = 100;
+/// Quality follows the verdict, except for `Blocked`, `TemporarilyBlocked` and `NoLiquidity`:
+/// the retry pass lowers quality by one per attempt so the token eventually leaves the 6–10
+/// retry window, and the recovery pass keeps floored tokens where they are. A token without a
+/// pool, or one whose owner never opens it, would otherwise be retried on every run; the
+/// recovery pass re-checks it once it trades.
+fn apply_analysis(t: &mut Token, analysis: &TokenAnalysis, pass: AnalysisPass) {
+    let quality_before = t.quality;
+    t.apply_analysis(analysis);
+    match analysis.verdict {
+        TokenVerdict::Blocked | TokenVerdict::TemporarilyBlocked | TokenVerdict::NoLiquidity => {
+            debug!(?t.address, reason = ?analysis.reason, "Token quality detected as bad!");
+            t.quality = match pass {
+                AnalysisPass::Retry => quality_before.saturating_sub(1),
+                AnalysisPass::Recovery => quality_before,
+            };
         }
-        TokenQuality::Bad { reason } => {
-            debug!(?t.address, ?reason, "Token quality detected as bad!");
-            match pass {
-                // Remove 1 per attempt; after 5 failures the token leaves the retry window.
-                AnalysisPass::Retry => t.quality -= 1,
-                // Already at the quality-5 floor.
-                AnalysisPass::Recovery => {}
-            }
-        }
+        TokenVerdict::Ok | TokenVerdict::Fee | TokenVerdict::NoQuote => {}
     }
-
-    // If it's a fee token, set quality to 50
-    if tax.is_some_and(|tax_value| tax_value > 0) {
-        t.quality = 50;
-    }
-
-    t.tax = tax.unwrap_or(0);
-    t.gas = gas
-        .map(|g| vec![Some(g)])
-        .unwrap_or_default();
 }
 
 #[cfg(test)]
@@ -301,7 +290,7 @@ mod test {
     };
 
     use super::*;
-    use crate::testing;
+    use crate::{cli::TokenAnalyzerArgs, testing};
 
     fn test_token(quality: u32) -> Token {
         Token::new(
@@ -315,29 +304,71 @@ mod test {
         )
     }
 
+    fn settlement_contract() -> alloy::primitives::Address {
+        "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+            .parse()
+            .unwrap()
+    }
+
+    fn token_analyzer_args() -> TokenAnalyzerArgs {
+        TokenAnalyzerArgs { settlement_contract: settlement_contract(), token_watchlist: vec![] }
+    }
+
+    fn eth_call_analyzer() -> AnalyzerKind {
+        AnalyzerKind::EthCall { settlement_contract: settlement_contract() }
+    }
+
     fn test_token_at(address: &str, quality: u32) -> Token {
         Token::new(&Bytes::from(address), "TEST", 18, 0, &[], Chain::Ethereum, quality)
     }
 
+    fn analysis(verdict: TokenVerdict, transfer_tax: i64) -> TokenAnalysis {
+        let mut analysis = TokenAnalysis::verdict_only(verdict, None, None, "test");
+        analysis.fees.transfer = Some(transfer_tax);
+        analysis.gas = Some(30_000);
+        analysis
+    }
+
     #[rstest]
-    #[case::good_promotes(TokenQuality::Good, 8, AnalysisPass::Retry, 100)]
-    #[case::bad_demotes(TokenQuality::bad("transfer failed"), 8, AnalysisPass::Retry, 7)]
-    #[case::bad_keeps_quality_in_recovery_pass(
-        TokenQuality::bad("transfer failed"),
+    #[case::ok_promotes(TokenVerdict::Ok, 8, AnalysisPass::Retry, 100)]
+    #[case::ok_promotes_in_recovery_pass(TokenVerdict::Ok, 5, AnalysisPass::Recovery, 100)]
+    #[case::blocked_demotes(TokenVerdict::Blocked, 8, AnalysisPass::Retry, 7)]
+    #[case::blocked_keeps_quality_in_recovery_pass(
+        TokenVerdict::Blocked,
         5,
         AnalysisPass::Recovery,
         5
     )]
-    #[case::good_promotes_in_recovery_pass(TokenQuality::Good, 5, AnalysisPass::Recovery, 100)]
+    #[case::no_liquidity_demotes(TokenVerdict::NoLiquidity, 8, AnalysisPass::Retry, 7)]
+    #[case::no_liquidity_keeps_quality_in_recovery_pass(
+        TokenVerdict::NoLiquidity,
+        5,
+        AnalysisPass::Recovery,
+        5
+    )]
+    #[case::temporarily_blocked_demotes(
+        TokenVerdict::TemporarilyBlocked,
+        8,
+        AnalysisPass::Retry,
+        7
+    )]
+    #[case::temporarily_blocked_keeps_quality_in_recovery_pass(
+        TokenVerdict::TemporarilyBlocked,
+        5,
+        AnalysisPass::Recovery,
+        5
+    )]
+    #[case::no_quote_leaves_retry_window(TokenVerdict::NoQuote, 8, AnalysisPass::Retry, 1)]
+    #[case::no_quote_recovers_in_recovery_pass(TokenVerdict::Ok, 1, AnalysisPass::Recovery, 100)]
     fn test_apply_analysis_quality(
-        #[case] verdict: TokenQuality,
+        #[case] verdict: TokenVerdict,
         #[case] initial_quality: u32,
         #[case] pass: AnalysisPass,
         #[case] expected_quality: u32,
     ) {
         let mut t = test_token(initial_quality);
 
-        apply_analysis(&mut t, verdict, Some(30_000), Some(0), pass);
+        apply_analysis(&mut t, &analysis(verdict, 0), pass);
 
         assert_eq!(t.quality, expected_quality);
         assert_eq!(t.gas, vec![Some(30_000)]);
@@ -345,17 +376,12 @@ mod test {
     }
 
     #[rstest]
-    #[case::good_in_retry_pass(TokenQuality::Good, AnalysisPass::Retry)]
-    #[case::good_in_recovery_pass(TokenQuality::Good, AnalysisPass::Recovery)]
-    #[case::bad_in_retry_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Retry)]
-    #[case::bad_in_recovery_pass(TokenQuality::bad("transfer failed"), AnalysisPass::Recovery)]
-    fn test_apply_analysis_fee_token_sets_50(
-        #[case] verdict: TokenQuality,
-        #[case] pass: AnalysisPass,
-    ) {
+    #[case::retry_pass(AnalysisPass::Retry)]
+    #[case::recovery_pass(AnalysisPass::Recovery)]
+    fn test_apply_analysis_fee_token_sets_50(#[case] pass: AnalysisPass) {
         let mut t = test_token(5);
 
-        apply_analysis(&mut t, verdict, Some(30_000), Some(250), pass);
+        apply_analysis(&mut t, &analysis(TokenVerdict::Fee, 250), pass);
 
         assert_eq!(t.quality, 50);
         assert_eq!(t.tax, 250);
@@ -366,9 +392,7 @@ mod test {
         let rpc = EthereumRpcClient::new("http://localhost:1").expect("url parses");
         let args = AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                .parse()
-                .unwrap(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 1,
             update_batch_size: 2,
             fetch_batch_size: 2,
@@ -410,8 +434,15 @@ mod test {
             .times(1)
             .in_sequence(&mut seq)
             .returning(|_| Box::pin(async { Ok(()) }));
+        gw.expect_upsert_token_analyses()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|analyses| {
+                assert_eq!(analyses.len(), 2);
+                Box::pin(async { Ok(()) })
+            });
 
-        analyze_tokens(args, &rpc, Arc::new(gw))
+        analyze_tokens(args, &rpc, Arc::new(gw), eth_call_analyzer())
             .await
             .expect("analyze tokens failed");
     }
@@ -419,9 +450,7 @@ mod test {
     fn wiring_args(recovery_lookback_days: u32) -> AnalyzeTokenArgs {
         AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                .parse()
-                .unwrap(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 1,
             update_batch_size: 10,
             fetch_batch_size: 10,
@@ -445,7 +474,7 @@ mod test {
             });
         gw.expect_get_tokens()
             .withf(|_, _, quality, traded_since, _| {
-                quality.min == Some(5) && quality.max == Some(5) && traded_since.is_some()
+                quality.min == Some(1) && quality.max == Some(5) && traded_since.is_some()
             })
             .times(1)
             .in_sequence(&mut seq)
@@ -453,7 +482,7 @@ mod test {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
 
-        analyze_tokens(wiring_args(1), &rpc, Arc::new(gw))
+        analyze_tokens(wiring_args(1), &rpc, Arc::new(gw), eth_call_analyzer())
             .await
             .expect("analyze tokens failed");
     }
@@ -471,7 +500,7 @@ mod test {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
 
-        analyze_tokens(wiring_args(0), &rpc, Arc::new(gw))
+        analyze_tokens(wiring_args(0), &rpc, Arc::new(gw), eth_call_analyzer())
             .await
             .expect("analyze tokens failed");
     }
@@ -491,6 +520,9 @@ mod test {
         gw.expect_update_tokens()
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
+        gw.expect_upsert_token_analyses()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
         gw
     }
 
@@ -506,9 +538,7 @@ mod test {
             tokens,
             Arc::new(Semaphore::new(1)),
             Arc::new(outcome_test_gateway()),
-            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                .parse()
-                .unwrap(),
+            &eth_call_analyzer(),
             pass,
         )
         .await
@@ -537,9 +567,7 @@ mod test {
 
         let args = AnalyzeTokenArgs {
             chain: Chain::Ethereum,
-            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                .parse()
-                .unwrap(),
+            token_analyzer: token_analyzer_args(),
             concurrency: 10,
             update_batch_size: 100,
             fetch_batch_size: 100,
@@ -644,8 +672,14 @@ mod test {
                 assert_eq!(updated, &exp);
                 Box::pin(async { Ok(()) })
             });
+        gw.expect_upsert_token_analyses()
+            .once()
+            .returning(|analyses| {
+                assert_eq!(analyses.len(), 2);
+                Box::pin(async { Ok(()) })
+            });
 
-        analyze_tokens(args, &rpc, Arc::new(gw))
+        analyze_tokens(args, &rpc, Arc::new(gw), eth_call_analyzer())
             .await
             .expect("analyze tokens failed");
     }

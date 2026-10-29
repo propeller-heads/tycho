@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use clap::{builder::TypedValueParser as _, Args, Parser, Subcommand, ValueEnum};
 use tycho_common::{models::Chain, Bytes};
-use tycho_ethereum::rpc::{
-    config::{RPCBatchingConfig, RPCRetryConfig},
-    EthereumRpcClient,
+use tycho_ethereum::{
+    rpc::{
+        config::{RPCBatchingConfig, RPCRetryConfig},
+        EthereumRpcClient,
+    },
+    services::token_analyzer::AnalyzerKind,
 };
 
 use crate::{
@@ -273,10 +278,8 @@ pub struct IndexArgs {
     #[clap(long, env, default_value = "2024-01-01T00:00:00")]
     pub retention_horizon: String,
 
-    /// Settlement contract address used for token transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
+    #[clap(flatten)]
+    pub token_analyzer: TokenAnalyzerArgs,
 }
 
 #[derive(Args, Debug, Clone, PartialEq)]
@@ -335,10 +338,8 @@ pub struct RunSpkgArgs {
     #[clap(long)]
     pub dci_plugin: Option<String>,
 
-    /// Settlement contract address used for token transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
+    #[clap(flatten)]
+    pub token_analyzer: TokenAnalyzerArgs,
 }
 
 impl RunSpkgArgs {
@@ -371,15 +372,45 @@ pub struct RpcServerArgs {
     pub chain_config: String,
 }
 
+/// How new and re-analysed tokens are analysed.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct TokenAnalyzerArgs {
+    /// Settlement contract the eth_call token analyzer transfers through. That analyzer is the
+    /// fallback when the RPC lacks eth_simulateV1 or debug_traceCall. Defaults to the CoW Swap
+    /// settlement contract on Ethereum mainnet.
+    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
+    pub settlement_contract: alloy::primitives::Address,
+    /// Comma-separated contracts a token must never call during a transfer; tokens that do are
+    /// never quoted. Defaults to a contract that lets its operator veto any transfer of the
+    /// tokens calling it.
+    #[clap(
+        long,
+        value_delimiter = ',',
+        default_value = "0x610b10d3671fef5dad68283a08c19d466da5bf2b"
+    )]
+    pub token_watchlist: Vec<alloy::primitives::Address>,
+}
+
+impl TokenAnalyzerArgs {
+    /// The simulation analyzer for `chain` when `rpc` supports it, else the eth_call analyzer.
+    pub async fn analyzer_kind(&self, rpc: &EthereumRpcClient, chain: Chain) -> AnalyzerKind {
+        let watchlist = Arc::new(
+            self.token_watchlist
+                .iter()
+                .copied()
+                .collect(),
+        );
+        AnalyzerKind::select_for_rpc(rpc, chain, self.settlement_contract, watchlist).await
+    }
+}
+
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzeTokenArgs {
     /// Blockchain to execute analysis for.
     #[clap(long)]
     pub chain: Chain,
-    /// Settlement contract address used for transfer simulation.
-    /// Defaults to the CoW Swap settlement contract on Ethereum mainnet.
-    #[clap(long, default_value = "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58")]
-    pub settlement_contract: alloy::primitives::Address,
+    #[clap(flatten)]
+    pub token_analyzer: TokenAnalyzerArgs,
     /// How many concurrent threads to use for token analysis.
     #[clap(long)]
     pub concurrency: usize,
@@ -390,11 +421,11 @@ pub struct AnalyzeTokenArgs {
     /// should be at least `concurrency * update_batch_size`.
     #[clap(long)]
     pub fetch_batch_size: usize,
-    /// Also re-analyze quality-5 tokens that traded within this many days. Quality 5 is
-    /// the analysis floor and is otherwise never revisited; a recently traded token gets
-    /// a recovery pass because its behavior may have changed after listing (e.g. launch
-    /// transfer restrictions lifted). Set to 0 to disable; a large value re-checks every
-    /// quality-5 token with active liquidity (backfill).
+    /// Also re-analyze quality 1–5 tokens that traded within this many days. Quality 5 is
+    /// the analysis floor and 1 marks tokens never to quote; neither is otherwise revisited.
+    /// A recently traded token gets a recovery pass because its behavior may have changed
+    /// after listing (e.g. launch transfer restrictions lifted). Set to 0 to disable; a large
+    /// value re-checks every quality 1–5 token with active liquidity (backfill).
     #[clap(long, default_value_t = 1)]
     pub recovery_lookback_days: u32,
 }
@@ -404,6 +435,17 @@ mod cli_tests {
     use rstest::rstest;
 
     use super::*;
+
+    fn default_token_analyzer() -> TokenAnalyzerArgs {
+        TokenAnalyzerArgs {
+            settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            token_watchlist: vec!["0x610b10d3671fef5dad68283a08c19d466da5bf2b"
+                .parse()
+                .unwrap()],
+        }
+    }
 
     #[tokio::test]
     async fn test_arg_parsing_run_cmd() {
@@ -473,9 +515,7 @@ mod cli_tests {
                 initialized_accounts: vec![],
                 initialization_block: 0,
                 dci_plugin: None,
-                settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                    .parse()
-                    .unwrap(),
+                token_analyzer: default_token_analyzer(),
             }),
         };
 
@@ -686,9 +726,7 @@ mod cli_tests {
                 extractors_config: "/opt/extractors.yaml".to_string(),
                 chain_config: "./chains.yaml".to_string(),
                 retention_horizon: "2024-01-01T00:00:00".to_string(),
-                settlement_contract: "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
-                    .parse()
-                    .unwrap(),
+                token_analyzer: default_token_analyzer(),
             }),
         };
 
