@@ -450,9 +450,8 @@ impl ProtocolStreamProcessor {
                     Some(fluid_v1_paused_pools_filter),
                 );
             }
-            // UP and Raphael on Robinhood Chain, and Topaz CL on Robinhood Chain and BSC, deploy
-            // the Slipstream contracts, so they decode with the same state as
-            // Aerodrome.
+            // UP, Topaz CL and Raphael deploy the Aerodrome Slipstream contracts, so they decode
+            // with the same state.
             "aerodrome_slipstreams" | "up_v3" | "topaz_cl" | "raphael_slipstreams" => {
                 stream = stream.exchange::<AerodromeSlipstreamsState>(
                     protocol,

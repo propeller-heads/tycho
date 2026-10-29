@@ -45,6 +45,9 @@ v0.1.6 was never released; its changes ship in this version.
   Raphael's defaults changed at blocks 70,897,071 (`defaultFeeCap`) and 70,897,094
   (`defaultScalingFactor`). If an owner changes them again, the table needs a code change; until
   then pools without a config of their own are quoted at the old values.
+- The package does not index the factory's `SwapFeeModuleChanged` either. If a factory switches
+  to another fee module, its pools price at their static fee until the simulator's module table
+  and the manifest's `dynamic_fee_modules` list the new module.
 
 ### Deployment notes
 

@@ -301,7 +301,9 @@ impl Observations {
             return Ok((last.tick_cumulative, last.seconds_per_liquidity_cumulative_x128));
         }
 
-        let target = time - seconds_ago;
+        // `Oracle.observeSingle` computes this in unchecked uint32 arithmetic (Solidity 0.7), and
+        // `lte` and the deltas below already treat timestamps as wrapping.
+        let target = time.wrapping_sub(seconds_ago);
         let (before_or_at, at_or_after) =
             self.get_surrounding_observations(time, target, tick, index, liquidity, cardinality)?;
 
