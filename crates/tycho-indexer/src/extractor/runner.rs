@@ -649,6 +649,76 @@ mod test {
         assert_eq!(msgs.len(), 1);
     }
 
+    fn block_message(number: u64, hash_byte: u8, revert: bool) -> ExtractorMsg {
+        let mut block = crate::testing::block(number);
+        block.hash = tycho_common::Bytes::from(hash_byte).lpad(32, 0);
+        Arc::new(BlockAggregatedChanges {
+            extractor: "uniswap_v4".to_string(),
+            block,
+            revert,
+            ..Default::default()
+        })
+    }
+
+    fn received(rx: &mut Receiver<DeltaCommand>) -> Vec<String> {
+        let mut commands = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            commands.push(match command {
+                DeltaCommand::Block(msg) if msg.revert => format!("revert to {}", msg.block.number),
+                DeltaCommand::Block(msg) => format!("block {}", msg.block.number),
+                DeltaCommand::ExtractorRestarted(name) => format!("restarted {name}"),
+            });
+        }
+        commands
+    }
+
+    #[tokio::test]
+    async fn test_replay_sends_only_the_blocks_the_subscribers_did_not_receive() {
+        let channels = SubscriberChannels::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        channels.add(0, tx).await;
+        for number in 1..=2 {
+            channels
+                .deliver(block_message(number, number as u8, false))
+                .await;
+        }
+        received(&mut rx);
+
+        assert!(channels.begin_replay());
+        for number in 1..=3 {
+            channels
+                .deliver(block_message(number, number as u8, false))
+                .await;
+        }
+
+        assert_eq!(received(&mut rx), ["block 3"]);
+    }
+
+    #[tokio::test]
+    async fn test_replay_that_differs_restarts_the_subscribers_and_drops_a_revert() {
+        let channels = SubscriberChannels::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        channels.add(0, tx).await;
+        for number in 1..=3 {
+            channels
+                .deliver(block_message(number, number as u8, false))
+                .await;
+        }
+        received(&mut rx);
+
+        assert!(channels.begin_replay());
+        channels
+            .deliver(block_message(2, 0xee, false))
+            .await;
+        assert_eq!(received(&mut rx), ["restarted uniswap_v4", "block 2"]);
+
+        assert!(channels.begin_replay());
+        channels
+            .deliver(block_message(1, 1, true))
+            .await;
+        assert_eq!(received(&mut rx), ["restarted uniswap_v4"]);
+    }
+
     #[test]
     fn test_compute_start_block_no_db_state() {
         // No committed block: fall back to the config start block.

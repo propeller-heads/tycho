@@ -113,3 +113,141 @@ impl SentBlocks {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tycho_common::Bytes;
+
+    use super::*;
+    use crate::testing;
+
+    fn full(number: u64) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { block: testing::block(number), ..Default::default() }
+    }
+
+    fn partial(number: u64, index: u32) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { partial_block_index: Some(index), ..full(number) }
+    }
+
+    fn other_hash(number: u64) -> BlockAggregatedChanges {
+        let mut msg = full(number);
+        msg.block.hash = Bytes::from(0xff_u8).lpad(32, 0);
+        msg
+    }
+
+    fn revert_to(number: u64) -> BlockAggregatedChanges {
+        BlockAggregatedChanges { revert: true, ..full(number) }
+    }
+
+    fn sent(numbers: std::ops::RangeInclusive<u64>) -> SentBlocks {
+        let mut sent = SentBlocks::default();
+        for number in numbers {
+            sent.record(&full(number));
+        }
+        sent
+    }
+
+    #[test]
+    fn test_messages_are_sent_while_no_replay_runs() {
+        let mut sent = sent(1..=3);
+
+        assert_eq!(sent.classify(&full(2)), Delivery::Send);
+        assert_eq!(sent.classify(&revert_to(1)), Delivery::Send);
+    }
+
+    #[test]
+    fn test_replay_skips_the_sent_blocks_and_sends_the_first_block_that_continues_them() {
+        let mut sent = sent(1..=3);
+        assert!(sent.begin_replay());
+
+        let deliveries: Vec<Delivery> = [full(2), partial(3, 0), full(3), partial(4, 0), full(4)]
+            .iter()
+            .map(|msg| sent.classify(msg))
+            .collect();
+
+        assert_eq!(
+            deliveries,
+            [Delivery::Skip, Delivery::Skip, Delivery::Skip, Delivery::Send, Delivery::Send]
+        );
+    }
+
+    #[test]
+    fn test_replay_of_a_block_with_another_hash_asks_for_a_restart() {
+        let mut sent = sent(1..=3);
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&full(2)), Delivery::Skip);
+        assert_eq!(sent.classify(&other_hash(3)), Delivery::Restart);
+    }
+
+    #[test]
+    fn test_revert_during_a_replay_asks_for_a_restart() {
+        let mut sent = sent(1..=3);
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&revert_to(2)), Delivery::Restart);
+    }
+
+    #[test]
+    fn test_replay_that_does_not_continue_the_newest_sent_block_asks_for_a_restart() {
+        let mut sent = sent(1..=3);
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&full(5)), Delivery::Restart);
+        assert_eq!(sent.classify(&full(6)), Delivery::Send, "the replay ended");
+    }
+
+    #[test]
+    fn test_replay_of_a_block_below_the_record_asks_for_a_restart() {
+        let mut sent = SentBlocks::default();
+        for number in 1..=3 {
+            sent.record(&BlockAggregatedChanges {
+                db_committed_block_height: Some(2),
+                ..full(number)
+            });
+        }
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&full(2)), Delivery::Restart);
+    }
+
+    #[test]
+    fn test_record_keeps_the_newest_block_above_the_committed_height() {
+        let mut sent = sent(1..=2);
+        sent.record(&BlockAggregatedChanges { db_committed_block_height: Some(5), ..full(3) });
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&full(3)), Delivery::Skip);
+        assert_eq!(sent.classify(&full(4)), Delivery::Send);
+    }
+
+    #[test]
+    fn test_record_of_a_revert_forgets_the_reverted_blocks() {
+        let mut sent = sent(1..=3);
+        sent.record(&revert_to(1));
+        assert!(sent.begin_replay());
+
+        assert_eq!(sent.classify(&full(1)), Delivery::Skip);
+        assert_eq!(sent.classify(&full(2)), Delivery::Send);
+    }
+
+    #[test]
+    fn test_no_replay_without_a_sent_full_block() {
+        let mut sent = SentBlocks::default();
+        sent.record(&partial(1, 0));
+
+        assert!(!sent.begin_replay());
+        assert_eq!(sent.classify(&full(1)), Delivery::Send);
+    }
+
+    #[test]
+    fn test_clear_ends_a_replay() {
+        let mut sent = sent(1..=3);
+        assert!(sent.begin_replay());
+
+        sent.clear();
+
+        assert!(!sent.begin_replay());
+        assert_eq!(sent.classify(&full(2)), Delivery::Send);
+    }
+}
