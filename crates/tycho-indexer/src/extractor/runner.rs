@@ -201,6 +201,19 @@ impl Subscriber {
     }
 }
 
+/// Returns the counter of client subscribers removed because their channel was full, registered
+/// at zero. A series born at one looks flat to `increase()` on Prometheus, so the first removal
+/// would go unseen.
+pub(crate) fn slow_client_removals(id: &ExtractorIdentity) -> metrics::Counter {
+    let removals = metrics::counter!(
+        "extractor_slow_clients_removed_total",
+        "extractor" => id.name.clone(),
+        "chain" => id.chain.to_string()
+    );
+    removals.increment(0);
+    removals
+}
+
 pub(crate) type SubscriptionsMap = HashMap<u64, Subscriber>;
 
 pub struct ExtractorRunner {
@@ -245,6 +258,7 @@ impl ExtractorRunner {
 
         runtime.spawn(async move {
             let id = self.extractor.get_id();
+            let slow_client_removals = slow_client_removals(&id);
             // Track the number of partials received for the current block != partial_index.
             let mut partials_in_block: u32 = 0;
             loop {
@@ -310,7 +324,7 @@ impl ExtractorRunner {
                                     })?;
                                     for msg in msgs {
                                         trace!("Propagating block data message.");
-                                        Self::propagate_msg(&self.subscriptions, msg).await;
+                                        Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
                                     }
 
                                     let duration_ms = start_time.elapsed().as_millis() as f64;
@@ -333,7 +347,7 @@ impl ExtractorRunner {
                                     match self.extractor.handle_revert(undo_signal.clone()).await {
                                         Ok(Some(msg)) => {
                                             trace!("Propagating block undo message.");
-                                            Self::propagate_msg(&self.subscriptions, msg).await;
+                                            Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
                                         }
                                         Ok(None) => {
                                             trace!("No message to propagate.");
@@ -430,7 +444,11 @@ impl ExtractorRunner {
 
     // TODO: add message tracing_id to the log
     #[instrument(skip_all, fields(subscriber_count))]
-    async fn propagate_msg(subscribers: &Arc<Mutex<SubscriptionsMap>>, message: ExtractorMsg) {
+    async fn propagate_msg(
+        subscribers: &Arc<Mutex<SubscriptionsMap>>,
+        message: ExtractorMsg,
+        slow_client_removals: &metrics::Counter,
+    ) {
         trace!(msg = %message, "Propagating message to subscribers.");
 
         let command = DeltaCommand::Block(message);
@@ -453,6 +471,7 @@ impl ExtractorRunner {
                 }
                 Delivery::Full => {
                     warn!(subscriber_id, "Removed a client subscriber whose channel is full");
+                    slow_client_removals.increment(1);
                     to_remove.push(subscriber_id);
                 }
             }
@@ -487,8 +506,12 @@ pub(crate) fn compute_start_block(
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{collections::BTreeMap, time::Duration};
 
+    use metrics_util::{
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+        MetricKind,
+    };
     use tycho_common::models::{blockchain::BlockAggregatedChanges, Chain};
 
     use super::*;
@@ -645,7 +668,7 @@ mod test {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            ExtractorRunner::propagate_msg(&subscribers, one_msg()),
+            ExtractorRunner::propagate_msg(&subscribers, one_msg(), &metrics::Counter::noop()),
         )
         .await
         .expect("a full client must not make the extractor wait");
@@ -674,7 +697,10 @@ mod test {
 
         let propagate = tokio::spawn({
             let subscribers = subscribers.clone();
-            async move { ExtractorRunner::propagate_msg(&subscribers, one_msg()).await }
+            async move {
+                ExtractorRunner::propagate_msg(&subscribers, one_msg(), &metrics::Counter::noop())
+                    .await
+            }
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!propagate.is_finished(), "the extractor must wait for an internal subscriber");
@@ -689,6 +715,77 @@ mod test {
             .lock()
             .await
             .contains_key(&0));
+    }
+
+    fn slow_client_removals_series(
+        snapshotter: &Snapshotter,
+    ) -> Vec<(BTreeMap<String, String>, u64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter &&
+                    key.key().name() == "extractor_slow_clients_removed_total"
+            })
+            .map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                let DebugValue::Counter(count) = value else {
+                    panic!("extractor_slow_clients_removed_total must be a counter");
+                };
+                (labels, count)
+            })
+            .collect()
+    }
+
+    fn uniswap_v2_labels() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("extractor".to_string(), "uniswap_v2".to_string()),
+            ("chain".to_string(), "ethereum".to_string()),
+        ])
+    }
+
+    #[test]
+    fn test_slow_client_removals_exists_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+
+        let _removals = metrics::with_local_recorder(&recorder, || slow_client_removals(&id));
+
+        assert_eq!(slow_client_removals_series(&snapshotter), vec![(uniswap_v2_labels(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn test_propagate_msg_counts_only_full_clients() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+        let removals = metrics::with_local_recorder(&recorder, || slow_client_removals(&id));
+        let (full_client, _full_client_rx) = subscriber(SubscriberKind::Client, 1, 1);
+        let (closed_client, closed_client_rx) = subscriber(SubscriberKind::Client, 1, 0);
+        drop(closed_client_rx);
+        let (client, _client_rx) = subscriber(SubscriberKind::Client, 4, 0);
+        let subscribers = Arc::new(Mutex::new(HashMap::from([
+            (0, full_client),
+            (1, closed_client),
+            (2, client),
+        ])));
+
+        ExtractorRunner::propagate_msg(&subscribers, one_msg(), &removals).await;
+
+        assert_eq!(slow_client_removals_series(&snapshotter), vec![(uniswap_v2_labels(), 1)]);
+        let remaining: Vec<u64> = subscribers
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(remaining, vec![2]);
     }
 
     #[tokio::test]
