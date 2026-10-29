@@ -1,3 +1,18 @@
+## [0.492.0](https://github.com/propeller-heads/tycho/compare/0.491.1...0.492.0) (2026-10-29)
+
+
+### Features
+
+* **ethereum:** add batch eth_call to EthereumRpcClient ([8911a17](https://github.com/propeller-heads/tycho/commit/8911a175aa9999addc55cdeb1ec4bd05e1ffca29))
+* **ethereum:** add OnChainTokenOwners holder finder ([00cd1af](https://github.com/propeller-heads/tycho/commit/00cd1af9188665bab8070b748947a737512201bb))
+
+
+### Bug Fixes
+
+* **ethereum:** read all holder candidates in one batch in OnChainTokenOwners ([e3db554](https://github.com/propeller-heads/tycho/commit/e3db554b3f896137a178bd60d43bfa18edac5c19))
+* **indexer:** check a pool's id before its contract addresses ([4d6f728](https://github.com/propeller-heads/tycho/commit/4d6f7280005d8df5240d39cbfa4c340fe61ef6d9))
+* **indexer:** verify token holders on-chain in analyze-tokens ([70bdaa6](https://github.com/propeller-heads/tycho/commit/70bdaa6ccc5bb18e1c11c721c14ccac4aabe3b5f))
+
 ## [0.491.1](https://github.com/propeller-heads/tycho/compare/0.491.0...0.491.1) (2026-10-29)
 
 
