@@ -614,6 +614,44 @@ mod tests {
     }
 
     #[test]
+    fn every_fee_module_a_slipstreams_manifest_indexes_is_supported() {
+        // A pool whose module is missing from the table silently prices at its static fee, so
+        // every module a manifest emits a `dynamic_fee_module` marker for must be listed here.
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocols/substreams/base-aerodrome-slipstreams");
+        let entries = std::fs::read_dir(&package)
+            .unwrap_or_else(|err| panic!("reading manifests in {}: {err}", package.display()));
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry
+                .expect("manifest directory entry")
+                .path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "yaml")
+            {
+                continue;
+            }
+            let manifest = std::fs::read_to_string(&path).expect("readable manifest");
+            const KEY: &str = "dynamic_fee_modules[]=";
+            for (start, _) in manifest.match_indices(KEY) {
+                let module: String = manifest[start + KEY.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .collect();
+                let address = hex::decode(&module).expect("hex module address");
+                assert!(
+                    supported_dynamic_fee_module(&address).is_some(),
+                    "{} indexes fee module 0x{module}, which SUPPORTED_DYNAMIC_FEE_MODULES lacks",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no dynamic_fee_modules[] found under {}", package.display());
+    }
+
+    #[test]
     fn default_config_falls_back_to_static_default_fee() {
         // base_fee == 0 must resolve to the pool's static default fee (3000 here).
         let dfc = DynamicFeeConfig::default();
