@@ -165,6 +165,11 @@ pub(crate) const SUBSIDY_KEY: &str = "subsidy";
 /// Protocol system of the native token wrap/unwrap.
 pub(crate) const NATIVE_WRAPPER_PROTOCOL_SYSTEM: &str = "native_wrapper";
 
+/// BaiBai components, and the static attributes naming the pair's base and quote token.
+pub const BAIBAI_PROTOCOL_SYSTEM: &str = "baibai";
+pub const BAIBAI_BASE_ATTRIBUTE: &str = "base";
+pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 

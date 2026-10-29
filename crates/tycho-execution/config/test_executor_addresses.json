@@ -30,6 +30,7 @@
     "fallback": "0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36"
   },
   "base": {
+    "baibai": "0x59605549B978cAd5473A72c077FC6b5d113c6264",
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",
     "aero_cl": "0x2a07706473244BC757E10F2a9E86fB532828afe3",
     "aerodrome_v1": "0x1aF7f588A501EA2B5bB3feeFA744892aA2CF00e6",
