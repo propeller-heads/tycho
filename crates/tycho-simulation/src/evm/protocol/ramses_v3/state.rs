@@ -475,7 +475,7 @@ impl ProtocolSim for RamsesV3State {
             .updated_attributes
             .remove("liquidity")
         {
-            self.liquidity = liquidity.into();
+            self.liquidity = liquidity.try_into()?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -484,11 +484,11 @@ impl ProtocolSim for RamsesV3State {
             self.sqrt_price = U256::from_be_slice(sqrt_price);
         }
         if let Some(tick) = delta.updated_attributes.remove("tick") {
-            self.tick = i32::from(tick).into();
+            self.tick = i32::try_from(tick)?.into();
         }
         // The Ramses swap fee is governance-mutable, so apply fee updates here.
         if let Some(fee) = delta.updated_attributes.remove("fee") {
-            self.fee = fee.into();
+            self.fee = fee.try_into()?;
         }
 
         // update ticks
@@ -501,7 +501,7 @@ impl ProtocolSim for RamsesV3State {
                 .set_tick_liquidity(
                     tick.parse::<i32>()
                         .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                    i128::from(value),
+                    i128::try_from(value)?,
                 )
                 .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
         }

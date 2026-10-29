@@ -39,7 +39,7 @@ impl TryFrom<Bytes> for EkuboExtension {
 
     fn try_from(value: Bytes) -> Result<Self, Self::Error> {
         // See extension ID encoding in tycho-protocol-sdk
-        match i32::from(value) {
+        match i32::try_from(value)? {
             0 => Err(InvalidSnapshotError::ValueError("Unknown Ekubo extension".to_string())),
             1 => Ok(Self::Base),
             2 => Ok(Self::Oracle),
@@ -100,7 +100,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
 
         let liquidity = attribute(&state_attrs, "liquidity")?
             .clone()
-            .into();
+            .try_into()?;
 
         let sqrt_ratio = U256::from_big_endian(attribute(&state_attrs, "sqrt_ratio")?);
 
@@ -116,7 +116,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
                 } else {
                     let tick = attribute(&state_attrs, "tick")?
                         .clone()
-                        .into();
+                        .try_into()?;
 
                     let mut ticks = ticks_from_attributes(state_attrs)
                         .map_err(InvalidSnapshotError::ValueError)?;
@@ -138,15 +138,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
                 let (token0_sale_rate, token1_sale_rate) = (
                     attribute(&state_attrs, "token0_sale_rate")?
                         .clone()
-                        .into(),
+                        .try_into()?,
                     attribute(&state_attrs, "token1_sale_rate")?
                         .clone()
-                        .into(),
+                        .try_into()?,
                 );
 
                 let last_execution_time: u64 = attribute(&state_attrs, "last_execution_time")?
                     .clone()
-                    .into();
+                    .try_into()?;
 
                 let mut virtual_order_deltas =
                     sale_rate_deltas_from_attributes(state_attrs, last_execution_time)
@@ -169,7 +169,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EkuboState {
             EkuboExtension::MevResist => {
                 let tick = attribute(&state_attrs, "tick")?
                     .clone()
-                    .into();
+                    .try_into()?;
 
                 let mut ticks =
                     ticks_from_attributes(state_attrs).map_err(InvalidSnapshotError::ValueError)?;

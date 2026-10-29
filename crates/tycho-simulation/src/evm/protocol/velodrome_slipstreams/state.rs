@@ -485,7 +485,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             .updated_attributes
             .get("liquidity")
         {
-            self.liquidity = u128::from(liquidity.clone());
+            self.liquidity = u128::try_from(liquidity.clone())?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -497,16 +497,16 @@ impl ProtocolSim for VelodromeSlipstreamsState {
             .updated_attributes
             .get("default_fee")
         {
-            self.default_fee = u32::from(default_fee.clone());
+            self.default_fee = u32::try_from(default_fee.clone())?;
         }
         if let Some(custom_fee) = delta
             .updated_attributes
             .get("custom_fee")
         {
-            self.custom_fee = u32::from(custom_fee.clone());
+            self.custom_fee = u32::try_from(custom_fee.clone())?;
         }
         if let Some(tick) = delta.updated_attributes.get("tick") {
-            self.tick = i32::from(tick.clone()).into();
+            self.tick = i32::try_from(tick.clone())?.into();
         }
 
         // apply tick & observations changes
@@ -519,7 +519,7 @@ impl ProtocolSim for VelodromeSlipstreamsState {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }

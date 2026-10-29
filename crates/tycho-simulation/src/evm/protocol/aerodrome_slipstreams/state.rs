@@ -694,7 +694,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                 liquidity.clone()
             };
 
-            self.liquidity = u128::from(liq_16_bytes);
+            self.liquidity = u128::try_from(liq_16_bytes)?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -706,19 +706,19 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             .updated_attributes
             .get("observationIndex")
         {
-            self.observation_index = u16::from(observation_index.clone());
+            self.observation_index = u16::try_from(observation_index.clone())?;
         }
         if let Some(observation_cardinality) = delta
             .updated_attributes
             .get("observationCardinality")
         {
-            self.observation_cardinality = u16::from(observation_cardinality.clone());
+            self.observation_cardinality = u16::try_from(observation_cardinality.clone())?;
         }
         if let Some(default_fee) = delta
             .updated_attributes
             .get("default_fee")
         {
-            self.default_fee = u32::from(default_fee.clone());
+            self.default_fee = u32::try_from(default_fee.clone())?;
         }
         if let Some(hook) = self.aero_hook.as_mut() {
             hook.update_from_attributes(&delta.updated_attributes)
@@ -761,7 +761,7 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }

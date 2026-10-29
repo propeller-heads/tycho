@@ -50,7 +50,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeV1State {
             .state
             .attributes
             .get("fee")
-            .map(|fee| u32::from(fee.clone()))
+            .map(|fee| u32::try_from(fee.clone()))
+            .transpose()?
             .unwrap_or(0);
 
         if fee > 10_000 {

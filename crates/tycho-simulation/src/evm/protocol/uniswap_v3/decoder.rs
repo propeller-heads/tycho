@@ -49,7 +49,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
             liq
         };
 
-        let liquidity = u128::from(liq_16_bytes);
+        let liquidity = u128::try_from(liq_16_bytes)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -97,7 +97,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV3State {
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),
@@ -152,13 +152,8 @@ fn decode_fee_tier(
 }
 
 fn decode_i32(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
-    if value.len() > 4 {
-        return Err(InvalidSnapshotError::ValueError(format!(
-            "Attribute {name} is {} bytes, expected at most 4",
-            value.len()
-        )));
-    }
-    Ok(i32::from(value.clone()))
+    i32::try_from(value.clone())
+        .map_err(|err| InvalidSnapshotError::ValueError(format!("Attribute {name}: {err}")))
 }
 
 #[cfg(test)]
@@ -357,7 +352,7 @@ mod tests {
     #[case::zero_spacing(vec![0x32], vec![0x00], "must be positive")]
     #[case::negative_spacing(vec![0x32], vec![0xff], "out of range")]
     #[case::spacing_above_u16(vec![0x32], vec![0x01, 0x00, 0x00], "out of range")]
-    #[case::spacing_wider_than_i32(vec![0x32], vec![0x00; 5], "expected at most 4")]
+    #[case::spacing_wider_than_i32(vec![0x32], vec![0x01, 0x00, 0x00, 0x00, 0x00], "does not fit into i32")]
     async fn test_usv3_try_from_invalid_tick_spacing_attribute(
         #[case] fee_bytes: Vec<u8>,
         #[case] tick_spacing_bytes: Vec<u8>,
