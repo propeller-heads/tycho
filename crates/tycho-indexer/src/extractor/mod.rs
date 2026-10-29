@@ -82,6 +82,11 @@ pub enum ExtractionError {
     AccountExtractionError(String),
     #[error("DCI cache error: {0}")]
     DCICacheError(#[from] DCICacheError),
+    /// The process became the leader, and the extractor's DCI state comes from its own traces,
+    /// which can differ from the traces of the former leader. The extractor must be built again
+    /// from the database before it commits.
+    #[error("Extractor {0} must restart from the database cursor to take over commits")]
+    RestartToTakeOver(String),
 }
 
 impl ExtractionError {
@@ -102,6 +107,7 @@ impl ExtractionError {
             Self::TracingError(_) => "tracing",
             Self::AccountExtractionError(_) => "account_extraction",
             Self::DCICacheError(_) => "dci_cache",
+            Self::RestartToTakeOver(_) => "restart_to_take_over",
         }
     }
 }
