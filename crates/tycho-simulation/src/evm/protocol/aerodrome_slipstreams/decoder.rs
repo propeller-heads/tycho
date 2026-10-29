@@ -59,7 +59,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
             liq
         };
 
-        let liquidity = u128::from(liq_16_bytes);
+        let liquidity = u128::try_from(liq_16_bytes)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -69,7 +69,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("sqrt_price".to_string()))?,
         );
 
-        let observation_index = u16::from(
+        let observation_index = u16::try_from(
             snapshot
                 .state
                 .attributes
@@ -78,9 +78,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                     InvalidSnapshotError::MissingAttribute("observationIndex".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
-        let observation_cardinality = u16::from(
+        let observation_cardinality = u16::try_from(
             snapshot
                 .state
                 .attributes
@@ -89,7 +89,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                     InvalidSnapshotError::MissingAttribute("observationCardinality".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
         let dynamic_fee_config = DynamicFeeConfig::from_attributes(&snapshot.state.attributes)
             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))?;
@@ -124,14 +124,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
 
         let tick_spacing = i24_be_bytes_to_i32(&tick_spacing_4_bytes);
 
-        let default_fee = u32::from(
+        let default_fee = u32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("default_fee")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("default_fee".to_string()))?
                 .clone(),
-        );
+        )?;
 
         let tick = snapshot
             .state
@@ -169,7 +169,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeSlipstreamsS
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),

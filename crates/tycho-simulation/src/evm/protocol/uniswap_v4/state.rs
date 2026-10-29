@@ -1029,7 +1029,7 @@ impl ProtocolSim for UniswapV4State {
             .updated_attributes
             .get("liquidity")
         {
-            self.liquidity = u128::from(liquidity.clone());
+            self.liquidity = u128::try_from(liquidity.clone())?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -1041,19 +1041,19 @@ impl ProtocolSim for UniswapV4State {
             self.tick = i24_be_bytes_to_i32(tick).into();
         }
         if let Some(lp_fee) = delta.updated_attributes.get("fee") {
-            self.fees.lp_fee = u32::from(lp_fee.clone());
+            self.fees.lp_fee = u32::try_from(lp_fee.clone())?;
         }
         if let Some(zero2one_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/zero2one")
         {
-            self.fees.zero_for_one = u32::from(zero2one_protocol_fee.clone());
+            self.fees.zero_for_one = u32::try_from(zero2one_protocol_fee.clone())?;
         }
         if let Some(one2zero_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/one2zero")
         {
-            self.fees.one_for_zero = u32::from(one2zero_protocol_fee.clone());
+            self.fees.one_for_zero = u32::try_from(one2zero_protocol_fee.clone())?;
         }
 
         // apply tick changes
@@ -1066,7 +1066,7 @@ impl ProtocolSim for UniswapV4State {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
