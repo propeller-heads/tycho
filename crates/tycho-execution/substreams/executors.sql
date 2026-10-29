@@ -170,7 +170,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('polygon', '0x746cdaf8ef08a9d023155dddc95291ab8c9a7936', ARRAY['rfq:metric']),
     ('polygon', '0xb9f140f4f8d674c453b3ee00646189452a74e10c', ARRAY['quickswap_v2', 'uniswap_v2']),
     ('polygon', '0xc8f2a896d6d98b325889ce9c998f62779d17fee3', ARRAY['native_wrapper']),
-    ('robinhood', '0x33e8602fedd1215cb04c865c66648dba5b81fb75', ARRAY['ramses_v3', 'robinswap_v3', 'sushiswap_v3', 'uniswap_v3']),
+    ('robinhood', '0x33e8602fedd1215cb04c865c66648dba5b81fb75', ARRAY['gigadex_v3', 'ramses_v3', 'robinswap_v3', 'sushiswap_v3', 'swaphood_v3', 'uniswap_v3', 'up_v3']),
     ('robinhood', '0x3e3f6eb0f1e98aa300dbecdf0dbc7d5e6870812d', ARRAY['rfq:native']),
     ('robinhood', '0x4e80394e1caf5cdee6d57aeba2dce9b333b33e45', ARRAY['pancakeswap_infinity_cl']),
     ('robinhood', '0x5ce13b5a3d41f22e28c4f76c115bd0c3ca70ee7c', ARRAY['rfq:metric']),
