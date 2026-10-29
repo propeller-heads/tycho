@@ -27,6 +27,12 @@
 
 - No module code changed, so Base and UP V3 output is unchanged. Only the package version moves.
 - Topaz back-processes from block 60,744,015 on Robinhood and 98,756,164 on BSC.
+- The package does not index module-wide fee settings: `DefaultFeeCapSet`,
+  `DefaultScalingFactorSet`, `SecondsAgoSet`, or the factory's `SwapFeeModuleChanged`. The
+  simulator applies each supported module's default cap, default scaling factor and seconds-ago
+  window as constants (Topaz: 50,000 cap on Robinhood, 10,000 on BSC). The swap fee manager can
+  change them, and the factory can switch to another module; either change needs a simulator
+  release, and a module missing from the simulator's table prices its pools at their static fee.
 
 ## v0.1.5
 
