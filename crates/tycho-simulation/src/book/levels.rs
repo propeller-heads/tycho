@@ -269,6 +269,26 @@ mod tests {
     }
 
     #[rstest]
+    #[case::nothing_filled(0.0, Some(3000.0))]
+    #[case::inside_the_first_level(0.5, Some(3000.0))]
+    #[case::on_the_boundary(1.0, Some(2999.0))]
+    #[case::inside_the_second_level(2.5, Some(2999.0))]
+    #[case::on_the_depth(3.0, None)]
+    #[case::past_the_depth(4.0, None)]
+    #[case::not_a_number(f64::NAN, None)]
+    fn marginal_price_is_the_price_of_the_next_unit(
+        #[case] filled: f64,
+        #[case] expected: Option<f64>,
+    ) {
+        assert_eq!(ladder().marginal_price(filled), expected);
+    }
+
+    #[test]
+    fn marginal_price_of_an_empty_ladder_is_none() {
+        assert_eq!(Levels::default().marginal_price(0.0), None);
+    }
+
+    #[rstest]
     #[case::nothing(0.0)]
     #[case::less_than_nothing(-1.0)]
     #[case::not_a_number(f64::NAN)]
