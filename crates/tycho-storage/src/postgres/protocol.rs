@@ -3500,6 +3500,105 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_upsert_token_analyses() {
+        use tycho_common::models::token::{
+            ControlSlot, LegFees, SlotRole, TokenAnalysis, TokenFlag, TokenVerdict,
+        };
+
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let dai = Bytes::from(DAI);
+        let mut analysis =
+            TokenAnalysis::verdict_only(TokenVerdict::Fee, None, Some(7), "simulation/1");
+        analysis.fees = LegFees { buy: Some(100), transfer: None, sell: Some(250) };
+        analysis.pool = Some(Bytes::from(WETH));
+        analysis.flags = vec![TokenFlag::SwapsOnTransfer];
+        analysis.control_slots = vec![ControlSlot {
+            slot: Bytes::from("0x0a"),
+            offset: 0,
+            writers: vec![Bytes::from("0x8a8c523c")],
+            role: SlotRole::Fee,
+        }];
+        let unknown = Bytes::from("0x0000000000000000000000000000000000000bad");
+        let blocked = TokenAnalysis::verdict_only(
+            TokenVerdict::Blocked,
+            Some("reverted".to_string()),
+            Some(8),
+            "simulation/1",
+        );
+
+        gw.upsert_token_analyses(
+            &[(dai.clone(), analysis.clone()), (unknown, blocked.clone())],
+            &mut conn,
+        )
+        .await
+        .expect("failed to store analyses");
+        let row = |conn: &mut AsyncPgConnection| {
+            schema::token::table
+                .inner_join(schema::account::table)
+                .inner_join(schema::token_analysis::table)
+                .filter(schema::account::address.eq(dai.clone()))
+                .select((
+                    schema::token::verdict,
+                    schema::token::buy_tax,
+                    schema::token::transfer_tax,
+                    schema::token::sell_tax,
+                    schema::token::analyzed_block,
+                    schema::token_analysis::reason,
+                    schema::token_analysis::control_slots,
+                    schema::token_analysis::pool,
+                ))
+                .get_result::<(
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<String>,
+                    serde_json::Value,
+                    Option<Bytes>,
+                )>(conn)
+        };
+        let stored = row(&mut conn)
+            .await
+            .expect("analysis stored");
+        assert_eq!(
+            (stored.0.as_deref(), stored.1, stored.2, stored.3, stored.4),
+            (Some("fee"), Some(100), None, Some(250), Some(7))
+        );
+        assert_eq!(
+            serde_json::from_value::<Vec<ControlSlot>>(stored.6).expect("control slots"),
+            analysis.control_slots
+        );
+
+        gw.upsert_token_analyses(&[(dai.clone(), blocked)], &mut conn)
+            .await
+            .expect("failed to replace analysis");
+        let replaced = row(&mut conn)
+            .await
+            .expect("analysis replaced");
+        assert_eq!(replaced.0.as_deref(), Some("blocked"));
+        assert_eq!(replaced.1, None);
+        assert_eq!(replaced.5.as_deref(), Some("reverted"));
+        assert_eq!(replaced.7, None, "the pool of the old analysis is cleared");
+
+        gw.upsert_token_analyses(&[(dai.clone(), analysis)], &mut conn)
+            .await
+            .expect("failed to replace analysis again");
+        let reopened = row(&mut conn)
+            .await
+            .expect("analysis replaced again");
+        assert_eq!(reopened.5, None, "the reason of the old analysis is cleared");
+        let rows: i64 = schema::token_analysis::table
+            .count()
+            .get_result(&mut conn)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
     async fn test_add_component_balances() {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;
