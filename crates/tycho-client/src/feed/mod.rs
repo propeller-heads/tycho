@@ -671,7 +671,7 @@ where
     /// Sets timeout for the first message of a protocol.
     ///
     /// Time to wait for the full first message, including snapshot retrieval.
-    pub fn startup_timeout(mut self, val: Duration) {
+    pub fn startup_timeout(&mut self, val: Duration) {
         self.startup_timeout = val;
     }
 
@@ -2251,6 +2251,40 @@ mod tests {
 
         assert_eq!(msg.map(|msg| msg.header.number), Some(2));
         assert!(matches!(stream.state, SynchronizerState::Ready(ref header) if header.number == 2));
+    }
+
+    /// The startup timeout is set apart from the stale threshold, so a first message that takes
+    /// longer than `block_time * max_missed_blocks` still starts the synchronizer.
+    #[test(tokio::test)]
+    async fn test_startup_timeout() {
+        let v2_sync = MockStateSync::new();
+        // The stale threshold, and the default startup timeout, is 10 ms.
+        let mut block_sync =
+            BlockSynchronizer::new(Duration::from_millis(10), Duration::from_millis(10), 1);
+        block_sync.startup_timeout(Duration::from_secs(1));
+        let block_sync = block_sync.register_synchronizer(
+            ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+            v2_sync.clone(),
+        );
+        let slow_first_message = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            v2_sync
+                .send_header(header_message(1))
+                .await
+                .expect("send failed");
+        });
+
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let feed = receive_message(&mut rx).await;
+
+        assert_ready_at(&feed, "uniswap-v2", 1, None);
+        slow_first_message
+            .await
+            .expect("sender panicked");
+        shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
     #[test(tokio::test)]
