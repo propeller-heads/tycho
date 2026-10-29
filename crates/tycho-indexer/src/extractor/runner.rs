@@ -172,20 +172,30 @@ pub struct Subscriber {
     pub(crate) kind: SubscriberKind,
 }
 
+/// What happened to a [`DeltaCommand`] sent to a [`Subscriber`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Sent,
+    /// The receiver is gone.
+    Closed,
+    /// The channel of a client subscriber has no room. Never returned for an internal
+    /// subscriber.
+    Full,
+}
+
 impl Subscriber {
-    /// Sends `command`. Returns false when the subscriber must be removed: its receiver is gone,
-    /// or it is a client whose channel is full. Only an internal subscriber is waited for, so a
-    /// slow client cannot stall the extractor for the other subscribers.
-    pub(crate) async fn deliver(&self, command: DeltaCommand) -> bool {
+    /// Sends `command`. Waits for room only for an internal subscriber, so a slow client cannot
+    /// stall the extractor for the other subscribers.
+    pub(crate) async fn deliver(&self, command: DeltaCommand) -> Delivery {
         match self.kind {
-            SubscriberKind::Internal => self.sender.send(command).await.is_ok(),
+            SubscriberKind::Internal => match self.sender.send(command).await {
+                Ok(()) => Delivery::Sent,
+                Err(_) => Delivery::Closed,
+            },
             SubscriberKind::Client => match self.sender.try_send(command) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) => {
-                    warn!("Client subscriber is too slow, ending its subscription");
-                    false
-                }
-                Err(TrySendError::Closed(_)) => false,
+                Ok(()) => Delivery::Sent,
+                Err(TrySendError::Full(_)) => Delivery::Full,
+                Err(TrySendError::Closed(_)) => Delivery::Closed,
             },
         }
     }
@@ -431,19 +441,25 @@ impl ExtractorRunner {
         let mut subscribers = subscribers.lock().await;
         tracing::Span::current().record("subscriber_count", subscribers.len());
 
-        for (counter, subscriber) in subscribers.iter() {
-            if !subscriber
+        for (&subscriber_id, subscriber) in subscribers.iter() {
+            match subscriber
                 .deliver(command.clone())
                 .await
             {
-                to_remove.push(*counter);
+                Delivery::Sent => {}
+                Delivery::Closed => {
+                    debug!(subscriber_id, "Removed a closed subscriber");
+                    to_remove.push(subscriber_id);
+                }
+                Delivery::Full => {
+                    warn!(subscriber_id, "Removed a client subscriber whose channel is full");
+                    to_remove.push(subscriber_id);
+                }
             }
         }
 
-        // Remove inactive subscribers
-        for counter in to_remove {
-            subscribers.remove(&counter);
-            debug!("Subscriber {} has been dropped", counter);
+        for subscriber_id in to_remove {
+            subscribers.remove(&subscriber_id);
         }
     }
 }
@@ -651,7 +667,7 @@ mod test {
         assert!(full_client_rx.recv().await.is_none(), "the removed client's stream ends");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_propagate_msg_waits_for_full_internal_subscriber() {
         let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 1, 1);
         let subscribers = Arc::new(Mutex::new(HashMap::from([(0, internal)])));
@@ -673,5 +689,49 @@ mod test {
             .lock()
             .await
             .contains_key(&0));
+    }
+
+    #[tokio::test]
+    async fn test_deliver_reports_full_client_without_waiting() {
+        let (client, _rx) = subscriber(SubscriberKind::Client, 1, 1);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.deliver(DeltaCommand::Block(one_msg())),
+        )
+        .await
+        .expect("a full client must not make the caller wait");
+
+        assert_eq!(outcome, Delivery::Full);
+    }
+
+    #[tokio::test]
+    async fn test_deliver_reports_closed_for_both_kinds() {
+        for kind in [SubscriberKind::Client, SubscriberKind::Internal] {
+            let (sub, rx) = subscriber(kind, 1, 0);
+            drop(rx);
+
+            assert_eq!(
+                sub.deliver(DeltaCommand::Block(one_msg()))
+                    .await,
+                Delivery::Closed,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deliver_sends_when_there_is_room() {
+        for kind in [SubscriberKind::Client, SubscriberKind::Internal] {
+            let (sub, mut rx) = subscriber(kind, 1, 0);
+
+            assert_eq!(
+                sub.deliver(DeltaCommand::Block(one_msg()))
+                    .await,
+                Delivery::Sent,
+                "{kind:?}"
+            );
+            assert!(matches!(rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        }
     }
 }

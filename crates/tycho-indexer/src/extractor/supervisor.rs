@@ -11,7 +11,9 @@ use tycho_common::models::ExtractorIdentity;
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
     factory::ExtractorFactory,
-    runner::{ControlMessage, ExtractorHandle, Subscriber, SubscriberKind, SubscriptionsMap},
+    runner::{
+        ControlMessage, Delivery, ExtractorHandle, Subscriber, SubscriberKind, SubscriptionsMap,
+    },
     DeltaCommand, ExtractionError,
 };
 
@@ -259,21 +261,32 @@ impl ExtractorSupervisor {
             {
                 let mut subs = self.subscriptions.lock().await;
                 let mut removed = Vec::new();
-                for (subscriber_id, subscriber) in subs.iter() {
-                    if !subscriber
+                for (&subscriber_id, subscriber) in subs.iter() {
+                    match subscriber
                         .deliver(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
                         .await
                     {
-                        removed.push(*subscriber_id);
+                        Delivery::Sent => {}
+                        Delivery::Closed => {
+                            info!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                "Removed a closed subscriber during restart"
+                            );
+                            removed.push(subscriber_id);
+                        }
+                        Delivery::Full => {
+                            warn!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                "Removed a client subscriber whose channel is full during restart"
+                            );
+                            removed.push(subscriber_id);
+                        }
                     }
                 }
                 for subscriber_id in removed {
                     subs.remove(&subscriber_id);
-                    info!(
-                        extractor = %self.id,
-                        subscriber_id,
-                        "Removed subscriber during restart"
-                    );
                 }
             }
 
