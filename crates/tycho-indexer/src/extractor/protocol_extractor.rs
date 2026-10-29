@@ -3141,6 +3141,36 @@ mod test {
         assert_eq!(*committed.lock().unwrap(), vec![4]);
     }
 
+    #[tokio::test]
+    async fn test_promoted_follower_with_a_dci_plugin_restarts_instead_of_taking_over() {
+        let mut gw = following_gateway();
+        gw.expect_get_block().never();
+        let mut dci_plugin = MockExtractorExtension::new();
+        dci_plugin
+            .expect_cache_size()
+            .returning(|| 0);
+        dci_plugin
+            .expect_emit_cache_metrics()
+            .returning(|_, _| ());
+        let (channels, writer) = WriterChannels::follower();
+        let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer)
+            .await
+            .with_dci_plugin(dci_plugin);
+        process_trailing_blocks(&extractor, 1..=4).await;
+        let retained = committing_numbers(&extractor).await;
+
+        channels.promote();
+        let result = extractor
+            .process_full_block_message(trailing_block(5), "cursor@5".into(), 4)
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtractionError::RestartToTakeOver(ref name)) if name == EXTRACTOR_NAME),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(committing_numbers(&extractor).await, retained);
+    }
+
     fn following_gateway() -> MockExtractorGateway {
         let mut gw = MockExtractorGateway::new();
         gw.expect_ensure_protocol_types()
