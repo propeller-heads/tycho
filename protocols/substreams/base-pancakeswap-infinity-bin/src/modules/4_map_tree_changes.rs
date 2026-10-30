@@ -91,26 +91,16 @@ fn event_to_tree_deltas(event: &PoolEvent, writes: &WritesBySlot, floor: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pb::pancakeswap::infinity::bin::{events::pool_event::Type, Transaction};
+    use crate::modules::test_fixtures::*;
     use substreams_ethereum::pb::eth::v2::StorageChange;
 
-    const POOL_MANAGER: [u8; 20] = [0xc6; 20];
-    const POOL_ID: &str = "abababababababababababababababababababababababababababababababab";
-
-    fn pool_id_bytes() -> [u8; 32] {
-        hex::decode(POOL_ID)
-            .unwrap()
-            .try_into()
-            .unwrap()
-    }
-
     fn leaf_write(segment: u32, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_base_slot(&pool_id_bytes());
+        let base = parameters::pool_base_slot(&POOL_ID);
         tree_write(parameters::tree_level2_slot(&base, segment), new, ordinal)
     }
 
     fn middle_write(key: u32, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_base_slot(&pool_id_bytes());
+        let base = parameters::pool_base_slot(&POOL_ID);
         tree_write(parameters::tree_level1_slot(&base, key), new, ordinal)
     }
 
@@ -132,25 +122,6 @@ mod tests {
                 .push(change);
         }
         map
-    }
-
-    fn event(kind: Type, ordinal: u64) -> PoolEvent {
-        PoolEvent {
-            log_ordinal: ordinal,
-            pool_id: pool_id_bytes().to_vec(),
-            currency0: Vec::new(),
-            currency1: Vec::new(),
-            transaction: Some(Transaction { hash: vec![1], from: vec![], to: vec![], index: 0 }),
-            r#type: Some(kind),
-        }
-    }
-
-    fn mint(ids: Vec<u32>) -> Type {
-        Type::Mint(pool_event::Mint { ids })
-    }
-
-    fn word(byte: u8) -> Vec<u8> {
-        vec![byte; 32]
     }
 
     /// Three bins in two segments, both leaves written: one delta per segment, not per bin.

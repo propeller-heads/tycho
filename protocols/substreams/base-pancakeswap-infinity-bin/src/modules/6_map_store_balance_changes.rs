@@ -83,16 +83,10 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    const POOL_ID: [u8; 32] = [0xab; 32];
+    use crate::modules::test_fixtures::{packed as word, POOL_ID};
+
     const TOKEN0: [u8; 20] = [0x11; 20];
     const TOKEN1: [u8; 20] = [0x22; 20];
-
-    fn word(x: u128, y: u128) -> Vec<u8> {
-        let mut out = vec![0u8; 32];
-        out[..16].copy_from_slice(&y.to_be_bytes());
-        out[16..].copy_from_slice(&x.to_be_bytes());
-        out
-    }
 
     fn deltas(old: Vec<u8>, new: Vec<u8>) -> Vec<BalanceDelta> {
         try_deltas(old, new).unwrap()
@@ -132,7 +126,7 @@ mod tests {
     #[case::burn((10, 20), (4, 5), -6, -15)]
     #[case::swap((10, 20), (13, 16), 3, -4)]
     #[case::deletion_returns_the_reserve((10, 20), (0, 0), -10, -20)]
-    fn test_balance_deltas(
+    fn deltas_are_signed_differences_of_absolute_reserves(
         #[case] old: (u128, u128),
         #[case] new: (u128, u128),
         #[case] expected_x: i64,

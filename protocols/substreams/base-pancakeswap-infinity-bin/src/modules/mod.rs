@@ -64,15 +64,18 @@ impl From<&Transaction> for tycho_substreams::prelude::Transaction {
 pub(crate) mod test_stores {
     use substreams::store::StoreGet;
 
-    /// Raw store holding `(ordinal, key, value)` writes; `get_at` returns the latest at or below.
-    pub struct FakeRawStore(pub Vec<(u64, String, Vec<u8>)>);
+    /// Store holding `(ordinal, key, value)` writes; `get_at` returns the latest at or below.
+    pub struct FakeStore<V>(pub Vec<(u64, String, V)>);
 
-    impl StoreGet<Vec<u8>> for FakeRawStore {
+    /// The raw-bytes store the tree and reserve modules read.
+    pub type FakeRawStore = FakeStore<Vec<u8>>;
+
+    impl<V: Clone> StoreGet<V> for FakeStore<V> {
         fn new(_idx: u32) -> Self {
             Self(Vec::new())
         }
 
-        fn get_at<K: AsRef<str>>(&self, ord: u64, key: K) -> Option<Vec<u8>> {
+        fn get_at<K: AsRef<str>>(&self, ord: u64, key: K) -> Option<V> {
             self.0
                 .iter()
                 .filter(|(written_at, written_key, _)| {
@@ -82,11 +85,11 @@ pub(crate) mod test_stores {
                 .map(|(_, _, value)| value.clone())
         }
 
-        fn get_last<K: AsRef<str>>(&self, _key: K) -> Option<Vec<u8>> {
+        fn get_last<K: AsRef<str>>(&self, _key: K) -> Option<V> {
             unimplemented!("tests only read at an ordinal")
         }
 
-        fn get_first<K: AsRef<str>>(&self, _key: K) -> Option<Vec<u8>> {
+        fn get_first<K: AsRef<str>>(&self, _key: K) -> Option<V> {
             unimplemented!("tests only read at an ordinal")
         }
 
@@ -101,5 +104,74 @@ pub(crate) mod test_stores {
         fn has_first<K: AsRef<str>>(&self, _key: K) -> bool {
             unimplemented!("tests only read at an ordinal")
         }
+    }
+}
+
+/// The one pool, pool manager and event shapes every module's tests use.
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use crate::pb::pancakeswap::infinity::bin::{
+        events::{
+            pool_event::{self, Type},
+            PoolEvent,
+        },
+        Transaction,
+    };
+
+    pub const POOL_ID: [u8; 32] = [0xab; 32];
+    pub const POOL_MANAGER: [u8; 20] = [0xc6; 20];
+
+    /// An event of `POOL_ID` in transaction 0.
+    pub fn event(kind: Type, ordinal: u64) -> PoolEvent {
+        event_in_tx(kind, ordinal, 0)
+    }
+
+    pub fn event_in_tx(kind: Type, ordinal: u64, tx_index: u64) -> PoolEvent {
+        PoolEvent {
+            log_ordinal: ordinal,
+            pool_id: POOL_ID.to_vec(),
+            currency0: Vec::new(),
+            currency1: Vec::new(),
+            transaction: Some(Transaction {
+                hash: vec![1],
+                from: vec![],
+                to: vec![],
+                index: tx_index,
+            }),
+            r#type: Some(kind),
+        }
+    }
+
+    pub fn mint(ids: Vec<u32>) -> Type {
+        Type::Mint(pool_event::Mint { ids })
+    }
+
+    pub fn burn(ids: Vec<u32>) -> Type {
+        Type::Burn(pool_event::Burn { ids })
+    }
+
+    pub fn swap(active_id: u32) -> Type {
+        Type::Swap(pool_event::Swap { active_id })
+    }
+
+    pub fn donate(amount0: &str, amount1: &str, bin_id: u32) -> Type {
+        Type::Donate(pool_event::Donate {
+            amount0: amount0.into(),
+            amount1: amount1.into(),
+            bin_id,
+        })
+    }
+
+    /// A `reserveOfBin` word: y in the first 16 bytes, x in the last.
+    pub fn packed(x: u128, y: u128) -> Vec<u8> {
+        let mut out = vec![0u8; 32];
+        out[..16].copy_from_slice(&y.to_be_bytes());
+        out[16..].copy_from_slice(&x.to_be_bytes());
+        out
+    }
+
+    /// A 32-byte word of one repeated byte.
+    pub fn word(byte: u8) -> Vec<u8> {
+        vec![byte; 32]
     }
 }
