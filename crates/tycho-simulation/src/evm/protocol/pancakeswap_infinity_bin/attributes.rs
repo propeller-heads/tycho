@@ -1,10 +1,22 @@
-//! Decoding for the attributes the `pancakeswap_infinity_bin` substreams package emits.
+//! Decoding for the state attributes the `base-pancakeswap-infinity-bin` substreams package
+//! emits, as `8_map_protocol_changes.rs` encodes them:
+//!
+//! - `active_id`: `to_signed_bytes_be` of the u24 id, so 3 bytes below `0x800000` and 4 with a
+//!   leading `0x00` at or above. Decoded length-tolerantly
+//! - `active_in_tree`: one byte, `0` or `1`, emitted with every write to the active bin
+//! - `fee`: LP fee in pips, emitted at creation
+//! - `protocol_fees/zero2one`, `protocol_fees/one2zero`: 12-bit, big-endian
+//! - `bins/{id}/reserve_x`, `bins/{id}/reserve_y`: 16-byte big-endian `uint128`, one pair per bin
+//!   with reserves a swap can reach. A bin at `(0, 0)` holds nothing and is dropped; a deletion of
+//!   either key drops the bin
 //!
 //! Shared by `state::delta_transition` and `decoder`; [`AttributeError`] converts into the error
 //! type each of them returns.
 //!
 //! Every helper checks the length first. The `Bytes` conversions right-align into a fixed buffer
 //! and panic on anything longer, and these values come from the indexer.
+
+use std::collections::BTreeMap;
 
 use tycho_common::{simulation::errors::TransitionError, Bytes};
 
@@ -70,46 +82,77 @@ pub fn decode_bool(name: &str, value: &Bytes) -> Result<bool, AttributeError> {
     }
 }
 
-/// Splits a raw `reserveOfBin` word into `(reserve_x, reserve_y)`.
-///
-/// `PackedUint128Math` keeps x in the low 128 bits, so big-endian puts **y first**. Reading them
-/// the other way round decodes cleanly and silently swaps the pool's two balances.
-pub fn decode_reserves(name: &str, value: &Bytes) -> Result<(u128, u128), AttributeError> {
-    let word: [u8; 32] = value
-        .as_ref()
-        .try_into()
-        .map_err(|_| AttributeError(format!("{name}: expected 32 bytes, got {}", value.len())))?;
-    let y = u128::from_be_bytes(word[..16].try_into().expect("16 bytes"));
-    let x = u128::from_be_bytes(word[16..].try_into().expect("16 bytes"));
-
-    Ok((x, y))
+/// Decodes an unsigned value of at most 16 bytes, big-endian. Bin reserves are `uint128`.
+pub fn decode_u128(name: &str, value: &Bytes) -> Result<u128, AttributeError> {
+    if value.len() > 16 {
+        return Err(AttributeError(format!(
+            "{name}: expected at most 16 bytes, got {}",
+            value.len()
+        )));
+    }
+    Ok(u128::from(value.clone()))
 }
 
-/// Parses the bin id out of a `bins/{id}` attribute key.
+/// The half of a bin's reserves a `bins/{id}/reserve_x` or `bins/{id}/reserve_y` key names.
+/// `x` is `currency0`, `y` is `currency1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reserve {
+    X,
+    Y,
+}
+
+/// Parses a `bins/{id}/reserve_x` or `bins/{id}/reserve_y` key into the bin id and the side.
 ///
-/// Bounded to a u24, as on chain: `get_price_from_id` subtracts `2^23` into an `i32` and the swap
-/// walk takes `id + 1`, so a wider id would overflow rather than price a bin that cannot exist.
-pub fn parse_bin_id(key: &str) -> Result<u32, AttributeError> {
-    let id: u32 = key
+/// The id is bounded to a u24, as on chain: `get_price_from_id` subtracts `2^23` into an `i32`
+/// and the swap walk takes `id + 1`, so a wider id would overflow rather than price a bin that
+/// cannot exist.
+pub fn parse_bin_key(key: &str) -> Result<(u32, Reserve), AttributeError> {
+    let (id, side) = key
         .strip_prefix("bins/")
-        .ok_or_else(|| AttributeError(format!("{key}: not a bins/ attribute")))?
+        .and_then(|rest| rest.split_once('/'))
+        .ok_or_else(|| AttributeError(format!("{key}: not a bins/{{id}}/reserve_* attribute")))?;
+    let id: u32 = id
         .parse()
         .map_err(|_| AttributeError(format!("{key}: bin id is not a u32")))?;
     if id >= 1 << 24 {
         return Err(AttributeError(format!("{key}: bin id is wider than the u24 on chain")));
     }
+    let side = match side {
+        "reserve_x" => Reserve::X,
+        "reserve_y" => Reserve::Y,
+        _ => return Err(AttributeError(format!("{key}: expected reserve_x or reserve_y"))),
+    };
 
-    Ok(id)
+    Ok((id, side))
 }
 
-/// Packs reserves the way the indexer emits them, the inverse of [`decode_reserves`]. Test-only.
-#[cfg(test)]
-pub fn reserve_word(x: u128, y: u128) -> Bytes {
-    let mut word = [0u8; 32];
-    word[..16].copy_from_slice(&y.to_be_bytes());
-    word[16..].copy_from_slice(&x.to_be_bytes());
+/// Applies one `bins/{id}/reserve_*` attribute to the bin map, creating the bin if needed. The
+/// other half is untouched, so a bin whose halves arrive in separate deltas still ends up whole.
+///
+/// Bins left at `(0, 0)` are the caller's to drop.
+pub fn apply_reserve(
+    bins: &mut BTreeMap<u32, (u128, u128)>,
+    key: &str,
+    value: &Bytes,
+) -> Result<(), AttributeError> {
+    let (id, side) = parse_bin_key(key)?;
+    let amount = decode_u128(key, value)?;
+    let bin = bins.entry(id).or_insert((0, 0));
+    match side {
+        Reserve::X => bin.0 = amount,
+        Reserve::Y => bin.1 = amount,
+    }
 
-    Bytes::from(word.to_vec())
+    Ok(())
+}
+
+/// A bin's two reserve attributes as the indexer emits them. Test-only.
+#[cfg(test)]
+pub fn reserve_attributes(id: u32, x: u128, y: u128) -> [(String, Bytes); 2] {
+    [
+        (format!("bins/{id}/reserve_x"), Bytes::from(x.to_be_bytes().to_vec())),
+        (format!("bins/{id}/reserve_y"), Bytes::from(y.to_be_bytes().to_vec())),
+    ]
 }
 
 #[cfg(test)]
@@ -144,22 +187,35 @@ mod tests {
         assert_eq!(decode_bool("active_in_tree", &Bytes::from(bytes)).ok(), expected);
     }
 
-    /// Y occupies the first 16 bytes, x the last.
-    #[test]
-    fn test_decode_reserves_reads_y_first() {
-        let mut word = [0u8; 32];
-        word[15] = 7;
-        word[31] = 3;
-
-        assert_eq!(decode_reserves("bins/1", &Bytes::from(word.to_vec())).unwrap(), (3, 7));
+    #[rstest]
+    #[case::one_byte(vec![7], Some(7))]
+    #[case::sixteen_bytes(u128::MAX.to_be_bytes().to_vec(), Some(u128::MAX))]
+    #[case::seventeen_bytes(vec![0u8; 17], None)]
+    fn test_decode_u128(#[case] bytes: Vec<u8>, #[case] expected: Option<u128>) {
+        assert_eq!(decode_u128("bins/1/reserve_x", &Bytes::from(bytes)).ok(), expected);
     }
 
+    #[rstest]
+    #[case::x("bins/8388608/reserve_x", Some((8_388_608, Reserve::X)))]
+    #[case::y("bins/7/reserve_y", Some((7, Reserve::Y)))]
+    #[case::no_side("bins/7", None)]
+    #[case::unknown_side("bins/7/reserve_z", None)]
+    #[case::negative_id("bins/-1/reserve_x", None)]
+    #[case::wider_than_u24("bins/16777216/reserve_x", None)]
+    #[case::not_a_bin("fee", None)]
+    fn test_parse_bin_key(#[case] key: &str, #[case] expected: Option<(u32, Reserve)>) {
+        assert_eq!(parse_bin_key(key).ok(), expected);
+    }
+
+    /// Each half lands on its side and leaves the other alone.
     #[test]
-    fn test_decode_reserves_rejects_short_word() {
-        assert!(
-            decode_reserves("bins/1", &Bytes::from(vec![0u8; 16])).is_err(),
-            "half a reserve word must not decode as one"
-        );
+    fn test_apply_reserve_sets_one_half() {
+        let mut bins = BTreeMap::from([(7, (1, 2))]);
+
+        apply_reserve(&mut bins, "bins/7/reserve_y", &Bytes::from(vec![9])).unwrap();
+        apply_reserve(&mut bins, "bins/8/reserve_x", &Bytes::from(vec![3])).unwrap();
+
+        assert_eq!(bins, BTreeMap::from([(7, (1, 9)), (8, (3, 0))]));
     }
 
     /// Ids wider than the chain's u24 would overflow `get_price_from_id`'s exponent and the swap
@@ -171,17 +227,6 @@ mod tests {
         assert!(
             decode_bin_id(name, &Bytes::from(bytes)).is_err(),
             "{name}: a bin id cannot be wider than u24"
-        );
-    }
-
-    #[test]
-    fn test_parse_bin_id() {
-        assert_eq!(parse_bin_id("bins/8388608").unwrap(), 8_388_608);
-        assert!(parse_bin_id("bins/-1").is_err(), "bin ids are unsigned");
-        assert!(parse_bin_id("fee").is_err(), "only bins/ keys carry a bin id");
-        assert!(
-            parse_bin_id(&format!("bins/{}", 1u32 << 24)).is_err(),
-            "a bin id cannot be wider than u24"
         );
     }
 }

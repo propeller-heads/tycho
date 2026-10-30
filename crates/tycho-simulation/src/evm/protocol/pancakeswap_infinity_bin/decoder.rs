@@ -4,9 +4,7 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    attributes::{
-        decode_bin_id, decode_bool, decode_reserves, decode_u16, decode_u32, parse_bin_id,
-    },
+    attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, decode_u32},
     state::PancakeswapInfinityBinState,
 };
 use crate::protocol::{
@@ -26,7 +24,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
     /// | `active_in_tree` | state | `active_in_tree`, `true` when absent |
     /// | `lp_fee` | state, else static | `fee`, else `key_lp_fee` |
     /// | `protocol_fee_*` | state | `protocol_fees/zero2one`, `protocol_fees/one2zero` |
-    /// | `bins` | state | every `bins/{id}` key |
+    /// | `bins` | state | every `bins/{id}/reserve_x` and `bins/{id}/reserve_y` key |
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _block: BlockHeader,
@@ -76,23 +74,15 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
         };
         let protocol_fee_zero_for_one = protocol_fee("protocol_fees/zero2one")?;
         let protocol_fee_one_for_zero = protocol_fee("protocol_fees/one2zero")?;
-        let bins = state_attrs
+        let mut bins = BTreeMap::new();
+        for (key, value) in state_attrs
             .iter()
-            .filter_map(|(key, value)| {
-                if !key.starts_with("bins/") {
-                    return None;
-                }
-                let entry = parse_bin_id(key)
-                    .and_then(|id| decode_reserves(key, value).map(|reserves| (id, reserves)));
-
-                match entry {
-                    // A zeroed bin holds nothing; the swap walk would pay a crossing for it.
-                    Ok((_, (0, 0))) => None,
-                    Ok(entry) => Some(Ok(entry)),
-                    Err(err) => Some(Err(InvalidSnapshotError::from(err))),
-                }
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+            .filter(|(key, _)| key.starts_with("bins/"))
+        {
+            apply_reserve(&mut bins, key, value)?;
+        }
+        // A zeroed bin holds nothing; the swap walk would pay a crossing for it.
+        bins.retain(|_, reserves| *reserves != (0, 0));
 
         Ok(Self {
             active_id,
@@ -146,7 +136,7 @@ mod tests {
         Chain, ChangeType,
     };
 
-    use super::{super::attributes::reserve_word, *};
+    use super::{super::attributes::reserve_attributes, *};
     use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
 
     const ACTIVE_ID: u32 = 8_388_608;
@@ -208,17 +198,35 @@ mod tests {
         }
     }
 
-    /// Every field lands where it belongs, and the bin word is read y first.
+    /// State attributes with the given bins added, so a test can list bins by `(id, x, y)`.
+    fn with_bins<'a>(
+        attrs: &[(&'a str, Bytes)],
+        bins: &'a [(String, Bytes)],
+    ) -> Vec<(&'a str, Bytes)> {
+        attrs
+            .iter()
+            .cloned()
+            .chain(
+                bins.iter()
+                    .map(|(key, value)| (key.as_str(), value.clone())),
+            )
+            .collect()
+    }
+
+    /// Every field lands where it belongs, and each reserve lands on its side.
     #[tokio::test]
     async fn test_decodes_full_snapshot() {
+        let bins = reserve_attributes(ACTIVE_ID, 7, 11);
         let snapshot = snapshot(
             &statics(),
-            &[
-                ("active_id", Bytes::from(vec![0x00, 0x80, 0x00, 0x00])),
-                ("protocol_fees/zero2one", Bytes::from(vec![0x03])),
-                ("protocol_fees/one2zero", Bytes::from(vec![0x05])),
-                (&format!("bins/{ACTIVE_ID}"), reserve_word(7, 11)),
-            ],
+            &with_bins(
+                &[
+                    ("active_id", Bytes::from(vec![0x00, 0x80, 0x00, 0x00])),
+                    ("protocol_fees/zero2one", Bytes::from(vec![0x03])),
+                    ("protocol_fees/one2zero", Bytes::from(vec![0x05])),
+                ],
+                &bins,
+            ),
         );
 
         let state = try_decode_snapshot_with_defaults::<PancakeswapInfinityBinState>(snapshot)
@@ -368,15 +376,19 @@ mod tests {
     /// Bins with no reserves never enter the map; the swap walk would pay a crossing for them.
     #[tokio::test]
     async fn test_skips_empty_bins() {
+        let bins: Vec<_> =
+            [reserve_attributes(ACTIVE_ID, 0, 1_000), reserve_attributes(ACTIVE_ID + 1, 0, 0)]
+                .concat();
         let snapshot = snapshot(
             &statics(),
-            &[
-                ("active_id", Bytes::from(vec![0x00, 0x80, 0x00, 0x00])),
-                ("protocol_fees/zero2one", Bytes::from(vec![0x03])),
-                ("protocol_fees/one2zero", Bytes::from(vec![0x05])),
-                (&format!("bins/{ACTIVE_ID}"), reserve_word(0, 1_000)),
-                (&format!("bins/{}", ACTIVE_ID + 1), reserve_word(0, 0)),
-            ],
+            &with_bins(
+                &[
+                    ("active_id", Bytes::from(vec![0x00, 0x80, 0x00, 0x00])),
+                    ("protocol_fees/zero2one", Bytes::from(vec![0x03])),
+                    ("protocol_fees/one2zero", Bytes::from(vec![0x05])),
+                ],
+                &bins,
+            ),
         );
 
         let state = try_decode_snapshot_with_defaults::<PancakeswapInfinityBinState>(snapshot)

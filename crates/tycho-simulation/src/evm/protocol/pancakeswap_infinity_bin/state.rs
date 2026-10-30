@@ -20,7 +20,7 @@ use tycho_common::{
 use crate::evm::protocol::{
     pancakeswap_infinity_bin::{
         attributes::{
-            decode_bin_id, decode_bool, decode_reserves, decode_u16, decode_u32, parse_bin_id,
+            apply_reserve, decode_bin_id, decode_bool, decode_u16, decode_u32, parse_bin_key,
         },
         math::{
             bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
@@ -366,18 +366,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
         Ok((total_in, total_out))
     }
 
-    /// Applies an indexer delta.
-    ///
-    /// Encodings, as emitted by `8_map_protocol_changes.rs` in the substreams package:
-    /// - `active_id`: `to_signed_bytes_be` of the u24 id, so 3 bytes below `0x800000`, 4 with a
-    ///   leading `0x00` at or above. Decode length-tolerantly; a fixed-width `i24_be_bytes_to_i32`
-    ///   copy breaks past that boundary, where the test pool sits
-    /// - `active_in_tree`: one byte, `0` or `1`, emitted with every write to the active bin
-    /// - `fee`: LP fee in pips, emitted at creation; a static-fee pool never changes it
-    /// - `protocol_fees/zero2one`, `protocol_fees/one2zero`: 12-bit, big-endian
-    /// - `bins/{id}`: raw 32-byte `reserveOfBin` word, **y first 16 bytes, x last**. Swapping them
-    ///   decodes cleanly and silently swaps the pool's balances
-    /// - `deleted_attributes` under `bins/`: drop that bin
+    /// Applies an indexer delta. The attribute encodings are documented in [`super::attributes`].
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
@@ -395,24 +384,21 @@ impl ProtocolSim for PancakeswapInfinityBinState {
                 "protocol_fees/one2zero" => {
                     self.protocol_fee_one_for_zero = decode_u16(key, value)?
                 }
-                _ if key.starts_with("bins/") => {
-                    let id = parse_bin_id(key)?;
-                    let (x, y) = decode_reserves(key, value)?;
-                    if x == 0 && y == 0 {
-                        self.bins.remove(&id);
-                    } else {
-                        self.bins.insert(id, (x, y));
-                    }
-                }
+                _ if key.starts_with("bins/") => apply_reserve(&mut self.bins, key, value)?,
                 _ => {}
             }
         }
 
         for key in delta.deleted_attributes.iter() {
             if key.starts_with("bins/") {
-                self.bins.remove(&parse_bin_id(key)?);
+                let (id, _) = parse_bin_key(key)?;
+                self.bins.remove(&id);
             }
         }
+        // The substreams classifies a bin written to zero as a deletion while still carrying the
+        // zero values, so both arrive. A bin left in the map costs the next swap a crossing.
+        self.bins
+            .retain(|_, reserves| *reserves != (0, 0));
 
         Ok(())
     }
@@ -454,7 +440,7 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::{
-        super::{attributes::reserve_word, math::constants::REAL_ID_SHIFT},
+        super::{attributes::reserve_attributes, math::constants::REAL_ID_SHIFT},
         *,
     };
     use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
@@ -1058,32 +1044,41 @@ mod tests {
         assert_eq!(state.active_in_tree, expected);
     }
 
-    /// A `bins/{id}` word replaces that bin's reserves and leaves every other bin alone.
+    /// A bin's reserve pair replaces that bin's reserves and leaves every other bin alone; one
+    /// half on its own leaves the other half as it was.
     #[test]
     fn test_delta_updates_bin_reserves() {
         let mut state = bin_state(
             REAL_ID_SHIFT,
             &[(REAL_ID_SHIFT - 1, (0, 5_000)), (REAL_ID_SHIFT, (0, 1_000))],
         );
+        let pair = reserve_attributes(REAL_ID_SHIFT, 7, 11);
+        let pair: Vec<_> = pair
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
 
-        apply(&mut state, delta(&[(&format!("bins/{REAL_ID_SHIFT}"), reserve_word(7, 11))], &[]));
+        apply(&mut state, delta(&pair, &[]));
+        assert_eq!(state.bins[&REAL_ID_SHIFT], (7, 11));
+        assert_eq!(state.bins[&(REAL_ID_SHIFT - 1)], (0, 5_000));
 
-        let touched_bin = state.bins.get(&REAL_ID_SHIFT).unwrap();
-        let existing_bin = state
-            .bins
-            .get(&(REAL_ID_SHIFT - 1))
-            .unwrap();
-        assert_eq!(*existing_bin, (0, 5_000));
-        assert_eq!(*touched_bin, (7, 11));
+        let x_only = format!("bins/{}/reserve_x", REAL_ID_SHIFT - 1);
+        apply(&mut state, delta(&[(&x_only, Bytes::from(vec![3]))], &[]));
+        assert_eq!(state.bins[&(REAL_ID_SHIFT - 1)], (3, 5_000));
     }
 
-    /// A bin can be emptied two ways: an all-zero reserve word, or the key in
-    /// `deleted_attributes`. The substreams classifies a zeroed bin as a deletion while still
-    /// carrying the zero word, so both arrive in practice, and a bin left in the map costs the next
-    /// swap a crossing over nothing.
+    /// A bin can be emptied two ways: zero values, or its keys in `deleted_attributes`. The
+    /// substreams classifies a zeroed bin as a deletion while still carrying the zero values, so
+    /// both arrive in practice, and a bin left in the map costs the next swap a crossing over
+    /// nothing.
     #[rstest]
-    #[case::zero_word(vec![(format!("bins/{REAL_ID_SHIFT}"), reserve_word(0, 0))], vec![])]
-    #[case::deleted_attribute(vec![], vec![format!("bins/{REAL_ID_SHIFT}")])]
+    #[case::zero_values(reserve_attributes(REAL_ID_SHIFT, 0, 0).to_vec(), vec![])]
+    #[case::one_half_zeroed_to_empty(
+        vec![(format!("bins/{REAL_ID_SHIFT}/reserve_y"), Bytes::from(vec![0]))],
+        vec![]
+    )]
+    #[case::deleted_attributes(vec![], vec![format!("bins/{REAL_ID_SHIFT}/reserve_x"), format!("bins/{REAL_ID_SHIFT}/reserve_y")])]
+    #[case::one_half_deleted(vec![], vec![format!("bins/{REAL_ID_SHIFT}/reserve_y")])]
     fn test_delta_removes_emptied_bin(
         #[case] updated: Vec<(String, Bytes)>,
         #[case] deleted: Vec<String>,
