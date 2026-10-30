@@ -269,12 +269,16 @@ impl WsActor {
         let actor_id = self.id;
         let extractor_id_for_future = extractor_id.clone();
         let extractor_id_for_error = extractor_id.clone();
+        let user_identity = self.user_identity.clone();
 
         // Step 3: Create async future for subscription setup
         // This future will run independently without blocking the actor's message processing
         // Use async operation instead of block_on to prevent runtime deadlocks
         let fut = async move {
-            match message_sender.subscribe().await {
+            match message_sender
+                .subscribe(subscription_id, user_identity)
+                .await
+            {
                 Ok(mut rx) => {
                     let elapsed = start_time.elapsed();
                     debug!(actor_id = %actor_id, elapsed_ms = elapsed.as_millis(), "subscribe completed successfully");
@@ -718,7 +722,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for MyMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             let (tx, rx) = mpsc::channel::<DeltaCommand>(1);
             let extractor_id = self.extractor_id.clone();
             let block_template = self.block_template.clone();
@@ -1180,7 +1188,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for SlowMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             debug!("SlowMessageSender::subscribe() starting 200ms delay");
             // Add a delay to increase the window for deadlock
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1525,7 +1537,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for FailingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             // Always return an error to simulate subscription failure
             Err(SendError(ControlMessage::Stop))
         }
@@ -1718,7 +1734,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for ClosingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             let (_tx, rx) = mpsc::channel::<DeltaCommand>(1);
             // _tx is dropped here, closing the channel immediately.
             Ok(rx)
@@ -1827,7 +1847,11 @@ mod tests {
 
     #[async_trait]
     impl MessageSender for RestartingMessageSender {
-        async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        async fn subscribe(
+            &self,
+            _subscription_id: Uuid,
+            _user_identity: Option<String>,
+        ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
             let (tx, rx) = mpsc::channel::<DeltaCommand>(2);
             let name = self.extractor_id.name.clone();
             tokio::spawn(async move {
