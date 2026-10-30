@@ -135,6 +135,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('ethereum', '0xbab7124c9662b15c6b9af0b1f329907dd55a24fc', ARRAY['uniswap_v3']),
     ('ethereum', '0xbc7c1e078865bb81938adddf24582eedd17324c7', ARRAY['rfq:hashflow']),
     ('ethereum', '0xbf33aa159af2d96f4a10937b83da8409264a760f', ARRAY['lido_v4']),
+    ('ethereum', '0xc03cc4ec87b999f28172840fc402b3216906cc5f', ARRAY['ekubo_v3']),
     ('ethereum', '0xc196f22d69d41a2b1dbf6ef8d28c09bc2ca4e4fa', ARRAY['pricelevelstream', 'prop_amm']),
     ('ethereum', '0xc77a1a9b8ebecc6bfb386720e0a37bc900860f5b', ARRAY['ekubo_v3']),
     ('ethereum', '0xc7d47f3c3f755ed977f3c19f4c1f007cbed109b0', ARRAY['pancakeswap_v3', 'uniswap_v3']),
