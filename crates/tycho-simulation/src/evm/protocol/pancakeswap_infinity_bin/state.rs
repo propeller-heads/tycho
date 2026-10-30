@@ -325,11 +325,11 @@ impl ProtocolSim for PancakeswapInfinityBinState {
 
     /// Maximum input the pool absorbs, and its output. `(0, 0)` when the direction is dry.
     ///
-    /// Consumers treat this as a floor, so each bin contributes the same `max_amount_in` that
-    /// `get_amounts_out` charges, the sum stops at the first bin whose drain input exceeds `u128`,
-    /// and both totals stay within `i128::MAX`, since `get_amount_out` takes the input and returns
-    /// the output as `int128`, as the pool does. Dust whose output rounds to zero still errors, as
-    /// it does on chain. Any other math error is returned.
+    /// A floor: the sum over whole bins, in walk order, of the input that drains each one and the
+    /// reserve it pays out. The walk stops at the first bin a swap could not fill: its drain input
+    /// exceeds `u128`, crediting it would breach `MAX_LIQUIDITY_PER_BIN` or overflow, or a total
+    /// would pass `i128::MAX`, which is how the pool takes the input and returns the output. Dust
+    /// whose output rounds to zero still errors, as it does on chain.
     fn get_limits(
         &self,
         token_in: Bytes,
@@ -342,12 +342,13 @@ impl ProtocolSim for PancakeswapInfinityBinState {
             Either::Right(self.bins.range(self.active_id..))
         };
 
-        let mut total_in = BigUint::ZERO;
-        let mut total_out = BigUint::ZERO;
+        let protocol_fee = self.protocol_fee(swap_for_y);
         let swap_fee = self.swap_fee(swap_for_y);
-        let max_amount = BigUint::from(i128::MAX as u128);
+        let max_amount = i128::MAX as u128;
+        let mut total_in = 0u128;
+        let mut total_out = 0u128;
         for (&id, &(x, y)) in bins {
-            let reserve_out = if swap_for_y { y } else { x };
+            let (reserve_in, reserve_out) = if swap_for_y { (x, y) } else { (y, x) };
             if reserve_out == 0 {
                 continue;
             }
@@ -355,15 +356,31 @@ impl ProtocolSim for PancakeswapInfinityBinState {
             let Some(step) = get_drain_amounts(reserve_out, swap_fee, price, swap_for_y)? else {
                 break;
             };
-            if &total_in + BigUint::from(step.amount_in_with_fee) > max_amount ||
-                &total_out + BigUint::from(step.amount_out) > max_amount
-            {
+            // Draining credits the bin the input less the protocol's cut, which `swap` rejects
+            // past the cap. A partial fill might still fit, but a floor can stop short.
+            let credited = step.amount_in_with_fee -
+                protocol_fee_amount(step.fee_amount, protocol_fee, swap_fee)?;
+            let Some(new_reserve_in) = reserve_in.checked_add(credited) else {
+                break;
+            };
+            let (new_x, new_y) = if swap_for_y { (new_reserve_in, 0) } else { (0, new_reserve_in) };
+            match get_liquidity(new_x, new_y, price) {
+                Ok(liquidity) if liquidity <= MAX_LIQUIDITY_PER_BIN => {}
+                Ok(_) | Err(_) => break,
+            }
+            let (Some(next_in), Some(next_out)) = (
+                total_in.checked_add(step.amount_in_with_fee),
+                total_out.checked_add(step.amount_out),
+            ) else {
+                break;
+            };
+            if next_in > max_amount || next_out > max_amount {
                 break;
             }
-            total_in += BigUint::from(step.amount_in_with_fee);
-            total_out += BigUint::from(step.amount_out);
+            total_in = next_in;
+            total_out = next_out;
         }
-        Ok((total_in, total_out))
+        Ok((BigUint::from(total_in), BigUint::from(total_out)))
     }
 
     /// Applies an indexer delta. The attribute encodings are documented in [`super::attributes`].
@@ -993,6 +1010,77 @@ mod tests {
                 .get_amount_out(max_in + BigUint::from(1u64), &usdc(), &usdt())
                 .is_err(),
             "one wei over the limit still quoted"
+        );
+    }
+
+    /// Crediting a drained bin can push it over `MAX_LIQUIDITY_PER_BIN`, where `swap` errors, so
+    /// the limit stops before such a bin: the limit quotes, one unit more does not.
+    #[rstest]
+    #[case::capped_bin_is_second(REAL_ID_SHIFT - 1, 1_000)]
+    #[case::capped_bin_is_active(REAL_ID_SHIFT, 0)]
+    fn test_limits_stop_before_a_bin_the_cap_blocks(
+        #[case] capped_bin: u32,
+        #[case] expected_out: u128,
+    ) {
+        let mut bins = vec![(REAL_ID_SHIFT, (0, 1_000)), (REAL_ID_SHIFT - 1, (0, 5_000))];
+        bins.retain(|(id, _)| *id != capped_bin);
+        bins.push((capped_bin, (0, 191_757_638_537_527_648_490_752_896_198_554)));
+        let state = bin_state(REAL_ID_SHIFT, &bins);
+
+        let (max_in, max_out) = state
+            .get_limits(usdc().address.clone(), usdt().address.clone())
+            .unwrap();
+
+        assert_eq!(max_out, BigUint::from(expected_out));
+        if expected_out > 0 {
+            assert_eq!(
+                state
+                    .get_amount_out(max_in.clone(), &usdc(), &usdt())
+                    .unwrap()
+                    .amount,
+                max_out
+            );
+        }
+        let over = state
+            .get_amount_out(max_in + BigUint::from(1u64), &usdc(), &usdt())
+            .expect_err("one unit over the limit enters the capped bin");
+        assert!(
+            over.to_string()
+                .contains("MAX_LIQUIDITY_PER_BIN"),
+            "{over}"
+        );
+    }
+
+    /// A bin far from the active one prices its reserve past `u128`, where `get_drain_amounts`
+    /// is `None` and the pool reverts on `safe128`. The limit stops before it: the limit quotes,
+    /// one unit more does not.
+    #[test]
+    fn test_limits_stop_before_a_bin_whose_drain_input_overflows() {
+        let mut state = bin_state(
+            REAL_ID_SHIFT,
+            &[(REAL_ID_SHIFT, (1_000, 0)), (REAL_ID_SHIFT + 7_000, (10u128.pow(18), 0))],
+        );
+        state.bin_step = 100;
+
+        let (max_in, max_out) = state
+            .get_limits(usdt().address.clone(), usdc().address.clone())
+            .unwrap();
+
+        assert_eq!(max_out, BigUint::from(1_000u64));
+        assert_eq!(
+            state
+                .get_amount_out(max_in.clone(), &usdt(), &usdc())
+                .unwrap()
+                .amount,
+            max_out
+        );
+        let over = state
+            .get_amount_out(max_in + BigUint::from(1u64), &usdt(), &usdc())
+            .expect_err("one unit over the limit enters the far bin");
+        assert!(
+            over.to_string()
+                .contains("exceeds u128"),
+            "{over}"
         );
     }
 
