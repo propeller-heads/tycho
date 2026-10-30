@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 
 use tycho_common::{simulation::errors::TransitionError, Bytes};
 
-use crate::protocol::errors::InvalidSnapshotError;
+use crate::{
+    evm::protocol::pancakeswap_infinity_bin::math::constants::BIN_ID_COUNT,
+    protocol::errors::InvalidSnapshotError,
+};
 
 /// A malformed attribute value.
 #[derive(Debug, PartialEq, Eq)]
@@ -54,7 +57,7 @@ pub fn decode_u32(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
 /// Decodes a bin id, bounded to the u24 the chain uses. See [`parse_bin_id`].
 pub fn decode_bin_id(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
     let id = decode_u32(name, value)?;
-    if id >= 1 << 24 {
+    if id >= BIN_ID_COUNT {
         return Err(AttributeError(format!("{name}: bin id is wider than the u24 on chain")));
     }
 
@@ -113,7 +116,7 @@ pub fn parse_bin_key(key: &str) -> Result<(u32, Reserve), AttributeError> {
     let id: u32 = id
         .parse()
         .map_err(|_| AttributeError(format!("{key}: bin id is not a u32")))?;
-    if id >= 1 << 24 {
+    if id >= BIN_ID_COUNT {
         return Err(AttributeError(format!("{key}: bin id is wider than the u24 on chain")));
     }
     let side = match side {

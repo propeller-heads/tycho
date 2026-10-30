@@ -13,7 +13,13 @@ pub const SCALE: U256 = U256::from_limbs([0, 0, 1, 0]);
 pub const PRECISION: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
 /// Pips denominator. LP and protocol fees are pips.
-pub const PIPS_DENOMINATOR: u32 = 1_000_000;
+pub(crate) use crate::evm::protocol::utils::uniswap::FEE_PIPS_DENOMINATOR as PIPS_DENOMINATOR;
+
+/// Scales pips to `PRECISION`: `1e18 / 1e6`. The fee helpers take pips and scale internally.
+pub const PIPS_TO_PRECISION: U256 = U256::from_limbs([1_000_000_000_000, 0, 0, 0]);
+
+/// Bin ids are `uint24` on chain: `0 .. BIN_ID_COUNT`.
+pub const BIN_ID_COUNT: u32 = 1 << 24;
 
 /// `bin_step` denominator: step 25 is a 0.25% ratio between neighbouring bins.
 pub const BASIS_POINT_MAX: u64 = 10_000;

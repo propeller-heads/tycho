@@ -47,8 +47,9 @@ pub struct BinAmounts {
 /// One exact-input swap step against a single bin.
 ///
 /// `bin_reserve_out` is the bin's reserve of the output token, `swap_fee_pips` the combined fee
-/// from [`super::fee::calculate_swap_fee`]. `amount_in_with_fee < amount_in_left` on return means
-/// the bin is drained and the caller must step on.
+/// from [`super::fee::calculate_swap_fee`], `price` the bin's from [`get_price_from_id`].
+/// `amount_in_with_fee < amount_in_left` on return means the bin is drained and the caller must
+/// step on.
 ///
 /// Rounding is asymmetric between the two branches, and the multiply/divide roles swap with
 /// direction. Narrowing happens before the clamp: a raw output above `u128` reverts on chain
@@ -58,16 +59,14 @@ pub struct BinAmounts {
 pub fn get_amounts_out(
     bin_reserve_out: u128,
     swap_fee_pips: u32,
-    bin_step: u16,
+    price: U256,
     swap_for_y: bool,
-    active_id: u32,
     amount_in_left: u128,
 ) -> Result<BinAmounts, SimulationError> {
-    let price = get_price_from_id(active_id, bin_step)?;
     let drained = get_drain_amounts(bin_reserve_out, swap_fee_pips, price, swap_for_y)?
         .ok_or_else(|| {
             SimulationError::InvalidInput(
-                format!("max amount in for bin {active_id} exceeds u128"),
+                format!("max amount in for the bin at price {price} exceeds u128"),
                 None,
             )
         })?;
@@ -221,15 +220,10 @@ mod tests {
         #[case] amount_in_left: u128,
         #[case] expected: BinAmounts,
     ) {
-        let amounts = get_amounts_out(
-            bin_reserve_out,
-            swap_fee_pips,
-            10,
-            swap_for_y,
-            active_id,
-            amount_in_left,
-        )
-        .unwrap();
+        let price = get_price_from_id(active_id, 10).unwrap();
+        let amounts =
+            get_amounts_out(bin_reserve_out, swap_fee_pips, price, swap_for_y, amount_in_left)
+                .unwrap();
 
         assert_eq!(amounts, expected);
     }
