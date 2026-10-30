@@ -63,6 +63,7 @@ pub struct PancakeswapInfinityBinState {
 }
 
 /// Outcome of an exact-input swap.
+#[derive(Debug)]
 pub struct BinSwapResult {
     pub amount_out: u128,
     /// Bins stepped into beyond the first. Drives the gas estimate.
@@ -482,8 +483,10 @@ mod tests {
 
         assert_eq!(result.amount_out, 999_900);
         assert_eq!(result.bins_crossed, 0);
-        assert_eq!(result.new_state.active_id, REAL_ID_SHIFT);
-        assert_eq!(result.new_state.bins[&REAL_ID_SHIFT], (1_000_000, 1_000_000_000 - 999_900));
+        assert_eq!(
+            result.new_state,
+            bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (1_000_000, 1_000_000_000 - 999_900))])
+        );
     }
 
     /// Drains the active bin and finishes in the next one down. Per-bin expectations come from the
@@ -499,9 +502,13 @@ mod tests {
 
         assert_eq!(result.amount_out, 1_997);
         assert_eq!(result.bins_crossed, 1);
-        assert_eq!(result.new_state.active_id, REAL_ID_SHIFT - 1);
-        assert_eq!(result.new_state.bins[&REAL_ID_SHIFT], (1_001, 0));
-        assert_eq!(result.new_state.bins[&(REAL_ID_SHIFT - 1)], (999, 4_003));
+        assert_eq!(
+            result.new_state,
+            bin_state(
+                REAL_ID_SHIFT - 1,
+                &[(REAL_ID_SHIFT - 1, (999, 4_003)), (REAL_ID_SHIFT, (1_001, 0))]
+            )
+        );
     }
 
     /// With a protocol fee the pool keeps less than it charges: the protocol's share leaves the
@@ -519,11 +526,13 @@ mod tests {
         state.protocol_fee_one_for_zero = 3;
 
         let result = state.swap(true, 1_000_000).unwrap();
-        let (x, y) = result.new_state.bins[&REAL_ID_SHIFT];
 
+        let mut expected = state.clone();
+        expected
+            .bins
+            .insert(REAL_ID_SHIFT, (999_997, 1_000_000_000 - 999_990));
         assert_eq!(result.amount_out, 999_990, "output nets the whole 10-pip swap fee");
-        assert_eq!(x, 999_997, "the protocol's 3 units never reach the bin");
-        assert_eq!(y, 1_000_000_000 - 999_990);
+        assert_eq!(result.new_state, expected, "the protocol's 3 units never reach the bin");
     }
 
     /// Selling y walks up: drains the active bin, skips a bin holding only y, finishes two bins
@@ -544,10 +553,18 @@ mod tests {
 
         assert_eq!(result.amount_out, 2_992);
         assert_eq!(result.bins_crossed, 2);
-        assert_eq!(result.new_state.active_id, REAL_ID_SHIFT + 3);
-        assert_eq!(result.new_state.bins[&REAL_ID_SHIFT], (0, 1_501));
-        assert_eq!(result.new_state.bins[&(REAL_ID_SHIFT + 1)], (0, 2_000), "y-only bin untouched");
-        assert_eq!(result.new_state.bins[&(REAL_ID_SHIFT + 3)], (2_008, 1_999));
+        assert_eq!(
+            result.new_state,
+            bin_state(
+                REAL_ID_SHIFT + 3,
+                &[
+                    (REAL_ID_SHIFT, (0, 1_501)),
+                    // The y-only bin is untouched.
+                    (REAL_ID_SHIFT + 1, (0, 2_000)),
+                    (REAL_ID_SHIFT + 3, (2_008, 1_999)),
+                ]
+            )
+        );
     }
 
     /// A burn down to `MINIMUM_SHARE` takes the active bin out of the tree but leaves its dust.
@@ -606,15 +623,15 @@ mod tests {
     #[rstest]
     #[case::selling_x_charges_zero_for_one(
         true, 100, 100, 400, 2_497_504_491, -2,
-        [(1_498_549_858, 502_495_509), (2_001_100_121, 0), (2_000_100_021, 0)]
+        [(-2, (1_498_549_858, 502_495_509)), (-1, (2_001_100_121, 0)), (0, (2_000_100_021, 0))]
     )]
     #[case::selling_y_charges_one_for_zero(
         false, 100, 100, 400, 2_496_755_989, 2,
-        [(0, 2_000_100_051), (0, 2_001_100_151), (503_244_011, 1_497_799_798)]
+        [(0, (0, 2_000_100_051)), (1, (0, 2_001_100_151)), (2, (503_244_011, 1_497_799_798))]
     )]
     #[case::max_lp_and_protocol_fee(
         true, 100_000, 4_000, 4_000, 2_239_520_717, -2,
-        [(1_266_666_666, 760_479_283), (2_112_222_224, 0), (2_111_111_112, 0)]
+        [(-2, (1_266_666_666, 760_479_283)), (-1, (2_112_222_224, 0)), (0, (2_111_111_112, 0))]
     )]
     fn test_swap_withholds_directional_protocol_fee_across_bins(
         #[case] swap_for_y: bool,
@@ -623,8 +640,8 @@ mod tests {
         #[case] one_for_zero: u16,
         #[case] expected_out: u128,
         #[case] final_offset: i32,
-        // Bins the swap touched, in id order.
-        #[case] touched: [(u128, u128); 3],
+        // Bins the swap touched, as `(offset from REAL_ID_SHIFT, reserves)`.
+        #[case] touched: [(i32, (u128, u128)); 3],
     ) {
         let mut state = five_bins();
         state.lp_fee = lp_fee;
@@ -635,19 +652,20 @@ mod tests {
             .swap(swap_for_y, 2_500_000_000)
             .unwrap();
 
-        let final_id = REAL_ID_SHIFT
+        let mut expected = state.clone();
+        expected.active_id = REAL_ID_SHIFT
             .checked_add_signed(final_offset)
             .unwrap();
-        assert_eq!(result.amount_out, expected_out);
-        assert_eq!(result.new_state.active_id, final_id);
-        let touched_ids = if swap_for_y {
-            REAL_ID_SHIFT - 2..=REAL_ID_SHIFT
-        } else {
-            REAL_ID_SHIFT..=REAL_ID_SHIFT + 2
-        };
-        for (id, reserves) in touched_ids.zip(touched) {
-            assert_eq!(result.new_state.bins[&id], reserves, "bin {id}");
+        for (offset, reserves) in touched {
+            expected.bins.insert(
+                REAL_ID_SHIFT
+                    .checked_add_signed(offset)
+                    .unwrap(),
+                reserves,
+            );
         }
+        assert_eq!(result.amount_out, expected_out);
+        assert_eq!(result.new_state, expected, "the two untouched bins must be as they were");
     }
 
     /// Input of exactly the bin's `max_amount_in` (1_000_100_011, from the pinned
@@ -686,8 +704,7 @@ mod tests {
 
         let err = state
             .swap(true, 1_000_000_000_000)
-            .err()
-            .expect("a swap past the per-bin cap must not quote");
+            .expect_err("a swap past the per-bin cap must not quote");
         assert!(
             err.to_string()
                 .contains("MAX_LIQUIDITY_PER_BIN"),
@@ -737,25 +754,60 @@ mod tests {
 
         assert_eq!(result.amount_out, 997);
         assert_eq!(result.bins_crossed, 1);
-        assert_eq!(result.new_state.bins[&REAL_ID_SHIFT], (5_000, 0));
+        assert_eq!(
+            result.new_state,
+            bin_state(
+                REAL_ID_SHIFT - 1,
+                &[(REAL_ID_SHIFT - 1, (999, 4_003)), (REAL_ID_SHIFT, (5_000, 0))]
+            )
+        );
     }
 
     /// Both on-chain reverts: `BinPool__OutOfLiquidity` when the bins run out before the input
     /// does, and `BinPool__InsufficientAmountUnSpecified` when the output rounds to zero. Neither
     /// may come back as a partial fill or a zero quote, which would not execute.
     #[rstest]
-    #[case::bins_run_out(REAL_ID_SHIFT, (0, 1_000), 5_000)]
-    #[case::output_rounds_to_zero(REAL_ID_SHIFT - 5_000, (0, 1_000_000_000), 1)]
+    #[case::bins_run_out(REAL_ID_SHIFT, (0, 1_000), 5_000, "Out of liquidity")]
+    #[case::output_rounds_to_zero(REAL_ID_SHIFT - 5_000, (0, 1_000_000_000), 1, "produced no output")]
     fn test_swap_errors(
         #[case] active_id: u32,
         #[case] reserves: (u128, u128),
         #[case] amount_in: u128,
+        #[case] message: &str,
     ) {
         let state = bin_state(active_id, &[(active_id, reserves)]);
 
+        let err = state
+            .swap(true, amount_in)
+            .expect_err("quoted where the pool would revert");
+        assert!(err.to_string().contains(message), "{err}");
+    }
+
+    /// Crediting the input to a bin can overflow its `u128` reserve, and summing the output over
+    /// bins can overflow `u128` before the `int128` check sees it. Each is an error, not a wrap.
+    #[test]
+    fn test_swap_errors_on_reserve_and_output_overflow() {
+        let state = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (u128::MAX - 10, 1_000))]);
+        let err = state
+            .swap(true, 500)
+            .expect_err("the credited x overflows the bin");
         assert!(
-            state.swap(true, amount_in).is_err(),
-            "quoted {amount_in} where the pool would revert"
+            err.to_string()
+                .contains("reserve overflows crediting"),
+            "{err}"
+        );
+
+        // Priced near 2^-60 y per x, two bins pay out more x together than `u128` holds for an
+        // input that fits comfortably.
+        let id = REAL_ID_SHIFT - 41_616;
+        let state = bin_state(id, &[(id, (u128::MAX - 1, 0)), (id + 1, (10, 0))]);
+        let err = state
+            .swap(false, 1 << 70)
+            .expect_err("the summed output overflows u128");
+        assert!(
+            err.to_string()
+                .contains("output overflows u128"),
+            "{err}"
         );
     }
 
@@ -818,7 +870,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(999_900u64));
-        assert_eq!(result.gas, BigUint::from(SWAP_BASE_GAS));
+        assert_eq!(result.gas, BigUint::from(120_000u64));
     }
 
     /// On chain the amount is an `int128`, so anything above that is rejected, not truncated.
@@ -827,11 +879,13 @@ mod tests {
         let state = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (0, 1_000_000_000))]);
         let too_large = BigUint::from(i128::MAX as u128 + 1);
 
+        let err = state
+            .get_amount_out(too_large, &usdc(), &usdt())
+            .expect_err("amounts above int128 must be rejected, not truncated");
         assert!(
-            state
-                .get_amount_out(too_large, &usdc(), &usdt())
-                .is_err(),
-            "amounts above int128 must be rejected, not truncated"
+            err.to_string()
+                .contains("amount_in exceeds int128"),
+            "{err}"
         );
     }
 
@@ -855,10 +909,11 @@ mod tests {
             "{err}"
         );
 
-        let (_, max_out) = state
+        // The only bin pays out past `int128`, so nothing is quotable.
+        let (max_in, max_out) = state
             .get_limits(usdt().address.clone(), usdc().address.clone())
             .unwrap();
-        assert!(max_out <= BigUint::from(i128::MAX as u128), "limit {max_out} past int128");
+        assert_eq!((max_in, max_out), (BigUint::ZERO, BigUint::ZERO));
     }
 
     /// Drains the active bin and finishes in the next, so gas carries one crossing.
@@ -874,7 +929,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(1_997u64));
-        assert_eq!(result.gas, BigUint::from(SWAP_BASE_GAS + GAS_PER_BIN_CROSSED));
+        assert_eq!(result.gas, BigUint::from(130_000u64), "base plus one crossing");
     }
 
     /// Priced at bin `2^23 + 100` rather than 1.0, so an inverted ratio is visible, and against an
