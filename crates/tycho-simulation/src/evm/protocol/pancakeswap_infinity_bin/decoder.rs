@@ -4,7 +4,10 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, decode_u32},
+    attributes::{
+        apply_reserve, decode_bin_id_attribute, decode_bool_attribute, decode_u16_attribute,
+        decode_u32_attribute,
+    },
     state::PancakeswapInfinityBinState,
 };
 use crate::{
@@ -48,26 +51,28 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
         }
         // The PoolKey's fee is the pool's LP fee for good: only a dynamic-fee pool can change it,
         // and those are rejected here.
-        let lp_fee = decode_u32("key_lp_fee", attribute(&static_attrs, "key_lp_fee")?)?;
+        let lp_fee = decode_u32_attribute("key_lp_fee", attribute(&static_attrs, "key_lp_fee")?)?;
         if lp_fee == DYNAMIC_FEE_FLAG {
             return Err(InvalidSnapshotError::ValueError(
                 "pool has a dynamic LP fee (key_lp_fee), set by its hook per swap".to_string(),
             ));
         }
 
-        let bin_step = decode_u16("bin_step", attribute(&static_attrs, "bin_step")?)?;
-        let active_id = decode_bin_id("active_id", attribute(&state_attrs, "active_id")?)?;
+        let bin_step = decode_u16_attribute("bin_step", attribute(&static_attrs, "bin_step")?)?;
+        let active_id =
+            decode_bin_id_attribute("active_id", attribute(&state_attrs, "active_id")?)?;
         // Emitted with the first write to the active bin, so a pool without it has an empty
         // active bin, which a swap skips whatever the tree says.
         let active_in_tree = match state_attrs.get("active_in_tree") {
-            Some(flag) => decode_bool("active_in_tree", flag)?,
+            Some(flag) => decode_bool_attribute("active_in_tree", flag)?,
             None => true,
         };
         // `initialize` sets the protocol fee from the fee controller and the substreams emits both
         // halves at creation, so a missing half is a broken snapshot, not a zero fee: defaulting
         // would overstate every quote.
         let protocol_fee = |key: &str| {
-            decode_u16(key, attribute(&state_attrs, key)?).map_err(InvalidSnapshotError::from)
+            decode_u16_attribute(key, attribute(&state_attrs, key)?)
+                .map_err(InvalidSnapshotError::from)
         };
         let protocol_fee_zero_for_one = protocol_fee("protocol_fees/zero2one")?;
         let protocol_fee_one_for_zero = protocol_fee("protocol_fees/one2zero")?;

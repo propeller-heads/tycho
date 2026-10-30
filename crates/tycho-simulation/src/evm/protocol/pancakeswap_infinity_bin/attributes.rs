@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use alloy::primitives::aliases::{U128, U16, U32};
 use tycho_common::{simulation::errors::TransitionError, Bytes};
 
 use crate::{
@@ -44,19 +45,18 @@ impl From<AttributeError> for InvalidSnapshotError {
 ///
 /// `active_id` arrives as `BigInt::to_signed_bytes_be` of a u24, so 3 bytes below `0x800000` and
 /// 4 with a leading `0x00` at or above it. Both decode to the same number here.
-pub fn decode_u32(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
-    if value.len() > 4 {
-        return Err(AttributeError(format!(
-            "{name}: expected at most 4 bytes, got {}",
-            value.len()
-        )));
-    }
-    Ok(u32::from(value.clone()))
+pub fn decode_u32_attribute(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
+    U32::try_from_be_slice(value)
+        .map(|v| v.to::<u32>())
+        .ok_or_else(|| too_wide(name, value, 4))
 }
 
-/// Decodes a bin id, bounded to the u24 the chain uses. See [`parse_bin_id`].
-pub fn decode_bin_id(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
-    let id = decode_u32(name, value)?;
+/// Decodes a bin id, bounded to the u24 the chain uses.
+///
+/// Not `U24::try_from_be_slice`: it refuses the 4-byte encoding of ids at or above `0x800000`,
+/// which is where the indexed pools sit.
+pub fn decode_bin_id_attribute(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
+    let id = decode_u32_attribute(name, value)?;
     if id >= BIN_ID_COUNT {
         return Err(AttributeError(format!("{name}: bin id is wider than the u24 on chain")));
     }
@@ -64,19 +64,19 @@ pub fn decode_bin_id(name: &str, value: &Bytes) -> Result<u32, AttributeError> {
     Ok(id)
 }
 
+fn too_wide(name: &str, value: &Bytes, bytes: usize) -> AttributeError {
+    AttributeError(format!("{name}: expected at most {bytes} bytes, got {}", value.len()))
+}
+
 /// Decodes an unsigned value of at most 2 bytes, big-endian. Protocol fees are 12-bit halves.
-pub fn decode_u16(name: &str, value: &Bytes) -> Result<u16, AttributeError> {
-    if value.len() > 2 {
-        return Err(AttributeError(format!(
-            "{name}: expected at most 2 bytes, got {}",
-            value.len()
-        )));
-    }
-    Ok(u16::from(value.clone()))
+pub fn decode_u16_attribute(name: &str, value: &Bytes) -> Result<u16, AttributeError> {
+    U16::try_from_be_slice(value)
+        .map(|v| v.to::<u16>())
+        .ok_or_else(|| too_wide(name, value, 2))
 }
 
 /// Decodes a one-byte flag, `0` or `1`.
-pub fn decode_bool(name: &str, value: &Bytes) -> Result<bool, AttributeError> {
+pub fn decode_bool_attribute(name: &str, value: &Bytes) -> Result<bool, AttributeError> {
     match value.as_ref() {
         [0] => Ok(false),
         [1] => Ok(true),
@@ -85,14 +85,10 @@ pub fn decode_bool(name: &str, value: &Bytes) -> Result<bool, AttributeError> {
 }
 
 /// Decodes an unsigned value of at most 16 bytes, big-endian. Bin reserves are `uint128`.
-pub fn decode_u128(name: &str, value: &Bytes) -> Result<u128, AttributeError> {
-    if value.len() > 16 {
-        return Err(AttributeError(format!(
-            "{name}: expected at most 16 bytes, got {}",
-            value.len()
-        )));
-    }
-    Ok(u128::from(value.clone()))
+pub fn decode_u128_attribute(name: &str, value: &Bytes) -> Result<u128, AttributeError> {
+    U128::try_from_be_slice(value)
+        .map(|v| v.to::<u128>())
+        .ok_or_else(|| too_wide(name, value, 16))
 }
 
 /// The half of a bin's reserves a `bins/{id}/reserve_x` or `bins/{id}/reserve_y` key names.
@@ -138,7 +134,7 @@ pub fn apply_reserve(
     value: &Bytes,
 ) -> Result<(), AttributeError> {
     let (id, side) = parse_bin_key(key)?;
-    let amount = decode_u128(key, value)?;
+    let amount = decode_u128_attribute(key, value)?;
     let bin = bins.entry(id).or_insert((0, 0));
     match side {
         Reserve::X => bin.0 = amount,
@@ -168,13 +164,13 @@ mod tests {
     #[case::three_bytes(vec![0x7f, 0xff, 0xff], 0x7fffff)]
     #[case::four_bytes_with_sign_padding(vec![0x00, 0x80, 0x00, 0x00], 0x800000)]
     fn test_decode_u32_tolerates_both_lengths(#[case] bytes: Vec<u8>, #[case] expected: u32) {
-        assert_eq!(decode_u32("active_id", &Bytes::from(bytes)).unwrap(), expected);
+        assert_eq!(decode_u32_attribute("active_id", &Bytes::from(bytes)).unwrap(), expected);
     }
 
     #[test]
     fn test_decode_u32_rejects_oversized_value() {
         assert!(
-            decode_u32("active_id", &Bytes::from(vec![0u8; 5])).is_err(),
+            decode_u32_attribute("active_id", &Bytes::from(vec![0u8; 5])).is_err(),
             "5 bytes would panic the right-aligning conversion, so it must error first"
         );
     }
@@ -186,7 +182,7 @@ mod tests {
     #[case::empty(vec![], None)]
     #[case::padded(vec![0, 1], None)]
     fn test_decode_bool(#[case] bytes: Vec<u8>, #[case] expected: Option<bool>) {
-        assert_eq!(decode_bool("active_in_tree", &Bytes::from(bytes)).ok(), expected);
+        assert_eq!(decode_bool_attribute("active_in_tree", &Bytes::from(bytes)).ok(), expected);
     }
 
     #[rstest]
@@ -194,7 +190,7 @@ mod tests {
     #[case::sixteen_bytes(u128::MAX.to_be_bytes().to_vec(), Some(u128::MAX))]
     #[case::seventeen_bytes(vec![0u8; 17], None)]
     fn test_decode_u128(#[case] bytes: Vec<u8>, #[case] expected: Option<u128>) {
-        assert_eq!(decode_u128("bins/1/reserve_x", &Bytes::from(bytes)).ok(), expected);
+        assert_eq!(decode_u128_attribute("bins/1/reserve_x", &Bytes::from(bytes)).ok(), expected);
     }
 
     #[rstest]
@@ -227,7 +223,7 @@ mod tests {
     #[case::max_u32("active_id", vec![0xff, 0xff, 0xff, 0xff])]
     fn test_decode_bin_id_rejects_ids_above_u24(#[case] name: &str, #[case] bytes: Vec<u8>) {
         assert!(
-            decode_bin_id(name, &Bytes::from(bytes)).is_err(),
+            decode_bin_id_attribute(name, &Bytes::from(bytes)).is_err(),
             "{name}: a bin id cannot be wider than u24"
         );
     }
