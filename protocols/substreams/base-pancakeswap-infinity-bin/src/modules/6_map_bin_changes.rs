@@ -71,7 +71,7 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
             pool_event::Type::Donate(..) => {
                 let active = active_id_store
                     .get_at(event.log_ordinal, pool_key(pool))
-                    .map(|id| id as u32)
+                    .map(|id| u32::try_from(id).expect("store_active_id writes u24 ids"))
                     .ok_or_else(|| missing_active_id(event))?;
                 (Some((active, active)), Vec::new())
             }
@@ -130,7 +130,7 @@ fn pre_swap_active_id<S: StoreGet<i64>>(
 ) -> Option<u32> {
     store
         .get_at(log_ordinal.saturating_sub(1), pool_key(pool_id))
-        .map(|id| id as u32)
+        .map(|id| u32::try_from(id).expect("store_active_id writes u24 ids"))
 }
 
 /// Tree bins in `[low, high]`, ascending, as of the log before `log_ordinal`.
@@ -293,29 +293,15 @@ mod tests {
     use std::cell::Cell;
 
     use crate::{
-        modules::test_stores::FakeRawStore,
-        pb::pancakeswap::infinity::bin::{events::pool_event::Type, Transaction},
+        modules::{
+            test_fixtures::*,
+            test_stores::{FakeRawStore, FakeStore},
+        },
+        pb::pancakeswap::infinity::bin::events::pool_event::Type,
     };
 
-    const POOL_MANAGER: [u8; 20] = [0xc6; 20];
-    const POOL_ID: &str = "abababababababababababababababababababababababababababababababab";
-
-    fn pool_id_bytes() -> [u8; 32] {
-        hex::decode(POOL_ID)
-            .unwrap()
-            .try_into()
-            .unwrap()
-    }
-
-    fn packed(x: u128, y: u128) -> Vec<u8> {
-        let mut out = vec![0u8; 32];
-        out[..16].copy_from_slice(&y.to_be_bytes());
-        out[16..].copy_from_slice(&x.to_be_bytes());
-        out
-    }
-
     fn write(bin_id: u32, old: Vec<u8>, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_base_slot(&pool_id_bytes());
+        let base = parameters::pool_base_slot(&POOL_ID);
         StorageChange {
             address: POOL_MANAGER.to_vec(),
             key: parameters::bin_reserve_slot(&base, bin_id).to_vec(),
@@ -335,25 +321,6 @@ mod tests {
         map
     }
 
-    fn event(kind: Type, ordinal: u64) -> PoolEvent {
-        PoolEvent {
-            log_ordinal: ordinal,
-            pool_id: pool_id_bytes().to_vec(),
-            currency0: Vec::new(),
-            currency1: Vec::new(),
-            transaction: Some(Transaction { hash: vec![1], from: vec![], to: vec![], index: 0 }),
-            r#type: Some(kind),
-        }
-    }
-
-    fn mint(ids: Vec<u32>) -> Type {
-        Type::Mint(pool_event::Mint { ids })
-    }
-
-    fn swap(active_id: u32) -> Type {
-        Type::Swap(pool_event::Swap { active_id })
-    }
-
     #[test]
     fn mint_emits_one_delta_per_written_bin() {
         let changes = vec![
@@ -367,7 +334,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 3);
         assert_eq!(deltas[0].bin_id, 100);
-        assert_eq!(deltas[0].pool_id, pool_id_bytes().to_vec());
+        assert_eq!(deltas[0].pool_id, POOL_ID.to_vec());
         assert_eq!(deltas[0].old_packed, packed(0, 0));
         assert_eq!(deltas[0].new_packed, packed(10, 20));
         assert_eq!(deltas[2].new_packed, packed(12, 22));
@@ -423,18 +390,6 @@ mod tests {
         assert_eq!(swapped[0].new_packed, packed(7, 13));
     }
 
-    fn burn(ids: Vec<u32>) -> Type {
-        Type::Burn(pool_event::Burn { ids })
-    }
-
-    fn donate(amount0: &str, amount1: &str, bin_id: u32) -> Type {
-        Type::Donate(pool_event::Donate {
-            amount0: amount0.into(),
-            amount1: amount1.into(),
-            bin_id,
-        })
-    }
-
     /// A repeated id is one delta spanning all its writes, else balances count the last write
     /// once per occurrence.
     #[rstest::rstest]
@@ -475,52 +430,14 @@ mod tests {
     /// Stands in for the host store with the engine's semantics: `get_at(ord)` returns the state
     /// including every write at or below `ord` (`storage/store/value_get.go`, `getAt` rewinds only
     /// deltas whose ordinal is strictly greater).
-    struct FakeStore(Vec<(u64, String, i64)>);
-
-    impl StoreGet<i64> for FakeStore {
-        fn new(_idx: u32) -> Self {
-            Self(Vec::new())
-        }
-
-        fn get_at<K: AsRef<str>>(&self, ord: u64, key: K) -> Option<i64> {
-            self.0
-                .iter()
-                .filter(|(written_at, written_key, _)| {
-                    *written_at <= ord && written_key == key.as_ref()
-                })
-                .max_by_key(|(written_at, _, _)| *written_at)
-                .map(|(_, _, value)| *value)
-        }
-
-        fn get_last<K: AsRef<str>>(&self, _key: K) -> Option<i64> {
-            unimplemented!("tests only read at an ordinal")
-        }
-
-        fn get_first<K: AsRef<str>>(&self, _key: K) -> Option<i64> {
-            unimplemented!("tests only read at an ordinal")
-        }
-
-        fn has_at<K: AsRef<str>>(&self, _ord: u64, _key: K) -> bool {
-            unimplemented!("tests only read at an ordinal")
-        }
-
-        fn has_last<K: AsRef<str>>(&self, _key: K) -> bool {
-            unimplemented!("tests only read at an ordinal")
-        }
-
-        fn has_first<K: AsRef<str>>(&self, _key: K) -> bool {
-            unimplemented!("tests only read at an ordinal")
-        }
-    }
-
     /// `store_active_id` writes the post-swap id at the swap's own ordinal, so reading at that
     /// ordinal returns the post value and the crossed-bin range collapses to one bin.
     #[test]
     fn pre_swap_active_id_ignores_this_logs_own_write() {
-        let key = pool_key(&pool_id_bytes());
+        let key = pool_key(&POOL_ID);
         let store = FakeStore(vec![(5, key.clone(), 8_388_608), (9, key, 8_388_610)]);
 
-        let pre = pre_swap_active_id(&store, &pool_id_bytes(), 9);
+        let pre = pre_swap_active_id(&store, &POOL_ID, 9);
 
         assert_eq!(pre, Some(8_388_608), "read the state before this swap, not after it");
     }
@@ -529,9 +446,9 @@ mod tests {
     /// id.
     #[test]
     fn pre_swap_active_id_is_none_without_an_earlier_write() {
-        let store = FakeStore(vec![(9, pool_key(&pool_id_bytes()), 8_388_610)]);
+        let store = FakeStore(vec![(9, pool_key(&POOL_ID), 8_388_610)]);
 
-        assert_eq!(pre_swap_active_id(&store, &pool_id_bytes(), 9), None);
+        assert_eq!(pre_swap_active_id(&store, &POOL_ID, 9), None);
     }
 
     /// `FakeStore` for the raw tree words.
@@ -567,10 +484,10 @@ mod tests {
             {
                 level1[31 - ((other & 0xff) / 8) as usize] |= 1 << ((other & 0xff) % 8);
             }
-            writes.push((ordinal, tree_key(2, &pool_id_bytes(), segment), word));
-            writes.push((ordinal, tree_key(1, &pool_id_bytes(), key), level1));
+            writes.push((ordinal, tree_key(2, &POOL_ID, segment), word));
+            writes.push((ordinal, tree_key(1, &POOL_ID, key), level1));
         }
-        FakeRawStore(writes)
+        FakeStore(writes)
     }
 
     /// Only tree bins between the ends count, whatever the gap, and both ends are clipped.
@@ -583,18 +500,18 @@ mod tests {
             (1, high >> 8, tree_word(high)),
         ]);
 
-        assert_eq!(tree_bins_between(&store, &pool_id_bytes(), low, high, 9), vec![low, mid, high]);
-        assert_eq!(tree_bins_between(&store, &pool_id_bytes(), low + 1, high - 1, 9), vec![mid]);
+        assert_eq!(tree_bins_between(&store, &POOL_ID, low, high, 9), vec![low, mid, high]);
+        assert_eq!(tree_bins_between(&store, &POOL_ID, low + 1, high - 1, 9), vec![mid]);
     }
 
     /// The store writes a mint's or burn's word at that log's own ordinal, so the after-side read
     /// must include it and the before-side read must not.
     #[test]
     fn bin_in_tree_includes_a_write_at_the_ordinal() {
-        let store = FakeRawStore(vec![(9, tree_key(2, &pool_id_bytes(), 0), tree_word(5))]);
+        let store = FakeStore(vec![(9, tree_key(2, &POOL_ID, 0), tree_word(5))]);
 
-        assert!(bin_in_tree(&store, &pool_id_bytes(), 5, 9));
-        assert!(!bin_in_tree(&store, &pool_id_bytes(), 5, 8));
+        assert!(bin_in_tree(&store, &POOL_ID, 5, 9));
+        assert!(!bin_in_tree(&store, &POOL_ID, 5, 8));
     }
 
     /// Words are big-endian, so a short one is left-padded with zeros rather than out of bounds.
@@ -607,10 +524,10 @@ mod tests {
     /// A segment word that exists says nothing about bins whose bit is clear.
     #[test]
     fn bin_in_tree_tests_the_bins_own_bit() {
-        let store = FakeRawStore(vec![(1, tree_key(2, &pool_id_bytes(), 0), tree_word(5))]);
+        let store = FakeStore(vec![(1, tree_key(2, &POOL_ID, 0), tree_word(5))]);
 
-        assert!(!bin_in_tree(&store, &pool_id_bytes(), 6, 9));
-        assert!(!bin_in_tree(&store, &pool_id_bytes(), 256 + 5, 9), "segment 1 was never written");
+        assert!(!bin_in_tree(&store, &POOL_ID, 6, 9));
+        assert!(!bin_in_tree(&store, &POOL_ID, 256 + 5, 9), "segment 1 was never written");
     }
 
     /// A mint at the swap's own ordinal is a later log; one just before it must be visible.
@@ -618,7 +535,22 @@ mod tests {
     fn tree_bins_between_reads_the_state_before_this_log() {
         let store = tree_store(vec![(8, 0, tree_word(5)), (9, 0, tree_word(6))]);
 
-        assert_eq!(tree_bins_between(&store, &pool_id_bytes(), 0, 255, 9), vec![5]);
+        assert_eq!(tree_bins_between(&store, &POOL_ID, 0, 255, 9), vec![5]);
+    }
+
+    /// A burn that empties a segment clears its `level1` bit, so the walk never opens that
+    /// segment's `level2` word again, however many stale words it holds.
+    #[test]
+    fn tree_bins_between_skips_a_segment_a_burn_emptied() {
+        let (a, b) = (1_000, 140_000);
+        let store = tree_store(vec![
+            (1, a >> 8, tree_word(a)),
+            (1, b >> 8, tree_word(b)),
+            (5, b >> 8, vec![0u8; 32]),
+        ]);
+
+        assert_eq!(tree_bins_between(&store, &POOL_ID, 0, 200_000, 4), vec![a, b]);
+        assert_eq!(tree_bins_between(&store, &POOL_ID, 0, 200_000, 9), vec![a]);
     }
 
     /// Counts `get_at` calls on a [`FakeRawStore`].
@@ -666,7 +598,7 @@ mod tests {
             Cell::new(0),
         );
 
-        assert_eq!(tree_bins_between(&store, &pool_id_bytes(), low, high, 9), vec![low, high]);
+        assert_eq!(tree_bins_between(&store, &POOL_ID, low, high, 9), vec![low, high]);
         // 28 level1 words across the span, plus one level2 word per non-empty segment.
         assert_eq!(store.1.get(), 28 + 2);
     }
@@ -715,7 +647,7 @@ mod tests {
         let active_store = FakeStore(
             active_ids
                 .into_iter()
-                .map(|(ordinal, id)| (ordinal, pool_key(&pool_id_bytes()), i64::from(id)))
+                .map(|(ordinal, id)| (ordinal, pool_key(&POOL_ID), i64::from(id)))
                 .collect(),
         );
         let tree_store = tree_store(tree_words);

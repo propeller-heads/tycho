@@ -83,24 +83,10 @@ pub(crate) fn in_window(ordinal: u64, floor: u64, log_ordinal: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pb::pancakeswap::infinity::bin::{events::pool_event, Transaction};
-
-    const POOL_MANAGER: [u8; 20] = [0xc6; 20];
+    use crate::modules::test_fixtures::{event_in_tx, mint, POOL_MANAGER};
 
     fn event(tx_index: u64, ordinal: u64) -> PoolEvent {
-        PoolEvent {
-            log_ordinal: ordinal,
-            pool_id: vec![0xab; 32],
-            currency0: Vec::new(),
-            currency1: Vec::new(),
-            transaction: Some(Transaction {
-                hash: vec![],
-                from: vec![],
-                to: vec![],
-                index: tx_index,
-            }),
-            r#type: Some(pool_event::Type::Mint(pool_event::Mint { ids: vec![] })),
-        }
+        event_in_tx(mint(vec![]), ordinal, tx_index)
     }
 
     fn write(address: [u8; 20], slot: u8, ordinal: u64) -> StorageChange {

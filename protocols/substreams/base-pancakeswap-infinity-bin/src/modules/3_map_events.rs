@@ -129,9 +129,9 @@ mod tests {
     use rstest::rstest;
     use tiny_keccak::{Hasher, Keccak};
 
-    const POOL_ID: [u8; 32] = [0xab; 32];
+    use crate::modules::test_fixtures::{POOL_ID, POOL_MANAGER};
+
     const SENDER: [u8; 20] = [0x11; 20];
-    const POOL_MANAGER: [u8; 20] = [0xc6; 20];
 
     fn topic(signature: &str) -> Vec<u8> {
         let mut hasher = Keccak::v256();
@@ -203,6 +203,61 @@ mod tests {
         assert_eq!(swap.active_id, 8_388_607);
     }
 
+    /// ABI head and tail of a dynamic array: `[offset]` in the head, `[len, items..]` in the tail.
+    fn array(items: &[u128]) -> Vec<Vec<u8>> {
+        let mut out = vec![word(items.len() as u128)];
+        out.extend(items.iter().map(|item| word(*item)));
+        out
+    }
+
+    /// `ids` sits behind an offset, between a salt and two more dynamic or static words, so a
+    /// decoder that reads the head words as ids would see offsets instead.
+    #[rstest]
+    #[case::mint(
+        "Mint(bytes32,address,uint256[],bytes32,bytes32[],bytes32,bytes32)",
+        // head: offset(ids), salt, offset(amounts), compositionFeeAmount, feeAmountToProtocol
+        vec![word(5 * 32), word(0), word(8 * 32), word(0), word(0)]
+    )]
+    #[case::burn(
+        "Burn(bytes32,address,uint256[],bytes32,bytes32[])",
+        // head: offset(ids), salt, offset(amounts)
+        vec![word(3 * 32), word(0), word(6 * 32)]
+    )]
+    fn mint_and_burn_carry_their_bin_ids(#[case] signature: &str, #[case] head: Vec<Vec<u8>>) {
+        let mut data = head;
+        data.extend(array(&[8_388_600, 8_388_601]));
+        data.extend(array(&[1, 2]));
+        let log = log(signature, &[POOL_ID.to_vec(), padded(&SENDER)], data);
+
+        let (pool_id, event) = decode_log(&log, &POOL_MANAGER).expect("log decodes");
+
+        assert_eq!(pool_id, POOL_ID.to_vec());
+        let ids = match event {
+            Type::Mint(mint) => mint.ids,
+            Type::Burn(burn) => burn.ids,
+            other => panic!("wrong event type: {other:?}"),
+        };
+        assert_eq!(ids, vec![8_388_600, 8_388_601]);
+    }
+
+    /// A donate's amounts are int128, so a negative one survives as a signed decimal string.
+    #[test]
+    fn donate_carries_signed_amounts_and_the_bin() {
+        let mut negative = vec![0xffu8; 32];
+        negative[31] = 0xfb;
+        let log = log(
+            "Donate(bytes32,address,int128,int128,uint24)",
+            &[POOL_ID.to_vec(), padded(&SENDER)],
+            vec![word(1_000), negative, word(8_388_607)],
+        );
+
+        let (_, event) = decode_log(&log, &POOL_MANAGER).expect("Donate decodes");
+
+        let Type::Donate(donate) = event else { panic!("wrong event type") };
+        assert_eq!((donate.amount0.as_str(), donate.amount1.as_str()), ("1000", "-5"));
+        assert_eq!(donate.bin_id, 8_388_607);
+    }
+
     #[test]
     fn foreign_emitter_is_skipped() {
         let mut log = log(
@@ -221,7 +276,11 @@ mod tests {
     #[test]
     fn protocol_fee_update_from_another_manager_is_skipped() {
         let mut log = log("ProtocolFeeUpdated(bytes32,uint24)", &[POOL_ID.to_vec()], vec![word(7)]);
-        assert!(decode_log(&log, &POOL_MANAGER).is_some(), "the Bin manager's update decodes");
+        let (pool_id, event) =
+            decode_log(&log, &POOL_MANAGER).expect("the Bin manager's update decodes");
+        assert_eq!(pool_id, POOL_ID.to_vec());
+        let Type::ProtocolFeeUpdated(updated) = event else { panic!("wrong event type") };
+        assert_eq!(updated.protocol_fee, 7);
 
         log.address = vec![0xc7; 20];
         assert!(decode_log(&log, &POOL_MANAGER).is_none(), "a CL manager's update must not");

@@ -267,14 +267,13 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolId, At
 mod tests {
     use super::*;
     use crate::{
-        modules::test_stores::FakeRawStore,
-        pb::pancakeswap::infinity::bin::{LeftBin, Transaction},
+        modules::{
+            test_fixtures::*,
+            test_stores::{FakeRawStore, FakeStore},
+        },
+        pb::pancakeswap::infinity::bin::{events::pool_event, LeftBin, Transaction},
     };
     use rstest::rstest;
-
-    fn word(value: u8) -> Vec<u8> {
-        vec![value; 32]
-    }
 
     /// One side of a delta: (in tree, active, packed reserves).
     type Side = (bool, bool, Vec<u8>);
@@ -348,7 +347,7 @@ mod tests {
         (false, false, word(2)),
         None
     )]
-    fn test_bin_change_type(
+    fn visibility_picks_the_change_type(
         #[case] before: Side,
         #[case] after: Side,
         #[case] expected: Option<ChangeType>,
@@ -356,8 +355,38 @@ mod tests {
         assert_eq!(bin_change_type(&delta(7, 1, before, after)), expected);
     }
 
+    fn names_and_values(event_kind: pool_event::Type) -> Vec<(String, Vec<u8>)> {
+        event_to_attributes_updates(event(event_kind, 3))
+            .into_iter()
+            .map(|(_, pool_id, attribute)| {
+                assert_eq!(pool_id, POOL_ID.to_vec());
+                (attribute.name, attribute.value)
+            })
+            .collect()
+    }
+
+    /// The packed uint24 splits into the two 12-bit halves, low bits first, each under its own
+    /// name; a swap emits the post-swap bin as `active_id`.
+    #[test]
+    fn fee_update_emits_both_halves_and_swap_the_active_id() {
+        assert_eq!(
+            names_and_values(pool_event::Type::ProtocolFeeUpdated(
+                pool_event::ProtocolFeeUpdated { protocol_fee: 0x00_1005 }
+            )),
+            vec![
+                ("protocol_fees/zero2one".to_string(), vec![0x05]),
+                ("protocol_fees/one2zero".to_string(), vec![0x01]),
+            ]
+        );
+        assert_eq!(
+            names_and_values(swap(8_388_608)),
+            vec![("active_id".to_string(), vec![0x00, 0x80, 0x00, 0x00])]
+        );
+        assert!(names_and_values(mint(vec![1])).is_empty(), "bin events carry no pool attribute");
+    }
+
     fn reserves_store(writes: Vec<(u64, u32, Vec<u8>)>) -> FakeRawStore {
-        FakeRawStore(
+        FakeStore(
             writes
                 .into_iter()
                 .map(|(ordinal, bin_id, packed)| {

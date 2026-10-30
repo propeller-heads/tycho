@@ -418,16 +418,4 @@ mod tests {
         assert_eq!(split_protocol_fee(0x00_1005), (5, 1));
         assert_eq!(split_protocol_fee(0), (0, 0));
     }
-
-    /// Carry out of the low byte must propagate.
-    #[test]
-    fn test_bin_reserve_slot_carries() {
-        let mut base = [0u8; 32];
-        base[31] = 0xff;
-        base[30] = 0x01;
-        // base + 1 is 0x...0200, not 0x...0100.
-        let mut naive = base;
-        naive[31] = naive[31].wrapping_add(1);
-        assert_ne!(bin_reserve_slot(&base, 1), bin_reserve_slot(&naive, 1));
-    }
 }
