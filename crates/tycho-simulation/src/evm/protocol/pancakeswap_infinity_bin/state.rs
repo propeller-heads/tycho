@@ -22,7 +22,7 @@ use crate::evm::protocol::{
         attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, parse_bin_key},
         math::{
             bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
-            constants::MAX_LIQUIDITY_PER_BIN,
+            constants::{BIN_ID_COUNT, MAX_LIQUIDITY_PER_BIN, PIPS_DENOMINATOR},
             fee::{calculate_swap_fee, protocol_fee_amount},
         },
     },
@@ -42,36 +42,103 @@ const GAS_PER_BIN_CROSSED: u64 = 10_000;
 /// Only bins with liquidity are kept, and the `BTreeMap` order replaces the on-chain bitmap tree:
 /// the next non-empty bin is a range query. The one bin that can hold liquidity outside the tree
 /// is the active one, after a burn down to `MINIMUM_SHARE`; `active_in_tree` marks it.
+///
+/// Built through [`Self::new`], which holds the invariants `swap` relies on: every id fits the
+/// chain's u24, and no bin is kept at `(0, 0)`. Deserialization goes through it too.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PancakeswapInfinityBinStateData")]
 pub struct PancakeswapInfinityBinState {
     /// Bin the next swap starts in. u24 on chain.
-    pub active_id: u32,
+    pub(crate) active_id: u32,
     /// Whether the active bin is in the on-chain tree. A swap starts in the active bin either way,
     /// but once it moves off a bin outside the tree, no swap reaches that bin again until a mint
     /// re-adds it.
-    pub active_in_tree: bool,
+    pub(crate) active_in_tree: bool,
     /// Price ratio between neighbouring bins, in basis points.
-    pub bin_step: u16,
+    pub(crate) bin_step: u16,
     /// LP fee in pips (`1e6` denominator).
-    pub lp_fee: u32,
+    pub(crate) lp_fee: u32,
     /// Protocol fee in pips charged when selling token0, the low 12 bits of the packed fee.
-    pub protocol_fee_zero_for_one: u16,
+    pub(crate) protocol_fee_zero_for_one: u16,
     /// Protocol fee in pips charged when selling token1, the high 12 bits.
-    pub protocol_fee_one_for_zero: u16,
+    pub(crate) protocol_fee_one_for_zero: u16,
     /// `bin id -> (reserve_x, reserve_y)`, absolute reserves as indexed from `reserveOfBin`.
-    pub bins: BTreeMap<u32, (u128, u128)>,
+    pub(crate) bins: BTreeMap<u32, (u128, u128)>,
+}
+
+/// The wire shape of a state. `TryFrom` applies the invariants.
+#[derive(Deserialize)]
+struct PancakeswapInfinityBinStateData {
+    active_id: u32,
+    active_in_tree: bool,
+    bin_step: u16,
+    lp_fee: u32,
+    protocol_fee_zero_for_one: u16,
+    protocol_fee_one_for_zero: u16,
+    bins: BTreeMap<u32, (u128, u128)>,
+}
+
+impl TryFrom<PancakeswapInfinityBinStateData> for PancakeswapInfinityBinState {
+    type Error = SimulationError;
+
+    fn try_from(data: PancakeswapInfinityBinStateData) -> Result<Self, Self::Error> {
+        Self::new(
+            data.active_id,
+            data.active_in_tree,
+            data.bin_step,
+            data.lp_fee,
+            data.protocol_fee_zero_for_one,
+            data.protocol_fee_one_for_zero,
+            data.bins,
+        )
+    }
 }
 
 /// Outcome of an exact-input swap.
 #[derive(Debug)]
-pub struct BinSwapResult {
-    pub amount_out: u128,
+struct BinSwapResult {
+    /// Output the swap pays, over every bin it took from.
+    amount_out: u128,
     /// Bins stepped into beyond the first. Drives the gas estimate.
-    pub bins_crossed: u64,
-    pub new_state: PancakeswapInfinityBinState,
+    bins_crossed: u64,
+    new_state: PancakeswapInfinityBinState,
 }
 
 impl PancakeswapInfinityBinState {
+    /// A pool state, checked: `active_id` and every bin id below `BIN_ID_COUNT`, and no bin at
+    /// `(0, 0)`, which the walk would pay a crossing for.
+    pub fn new(
+        active_id: u32,
+        active_in_tree: bool,
+        bin_step: u16,
+        lp_fee: u32,
+        protocol_fee_zero_for_one: u16,
+        protocol_fee_one_for_zero: u16,
+        bins: BTreeMap<u32, (u128, u128)>,
+    ) -> Result<Self, SimulationError> {
+        let invalid = |message: String| SimulationError::InvalidInput(message, None);
+        if active_id >= BIN_ID_COUNT {
+            return Err(invalid(format!("active bin {active_id} is wider than the u24 on chain")));
+        }
+        for (&id, &reserves) in &bins {
+            if id >= BIN_ID_COUNT {
+                return Err(invalid(format!("bin {id} is wider than the u24 on chain")));
+            }
+            if reserves == (0, 0) {
+                return Err(invalid(format!("bin {id} holds nothing and must not be kept")));
+            }
+        }
+        Ok(Self {
+            active_id,
+            active_in_tree,
+            bin_step,
+            lp_fee,
+            protocol_fee_zero_for_one,
+            protocol_fee_one_for_zero,
+            bins,
+        })
+    }
+
     /// Exact-input swap across as many bins as the input reaches.
     ///
     /// Errors `InvalidInput("Out of liquidity")` when the bins run out first: on chain the whole
@@ -79,11 +146,7 @@ impl PancakeswapInfinityBinState {
     /// trade.
     ///
     /// [`BinPool.sol#L111-L222`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L111-L222)
-    pub fn swap(
-        &self,
-        swap_for_y: bool,
-        amount_in: u128,
-    ) -> Result<BinSwapResult, SimulationError> {
+    fn swap(&self, swap_for_y: bool, amount_in: u128) -> Result<BinSwapResult, SimulationError> {
         // Fixed before the loop, not per bin. Protocol fee is charged first, LP fee on the rest.
         let protocol_fee = self.protocol_fee(swap_for_y);
         let swap_fee = self.swap_fee(swap_for_y);
@@ -103,35 +166,27 @@ impl PancakeswapInfinityBinState {
 
             // A bin with nothing on the output side is skipped, not an error.
             if reserve_out > 0 {
-                let step = get_amounts_out(
-                    reserve_out,
-                    swap_fee,
-                    self.bin_step,
-                    swap_for_y,
-                    active,
-                    left,
-                )?;
+                let reserve_in = if swap_for_y { x } else { y };
+                let price = get_price_from_id(active, self.bin_step)?;
+                let step = get_amounts_out(reserve_out, swap_fee, price, swap_for_y, left)?;
                 // The protocol's cut leaves the pool: off the input, never off the output.
                 let protocol_share = protocol_fee_amount(step.fee_amount, protocol_fee, swap_fee)?;
                 let credited = step.amount_in_with_fee - protocol_share;
-
-                let credit = |reserve: u128| {
-                    reserve
-                        .checked_add(credited)
-                        .ok_or_else(|| {
-                            SimulationError::InvalidInput(
-                                format!("bin {active} reserve overflows crediting {credited}"),
-                                None,
-                            )
-                        })
-                };
+                let new_reserve_in = reserve_in
+                    .checked_add(credited)
+                    .ok_or_else(|| {
+                        SimulationError::InvalidInput(
+                            format!("bin {active} reserve overflows crediting {credited}"),
+                            None,
+                        )
+                    })?;
+                let new_reserve_out = reserve_out - step.amount_out;
                 let (new_x, new_y) = if swap_for_y {
-                    (credit(x)?, y - step.amount_out)
+                    (new_reserve_in, new_reserve_out)
                 } else {
-                    (x - step.amount_out, credit(y)?)
+                    (new_reserve_out, new_reserve_in)
                 };
 
-                let price = get_price_from_id(active, self.bin_step)?;
                 if get_liquidity(new_x, new_y, price)? > MAX_LIQUIDITY_PER_BIN {
                     return Err(SimulationError::InvalidInput(
                         format!("bin {active} exceeds MAX_LIQUIDITY_PER_BIN after the swap"),
@@ -266,7 +321,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
                 "Bin pools charge a directional protocol fee; use spot_price or get_amount_out"
             )
         }
-        self.swap_fee(true) as f64 / 1_000_000.0
+        self.swap_fee(true) as f64 / f64::from(PIPS_DENOMINATOR)
     }
 
     /// Price of the bin a buy of `base` fills first, fee markup included. Constant sum inside a
@@ -290,7 +345,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
         let correction = 10f64.powi(token0.decimals as i32 - token1.decimals as i32);
         let price = if base_is_x { price * correction } else { 1.0 / (price * correction) };
         let swap_fee = self.swap_fee(swap_for_y);
-        Ok(add_fee_markup(price, swap_fee as f64 / 1_000_000.0))
+        Ok(add_fee_markup(price, swap_fee as f64 / f64::from(PIPS_DENOMINATOR)))
     }
 
     fn get_amount_out(
@@ -463,15 +518,27 @@ mod tests {
     /// Pool with `bin_step` 10 and a 100-pip LP fee, no protocol fee, so `swap_fee` is 100 pips
     /// and the expectations below reuse the `math::bin` vectors.
     fn bin_state(active_id: u32, bins: &[(u32, (u128, u128))]) -> PancakeswapInfinityBinState {
-        PancakeswapInfinityBinState {
+        PancakeswapInfinityBinState::new(
             active_id,
-            active_in_tree: true,
-            bin_step: 10,
-            lp_fee: 100,
-            protocol_fee_zero_for_one: 0,
-            protocol_fee_one_for_zero: 0,
-            bins: bins.iter().copied().collect(),
-        }
+            true,
+            10,
+            100,
+            0,
+            0,
+            bins.iter().copied().collect(),
+        )
+        .unwrap()
+    }
+
+    /// Deserialization goes through `new`, so a wire state cannot skip the invariants.
+    #[rstest]
+    #[case::wide_active_id(r#"{"active_id":16777216,"active_in_tree":true,"bin_step":10,"lp_fee":100,"protocol_fee_zero_for_one":0,"protocol_fee_one_for_zero":0,"bins":{}}"#, "wider than the u24")]
+    #[case::wide_bin_id(r#"{"active_id":1,"active_in_tree":true,"bin_step":10,"lp_fee":100,"protocol_fee_zero_for_one":0,"protocol_fee_one_for_zero":0,"bins":{"16777216":[1,1]}}"#, "wider than the u24")]
+    #[case::empty_bin(r#"{"active_id":1,"active_in_tree":true,"bin_step":10,"lp_fee":100,"protocol_fee_zero_for_one":0,"protocol_fee_one_for_zero":0,"bins":{"1":[0,0]}}"#, "holds nothing")]
+    fn test_deserialize_applies_the_invariants(#[case] json: &str, #[case] message: &str) {
+        let err = serde_json::from_str::<PancakeswapInfinityBinState>(json)
+            .expect_err("an invalid wire state must not deserialize");
+        assert!(err.to_string().contains(message), "{err}");
     }
 
     /// Fits inside the active bin: no crossing, no move, reserves shift by the step's amounts.

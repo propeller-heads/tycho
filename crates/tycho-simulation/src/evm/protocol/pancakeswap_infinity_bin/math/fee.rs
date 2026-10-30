@@ -8,17 +8,16 @@
 use alloy::primitives::U256;
 use tycho_common::simulation::errors::SimulationError;
 
-use super::constants::{PIPS_DENOMINATOR, PRECISION};
-use crate::evm::protocol::safe_math::{safe_add_u256, safe_mul_u256};
+use super::constants::{PIPS_DENOMINATOR, PIPS_TO_PRECISION, PRECISION};
+use crate::evm::protocol::utils::solidity_math::{mul_div, mul_div_rounding_up};
 
 /// Fee already contained in an amount, rounded up. Charged when the input is smaller than the bin
 /// can absorb.
 ///
 /// [`FeeHelper.sol#L13-L19`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/FeeHelper.sol#L13-L19)
 pub fn get_fee_amount_from(amount_with_fee: u128, fee_pips: u32) -> Result<u128, SimulationError> {
-    let total_fee = U256::from(fee_pips) * U256::from(1_000_000_000_000u64);
-    let numerator = safe_mul_u256(U256::from(amount_with_fee), total_fee)?;
-    let fee = safe_add_u256(numerator, PRECISION - U256::from(1))? / PRECISION;
+    let total_fee = U256::from(fee_pips) * PIPS_TO_PRECISION;
+    let fee = mul_div_rounding_up(U256::from(amount_with_fee), total_fee, PRECISION)?;
     u128::try_from(fee)
         .map_err(|_| SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None))
 }
@@ -27,21 +26,19 @@ pub fn get_fee_amount_from(amount_with_fee: u128, fee_pips: u32) -> Result<u128,
 /// net reserve. Denominator is `1e18 - total_fee`, so this is not [`get_fee_amount_from`]
 /// rearranged.
 ///
-/// Rejects fees at or above `1e6` pips: the denominator would underflow, and `fee_pips` arrives
-/// from an indexer attribute. On-chain cap is `100_000` (10%).
+/// Rejects fees at or above `PIPS_DENOMINATOR`: the denominator would underflow, and `fee_pips`
+/// arrives from an indexer attribute. On-chain cap is `100_000` (10%).
 ///
 /// [`FeeHelper.sol#L25-L32`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/FeeHelper.sol#L25-L32)
 pub fn get_fee_amount(amount: u128, fee_pips: u32) -> Result<u128, SimulationError> {
-    if fee_pips >= 1_000_000 {
+    if fee_pips >= PIPS_DENOMINATOR {
         return Err(SimulationError::InvalidInput(
-            format!("fee out of range: {fee_pips} pips"),
+            format!("fee out of range: {fee_pips} pips, must be below {PIPS_DENOMINATOR}"),
             None,
         ));
     }
-    let total_fee = U256::from(fee_pips) * U256::from(1_000_000_000_000u64);
-    let denominator = PRECISION - total_fee;
-    let numerator = safe_mul_u256(U256::from(amount), total_fee)?;
-    let fee = safe_add_u256(numerator, denominator - U256::from(1))? / denominator;
+    let total_fee = U256::from(fee_pips) * PIPS_TO_PRECISION;
+    let fee = mul_div_rounding_up(U256::from(amount), total_fee, PRECISION - total_fee)?;
     u128::try_from(fee)
         .map_err(|_| SimulationError::InvalidInput(format!("fee overflows u128: {fee}"), None))
 }
@@ -80,8 +77,7 @@ pub fn protocol_fee_amount(
     if u32::from(protocol_fee) == swap_fee {
         return Ok(fee_amount);
     }
-    let share =
-        safe_mul_u256(U256::from(fee_amount), U256::from(protocol_fee))? / U256::from(swap_fee);
+    let share = mul_div(U256::from(fee_amount), U256::from(protocol_fee), U256::from(swap_fee))?;
     u128::try_from(share).map_err(|_| {
         SimulationError::InvalidInput(format!("protocol fee overflows u128: {share}"), None)
     })

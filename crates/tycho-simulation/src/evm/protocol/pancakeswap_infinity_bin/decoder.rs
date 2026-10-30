@@ -7,9 +7,12 @@ use super::{
     attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, decode_u32},
     state::PancakeswapInfinityBinState,
 };
-use crate::protocol::{
-    errors::InvalidSnapshotError,
-    models::{DecoderContext, TryFromWithBlock},
+use crate::{
+    evm::protocol::utils::uniswap::lp_fee::DYNAMIC_FEE_FLAG,
+    protocol::{
+        errors::InvalidSnapshotError,
+        models::{DecoderContext, TryFromWithBlock},
+    },
 };
 
 impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBinState {
@@ -78,7 +81,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
         // A zeroed bin holds nothing; the swap walk would pay a crossing for it.
         bins.retain(|_, reserves| *reserves != (0, 0));
 
-        Ok(Self {
+        Self::new(
             active_id,
             active_in_tree,
             bin_step,
@@ -86,16 +89,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
             protocol_fee_zero_for_one,
             protocol_fee_one_for_zero,
             bins,
-        })
+        )
+        .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
     }
 }
 
 /// Swap-related bits of the hooks registration bitmap (`IBinHooks.sol:10-23`): `beforeSwap`,
 /// `afterSwap` and their returns-delta variants.
 const SWAP_HOOK_BITS: u16 = (1 << 6) | (1 << 7) | (1 << 10) | (1 << 11);
-
-/// `LPFeeLibrary.DYNAMIC_FEE_FLAG`: the LP fee comes from the hook.
-const DYNAMIC_FEE_FLAG: u32 = 0x80_0000;
 
 /// Whether the PoolKey `parameters` word registers a swap hook. The bitmap is its low 16 bits.
 fn has_swap_hooks(parameters: &Bytes) -> Result<bool, InvalidSnapshotError> {
