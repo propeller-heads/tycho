@@ -1,3 +1,11 @@
+## [0.492.1](https://github.com/propeller-heads/tycho/compare/0.492.0...0.492.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* block Fluid pools that have paused swaps ([07b87c3](https://github.com/propeller-heads/tycho/commit/07b87c31c4c91cebefec6bb6ef4b37d183e5d890))
+* block Fluid pools that have paused swaps ([#1709](https://github.com/propeller-heads/tycho/issues/1709)) ([1e22d7d](https://github.com/propeller-heads/tycho/commit/1e22d7dc048ec0a53c59bb2d638ab783528638ee))
+
 ## [0.492.0](https://github.com/propeller-heads/tycho/compare/0.491.1...0.492.0) (2026-10-29)
 
 
