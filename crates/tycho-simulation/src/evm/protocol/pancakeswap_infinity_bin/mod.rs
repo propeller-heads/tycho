@@ -4,13 +4,12 @@
 //! `(1 + bin_step / 10_000) ^ (id - 2^23)`, so a swap walks bins one at a time, draining the
 //! output-side reserve of each, and the quote is exact per bin with no square roots.
 //!
-//! State comes from the `pancakeswap_infinity_bin` substreams package:
+//! State comes from the `base-pancakeswap-infinity-bin` substreams package:
 //! - static: `bin_step` (u16 BE), `key_lp_fee` (LP fee in pips), `parameters` (the raw PoolKey
 //!   word, checked for swap hooks)
-//! - dynamic: `active_id`, `active_in_tree` (whether the active bin is in the bitmap tree, or is
-//!   dust a burn left behind), `fee` (the LP fee again; static pools never change it),
-//!   `protocol_fees/zero2one`, `protocol_fees/one2zero`, `bins/{id}` (the raw 32-byte
-//!   `reserveOfBin` word, y in the high 128 bits, x in the low)
+//! - dynamic: `active_id`, `active_in_tree`, `fee`, `protocol_fees/zero2one`,
+//!   `protocol_fees/one2zero`, `bins/{id}/reserve_x`, `bins/{id}/reserve_y`; encodings in
+//!   [`attributes`]
 //!
 //! That package indexes only pools with a static LP fee and no swap hook, so nothing here models a
 //! hook or a fee that moves mid-swap.
