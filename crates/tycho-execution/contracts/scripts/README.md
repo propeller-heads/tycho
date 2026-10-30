@@ -71,6 +71,26 @@ Via the safe wallet UI:
 6. Set fee amounts in FeeCalculator
 7. Set the pauser wallets
 
+### Deploy subsidies
+
+The `SubsidyPayer` must be deployed **before** the `TychoSubsidizingExecutor`, as the executor requires its address.
+The chain's router must already be in `config/router_addresses.json`.
+
+1. Check the roles in `scripts/roles.json`. The payer takes `SUBSIDY_SIGNER` as its signer and these role holders:
+   - `SIGNER_SETTER_ROLE` and `BUDGET_ROLE`: the first `EXECUTOR_SETTER_ROLE` address
+   - `PAUSER_ADMIN_ROLE` and `UNPAUSER_ROLE`: the first `UNPAUSER_ROLE` address
+   - `PAUSER_ROLE`: every `PAUSER_ROLE` address
+2. Deploy the payer: `npx hardhat run scripts/deploy-subsidy-payer.js --network NETWORK`
+3. Set the printed payer address as the `subsidy` argument in `config/executor_deployments.json`
+4. Deploy the executor with `deploy-executors.js` (see "Deploy executors")
+5. Fill in the executor address as `subsidy` in `config/executor_addresses.json`, and the payer address as
+   `payer_address` under `subsidy` in `config/protocol_specific_addresses.json`
+6. Fund the payer: send it the subsidy tokens, or ETH
+
+Via the safe wallet UI:
+
+7. Set the executor address on the router
+
 ### Publish the deployment
 
 1. Add the complete deployment snapshot under the chain's `scheduled_successor` field. Keep the current deployment active during the notice period.
