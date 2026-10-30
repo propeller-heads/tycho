@@ -1472,7 +1472,6 @@ impl TestRunner {
             filtered_execution_data.clone(),
             block,
             router_overwrites_data,
-            None,
         )
         .await
         .map_err(|(error, _, _)| error)?;
