@@ -246,8 +246,12 @@ mod tests {
     /// with the step-by-step truncation.
     #[test]
     fn test_price_one_bin_above_shift_is_base() {
-        assert_eq!(get_price_from_id(REAL_ID_SHIFT + 1, 25).unwrap(), get_base(25));
-        assert_eq!(get_price_from_id(REAL_ID_SHIFT + 1, 10).unwrap(), get_base(10));
+        // `(1 + step / 10_000) << 128`, floored as `getBase` does.
+        let base_25 = U256::from_str_radix("341133072838240809622033043950347631984", 10).unwrap();
+        let base_10 = U256::from_str_radix("340622649287859401926837982039199979667", 10).unwrap();
+        assert_eq!(get_base(25), base_25);
+        assert_eq!(get_price_from_id(REAL_ID_SHIFT + 1, 25).unwrap(), base_25);
+        assert_eq!(get_price_from_id(REAL_ID_SHIFT + 1, 10).unwrap(), base_10);
     }
 
     /// One bin below the shift, i.e. the negative-exponent path where the two inversions cancel.
