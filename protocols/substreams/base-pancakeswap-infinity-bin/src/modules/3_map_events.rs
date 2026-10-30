@@ -1,5 +1,6 @@
 use crate::{
     abi::bin_pool_manager::events::{Burn, Donate, Initialize, Mint, ProtocolFeeUpdated, Swap},
+    keys::pool_key,
     modules::map_pool_created::decode_address,
     pb::pancakeswap::infinity::bin::{
         events::{
@@ -66,13 +67,13 @@ fn log_to_event(
     pools_store: &StoreGetProto<Pool>,
 ) -> Option<PoolEvent> {
     let (pool_id, event) = decode_log(log, pool_manager)?;
-    let pool = pools_store.get_last(format!("pool:{pool_id}"))?;
+    let pool = pools_store.get_last(pool_key(&pool_id))?;
 
     Some(PoolEvent {
         log_ordinal: log.ordinal,
         pool_id,
-        currency0: pool.currency0.to_hex(),
-        currency1: pool.currency1.to_hex(),
+        currency0: pool.currency0,
+        currency1: pool.currency1,
         transaction: Some(tx.into()),
         r#type: Some(event),
     })
@@ -82,13 +83,13 @@ fn log_to_event(
 ///
 /// `Initialize` is decoded here as well as in `1_map_pool_created` because `store_active_id` seeds
 /// the active bin from it.
-fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
+fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(Vec<u8>, Type)> {
     if log.address != pool_manager {
         return None;
     }
     if let Some(init) = Initialize::match_and_decode(log) {
         Some((
-            init.id.to_vec().to_hex(),
+            init.id.to_vec(),
             Type::Initialize(pool_event::Initialize {
                 fee: init.fee.into(),
                 bin_step: crate::parameters::bin_step(&init.parameters) as u32,
@@ -99,7 +100,7 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
         ))
     } else if let Some(swap) = Swap::match_and_decode(log) {
         Some((
-            swap.id.to_vec().to_hex(),
+            swap.id.to_vec(),
             Type::Swap(pool_event::Swap {
                 sender: swap.sender.to_hex(),
                 amount0: swap.amount0.to_string(),
@@ -110,7 +111,7 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
         ))
     } else if let Some(mint) = Mint::match_and_decode(log) {
         Some((
-            mint.id.to_vec().to_hex(),
+            mint.id.to_vec(),
             Type::Mint(pool_event::Mint {
                 sender: mint.sender.to_hex(),
                 ids: bin_ids(&mint.ids),
@@ -119,7 +120,7 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
         ))
     } else if let Some(burn) = Burn::match_and_decode(log) {
         Some((
-            burn.id.to_vec().to_hex(),
+            burn.id.to_vec(),
             Type::Burn(pool_event::Burn {
                 sender: burn.sender.to_hex(),
                 ids: bin_ids(&burn.ids),
@@ -128,7 +129,7 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
         ))
     } else if let Some(donate) = Donate::match_and_decode(log) {
         Some((
-            donate.id.to_vec().to_hex(),
+            donate.id.to_vec(),
             Type::Donate(pool_event::Donate {
                 sender: donate.sender.to_hex(),
                 amount0: donate.amount0.to_string(),
@@ -137,7 +138,7 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(String, Type)> {
             }),
         ))
     } else if let Some(fee_updated) = ProtocolFeeUpdated::match_and_decode(log) {
-        let pool_id = fee_updated.id.to_vec().to_hex();
+        let pool_id = fee_updated.id.to_vec();
         Some((
             pool_id.clone(),
             Type::ProtocolFeeUpdated(pool_event::ProtocolFeeUpdated {
@@ -215,7 +216,7 @@ mod tests {
 
         let (pool_id, event) = decode_log(&log, &POOL_MANAGER).expect("Initialize decodes");
 
-        assert_eq!(pool_id, POOL_ID.to_vec().to_hex());
+        assert_eq!(pool_id, POOL_ID.to_vec());
         let Type::Initialize(init) = event else { panic!("wrong event type") };
         assert_eq!((init.fee, init.bin_step, init.active_id), (7, 10, 8_388_608));
     }

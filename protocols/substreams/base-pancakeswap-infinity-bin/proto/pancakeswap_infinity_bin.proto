@@ -100,10 +100,10 @@ message Events {
       ProtocolFeeUpdated protocol_fee_updated = 6;
     }
     uint64 log_ordinal = 100;
-    // 0x-prefixed hex of the bytes32 pool id; also the Tycho component id.
-    string pool_id = 102;
-    string currency0 = 103;
-    string currency1 = 104;
+    // The raw bytes32 pool id. Its 0x-hex is the Tycho component id.
+    bytes pool_id = 102;
+    bytes currency0 = 103;
+    bytes currency1 = 104;
     Transaction transaction = 105;
 
     message Initialize {
@@ -154,7 +154,7 @@ message Events {
     }
 
     message ProtocolFeeUpdated {
-      string pool_id = 1;
+      bytes pool_id = 1;
       // uint24: bits [0,12) zero-for-one, bits [12,24) one-for-zero (ProtocolFeeLibrary.sol:22-31).
       uint32 protocol_fee = 2;
     }

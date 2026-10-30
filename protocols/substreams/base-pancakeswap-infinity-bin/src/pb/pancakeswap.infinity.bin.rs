@@ -134,13 +134,13 @@ pub mod events {
     pub struct PoolEvent {
         #[prost(uint64, tag="100")]
         pub log_ordinal: u64,
-        /// 0x-prefixed hex of the bytes32 pool id; also the Tycho component id.
-        #[prost(string, tag="102")]
-        pub pool_id: ::prost::alloc::string::String,
-        #[prost(string, tag="103")]
-        pub currency0: ::prost::alloc::string::String,
-        #[prost(string, tag="104")]
-        pub currency1: ::prost::alloc::string::String,
+        /// The raw bytes32 pool id. Its 0x-hex is the Tycho component id.
+        #[prost(bytes="vec", tag="102")]
+        pub pool_id: ::prost::alloc::vec::Vec<u8>,
+        #[prost(bytes="vec", tag="103")]
+        pub currency0: ::prost::alloc::vec::Vec<u8>,
+        #[prost(bytes="vec", tag="104")]
+        pub currency1: ::prost::alloc::vec::Vec<u8>,
         #[prost(message, optional, tag="105")]
         pub transaction: ::core::option::Option<super::Transaction>,
         #[prost(oneof="pool_event::Type", tags="1, 2, 3, 4, 5, 6")]
@@ -223,8 +223,8 @@ pub mod events {
         #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ProtocolFeeUpdated {
-            #[prost(string, tag="1")]
-            pub pool_id: ::prost::alloc::string::String,
+            #[prost(bytes="vec", tag="1")]
+            pub pool_id: ::prost::alloc::vec::Vec<u8>,
             /// uint24: bits [0,12) zero-for-one, bits [12,24) one-for-zero (ProtocolFeeLibrary.sol:22-31).
             #[prost(uint32, tag="2")]
             pub protocol_fee: u32,

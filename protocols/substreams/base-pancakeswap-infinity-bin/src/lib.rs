@@ -25,6 +25,7 @@
 //! `bins/{bin_id}/reserve_y`.
 
 pub mod abi;
+pub mod keys;
 pub mod modules;
 pub mod parameters;
 pub mod pb;

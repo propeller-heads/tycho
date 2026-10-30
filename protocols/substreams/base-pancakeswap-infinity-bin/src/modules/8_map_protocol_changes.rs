@@ -1,5 +1,5 @@
 use crate::{
-    modules::store_bin_reserves::bin_reserves_key,
+    keys::bin_reserves_key,
     parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
@@ -23,7 +23,7 @@ use tycho_substreams::{
     },
 };
 
-type PoolAddress = Vec<u8>;
+type PoolId = Vec<u8>;
 
 // `Transaction` is tycho's, not this package's proto one. The `From<&bin::Transaction>` impls in
 // modules/mod.rs are what make `.into()` below compile.
@@ -116,12 +116,12 @@ pub fn collect_transaction_changes<S: StoreGet<Vec<u8>>>(
         .pool_events
         .into_iter()
         .flat_map(event_to_attributes_updates)
-        .for_each(|(tx, pool_address, attr)| {
+        .for_each(|(tx, pool_id, attr)| {
             let builder = transaction_changes
                 .entry(tx.index)
                 .or_insert_with(|| TransactionChangesBuilder::new(&tx));
             builder.add_entity_change(&EntityChanges {
-                component_id: pool_address.to_hex(),
+                component_id: pool_id.to_hex(),
                 attributes: vec![attr],
             });
         });
@@ -153,8 +153,8 @@ pub fn collect_transaction_changes<S: StoreGet<Vec<u8>>>(
 fn bin_attributes<S: StoreGet<Vec<u8>>>(
     bin_deltas: BinDeltas,
     bin_reserves_store: &S,
-) -> Vec<(BinTransaction, PoolAddress, Attribute)> {
-    let mut attributes: Vec<(u64, BinTransaction, PoolAddress, Attribute)> = Vec::new();
+) -> Vec<(BinTransaction, PoolId, Attribute)> {
+    let mut attributes: Vec<(u64, BinTransaction, PoolId, Attribute)> = Vec::new();
     for delta in bin_deltas.deltas {
         let change = bin_change_type(&delta);
         let tx = delta.transaction.unwrap();
@@ -229,7 +229,7 @@ fn bin_change_type(delta: &BinDelta) -> Option<ChangeType> {
     }
 }
 
-fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddress, Attribute)> {
+fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolId, Attribute)> {
     let updates: Vec<(&str, BigInt)> = match event.r#type.as_ref().unwrap() {
         pool_event::Type::Swap(swap) => vec![("active_id", BigInt::from(swap.active_id))],
         pool_event::Type::ProtocolFeeUpdated(updated) => {
@@ -250,7 +250,6 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddres
         .as_ref()
         .unwrap()
         .into();
-    let pool_address = hex::decode(event.pool_id.trim_start_matches("0x")).unwrap();
     updates
         .into_iter()
         .map(|(name, value)| {
@@ -259,7 +258,7 @@ fn event_to_attributes_updates(event: PoolEvent) -> Vec<(Transaction, PoolAddres
                 value: value.to_signed_bytes_be(),
                 change: ChangeType::Update.into(),
             };
-            (tx.clone(), pool_address.clone(), attribute)
+            (tx.clone(), event.pool_id.clone(), attribute)
         })
         .collect()
 }
