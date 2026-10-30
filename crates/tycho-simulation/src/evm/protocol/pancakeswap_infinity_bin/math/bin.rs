@@ -40,7 +40,7 @@ pub struct BinAmounts {
     pub amount_in_with_fee: u128,
     /// Output taken out of the bin. Never exceeds the bin's output reserve.
     pub amount_out: u128,
-    /// Total fee inside `amount_in_with_fee`, split between LPs and the protocol by the caller.
+    /// Total fee inside `amount_in_with_fee`, the LP and protocol shares together.
     pub fee_amount: u128,
 }
 
@@ -123,8 +123,8 @@ pub fn get_drain_amounts(
 /// Liquidity a bin holds, `price * x + (y << 128)`. Both terms count: the active bin has both
 /// reserves.
 ///
-/// Errors where the Solidity reverts `BinHelper__LiquidityOverflow`. `swap` needs it for the
-/// `MAX_LIQUIDITY_PER_BIN` check after crediting a bin.
+/// Errors where the Solidity reverts `BinHelper__LiquidityOverflow`. Compared against
+/// `MAX_LIQUIDITY_PER_BIN` to tell whether a bin can take a credit.
 ///
 /// [`BinHelper.sol#L124-L156`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinHelper.sol#L124-L156)
 pub fn get_liquidity(x: u128, y: u128, price: U256) -> Result<U256, SimulationError> {

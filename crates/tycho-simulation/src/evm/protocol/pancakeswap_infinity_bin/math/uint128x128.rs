@@ -24,7 +24,10 @@ pub fn pow(x: U256, y: i32) -> Result<U256, SimulationError> {
     let mut invert = y < 0;
     let mut abs_y = y.unsigned_abs(); // u32; i32::MIN is fine, lands out of range below
     if abs_y >= 0x100000 {
-        return Err(SimulationError::InvalidInput(format!("pow exponent out of range: {y}"), None));
+        return Err(SimulationError::InvalidInput(
+            format!("pow exponent out of range: {y}, |y| must be below 2^20"),
+            None,
+        ));
     }
     let mut squared = x;
     if squared > U256::from(u128::MAX) {

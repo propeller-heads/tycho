@@ -99,7 +99,7 @@ impl TryFrom<PancakeswapInfinityBinStateData> for PancakeswapInfinityBinState {
 struct BinSwapResult {
     /// Output the swap pays, over every bin it took from.
     amount_out: u128,
-    /// Bins stepped into beyond the first. Drives the gas estimate.
+    /// Bins stepped into beyond the first.
     bins_crossed: u64,
     new_state: PancakeswapInfinityBinState,
 }
