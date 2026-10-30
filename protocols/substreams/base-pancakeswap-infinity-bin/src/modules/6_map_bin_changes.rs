@@ -428,8 +428,8 @@ mod tests {
     }
 
     /// Stands in for the host store with the engine's semantics: `get_at(ord)` returns the state
-    /// including every write at or below `ord` (`storage/store/value_get.go`, `getAt` rewinds only
-    /// deltas whose ordinal is strictly greater).
+    /// including every write at or below `ord` (`getAt` in streamingfast/substreams
+    /// `storage/store/value_get.go` rewinds only deltas whose ordinal is strictly greater).
     /// `store_active_id` writes the post-swap id at the swap's own ordinal, so reading at that
     /// ordinal returns the post value and the crossed-bin range collapses to one bin.
     #[test]
@@ -442,8 +442,8 @@ mod tests {
         assert_eq!(pre, Some(8_388_608), "read the state before this swap, not after it");
     }
 
-    /// With no earlier write the swap is the pool's first, and the caller falls back to the post
-    /// id.
+    /// With no earlier write there is no pre-swap id. The caller errors: on chain `Initialize`
+    /// always precedes a pool's first swap, so the store has lost it.
     #[test]
     fn pre_swap_active_id_is_none_without_an_earlier_write() {
         let store = FakeStore(vec![(9, pool_key(&POOL_ID), 8_388_610)]);
