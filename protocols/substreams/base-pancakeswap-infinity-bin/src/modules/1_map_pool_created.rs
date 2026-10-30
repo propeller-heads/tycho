@@ -124,9 +124,6 @@ fn pool_created(
                 attribute("balance_owner", vault.to_vec()),
                 // Mutable, so state rather than static: every Swap moves it.
                 attribute("active_id", event.active_id.to_signed_bytes_be()),
-                // Mirrors key_lp_fee and never changes for a static-fee pool, but the decoder
-                // prefers `fee`, so it has to exist.
-                attribute("fee", event.fee.to_signed_bytes_be()),
                 attribute(
                     "protocol_fees/zero2one",
                     BigInt::from(fee_zero2one).to_signed_bytes_be(),
@@ -437,7 +434,6 @@ mod tests {
         let state = &change.entity_changes[0].attributes;
         assert_attr(state, "balance_owner", hex::decode(VAULT).unwrap());
         assert_attr(state, "active_id", BigInt::from(ACTIVE_ID).to_signed_bytes_be());
-        assert_attr(state, "fee", BigInt::from(7).to_signed_bytes_be());
         assert_attr(state, "protocol_fees/zero2one", BigInt::from(200).to_signed_bytes_be());
         assert_attr(state, "protocol_fees/one2zero", BigInt::from(300).to_signed_bytes_be());
     }
