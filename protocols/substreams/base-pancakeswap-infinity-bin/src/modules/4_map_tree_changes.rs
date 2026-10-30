@@ -100,7 +100,7 @@ fn event_to_tree_deltas(
         pool_event::Type::ProtocolFeeUpdated(..) => return Vec::new(),
     };
 
-    let pool_id = hex::decode(event.pool_id.trim_start_matches("0x")).expect("pool_id is hex");
+    let pool_id = &event.pool_id;
     let base = parameters::pool_state_base_slot(
         pool_id
             .as_slice()
@@ -193,9 +193,9 @@ mod tests {
     fn event(kind: Type, ordinal: u64) -> PoolEvent {
         PoolEvent {
             log_ordinal: ordinal,
-            pool_id: format!("0x{POOL_ID}"),
-            currency0: String::new(),
-            currency1: String::new(),
+            pool_id: pool_id_bytes().to_vec(),
+            currency0: Vec::new(),
+            currency1: Vec::new(),
             transaction: Some(Transaction { hash: vec![1], from: vec![], to: vec![], index: 0 }),
             r#type: Some(kind),
         }

@@ -1,11 +1,14 @@
 use substreams::store::{StoreNew, StoreSet, StoreSetInt64};
 
-use crate::pb::pancakeswap::infinity::bin::{
-    events::{pool_event, PoolEvent},
-    Events,
+use crate::{
+    keys::pool_key,
+    pb::pancakeswap::infinity::bin::{
+        events::{pool_event, PoolEvent},
+        Events,
+    },
 };
 
-/// Tracks the active bin per pool (`pool:{id}`) from `Initialize` and `Swap`.
+/// Tracks the active bin per pool from `Initialize` and `Swap`.
 ///
 /// Writes at the LOG ordinal, never 0, so a reader can ask for the state as of any log in the
 /// block. A Bin `Swap` reports only the active bin AFTER the swap, and `get_at` includes the write
@@ -18,12 +21,12 @@ pub fn store_active_id(events: Events, store: StoreSetInt64) {
         .into_iter()
         .filter_map(event_to_active_id)
         .for_each(|(pool, ordinal, active_id)| {
-            store.set(ordinal, format!("pool:{pool}"), &i64::from(active_id))
+            store.set(ordinal, pool_key(&pool), &i64::from(active_id))
         });
 }
 
 /// `(pool_id, ordinal, active_id)`
-fn event_to_active_id(event: PoolEvent) -> Option<(String, u64, u32)> {
+fn event_to_active_id(event: PoolEvent) -> Option<(Vec<u8>, u64, u32)> {
     match event.r#type.as_ref().unwrap() {
         pool_event::Type::Initialize(initialize) => {
             Some((event.pool_id, event.log_ordinal, initialize.active_id))
@@ -41,14 +44,14 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    const POOL: &str = "0xabab";
+    const POOL: [u8; 2] = [0xab, 0xab];
 
     fn event(kind: pool_event::Type) -> PoolEvent {
         PoolEvent {
             log_ordinal: 9,
-            pool_id: POOL.to_string(),
-            currency0: String::new(),
-            currency1: String::new(),
+            pool_id: POOL.to_vec(),
+            currency0: Vec::new(),
+            currency1: Vec::new(),
             transaction: None,
             r#type: Some(kind),
         }
@@ -114,6 +117,6 @@ mod tests {
     fn writes_at_the_log_ordinal() {
         let (pool, ordinal, _) = event_to_active_id(event(swap(1))).expect("swap sets it");
 
-        assert_eq!((pool.as_str(), ordinal), (POOL, 9));
+        assert_eq!((pool.as_slice(), ordinal), (POOL.as_slice(), 9));
     }
 }

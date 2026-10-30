@@ -193,13 +193,6 @@ mod tests {
     #[test]
     fn component_id_is_the_hex_string_bytes() {
         let out = deltas(word(0, 0), word(1, 1));
-        assert_eq!(
-            out[0].component_id,
-            POOL_ID
-                .to_vec()
-                .to_hex()
-                .as_bytes()
-                .to_vec()
-        );
+        assert_eq!(out[0].component_id, format!("0x{}", "ab".repeat(32)).into_bytes());
     }
 }
