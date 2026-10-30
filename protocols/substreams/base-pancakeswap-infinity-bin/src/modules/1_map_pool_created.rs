@@ -17,7 +17,10 @@ struct Params {
 }
 
 /// Decodes a 20-byte address given as hex without the `0x` prefix.
-pub fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
+pub(crate) fn decode_address(
+    name: &str,
+    value: &str,
+) -> Result<Vec<u8>, substreams::errors::Error> {
     let bytes =
         hex::decode(value).map_err(|err| anyhow::anyhow!("Invalid {name} {value:?}: {err}"))?;
     if bytes.len() != 20 {

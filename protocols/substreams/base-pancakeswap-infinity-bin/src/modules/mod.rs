@@ -32,12 +32,6 @@ pub mod store_bin_reserves;
 #[path = "8_map_protocol_changes.rs"]
 pub mod map_protocol_changes;
 
-impl From<TransactionTrace> for Transaction {
-    fn from(value: TransactionTrace) -> Self {
-        Self { hash: value.hash, from: value.from, to: value.to, index: value.index.into() }
-    }
-}
-
 impl From<&TransactionTrace> for Transaction {
     fn from(value: &TransactionTrace) -> Self {
         Self {

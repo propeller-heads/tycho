@@ -15,11 +15,9 @@ pub fn store_pools(pools_created: BlockEntityChanges, store: StoreSetIfNotExists
                     .trim_start_matches("0x"),
             )
             .expect("component id is the pool id in hex");
-            let pool: Pool = Pool {
-                id: pool_id.clone(),
+            let pool = Pool {
                 currency0: component_change.tokens[0].clone(),
                 currency1: component_change.tokens[1].clone(),
-                created_tx_hash: change.tx.as_ref().unwrap().hash.clone(),
             };
             store.set_if_not_exists(0, pool_key(&pool_id), &pool);
         }

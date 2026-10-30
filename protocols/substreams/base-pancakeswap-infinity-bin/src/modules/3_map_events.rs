@@ -15,7 +15,6 @@ use substreams_ethereum::{
     pb::eth::v2::{self as eth, Log, TransactionTrace},
     Event,
 };
-use substreams_helper::hex::Hexable;
 
 /// Decodes BinPoolManager logs of known pools into `Events`, sorted by log ordinal.
 ///
@@ -88,59 +87,27 @@ fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(Vec<u8>, Type)> {
     if let Some(init) = Initialize::match_and_decode(log) {
         Some((
             init.id.to_vec(),
-            Type::Initialize(pool_event::Initialize {
-                fee: init.fee.into(),
-                bin_step: crate::parameters::bin_step(&init.parameters) as u32,
-                active_id: init.active_id.into(),
-                hooks: init.hooks.to_vec().to_hex(),
-                parameters: init.parameters.to_vec(),
-            }),
+            Type::Initialize(pool_event::Initialize { active_id: init.active_id.into() }),
         ))
     } else if let Some(swap) = Swap::match_and_decode(log) {
-        Some((
-            swap.id.to_vec(),
-            Type::Swap(pool_event::Swap {
-                sender: swap.sender.to_hex(),
-                amount0: swap.amount0.to_string(),
-                amount1: swap.amount1.to_string(),
-                active_id: swap.active_id.into(),
-                fee: swap.fee.into(),
-            }),
-        ))
+        Some((swap.id.to_vec(), Type::Swap(pool_event::Swap { active_id: swap.active_id.into() })))
     } else if let Some(mint) = Mint::match_and_decode(log) {
-        Some((
-            mint.id.to_vec(),
-            Type::Mint(pool_event::Mint {
-                sender: mint.sender.to_hex(),
-                ids: bin_ids(&mint.ids),
-                salt: mint.salt.to_vec().to_hex(),
-            }),
-        ))
+        Some((mint.id.to_vec(), Type::Mint(pool_event::Mint { ids: bin_ids(&mint.ids) })))
     } else if let Some(burn) = Burn::match_and_decode(log) {
-        Some((
-            burn.id.to_vec(),
-            Type::Burn(pool_event::Burn {
-                sender: burn.sender.to_hex(),
-                ids: bin_ids(&burn.ids),
-                salt: burn.salt.to_vec().to_hex(),
-            }),
-        ))
+        Some((burn.id.to_vec(), Type::Burn(pool_event::Burn { ids: bin_ids(&burn.ids) })))
     } else if let Some(donate) = Donate::match_and_decode(log) {
         Some((
             donate.id.to_vec(),
             Type::Donate(pool_event::Donate {
-                sender: donate.sender.to_hex(),
                 amount0: donate.amount0.to_string(),
                 amount1: donate.amount1.to_string(),
                 bin_id: donate.bin_id.into(),
             }),
         ))
     } else if let Some(fee_updated) = ProtocolFeeUpdated::match_and_decode(log) {
-        let pool_id = fee_updated.id.to_vec();
         Some((
-            pool_id.clone(),
+            fee_updated.id.to_vec(),
             Type::ProtocolFeeUpdated(pool_event::ProtocolFeeUpdated {
-                pool_id,
                 protocol_fee: fee_updated.protocol_fee.into(),
             }),
         ))
@@ -200,9 +167,9 @@ mod tests {
         }
     }
 
-    /// `parameters` carries the bin step in bits 16..32, and `activeId` is a u24 in a full word.
+    /// `activeId` is the last word of the data, a u24 in a full word.
     #[test]
-    fn initialize_carries_bin_step_and_active_id() {
+    fn initialize_carries_the_active_id() {
         let mut parameters = vec![0u8; 32];
         // Bin step above an empty hook bitmap.
         parameters[28..].copy_from_slice(&(10u32 << 16).to_be_bytes());
@@ -216,12 +183,12 @@ mod tests {
 
         assert_eq!(pool_id, POOL_ID.to_vec());
         let Type::Initialize(init) = event else { panic!("wrong event type") };
-        assert_eq!((init.fee, init.bin_step, init.active_id), (7, 10, 8_388_608));
+        assert_eq!(init.active_id, 8_388_608);
     }
 
-    /// `amount0` and `amount1` are int128, so a sold side must survive as a negative string.
+    /// The post-swap active id is the third data word, after the two signed amounts.
     #[test]
-    fn swap_keeps_signed_amounts() {
+    fn swap_carries_the_post_active_id() {
         let mut negative = vec![0xffu8; 32];
         negative[31] = 0xfe;
         let log = log(
@@ -233,7 +200,6 @@ mod tests {
         let (_, event) = decode_log(&log, &POOL_MANAGER).expect("Swap decodes");
 
         let Type::Swap(swap) = event else { panic!("wrong event type") };
-        assert_eq!((swap.amount0.as_str(), swap.amount1.as_str()), ("1000", "-2"));
         assert_eq!(swap.active_id, 8_388_607);
     }
 
