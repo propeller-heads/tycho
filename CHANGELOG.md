@@ -1,3 +1,18 @@
+## [0.494.0](https://github.com/propeller-heads/tycho/compare/0.493.0...0.494.0) (2026-10-30)
+
+
+### Features
+
+* **execution:** register the redeployed Liquorice executors ([3814a15](https://github.com/propeller-heads/tycho/commit/3814a1561c6216b4b4d48e9fd08bce15abc6fb68))
+* **execution:** register the redeployed Liquorice executors ([#1695](https://github.com/propeller-heads/tycho/issues/1695)) ([2f13ebd](https://github.com/propeller-heads/tycho/commit/2f13ebdebbe02b3c02bceed1d65376bfbc11aa32))
+* **indexer:** count client subscribers removed for a full channel ([7f3ddc6](https://github.com/propeller-heads/tycho/commit/7f3ddc676ca414527b749495372ea8315a250d4c))
+* **indexer:** log the websocket subscription of a removed client ([4fb36fe](https://github.com/propeller-heads/tycho/commit/4fb36fe558bae7f42f86eff9ee34a970ba666807))
+
+
+### Bug Fixes
+
+* **indexer:** remove a slow websocket client instead of waiting for it ([6c5cd8c](https://github.com/propeller-heads/tycho/commit/6c5cd8c3dd09a5392a7bdece99cef93c5e82ab02))
+
 ## [0.493.0](https://github.com/propeller-heads/tycho/compare/0.492.1...0.493.0) (2026-10-30)
 
 
