@@ -1,5 +1,6 @@
 use crate::{
     abi::bin_pool_manager::events::{Burn, Donate, Initialize, Mint, ProtocolFeeUpdated, Swap},
+    modules::map_pool_created::decode_address,
     pb::pancakeswap::infinity::bin::{
         events::{
             pool_event::{self, Type},
@@ -32,7 +33,7 @@ pub fn map_events(
     block: eth::Block,
     pools_store: StoreGetProto<Pool>,
 ) -> Result<Events, anyhow::Error> {
-    let pool_manager = hex::decode(&params).expect("pool manager is hex");
+    let pool_manager = decode_address("pool_manager", &params)?;
     let mut pool_manager_events = block
         .transaction_traces
         .into_iter()

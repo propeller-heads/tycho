@@ -1,4 +1,5 @@
 use crate::{
+    modules::map_pool_created::decode_address,
     parameters::{self, BIN_POOLS_MAPPING_SLOT},
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
@@ -20,7 +21,7 @@ pub fn map_tree_changes(
     block: eth::Block,
     events: Events,
 ) -> Result<TreeDeltas, substreams::errors::Error> {
-    let pool_manager = hex::decode(&params).expect("pool manager is hex");
+    let pool_manager = decode_address("pool_manager", &params)?;
     let writes_by_tx = storage_writes_by_tx(&block, &pool_manager);
 
     let no_writes = HashMap::new();

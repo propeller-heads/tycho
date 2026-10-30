@@ -126,6 +126,24 @@ pub fn tree_level2_slot(base: &[u8; 32], segment: u32) -> [u8; 32] {
     mapping_slot(base, 6, segment)
 }
 
+/// A storage value as the 32-byte word it encodes. A shorter value is left-padded, as `bit_is_set`
+/// reads tree words; a longer one is not a word.
+pub fn reserve_word(value: &[u8]) -> Result<[u8; 32], anyhow::Error> {
+    let mut word = [0u8; 32];
+    let start = word
+        .len()
+        .checked_sub(value.len())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "reserve word is {} bytes, more than 32: {}",
+                value.len(),
+                hex::encode(value)
+            )
+        })?;
+    word[start..].copy_from_slice(value);
+    Ok(word)
+}
+
 /// Splits a packed `reserveOfBin` word into `(reserve_x, reserve_y)`.
 ///
 /// `PackedUint128Math` puts x in bits [0,128) and y in [128,256) (`decodeX` is
@@ -260,6 +278,16 @@ mod tests {
         expected[30] = 0x01;
         // Same hash input as a base that already sits at the carried value with offset 0.
         assert_eq!(mapping_slot(&base, 6, 7), mapping_slot(&expected, 0, 7));
+    }
+
+    /// A short value is the same number left-padded; 33 bytes cannot be a word.
+    #[rstest::rstest]
+    #[case::empty(vec![], Some([0u8; 32]))]
+    #[case::one_byte(vec![7], Some({ let mut w = [0u8; 32]; w[31] = 7; w }))]
+    #[case::full(vec![9u8; 32], Some([9u8; 32]))]
+    #[case::too_long(vec![0u8; 33], None)]
+    fn test_reserve_word_left_pads(#[case] value: Vec<u8>, #[case] expected: Option<[u8; 32]>) {
+        assert_eq!(reserve_word(&value).ok(), expected);
     }
 
     /// Only Y below the active bin, only X above. Pins which half is which.

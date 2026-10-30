@@ -1,4 +1,5 @@
 use crate::{
+    modules::map_pool_created::decode_address,
     parameters::{self, BIN_POOLS_MAPPING_SLOT},
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
@@ -22,7 +23,7 @@ pub fn map_bin_changes(
     active_id_store: StoreGetInt64,
     bin_trees_store: StoreGetRaw,
 ) -> Result<BinDeltas, substreams::errors::Error> {
-    let pool_manager = hex::decode(&params).expect("pool manager is hex");
+    let pool_manager = decode_address("pool_manager", &params)?;
     bin_changes(&pool_manager, &block, &events, &active_id_store, &bin_trees_store)
 }
 
@@ -274,8 +275,8 @@ fn event_to_deltas(
                 currency0: currency0.clone(),
                 currency1: currency1.clone(),
                 bin_id,
-                old_packed: first.old_value.clone(),
-                new_packed: last.new_value.clone(),
+                old_packed: parameters::reserve_word(&first.old_value)?.to_vec(),
+                new_packed: parameters::reserve_word(&last.new_value)?.to_vec(),
                 ordinal: event.log_ordinal,
                 transaction: event.transaction.clone(),
                 // Tree membership and the active bin are read by the caller, which has the stores.
@@ -752,6 +753,29 @@ mod tests {
             &active_store,
             &tree_store,
         )
+    }
+
+    /// Storage values leave here as 32-byte words whatever length Firehose gave them, so the
+    /// published `bins/{id}` always decodes; a longer value is a broken layout.
+    #[test]
+    fn reserve_words_are_widened_to_32_bytes() {
+        let deltas = run_block(
+            vec![write(100, vec![], vec![6], 5)],
+            vec![event(mint(vec![100]), 10)],
+            vec![(1, 100)],
+            vec![],
+        );
+
+        assert_eq!(deltas.deltas[0].old_packed, vec![0u8; 32]);
+        assert_eq!(deltas.deltas[0].new_packed, packed(6, 0));
+
+        let long = try_run_block(
+            vec![write(100, vec![], vec![0u8; 33], 5)],
+            vec![event(mint(vec![100]), 10)],
+            vec![(1, 100)],
+            vec![],
+        );
+        assert!(long.is_err(), "33 bytes is not a storage word");
     }
 
     /// A swap's end bin can be written back unchanged, which records no storage change: with an

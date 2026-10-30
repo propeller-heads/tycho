@@ -16,7 +16,7 @@ type BalanceTotals = BTreeMap<(u64, Vec<u8>, Vec<u8>), (BigInt, Option<Transacti
 pub fn map_balance_changes(
     bin_deltas: BinDeltas,
 ) -> Result<BlockBalanceDeltas, substreams::errors::Error> {
-    Ok(BlockBalanceDeltas { balance_deltas: balance_deltas(bin_deltas) })
+    Ok(BlockBalanceDeltas { balance_deltas: balance_deltas(bin_deltas)? })
 }
 
 /// Split out so tests can call it: the handler macro rewrites the signature to take raw pointers.
@@ -25,13 +25,15 @@ pub fn map_balance_changes(
 /// `BinDelta` carries that log's ordinal, while `store_balance_changes` panics unless ordinals are
 /// strictly increasing per (component, token). Summing per log is also the right number: the pool's
 /// balance moved by the total across the bins the event touched.
-fn balance_deltas(bin_deltas: BinDeltas) -> Vec<BalanceDelta> {
+fn balance_deltas(bin_deltas: BinDeltas) -> Result<Vec<BalanceDelta>, substreams::errors::Error> {
     // Keyed by ordinal first, so the iteration order is the order the store requires.
     let mut totals = BalanceTotals::new();
 
     for delta in bin_deltas.deltas {
-        let (old_x, old_y) = parameters::unpack_reserves(&packed(&delta.old_packed));
-        let (new_x, new_y) = parameters::unpack_reserves(&packed(&delta.new_packed));
+        let (old_x, old_y) =
+            parameters::unpack_reserves(&parameters::reserve_word(&delta.old_packed)?);
+        let (new_x, new_y) =
+            parameters::unpack_reserves(&parameters::reserve_word(&delta.new_packed)?);
 
         // UTF-8 of the 0x-hex id, as 1_map_pool_created emits it.
         let component_id = delta
@@ -56,7 +58,7 @@ fn balance_deltas(bin_deltas: BinDeltas) -> Vec<BalanceDelta> {
         }
     }
 
-    totals
+    Ok(totals
         .into_iter()
         .map(|((ord, component_id, token), (total, tx))| BalanceDelta {
             token,
@@ -65,17 +67,7 @@ fn balance_deltas(bin_deltas: BinDeltas) -> Vec<BalanceDelta> {
             ord,
             tx,
         })
-        .collect()
-}
-
-/// Packed reserve word. Short or missing reads as an empty bin, which is what a creation or
-/// deletion writes.
-fn packed(value: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    if value.len() == 32 {
-        out.copy_from_slice(value);
-    }
-    out
+        .collect())
 }
 
 /// Accumulates the deltas into absolute balances per (pool, token).
@@ -103,6 +95,13 @@ mod tests {
     }
 
     fn deltas(old: Vec<u8>, new: Vec<u8>) -> Vec<BalanceDelta> {
+        try_deltas(old, new).unwrap()
+    }
+
+    fn try_deltas(
+        old: Vec<u8>,
+        new: Vec<u8>,
+    ) -> Result<Vec<BalanceDelta>, substreams::errors::Error> {
         balance_deltas(BinDeltas {
             deltas: vec![BinDelta {
                 pool_id: POOL_ID.to_vec(),
@@ -149,6 +148,17 @@ mod tests {
         assert_eq!(out[0].ord, 3, "deltas carry the log's ordinal");
     }
 
+    /// A short word is the same number; a long one is a broken value, not a zero reserve, which
+    /// would book a minus-reserve delta.
+    #[test]
+    fn short_word_is_left_padded_and_long_word_errors() {
+        let out = deltas(vec![], vec![5]);
+        assert_eq!(amount(&out[0]), BigInt::from(5u64), "one trailing byte is x = 5");
+        assert_eq!(amount(&out[1]), BigInt::zero());
+
+        assert!(try_deltas(word(10, 20), vec![0u8; 33]).is_err(), "33 bytes is not a word");
+    }
+
     /// A Mint touching three bins is one log, so it must yield one delta per token carrying the
     /// summed amounts. Emitting one per bin repeats the ordinal and panics the balance store.
     #[test]
@@ -170,7 +180,8 @@ mod tests {
         let out = balance_deltas(BinDeltas {
             deltas: vec![bin(6, 1, 10), bin(7, 2, 20), bin(8, 4, 0)],
             left_bins: vec![],
-        });
+        })
+        .unwrap();
 
         assert_eq!(out.len(), 2, "one delta per token, not per bin");
         assert_eq!(amount(&out[0]), BigInt::from(7u64));
