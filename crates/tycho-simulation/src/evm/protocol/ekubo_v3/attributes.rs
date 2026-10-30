@@ -13,14 +13,15 @@ pub fn ticks_from_attributes<'a, T: IntoIterator<Item = (impl AsRef<str>, Cow<'a
             let key = key.as_ref();
             // Support both new "tick/" and legacy "ticks/" prefix
             (key.starts_with("tick/") || key.starts_with("ticks/")).then(|| {
-                key.split('/')
+                let index = key
+                    .split('/')
                     .nth(1)
                     .ok_or_else(|| "expected key name to contain tick index".to_string())?
                     .parse::<i32>()
-                    .map_or_else(
-                        |err| Err(format!("tick index can't be parsed as i32: {err}")),
-                        |index| Ok(Tick { index, liquidity_delta: value.into_owned().into() }),
-                    )
+                    .map_err(|err| format!("tick index can't be parsed as i32: {err}"))?;
+                let liquidity_delta =
+                    i128::try_from(value.into_owned()).map_err(|err| err.to_string())?;
+                Ok(Tick { index, liquidity_delta })
             })
         })
         .try_collect()
@@ -70,7 +71,10 @@ pub fn rate_deltas_from_attributes<
                 }
             };
 
-            let delta = value.into_owned().into();
+            let delta = match i128::try_from(value.into_owned()) {
+                Ok(delta) => delta,
+                Err(err) => return Some(Err(err.to_string())),
+            };
 
             Some(Ok((time, is_token1, delta)))
         })

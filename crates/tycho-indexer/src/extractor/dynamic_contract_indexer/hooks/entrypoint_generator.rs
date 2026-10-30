@@ -704,7 +704,7 @@ where
 
             let hooks = SolAddress::from_slice(data.hook_address.as_ref());
 
-            let fee = u32::from(
+            let fee = u32::try_from(
                 data.component
                     .static_attributes
                     .get("key_lp_fee")
@@ -718,9 +718,12 @@ where
                         )
                     })?
                     .clone(),
-            );
+            )
+            .map_err(|err| {
+                EntrypointGenerationError::EntrypointGenerationFailed(err.to_string())
+            })?;
 
-            let tick_spacing = i32::from(
+            let tick_spacing = i32::try_from(
                 data.component
                     .static_attributes
                     .get("tick_spacing")
@@ -734,7 +737,10 @@ where
                         )
                     })?
                     .clone(),
-            );
+            )
+            .map_err(|err| {
+                EntrypointGenerationError::EntrypointGenerationFailed(err.to_string())
+            })?;
 
             debug!(fee, tick_spacing, "Extracted pool parameters from component");
 

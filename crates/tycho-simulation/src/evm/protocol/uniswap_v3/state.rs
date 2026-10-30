@@ -479,7 +479,7 @@ impl ProtocolSim for UniswapV3State {
                 liquidity.clone()
             };
 
-            self.liquidity = u128::from(liq_16_bytes);
+            self.liquidity = u128::try_from(liq_16_bytes)?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -516,7 +516,7 @@ impl ProtocolSim for UniswapV3State {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }

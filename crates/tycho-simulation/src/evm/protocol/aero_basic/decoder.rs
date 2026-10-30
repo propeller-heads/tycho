@@ -52,8 +52,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AeroBasicState {
         };
         let stable = attribute(&snapshot.component.static_attributes, "is_stable")?.as_ref() == [1];
         let fees = AeroBasicFees {
-            custom_fee: u32::from(attribute(state, "custom_fee")?.clone()),
-            default_fee: u32::from(attribute(state, "default_fee")?.clone()),
+            custom_fee: u32::try_from(attribute(state, "custom_fee")?.clone())?,
+            default_fee: u32::try_from(attribute(state, "default_fee")?.clone())?,
             fee_module: attribute(state, "fee_module")?.clone(),
             paused: attribute(state, "paused")?
                 .iter()

@@ -213,7 +213,7 @@ impl ProtocolSim for AerodromeV1State {
             self.reserve1 = U256::from_be_slice(reserve1);
         }
         if let Some(fee) = delta.updated_attributes.get("fee") {
-            self.fee = u32::from(fee.clone());
+            self.fee = u32::try_from(fee.clone())?;
             let resolved_fee_bps = self.resolved_fee_bps();
             if resolved_fee_bps > FEE_PRECISION_BPS {
                 return Err(TransitionError::DecodeError(format!(

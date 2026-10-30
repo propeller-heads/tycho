@@ -1029,7 +1029,7 @@ impl ProtocolSim for UniswapV4State {
             .updated_attributes
             .get("liquidity")
         {
-            self.liquidity = u128::from(liquidity.clone());
+            self.liquidity = u128::try_from(liquidity.clone())?;
         }
         if let Some(sqrt_price) = delta
             .updated_attributes
@@ -1041,19 +1041,19 @@ impl ProtocolSim for UniswapV4State {
             self.tick = i24_be_bytes_to_i32(tick).into();
         }
         if let Some(lp_fee) = delta.updated_attributes.get("fee") {
-            self.fees.lp_fee = u32::from(lp_fee.clone());
+            self.fees.lp_fee = u32::try_from(lp_fee.clone())?;
         }
         if let Some(zero2one_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/zero2one")
         {
-            self.fees.zero_for_one = u32::from(zero2one_protocol_fee.clone());
+            self.fees.zero_for_one = u32::try_from(zero2one_protocol_fee.clone())?;
         }
         if let Some(one2zero_protocol_fee) = delta
             .updated_attributes
             .get("protocol_fees/one2zero")
         {
-            self.fees.one_for_zero = u32::from(one2zero_protocol_fee.clone());
+            self.fees.one_for_zero = u32::try_from(one2zero_protocol_fee.clone())?;
         }
 
         // apply tick changes
@@ -1066,7 +1066,7 @@ impl ProtocolSim for UniswapV4State {
                         parts[1]
                             .parse::<i32>()
                             .map_err(|err| TransitionError::DecodeError(err.to_string()))?,
-                        i128::from(value.clone()),
+                        i128::try_from(value.clone())?,
                     )
                     .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
             }
@@ -1289,6 +1289,33 @@ mod tests {
             Default::default(),
             100,
         )
+    }
+
+    #[test]
+    fn delta_with_oversized_liquidity_is_rejected_without_panicking() {
+        let mut pool = UniswapV4State::new(
+            1000,
+            U256::from_str("1000").unwrap(),
+            UniswapV4Fees { zero_for_one: 100, one_for_zero: 90, lp_fee: 700 },
+            100,
+            60,
+            vec![TickInfo::new(120, 10000).unwrap(), TickInfo::new(180, -10000).unwrap()],
+        )
+        .unwrap();
+        let address_sized = Bytes::from(vec![0x11_u8; 20]);
+        let delta = ProtocolStateDelta {
+            component_id: "State1".to_owned(),
+            updated_attributes: HashMap::from([("liquidity".to_string(), address_sized.clone())]),
+            deleted_attributes: HashSet::new(),
+        };
+
+        let result = pool.delta_transition(delta, &HashMap::new(), &Balances::default());
+
+        let Err(TransitionError::DecodeError(message)) = result else {
+            panic!("a 20-byte liquidity attribute must not apply");
+        };
+        assert!(message.contains(&address_sized.to_string()), "{message}");
+        assert_eq!(pool.liquidity, 1000);
     }
 
     #[test]

@@ -373,55 +373,66 @@ macro_rules! impl_from_uint_for_bytes {
 
 impl_from_uint_for_bytes!(u8, u16, u32, u64, u128);
 
-macro_rules! impl_from_bytes_for_uint {
-    ($($t:ty),*) => {
-        $(
-            impl From<Bytes> for $t {
-                fn from(src: Bytes) -> Self {
-                    let bytes_slice = src.as_ref();
-
-                    // Create an array with zeros.
-                    let mut buf = [0u8; std::mem::size_of::<$t>()];
-
-                    // Copy bytes from `bytes_slice` to the end of `buf` to maintain big-endian order.
-                    buf[std::mem::size_of::<$t>() - bytes_slice.len()..].copy_from_slice(bytes_slice);
-
-                    // Convert to the integer type using big-endian.
-                    <$t>::from_be_bytes(buf)
-                }
-            }
-        )*
-    };
+/// A big-endian byte string holds a value outside the integer type it was converted into.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{value} ({len} bytes) does not fit into {target}: at most {max} significant bytes")]
+pub struct IntegerFromBytesError {
+    value: Bytes,
+    len: usize,
+    target: &'static str,
+    max: usize,
 }
 
-impl_from_bytes_for_uint!(u8, u16, u32, u64, u128);
+impl IntegerFromBytesError {
+    fn new(value: Bytes, target: &'static str, max: usize) -> Self {
+        let len = value.len();
+        Self { value, len, target, max }
+    }
+}
 
-macro_rules! impl_from_bytes_for_signed_int {
-    ($($t:ty),*) => {
+/// Drops the leading bytes that carry no information: zero bytes for an unsigned value, and for a
+/// signed one the sign-extension bytes (`0x00` before a byte with a clear sign bit, `0xFF` before a
+/// byte with a set sign bit).
+fn significant_bytes(bytes: &[u8], signed: bool) -> &[u8] {
+    let Some(&first) = bytes.first() else { return bytes };
+    let fill = if signed && first & 0x80 != 0 { 0xFF } else { 0x00 };
+    let mut start = 0;
+    while start + 1 < bytes.len() && bytes[start] == fill {
+        let next_sign_matches = !signed || (bytes[start + 1] & 0x80) == (fill & 0x80);
+        if !next_sign_matches {
+            break;
+        }
+        start += 1;
+    }
+    &bytes[start..]
+}
+
+macro_rules! impl_try_from_bytes_for_int {
+    ($signed:literal, $($t:ty),*) => {
         $(
-            impl From<Bytes> for $t {
-                fn from(src: Bytes) -> Self {
-                    let bytes_slice = src.as_ref();
+            impl TryFrom<Bytes> for $t {
+                type Error = IntegerFromBytesError;
 
-                    // Create an array with zeros or ones for negative numbers.
-                    let mut buf = if bytes_slice.get(0).map_or(false, |&b| b & 0x80 != 0) {
-                        [0xFFu8; std::mem::size_of::<$t>()] // Sign-extend with 0xFF for negative numbers.
-                    } else {
-                        [0x00u8; std::mem::size_of::<$t>()] // Fill with 0x00 for positive numbers.
+                /// Interprets the bytes as a big-endian integer, sign-extending for signed
+                /// types. Fails when the value does not fit the target type.
+                fn try_from(src: Bytes) -> Result<Self, Self::Error> {
+                    const SIZE: usize = std::mem::size_of::<$t>();
+                    let digits = significant_bytes(src.as_ref(), $signed);
+                    let Some(pad) = SIZE.checked_sub(digits.len()) else {
+                        return Err(IntegerFromBytesError::new(src, stringify!($t), SIZE));
                     };
-
-                    // Copy bytes from `bytes_slice` to the end of `buf` to maintain big-endian order.
-                    buf[std::mem::size_of::<$t>() - bytes_slice.len()..].copy_from_slice(bytes_slice);
-
-                    // Convert to the signed integer type using big-endian.
-                    <$t>::from_be_bytes(buf)
+                    let negative = $signed && digits.first().is_some_and(|&b| b & 0x80 != 0);
+                    let mut buf = if negative { [0xFFu8; SIZE] } else { [0x00u8; SIZE] };
+                    buf[pad..].copy_from_slice(digits);
+                    Ok(<$t>::from_be_bytes(buf))
                 }
             }
         )*
     };
 }
 
-impl_from_bytes_for_signed_int!(i8, i16, i32, i64, i128);
+impl_try_from_bytes_for_int!(false, u8, u16, u32, u64, u128);
+impl_try_from_bytes_for_int!(true, i8, i16, i32, i64, i128);
 
 #[cfg(test)]
 mod tests {
@@ -505,22 +516,61 @@ mod tests {
     #[test]
     fn test_u128_from_bytes() {
         let data = Bytes::from(vec![4, 3, 2, 1]);
-        let result: u128 = u128::from(data.clone());
+        let result = u128::try_from(data).unwrap();
         assert_eq!(result, u128::from_str("67305985").unwrap());
     }
 
     #[test]
     fn test_i128_from_bytes() {
         let data = Bytes::from(vec![4, 3, 2, 1]);
-        let result: i128 = i128::from(data.clone());
+        let result = i128::try_from(data).unwrap();
         assert_eq!(result, i128::from_str("67305985").unwrap());
     }
 
     #[test]
     fn test_i32_from_bytes() {
         let data = Bytes::from(vec![4, 3, 2, 1]);
-        let result: i32 = i32::from(data);
+        let result = i32::try_from(data).unwrap();
         assert_eq!(result, i32::from_str("67305985").unwrap());
+    }
+
+    #[test]
+    fn int_from_bytes_sign_extends_negative_values() {
+        assert_eq!(i32::try_from(Bytes::from(vec![0xff])).unwrap(), -1);
+        assert_eq!(i32::try_from(Bytes::from(vec![0xff, 0xff, 0xfe])).unwrap(), -2);
+        assert_eq!(i128::try_from(Bytes::from(vec![0x80])).unwrap(), -128);
+    }
+
+    #[test]
+    fn uint_from_bytes_accepts_leading_zero_bytes() {
+        let mut data = vec![0u8; 16];
+        data.insert(0, 0);
+        data[1] = 0x80;
+        assert_eq!(u128::try_from(Bytes::from(data)).unwrap(), 1u128 << 127);
+        assert_eq!(u8::try_from(Bytes::from(vec![0, 0, 0, 7])).unwrap(), 7);
+        assert_eq!(u8::try_from(Bytes::from(vec![0, 0])).unwrap(), 0);
+        assert_eq!(u8::try_from(Bytes::from(vec![])).unwrap(), 0);
+    }
+
+    #[test]
+    fn int_from_bytes_accepts_redundant_sign_extension_bytes() {
+        assert_eq!(i8::try_from(Bytes::from(vec![0xff, 0xff, 0x80])).unwrap(), -128);
+        assert_eq!(i8::try_from(Bytes::from(vec![0x00, 0x00, 0x7f])).unwrap(), 127);
+        assert_eq!(i16::try_from(Bytes::from(vec![0x00, 0x80])).unwrap(), 128);
+    }
+
+    #[test]
+    fn int_from_bytes_rejects_values_that_do_not_fit() {
+        let address = Bytes::from(vec![0x11u8; 20]);
+        let err = u128::try_from(address.clone()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("{address} (20 bytes) does not fit into u128: at most 16 significant bytes")
+        );
+        assert!(i128::try_from(address).is_err());
+        assert!(u8::try_from(Bytes::from(vec![0x01, 0x00])).is_err());
+        assert!(i8::try_from(Bytes::from(vec![0x00, 0x80])).is_err());
+        assert!(i8::try_from(Bytes::from(vec![0xff, 0x7f])).is_err());
     }
 }
 
