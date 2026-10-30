@@ -61,7 +61,7 @@
     },
     "ekubo_v3": {
       "contract": "EkuboV3Executor",
-      "args": ["0x55b703eED01b35641963da2FB2E14885993605A3"]
+      "args": ["0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09"]
     },
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
@@ -106,7 +106,7 @@
     },
     "fallback:rfq:liquorice": {
       "contract": "LiquoriceFallbackExecutor",
-      "args": ["0xF2E812386a8Ea1B700003fc4f2e402259446dEC1"]
+      "args": ["0x60C0050d60Ca4ce90EB3E52CaE63F1d547b05d5A"]
     },
     "rfq:metric": {
       "contract": "MetricExecutor",
