@@ -40,10 +40,7 @@ tests:
           bin_step: "0x0064"
         creation_tx: "0xb55183f15af32801d97701429e83062cbfc9f7c6d2cdb0a6f4639a870b277f33"
         skip_simulation: false
-        # Execution should work on paper: executor_deployments.json gives the same Vault and pool
-        # managers on BNB as on Base, and all of them, plus Permit2, have code at the start block.
-        # It has not been run on BNB yet, since execution validation needs debug_traceCall there.
-        skip_execution: true
+        skip_execution: false
       - id: "0xd421a3cddb87ef1209ad84ab77fafdd53c0d7d7f5c6456bd7fef86beac302f73"
         tokens:
           - "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82" # CAKE
@@ -53,4 +50,4 @@ tests:
           bin_step: "0x000a"
         creation_tx: "0xbb09fcf4425eede80e3cb61f439870848f31db0c2514437702f6408ea324d3fa"
         skip_simulation: false
-        skip_execution: true
+        skip_execution: false
