@@ -16,7 +16,7 @@
 
 use tiny_keccak::{Hasher, Keccak};
 
-/// Hook permission bit offsets (`src/pool-bin/interfaces/IBinHooks.sol:8-21`). Not v4's address
+/// Hook permission bit offsets (`src/pool-bin/interfaces/IBinHooks.sol:10-23`). Not v4's address
 /// bits, where `beforeSwap` is 7 and `afterSwap` 6. These four match `ICLHooks.sol` but the enums
 /// differ elsewhere, so read them from IBinHooks.
 pub const HOOKS_BEFORE_SWAP_OFFSET: u8 = 6;
