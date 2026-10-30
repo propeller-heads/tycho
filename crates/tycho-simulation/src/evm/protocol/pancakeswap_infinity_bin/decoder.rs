@@ -22,7 +22,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
     /// | `bin_step` | static | `bin_step` |
     /// | `active_id` | state | `active_id` |
     /// | `active_in_tree` | state | `active_in_tree`, `true` when absent |
-    /// | `lp_fee` | state, else static | `fee`, else `key_lp_fee` |
+    /// | `lp_fee` | static | `key_lp_fee` |
     /// | `protocol_fee_*` | state | `protocol_fees/zero2one`, `protocol_fees/one2zero` |
     /// | `bins` | state | every `bins/{id}/reserve_x` and `bins/{id}/reserve_y` key |
     async fn try_from_with_header(
@@ -43,12 +43,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
                 "pool registers a swap hook (parameters {parameters}); its quotes depend on the hook"
             )));
         }
-        if let Some(fee) = static_attrs.get("key_lp_fee") {
-            if decode_u32("key_lp_fee", fee)? == DYNAMIC_FEE_FLAG {
-                return Err(InvalidSnapshotError::ValueError(
-                    "pool has a dynamic LP fee, set by its hook per swap".to_string(),
-                ));
-            }
+        // The PoolKey's fee is the pool's LP fee for good: only a dynamic-fee pool can change it,
+        // and those are rejected here.
+        let lp_fee = decode_u32("key_lp_fee", attribute(&static_attrs, "key_lp_fee")?)?;
+        if lp_fee == DYNAMIC_FEE_FLAG {
+            return Err(InvalidSnapshotError::ValueError(
+                "pool has a dynamic LP fee (key_lp_fee), set by its hook per swap".to_string(),
+            ));
         }
 
         let bin_step = decode_u16("bin_step", attribute(&static_attrs, "bin_step")?)?;
@@ -58,13 +59,6 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
         let active_in_tree = match state_attrs.get("active_in_tree") {
             Some(flag) => decode_bool("active_in_tree", flag)?,
             None => true,
-        };
-        // Either source satisfies the LP fee; the substreams mirrors the static one into `fee`.
-        // Only a dynamic-fee pool can change its LP fee, and those are rejected above.
-        let lp_fee = match (state_attrs.get("fee"), static_attrs.get("key_lp_fee")) {
-            (Some(fee), _) => decode_u32("fee", fee)?,
-            (None, Some(fee)) => decode_u32("key_lp_fee", fee)?,
-            (None, None) => return Err(InvalidSnapshotError::MissingAttribute("fee".to_string())),
         };
         // `initialize` sets the protocol fee from the fee controller and the substreams emits both
         // halves at creation, so a missing half is a broken snapshot, not a zero fee: defaulting
@@ -261,9 +255,10 @@ mod tests {
         assert!(!state.active_in_tree);
     }
 
-    /// The state `fee` is read before the static `key_lp_fee` it mirrors.
+    /// Only the PoolKey's fee counts; a `fee` state attribute, which nothing ever updates, is
+    /// ignored rather than trusted over it.
     #[tokio::test]
-    async fn test_state_fee_takes_precedence_over_key_lp_fee() {
+    async fn test_state_fee_attribute_is_ignored() {
         let snapshot = snapshot(
             &statics(),
             &[
@@ -278,16 +273,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(state.lp_fee, 500);
+        assert_eq!(state.lp_fee, 100);
     }
 
-    /// Required attributes, and the name each absence is reported under. Dropping `key_lp_fee`
-    /// reports as `fee`, since either source satisfies the LP fee and only losing both is an error.
+    /// Required attributes, and the name each absence is reported under.
     #[tokio::test]
     #[rstest]
     #[case::missing_bin_step("bin_step", "bin_step")]
     #[case::missing_active_id("active_id", "active_id")]
-    #[case::missing_lp_fee("key_lp_fee", "fee")]
+    #[case::missing_lp_fee("key_lp_fee", "key_lp_fee")]
     #[case::missing_parameters("parameters", "parameters")]
     #[case::missing_protocol_fee_zero2one("protocol_fees/zero2one", "protocol_fees/zero2one")]
     #[case::missing_protocol_fee_one2zero("protocol_fees/one2zero", "protocol_fees/one2zero")]
@@ -327,7 +321,8 @@ mod tests {
     #[case::after_swap("parameters", parameters(1 << 7))]
     #[case::before_swap_returns_delta("parameters", parameters(1 << 10))]
     #[case::after_swap_returns_delta("parameters", parameters(1 << 11))]
-    #[case::dynamic_lp_fee("key_lp_fee", Bytes::from(vec![0x80, 0x00, 0x00]))]
+    // `to_signed_bytes_be` of 0x800000 carries a sign byte, so the producer emits four bytes.
+    #[case::dynamic_lp_fee("key_lp_fee", Bytes::from(vec![0x00, 0x80, 0x00, 0x00]))]
     #[case::short_parameters("parameters", Bytes::from(vec![0u8; 31]))]
     async fn test_rejects_pools_it_cannot_quote(#[case] key: &str, #[case] value: Bytes) {
         let mut statics = statics();

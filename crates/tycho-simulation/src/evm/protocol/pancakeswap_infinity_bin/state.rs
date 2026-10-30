@@ -19,9 +19,7 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     pancakeswap_infinity_bin::{
-        attributes::{
-            apply_reserve, decode_bin_id, decode_bool, decode_u16, decode_u32, parse_bin_key,
-        },
+        attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, parse_bin_key},
         math::{
             bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
             constants::MAX_LIQUIDITY_PER_BIN,
@@ -394,7 +392,6 @@ impl ProtocolSim for PancakeswapInfinityBinState {
             match key.as_str() {
                 "active_id" => self.active_id = decode_bin_id(key, value)?,
                 "active_in_tree" => self.active_in_tree = decode_bool(key, value)?,
-                "fee" => self.lp_fee = decode_u32(key, value)?,
                 "protocol_fees/zero2one" => {
                     self.protocol_fee_zero_for_one = decode_u16(key, value)?
                 }
@@ -1198,10 +1195,11 @@ mod tests {
         assert_eq!(state.active_id, REAL_ID_SHIFT + 5);
     }
 
-    /// Protocol fees move on `ProtocolFeeUpdated`; `fee` is applied too, should it ever be sent.
-    /// Values are big-endian and minimal length, so 500 pips is `[0x01, 0xf4]`.
+    /// Protocol fees move on `ProtocolFeeUpdated`. The LP fee is the PoolKey's and never moves,
+    /// so a `fee` attribute is ignored like any unknown key. Values are big-endian and minimal
+    /// length, so 1000 pips is `[0x03, 0xe8]`.
     #[test]
-    fn test_delta_updates_fees() {
+    fn test_delta_updates_protocol_fees_only() {
         let mut state = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (0, 1_000))]);
 
         apply(
@@ -1211,14 +1209,13 @@ mod tests {
                     ("fee", Bytes::from(vec![0x01, 0xf4])),
                     ("protocol_fees/zero2one", Bytes::from(vec![0x03, 0xe8])),
                     ("protocol_fees/one2zero", Bytes::from(vec![0x07, 0xd0])),
-                    // Unknown keys are skipped rather than rejected.
                     ("balance_owner", Bytes::from(vec![0x01])),
                 ],
                 &[],
             ),
         );
 
-        assert_eq!(state.lp_fee, 500);
+        assert_eq!(state.lp_fee, 100, "the LP fee is static");
         assert_eq!(state.protocol_fee_zero_for_one, 1000);
         assert_eq!(state.protocol_fee_one_for_zero, 2000);
     }

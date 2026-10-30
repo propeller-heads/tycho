@@ -7,9 +7,8 @@
 //! State comes from the `base-pancakeswap-infinity-bin` substreams package:
 //! - static: `bin_step` (u16 BE), `key_lp_fee` (LP fee in pips), `parameters` (the raw PoolKey
 //!   word, checked for swap hooks)
-//! - dynamic: `active_id`, `active_in_tree`, `fee`, `protocol_fees/zero2one`,
-//!   `protocol_fees/one2zero`, `bins/{id}/reserve_x`, `bins/{id}/reserve_y`; encodings in
-//!   [`attributes`]
+//! - dynamic: `active_id`, `active_in_tree`, `protocol_fees/zero2one`, `protocol_fees/one2zero`,
+//!   `bins/{id}/reserve_x`, `bins/{id}/reserve_y`; encodings in [`attributes`]
 //!
 //! That package indexes only pools with a static LP fee and no swap hook, so nothing here models a
 //! hook or a fee that moves mid-swap.
