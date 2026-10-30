@@ -61,6 +61,15 @@ pub fn decode_u16(name: &str, value: &Bytes) -> Result<u16, AttributeError> {
     Ok(u16::from(value.clone()))
 }
 
+/// Decodes a one-byte flag, `0` or `1`.
+pub fn decode_bool(name: &str, value: &Bytes) -> Result<bool, AttributeError> {
+    match value.as_ref() {
+        [0] => Ok(false),
+        [1] => Ok(true),
+        _ => Err(AttributeError(format!("{name}: expected a single 0 or 1 byte, got {value}"))),
+    }
+}
+
 /// Splits a raw `reserveOfBin` word into `(reserve_x, reserve_y)`.
 ///
 /// `PackedUint128Math` keeps x in the low 128 bits, so big-endian puts **y first**. Reading them
@@ -123,6 +132,16 @@ mod tests {
             decode_u32("active_id", &Bytes::from(vec![0u8; 5])).is_err(),
             "5 bytes would panic the right-aligning conversion, so it must error first"
         );
+    }
+
+    #[rstest]
+    #[case::zero(vec![0], Some(false))]
+    #[case::one(vec![1], Some(true))]
+    #[case::two(vec![2], None)]
+    #[case::empty(vec![], None)]
+    #[case::padded(vec![0, 1], None)]
+    fn test_decode_bool(#[case] bytes: Vec<u8>, #[case] expected: Option<bool>) {
+        assert_eq!(decode_bool("active_in_tree", &Bytes::from(bytes)).ok(), expected);
     }
 
     /// Y occupies the first 16 bytes, x the last.

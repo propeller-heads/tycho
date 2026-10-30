@@ -30,7 +30,8 @@ type PoolAddress = Vec<u8>;
 /// Assembles `BlockChanges`: created components, entity attributes, balance changes.
 ///
 /// Emits `active_id` per Swap, `protocol_fees/*` per ProtocolFeeUpdated, `bins/{bin_id}` per
-/// BinDelta, and a `bins/{bin_id}` deletion per left bin that was published.
+/// BinDelta, `active_in_tree` per BinDelta on the active bin, and a `bins/{bin_id}` deletion per
+/// left bin that was published.
 ///
 /// A BinDelta carries absolute before and after values, so no accumulator store as in CL. The
 /// reserves store answers only for a left bin, which the swap did not write: whether it held
@@ -143,7 +144,9 @@ pub fn collect_transaction_changes<S: StoreGet<Vec<u8>>>(
 }
 
 /// `bins/{id}` attributes in log order: one per visible delta, and a deletion per left bin that
-/// still held reserves, so was published while active.
+/// still held reserves, so was published while active. Plus `active_in_tree` per delta that
+/// writes the active bin: the simulation keeps only visible bins, so this is the one bit that
+/// tells it whether a swap moving off the active bin leaves it reachable.
 ///
 /// Log order because the builder keeps the last write per attribute within a transaction.
 fn bin_attributes<S: StoreGet<Vec<u8>>>(
@@ -152,7 +155,17 @@ fn bin_attributes<S: StoreGet<Vec<u8>>>(
 ) -> Vec<(BinTransaction, PoolAddress, Attribute)> {
     let mut attributes: Vec<(u64, BinTransaction, PoolAddress, Attribute)> = Vec::new();
     for delta in bin_deltas.deltas {
-        let Some(change) = bin_change_type(&delta) else {
+        let change = bin_change_type(&delta);
+        let tx = delta.transaction.unwrap();
+        if delta.is_active {
+            let attribute = Attribute {
+                name: "active_in_tree".to_string(),
+                value: vec![delta.in_tree as u8],
+                change: ChangeType::Update.into(),
+            };
+            attributes.push((delta.ordinal, tx.clone(), delta.pool_id.clone(), attribute));
+        }
+        let Some(change) = change else {
             continue;
         };
         let attribute = Attribute {
@@ -161,7 +174,7 @@ fn bin_attributes<S: StoreGet<Vec<u8>>>(
             value: delta.new_packed,
             change: change.into(),
         };
-        attributes.push((delta.ordinal, delta.transaction.unwrap(), delta.pool_id, attribute));
+        attributes.push((delta.ordinal, tx, delta.pool_id, attribute));
     }
     for left in bin_deltas.left_bins {
         // Deleting an attribute that was never published fails the indexer's storage write, so
@@ -366,6 +379,29 @@ mod tests {
         let bin_deltas = BinDeltas { deltas: vec![], left_bins: vec![left(100, 10)] };
 
         assert_eq!(names_and_changes(bin_deltas, &reserves_store(writes)), expected);
+    }
+
+    /// Only a delta on the active bin says whether that bin is in the tree; the flag follows the
+    /// delta's `in_tree`, whatever happened to the reserves.
+    #[rstest]
+    #[case::active_dust_bin_after_a_burn((true, true, word(10)), (false, true, word(1)), Some(0))]
+    #[case::swap_lands_in_a_tree_bin((true, false, word(10)), (true, true, word(9)), Some(1))]
+    #[case::active_bin_emptied((true, true, word(10)), (false, true, word(0)), Some(0))]
+    #[case::bin_that_is_not_active((true, false, word(10)), (true, false, word(9)), None)]
+    fn active_in_tree_follows_the_active_delta(
+        #[case] before: Side,
+        #[case] after: Side,
+        #[case] expected: Option<u8>,
+    ) {
+        let bin_deltas = BinDeltas { deltas: vec![delta(7, 1, before, after)], left_bins: vec![] };
+
+        let flag = bin_attributes(bin_deltas, &reserves_store(vec![]))
+            .into_iter()
+            .map(|(_, _, attribute)| attribute)
+            .find(|attribute| attribute.name == "active_in_tree")
+            .map(|attribute| attribute.value[0]);
+
+        assert_eq!(flag, expected);
     }
 
     /// The builder keeps the last write per attribute, so a left bin's deletion must sort among

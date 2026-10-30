@@ -19,7 +19,9 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     pancakeswap_infinity_bin::{
-        attributes::{decode_bin_id, decode_reserves, decode_u16, decode_u32, parse_bin_id},
+        attributes::{
+            decode_bin_id, decode_bool, decode_reserves, decode_u16, decode_u32, parse_bin_id,
+        },
         math::{
             bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
             constants::MAX_LIQUIDITY_PER_BIN,
@@ -40,11 +42,16 @@ const GAS_PER_BIN_CROSSED: u64 = 10_000;
 /// `x` is `currency0`, `y` is `currency1`, so `swap_for_y` means `token_in < token_out` by address.
 ///
 /// Only bins with liquidity are kept, and the `BTreeMap` order replaces the on-chain bitmap tree:
-/// the next non-empty bin is a range query.
+/// the next non-empty bin is a range query. The one bin that can hold liquidity outside the tree
+/// is the active one, after a burn down to `MINIMUM_SHARE`; `active_in_tree` marks it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PancakeswapInfinityBinState {
     /// Bin the next swap starts in. u24 on chain.
     pub active_id: u32,
+    /// Whether the active bin is in the on-chain tree. A swap starts in the active bin either way,
+    /// but once it moves off a bin outside the tree, no swap reaches that bin again until a mint
+    /// re-adds it.
+    pub active_in_tree: bool,
     /// Price ratio between neighbouring bins, in basis points.
     pub bin_step: u16,
     /// LP fee in pips (`1e6` denominator).
@@ -178,6 +185,16 @@ impl PancakeswapInfinityBinState {
             ));
         }
 
+        // The walk only steps through tree bins, so a start bin outside the tree is out of reach
+        // once left. Whatever dust it keeps on chain would otherwise be quoted the other way.
+        //
+        // [`BinPool.sol#L293-L297`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L293-L297)
+        if active != self.active_id {
+            if !self.active_in_tree {
+                new_state.bins.remove(&self.active_id);
+            }
+            new_state.active_in_tree = true;
+        }
         new_state.active_id = active;
         Ok(BinSwapResult { amount_out, bins_crossed, new_state })
     }
@@ -355,6 +372,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
     /// - `active_id`: `to_signed_bytes_be` of the u24 id, so 3 bytes below `0x800000`, 4 with a
     ///   leading `0x00` at or above. Decode length-tolerantly; a fixed-width `i24_be_bytes_to_i32`
     ///   copy breaks past that boundary, where the test pool sits
+    /// - `active_in_tree`: one byte, `0` or `1`, emitted with every write to the active bin
     /// - `fee`: LP fee in pips, emitted at creation; a static-fee pool never changes it
     /// - `protocol_fees/zero2one`, `protocol_fees/one2zero`: 12-bit, big-endian
     /// - `bins/{id}`: raw 32-byte `reserveOfBin` word, **y first 16 bytes, x last**. Swapping them
@@ -369,6 +387,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
         for (key, value) in delta.updated_attributes.iter() {
             match key.as_str() {
                 "active_id" => self.active_id = decode_bin_id(key, value)?,
+                "active_in_tree" => self.active_in_tree = decode_bool(key, value)?,
                 "fee" => self.lp_fee = decode_u32(key, value)?,
                 "protocol_fees/zero2one" => {
                     self.protocol_fee_zero_for_one = decode_u16(key, value)?
@@ -445,6 +464,7 @@ mod tests {
     fn bin_state(active_id: u32, bins: &[(u32, (u128, u128))]) -> PancakeswapInfinityBinState {
         PancakeswapInfinityBinState {
             active_id,
+            active_in_tree: true,
             bin_step: 10,
             lp_fee: 100,
             protocol_fee_zero_for_one: 0,
@@ -528,6 +548,47 @@ mod tests {
         assert_eq!(result.new_state.bins[&REAL_ID_SHIFT], (0, 1_501));
         assert_eq!(result.new_state.bins[&(REAL_ID_SHIFT + 1)], (0, 2_000), "y-only bin untouched");
         assert_eq!(result.new_state.bins[&(REAL_ID_SHIFT + 3)], (2_008, 1_999));
+    }
+
+    /// A burn down to `MINIMUM_SHARE` takes the active bin out of the tree but leaves its dust.
+    /// A swap still starts there, but once it moves off, the chain cannot reach the bin again:
+    /// the returned state must not keep it, or a quote the other way would walk into it.
+    #[test]
+    fn test_swap_off_an_active_dust_bin_drops_it() {
+        let mut state =
+            bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT - 1, (0, 5_000)), (REAL_ID_SHIFT, (1, 1))]);
+        state.active_in_tree = false;
+
+        let result = state.swap(true, 2_000).unwrap();
+
+        // The dust's single unit of y comes out first; its 2 units of input are then lost.
+        let mut expected = bin_state(REAL_ID_SHIFT - 1, &[(REAL_ID_SHIFT - 1, (1_998, 3_005))]);
+        expected.active_in_tree = true;
+        assert_eq!(result.amount_out, 1_996);
+        assert_eq!(result.bins_crossed, 1);
+        assert_eq!(result.new_state, expected);
+        assert_eq!(
+            result
+                .new_state
+                .swap(false, 1_000)
+                .unwrap()
+                .bins_crossed,
+            0,
+            "no bin above"
+        );
+    }
+
+    /// A swap that stays in an active dust bin keeps it, dust and all: it is still the start.
+    #[test]
+    fn test_swap_within_an_active_dust_bin_keeps_it() {
+        let mut state = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (0, 1_000))]);
+        state.active_in_tree = false;
+
+        let result = state.swap(true, 500).unwrap();
+
+        let mut expected = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (500, 1_000 - 499))]);
+        expected.active_in_tree = false;
+        assert_eq!(result.new_state, expected);
     }
 
     /// Five bins around the reference id, 1e9 of each token in each.
@@ -980,6 +1041,21 @@ mod tests {
         state
             .delta_transition(delta, &HashMap::new(), &Balances::default())
             .unwrap();
+    }
+
+    #[rstest]
+    #[case::leaves_the_tree(vec![0x00], false)]
+    #[case::back_in_the_tree(vec![0x01], true)]
+    fn test_delta_moves_active_bin_in_and_out_of_the_tree(
+        #[case] flag: Vec<u8>,
+        #[case] expected: bool,
+    ) {
+        let mut state = bin_state(REAL_ID_SHIFT, &[(REAL_ID_SHIFT, (0, 1_000))]);
+        state.active_in_tree = !expected;
+
+        apply(&mut state, delta(&[("active_in_tree", Bytes::from(flag))], &[]));
+
+        assert_eq!(state.active_in_tree, expected);
     }
 
     /// A `bins/{id}` word replaces that bin's reserves and leaves every other bin alone.

@@ -4,7 +4,9 @@ use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
 use tycho_common::{models::token::Token, Bytes};
 
 use super::{
-    attributes::{decode_bin_id, decode_reserves, decode_u16, decode_u32, parse_bin_id},
+    attributes::{
+        decode_bin_id, decode_bool, decode_reserves, decode_u16, decode_u32, parse_bin_id,
+    },
     state::PancakeswapInfinityBinState,
 };
 use crate::protocol::{
@@ -21,6 +23,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
     /// |---|---|---|
     /// | `bin_step` | static | `bin_step` |
     /// | `active_id` | state | `active_id` |
+    /// | `active_in_tree` | state | `active_in_tree`, `true` when absent |
     /// | `lp_fee` | state, else static | `fee`, else `key_lp_fee` |
     /// | `protocol_fee_*` | state | `protocol_fees/zero2one`, `protocol_fees/one2zero` |
     /// | `bins` | state | every `bins/{id}` key |
@@ -52,6 +55,12 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
 
         let bin_step = decode_u16("bin_step", attribute(&static_attrs, "bin_step")?)?;
         let active_id = decode_bin_id("active_id", attribute(&state_attrs, "active_id")?)?;
+        // Emitted with the first write to the active bin, so a pool without it has an empty
+        // active bin, which a swap skips whatever the tree says.
+        let active_in_tree = match state_attrs.get("active_in_tree") {
+            Some(flag) => decode_bool("active_in_tree", flag)?,
+            None => true,
+        };
         // Either source satisfies the LP fee; the substreams mirrors the static one into `fee`.
         // Only a dynamic-fee pool can change its LP fee, and those are rejected above.
         let lp_fee = match (state_attrs.get("fee"), static_attrs.get("key_lp_fee")) {
@@ -87,6 +96,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for PancakeswapInfinityBi
 
         Ok(Self {
             active_id,
+            active_in_tree,
             bin_step,
             lp_fee,
             protocol_fee_zero_for_one,
@@ -217,10 +227,30 @@ mod tests {
 
         assert_eq!(state.bin_step, 10);
         assert_eq!(state.active_id, ACTIVE_ID);
+        assert!(state.active_in_tree, "absent flag reads as in the tree");
         assert_eq!(state.lp_fee, 100);
         assert_eq!(state.protocol_fee_zero_for_one, 3);
         assert_eq!(state.protocol_fee_one_for_zero, 5);
         assert_eq!(state.bins[&ACTIVE_ID], (7, 11));
+    }
+
+    #[tokio::test]
+    async fn test_decodes_active_bin_outside_the_tree() {
+        let snapshot = snapshot(
+            &statics(),
+            &[
+                ("active_id", Bytes::from(vec![0x00, 0x80, 0x00, 0x00])),
+                ("active_in_tree", Bytes::from(vec![0x00])),
+                ("protocol_fees/zero2one", Bytes::from(vec![0x03])),
+                ("protocol_fees/one2zero", Bytes::from(vec![0x05])),
+            ],
+        );
+
+        let state = try_decode_snapshot_with_defaults::<PancakeswapInfinityBinState>(snapshot)
+            .await
+            .unwrap();
+
+        assert!(!state.active_in_tree);
     }
 
     /// The state `fee` is read before the static `key_lp_fee` it mirrors.

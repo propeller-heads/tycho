@@ -7,7 +7,8 @@
 //! State comes from the `pancakeswap_infinity_bin` substreams package:
 //! - static: `bin_step` (u16 BE), `key_lp_fee` (LP fee in pips), `parameters` (the raw PoolKey
 //!   word, checked for swap hooks)
-//! - dynamic: `active_id`, `fee` (the LP fee again; static pools never change it),
+//! - dynamic: `active_id`, `active_in_tree` (whether the active bin is in the bitmap tree, or is
+//!   dust a burn left behind), `fee` (the LP fee again; static pools never change it),
 //!   `protocol_fees/zero2one`, `protocol_fees/one2zero`, `bins/{id}` (the raw 32-byte
 //!   `reserveOfBin` word, y in the high 128 bits, x in the low)
 //!
