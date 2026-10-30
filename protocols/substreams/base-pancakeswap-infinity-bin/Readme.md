@@ -24,12 +24,14 @@ Included: pools with a static LP fee and no swap hook.
 Excluded: swap-hook pools, dynamic-fee pools. Unlike the CL package, `Donate` IS indexed, because
 in Bin it moves real reserves rather than only fee growth.
 
-`bins/{id}` is emitted only while the bin holds reserves and a swap can reach it: while it is in
-the pool's tree, or while it is the active bin, where a swap starts whatever the tree says. A burn
-down to `MINIMUM_SHARE` drops a bin from the tree with dust still in `reserveOfBin`, so the
-attribute is deleted even though reserves are not zero, unless the bin is still active. A swap
-can move off an active dust bin without writing it; `store_bin_reserves` tells whether it held
-dust, and so was published and must be deleted.
+`bins/{id}/reserve_x` and `bins/{id}/reserve_y` are emitted only while the bin holds reserves and
+a swap can reach it: while it is in the pool's tree, or while it is the active bin, where a swap
+starts whatever the tree says. A burn down to `MINIMUM_SHARE` drops a bin from the tree with dust
+still in `reserveOfBin`, so the attributes are deleted even though reserves are not zero, unless
+the bin is still active. A swap can move off an active dust bin without writing it;
+`store_bin_reserves` tells whether it held dust, and so was published and must be deleted.
+`active_in_tree` says whether the active bin is in the tree, since the simulation cannot tell an
+active dust bin from a tree bin otherwise.
 
 Not tracked: pausing. The owner can [pause](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/Owner.sol#L10-L19) `BinPoolManager`: [`swap`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L138-L141), [`mint`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L185-L188) and [`donate`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L260-L263) then revert with `EnforcedPause`, while [`burn`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L229) still allows removals. [`Paused`/`Unpaused`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/base/Pausable.sol#L20-L25) fire once on the pool manager, not per pool. Marking every component paused on each event means iterating the whole pool store, which this package does not do. Simulation keeps quoting through a pause and execution reverts.
 
