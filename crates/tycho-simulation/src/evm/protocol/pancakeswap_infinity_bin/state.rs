@@ -30,8 +30,10 @@ use crate::evm::protocol::{
     utils::add_fee_markup,
 };
 
-// Rough figures, as in `uniswap_v2/state.rs`: a quote's gas only ranks routes, it never changes
-// the amount out.
+// Estimates, not measured. A quote's gas becomes `Swap::estimated_gas`, which the encoder sums
+// into `EncodedSolution::estimated_gas`, so these size the solution's gas as well as ranking
+// routes. On chain each bin costs a cold `reserveOfBin` read and write, tree-level reads and two
+// `getPriceFromId` calls. Calibrating them against live swaps is a follow-up, as #1703 did for CL.
 const SWAP_BASE_GAS: u64 = 120_000;
 const GAS_PER_BIN_CROSSED: u64 = 10_000;
 
