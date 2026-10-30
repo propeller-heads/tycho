@@ -136,6 +136,10 @@
         "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
         "0xDadEf1fFBFeaAB4f68A9fD181395F68b4e4E7Ae0"
       ]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x6e369754595662379611e0dFb405950e33756E2A"]
     }
   },
   "base": {
@@ -198,6 +202,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x9706D3fff42571305Fc201F996ADC0e768d72911"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0xbFdF58Dc941CB83A32afe0FC008288D7eA509e7C"]
     }
   },
   "unichain": {
@@ -221,6 +229,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x4200000000000000000000000000000000000006"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x4471BeE2e3529d80A94004647eA2607f71f5dcE4"]
     }
   },
   "arbitrum": {
@@ -253,6 +265,10 @@
     "fallback:rfq:native": {
       "contract": "NativeFallbackExecutor",
       "args": ["0xcCe5C292fF5e2C5F85Ff33b83D3B74d03c7DF852"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x1D9EbE2ccCec2e4af2135896103EE607d84A0B0f"]
     }
   },
   "polygon": {
@@ -276,6 +292,10 @@
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
       "args": ["0x14d20db2490711E75ae4355A909AbEeF9B82835c"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0xF9372386215A8ca1170aDbF5126Db7Fd9f3309a7"]
     }
   },
   "bsc": {
@@ -328,7 +348,11 @@
         "0xC697d2898e0D09264376196696c51D7aBbbAA4a9"
       ]
     },
-    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] }
+    "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x6f8E85667958220f47529f475916ac3b84654622"]
+    }
   },
   "plasma": {
     "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
@@ -346,6 +370,10 @@
     "native_wrapper": {
       "contract": "NativeWrapExecutor",
       "args": ["0x6100E367285b01F48D07953803A2d8dCA5D19873"]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0xf8f86288c997f4b9aec8ab1870aeaaefF4EF0766"]
     }
   },
   "robinhood": {
@@ -390,6 +418,10 @@
         "0xeE04c68742e6Bf434bE8039580D2e89BBE55bc6f",
         "0x0000000000000000000000000000000000000000"
       ]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0x6294aE7Cc86794A5F7d1d0Dd5D5E250B32F8422f"]
     }
   },
   "arc": {
@@ -410,6 +442,10 @@
         "0x8366a39CC670B4001A1121B8F6A443A643e40951",
         "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
       ]
+    },
+    "subsidy": {
+      "contract": "TychoSubsidizingExecutor",
+      "args": ["0xa6a038F7353c53E6034c31B217Ca23C5cab5c5A0"]
     }
   }
 }
