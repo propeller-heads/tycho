@@ -484,7 +484,9 @@ encode an entire multi-pool route as a single swap if all hops are on the same g
 
 **SwapEncoder trait** (`swap_encoder.rs` + `evm/swap_encoder/`): Each protocol
 implements `encode_swap(&Swap, &EncodingContext) -> Result<Vec<u8>, EncodingError>`, encoding pool-specific data (pool ID, fee tiers, direction
-flags) into packed bytes. Each encoder holds its executor address.
+flags) into packed bytes. Each encoder holds its executor address. The trait is public
+(`encoding::swap_encoder::SwapEncoder`), so a crate outside Tycho can implement an encoder and add
+it with `SwapEncoderRegistry::register_encoder`.
 
 **SwapEncoderRegistry** (`swap_encoder_registry.rs`): Creates encoders by protocol system name. Reads executor addresses
 from `config/executor_addresses.json`. Protocol name prefixes: `vm:` (simulation-backed,

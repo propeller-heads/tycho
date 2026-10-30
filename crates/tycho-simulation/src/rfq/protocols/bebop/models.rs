@@ -2,14 +2,19 @@ use std::borrow::Cow;
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use tycho_common::{
     models::{protocol::GetAmountOutParams, Chain},
     Bytes,
 };
 
 use crate::{
-    book::levels::{InvalidLevel, Levels, PriceLevel},
+    book::{
+        levels::{InvalidLevel, Levels, PriceLevel},
+        wire::EntryReader,
+    },
     rfq::errors::RFQError,
+    snapshot_feed::errors::FeedError,
 };
 
 /// Protobuf message for Bebop pricing updates
@@ -54,7 +59,9 @@ impl BebopPriceData {
 /// validated ladders once, so the state simulates without converting per call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BebopBook {
+    /// The token the pair sells.
     pub base: Bytes,
+    /// The token the pair is priced in.
     pub quote: Bytes,
     /// Bebop's own update time; milliseconds on the wire.
     pub last_update_ts: u64,
@@ -345,6 +352,31 @@ impl BebopSupportedChain {
             BebopSupportedChain::Base => "base",
             BebopSupportedChain::Arbitrum => "arbitrum",
         }
+    }
+}
+
+/// Pairs from one Bebop pricing frame, excluding pairs with invalid levels and preserving each
+/// pair's published orientation.
+///
+/// The serde form follows the venue API models, so the writer and the reader must run the same
+/// tycho-simulation version.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BebopPrices {
+    /// The valid pairs of the frame, in the order Bebop sent them.
+    pub pairs: Vec<BebopBook>,
+}
+
+impl BebopPrices {
+    /// Reads every pair of `update`, dropping the ones whose levels are invalid. Fails only when
+    /// none is valid.
+    pub(super) fn from_update(update: BebopPricingUpdate) -> Result<Self, FeedError> {
+        let mut reader = EntryReader::new();
+        let pairs = reader.read(update.pairs, BebopBook::try_from);
+        reader
+            .finish()
+            .map_err(|reason| FeedError::Parsing(format!("Bebop pricing update: {reason}")))?;
+        debug!(pairs = pairs.len(), "decoded pricing update");
+        Ok(BebopPrices { pairs })
     }
 }
 

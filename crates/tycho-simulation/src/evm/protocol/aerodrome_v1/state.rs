@@ -17,9 +17,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::solidly_stable::{
-    get_amount_out as solidly_stable_get_amount_out, get_limits as solidly_stable_get_limits,
-};
+use super::solidly_stable::{StableMath, StablePool};
 use crate::evm::protocol::{
     cpmm::protocol::{cpmm_fee, cpmm_get_limits, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee},
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
@@ -86,38 +84,35 @@ impl AerodromeV1State {
 
         Ok(ProtocolFee::new(U256::from(FEE_PRECISION_BPS - fee_bps), FEE_PRECISION))
     }
+}
 
-    /// Aerodrome V1 volatile pools do not match our generic CPMM helper exactly.
-    ///
-    /// The on-chain pool first computes `floor(amount_in * fee / 10000)`, subtracts that fee from
-    /// `amount_in`, and only then applies the constant-product formula. Reusing
-    /// `cpmm_get_amount_out` would instead fold the fee into the numerator/denominator as
-    /// `amount_in * (10000 - fee) / 10000`, which is algebraically equivalent over reals but not
-    /// under Solidity integer division. That rounding difference is observable on-chain, so we
-    /// mirror the contract implementation here.
-    fn volatile_get_amount_out(
-        &self,
-        amount_in: U256,
-        reserve_in: U256,
-        reserve_out: U256,
-    ) -> Result<U256, SimulationError> {
-        if amount_in == U256::ZERO {
-            return Err(SimulationError::InvalidInput("Amount in cannot be zero".to_string(), None));
-        }
-
-        if reserve_in == U256::ZERO || reserve_out == U256::ZERO {
-            return Err(SimulationError::RecoverableError("No liquidity".to_string()));
-        }
-
-        let fee_bps = self.resolved_fee_bps();
-        let fee_amount =
-            safe_div_u256(safe_mul_u256(amount_in, U256::from(fee_bps))?, FEE_PRECISION)?;
-        let amount_in_after_fee = safe_sub_u256(amount_in, fee_amount)?;
-        let numerator = safe_mul_u256(amount_in_after_fee, reserve_out)?;
-        let denominator = safe_add_u256(reserve_in, amount_in_after_fee)?;
-
-        safe_div_u256(numerator, denominator)
+/// Output of a Solidly volatile (`x * y = k`) swap, as the pool's `getAmountOut`.
+///
+/// The pool first computes `floor(amount_in * fee / 10000)`, subtracts that fee from `amount_in`,
+/// and only then applies the constant-product formula. Reusing `cpmm_get_amount_out` would instead
+/// fold the fee into the numerator/denominator as `amount_in * (10000 - fee) / 10000`, which is
+/// algebraically equivalent over reals but not under Solidity integer division. That rounding
+/// difference is observable on-chain, so we mirror the contract implementation here.
+pub(crate) fn volatile_get_amount_out(
+    amount_in: U256,
+    reserve_in: U256,
+    reserve_out: U256,
+    fee_bps: u32,
+) -> Result<U256, SimulationError> {
+    if amount_in == U256::ZERO {
+        return Err(SimulationError::InvalidInput("Amount in cannot be zero".to_string(), None));
     }
+
+    if reserve_in == U256::ZERO || reserve_out == U256::ZERO {
+        return Err(SimulationError::RecoverableError("No liquidity".to_string()));
+    }
+
+    let fee_amount = safe_div_u256(safe_mul_u256(amount_in, U256::from(fee_bps))?, FEE_PRECISION)?;
+    let amount_in_after_fee = safe_sub_u256(amount_in, fee_amount)?;
+    let numerator = safe_mul_u256(amount_in_after_fee, reserve_out)?;
+    let denominator = safe_add_u256(reserve_in, amount_in_after_fee)?;
+
+    safe_div_u256(numerator, denominator)
 }
 
 #[typetag::serde]
@@ -140,22 +135,29 @@ impl ProtocolSim for AerodromeV1State {
         let amount_in = biguint_to_u256(&amount_in);
         let zero2one = token_in.address < token_out.address;
         let amount_out = if self.stable {
-            solidly_stable_get_amount_out(
-                amount_in,
-                zero2one,
-                self.reserve0,
-                self.reserve1,
-                self.resolved_fee_bps(),
-                if zero2one { token_in.decimals as u8 } else { token_out.decimals as u8 },
-                if zero2one { token_out.decimals as u8 } else { token_in.decimals as u8 },
-            )?
+            StablePool {
+                reserve0: self.reserve0,
+                reserve1: self.reserve1,
+                decimals0: if zero2one {
+                    token_in.decimals as u8
+                } else {
+                    token_out.decimals as u8
+                },
+                decimals1: if zero2one {
+                    token_out.decimals as u8
+                } else {
+                    token_in.decimals as u8
+                },
+                math: StableMath::Checked,
+            }
+            .get_amount_out(amount_in, zero2one, self.resolved_fee_bps())?
         } else {
             let (reserve_in, reserve_out) = if zero2one {
                 (self.reserve0, self.reserve1)
             } else {
                 (self.reserve1, self.reserve0)
             };
-            self.volatile_get_amount_out(amount_in, reserve_in, reserve_out)?
+            volatile_get_amount_out(amount_in, reserve_in, reserve_out, self.resolved_fee_bps())?
         };
         let mut new_state = self.clone();
         let (reserve0_mut, reserve1_mut) = (&mut new_state.reserve0, &mut new_state.reserve1);
@@ -179,14 +181,14 @@ impl ProtocolSim for AerodromeV1State {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if self.stable {
-            solidly_stable_get_limits(
-                sell_token,
-                buy_token,
-                self.reserve0,
-                self.reserve1,
-                self.decimals0,
-                self.decimals1,
-            )
+            StablePool {
+                reserve0: self.reserve0,
+                reserve1: self.reserve1,
+                decimals0: self.decimals0,
+                decimals1: self.decimals1,
+                math: StableMath::Checked,
+            }
+            .get_limits(sell_token, buy_token)
         } else {
             cpmm_get_limits(
                 sell_token,

@@ -6,6 +6,15 @@
     "fallback:rfq:hashflow": {
       "fallback_router": "0x29D7A3cd3485710585d4f3bee5E43fE28633915F"
     },
+    "fallback:rfq:native": {
+      "fallback_router": "0x5D4FA48eA95dca88E94549bf006B71B4fc956310",
+      "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
+    },
+    "fallback:rfq:liquorice": {
+      "fallback_router": "0xF2E812386a8Ea1B700003fc4f2e402259446dEC1",
+      "settlement_address": "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8",
+      "balance_manager_address": "0x56B4720e40dF52C560E520238E34e9C33d57E593"
+    },
     "uniswap_v4": {
       "angstrom_hook_address": "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
     },
@@ -29,11 +38,19 @@
     "fallback:rfq:bebop": {
       "fallback_router": "0x4bB02166188132103fc608402B8993c0c0857708"
     },
+    "fallback:rfq:native": {
+      "fallback_router": "0xBCBc2cFEd6fB0831deF1d39eB3ED6273f15f18e3",
+      "router_v6": "0x9706D3fff42571305Fc201F996ADC0e768d72911"
+    },
     "rfq:native": {
       "router_v6": "0x9706D3fff42571305Fc201F996ADC0e768d72911"
     }
   },
   "arbitrum": {
+    "fallback:rfq:native": {
+      "fallback_router": "0xcCe5C292fF5e2C5F85Ff33b83D3B74d03c7DF852",
+      "router_v6": "0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"
+    },
     "rfq:native": {
       "router_v6": "0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"
     }
@@ -41,12 +58,20 @@
   "polygon": {},
   "unichain": {},
   "bsc": {
+    "fallback:rfq:native": {
+      "fallback_router": "0x1D062B665c9aA1FD9851a3C327d5c60d0Ba36e59",
+      "router_v6": "0x1fDED89D98CBeADd96a109D28689c2638025dad3"
+    },
     "rfq:native": {
       "router_v6": "0x1fDED89D98CBeADd96a109D28689c2638025dad3"
     }
   },
   "plasma": {},
   "robinhood": {
+    "fallback:rfq:native": {
+      "fallback_router": "0x7b200EfFfC1a680aad250a0e5a66692E74386A9E",
+      "router_v6": "0x4Df7557734B382EB542BEa6c74786D398DF4CC19"
+    },
     "rfq:native": {
       "router_v6": "0x4Df7557734B382EB542BEa6c74786D398DF4CC19"
     }

@@ -7,9 +7,10 @@ use ::http::Request;
 use async_stream::try_stream;
 use futures::{Stream, StreamExt};
 use tokio::time::{sleep, timeout};
+pub use tokio_tungstenite::tungstenite::{Bytes as FrameBytes, Utf8Bytes};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{self, Bytes, Message, Utf8Bytes},
+    tungstenite::{self, Message},
 };
 use tracing::{debug_span, error, info, warn};
 
@@ -45,7 +46,7 @@ pub struct WsFeedConfig {
 /// The values every WebSocket feed builder starts from. The relation among them worth keeping
 /// through a retune: the withdrawal age is the idle window, so the moment the loop gives up on
 /// the socket it stops serving what that socket brought.
-pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
+pub fn default_ws_feed_config() -> WsFeedConfig {
     WsFeedConfig {
         connect_timeout: Duration::from_secs(10),
         read_idle_timeout: Duration::from_secs(60),
@@ -56,7 +57,8 @@ pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
     }
 }
 
-/// The connection loop shared by WebSocket-based feeds.
+/// Runs the shared WebSocket connection loop with reconnects, backoff, idle timeouts and
+/// staleness checks.
 ///
 /// Keeps `source` connected on the terms `config` sets and publishes every snapshot decoded off
 /// the socket, withdrawing one that goes `max_snapshot_age` without a refresh. What each knob
@@ -71,7 +73,7 @@ pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
 /// receiver goes away, mid-connect or mid-read included, since nothing it read from then on could
 /// reach anyone; reconnecting itself never runs out, so a feed is otherwise stopped by dropping
 /// its future, which withdraws the published snapshot on the way out.
-pub(crate) async fn run_ws_feed<S: WsSource>(
+pub async fn run_ws_feed<S: WsSource>(
     config: WsFeedConfig,
     publisher: Publisher<S::Snapshot>,
     source: S,
@@ -102,20 +104,42 @@ pub(crate) async fn run_ws_feed<S: WsSource>(
 /// A data-bearing WebSocket frame. Control frames never reach a [`WsSource`]: the loop
 /// reconnects on `Close`, tokio-tungstenite answers pings while the stream is polled, and
 /// tungstenite never yields raw frames on the read side.
-pub(crate) enum WsPayload {
+///
+/// The payloads are tokio-tungstenite's [`Utf8Bytes`] and `Bytes`, re-exported from this module,
+/// the latter as [`FrameBytes`] so it does not collide with `tycho_common::Bytes`. Both
+/// dereference to slices; `FrameBytes` shares its data through reference counting instead of
+/// copying it.
+pub enum WsPayload {
+    /// A text frame.
     Text(Utf8Bytes),
-    Binary(Bytes),
+    /// A binary frame.
+    Binary(FrameBytes),
 }
 
 /// The provider-specific half of a WebSocket feed: it builds the handshake request and decodes
 /// data frames into complete snapshots. [`run_ws_feed`] owns the source and drives it by
 /// reference.
-pub(crate) trait WsSource: Send {
+pub trait WsSource: Send {
+    /// The complete snapshot decoded from a frame. Each snapshot replaces the previous one, so it
+    /// must not be a delta.
     type Snapshot: Send + Sync + 'static;
 
+    /// Builds the handshake for one connection. The loop calls this before every connection attempt
+    /// to refresh connection-specific headers such as `Sec-WebSocket-Key`.
+    ///
+    /// Return [`FeedError::Fatal`] when retrying cannot produce a different request; this ends
+    /// the feed. Any other error counts as one failed attempt toward `max_consecutive_failures`,
+    /// followed by a backoff wait.
     fn request(&self) -> Result<Request<()>, FeedError>;
 
-    /// `Ok(None)` for frames that carry no snapshot.
+    /// Turns a data frame into a snapshot.
+    ///
+    /// Return `Ok(None)` for frames without snapshots, such as server notices. The loop skips
+    /// these frames without changing the failure count. `Err` closes the connection and counts as
+    /// one failure; repeated decode failures trigger reconnects with backoff, and
+    /// `max_consecutive_failures` (unset by default, which reconnects forever) ends the feed once
+    /// reached. [`FeedError::Fatal`] ends the feed immediately.
+    /// Only `Ok(Some(_))` clears the failure count.
     fn decode(&mut self, payload: WsPayload) -> Result<Option<Self::Snapshot>, FeedError>;
 }
 

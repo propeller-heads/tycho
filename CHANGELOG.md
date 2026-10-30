@@ -1,3 +1,137 @@
+## [0.493.0](https://github.com/propeller-heads/tycho/compare/0.492.1...0.493.0) (2026-10-30)
+
+
+### Features
+
+* **execution:** export group_swaps and SwapGroup ([eb654d8](https://github.com/propeller-heads/tycho/commit/eb654d8ab20b6770c0c4dd7d9f5c20cbeef143d7))
+* **execution:** export group_swaps and SwapGroup ([#1696](https://github.com/propeller-heads/tycho/issues/1696)) ([68c2579](https://github.com/propeller-heads/tycho/commit/68c2579748923bc987b9aaf9d959e60f5579920a))
+
+## [0.492.1](https://github.com/propeller-heads/tycho/compare/0.492.0...0.492.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* block Fluid pools that have paused swaps ([07b87c3](https://github.com/propeller-heads/tycho/commit/07b87c31c4c91cebefec6bb6ef4b37d183e5d890))
+* block Fluid pools that have paused swaps ([#1709](https://github.com/propeller-heads/tycho/issues/1709)) ([1e22d7d](https://github.com/propeller-heads/tycho/commit/1e22d7dc048ec0a53c59bb2d638ab783528638ee))
+
+## [0.492.0](https://github.com/propeller-heads/tycho/compare/0.491.1...0.492.0) (2026-10-29)
+
+
+### Features
+
+* **ethereum:** add batch eth_call to EthereumRpcClient ([8911a17](https://github.com/propeller-heads/tycho/commit/8911a175aa9999addc55cdeb1ec4bd05e1ffca29))
+* **ethereum:** add OnChainTokenOwners holder finder ([00cd1af](https://github.com/propeller-heads/tycho/commit/00cd1af9188665bab8070b748947a737512201bb))
+
+
+### Bug Fixes
+
+* **ethereum:** read all holder candidates in one batch in OnChainTokenOwners ([e3db554](https://github.com/propeller-heads/tycho/commit/e3db554b3f896137a178bd60d43bfa18edac5c19))
+* **indexer:** check a pool's id before its contract addresses ([4d6f728](https://github.com/propeller-heads/tycho/commit/4d6f7280005d8df5240d39cbfa4c340fe61ef6d9))
+* **indexer:** verify token holders on-chain in analyze-tokens ([70bdaa6](https://github.com/propeller-heads/tycho/commit/70bdaa6ccc5bb18e1c11c721c14ccac4aabe3b5f))
+
+## [0.491.1](https://github.com/propeller-heads/tycho/compare/0.491.0...0.491.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **client:** back off background snapshots per extractor ([74cdcd6](https://github.com/propeller-heads/tycho/commit/74cdcd6d9119275141ec73d03eb0b0b805f12beb))
+* **client:** back off background snapshots per extractor ([#1698](https://github.com/propeller-heads/tycho/issues/1698)) ([36668a7](https://github.com/propeller-heads/tycho/commit/36668a79b224e5de3e4ace225538266f08bdf92a))
+
+## [0.491.0](https://github.com/propeller-heads/tycho/compare/0.490.1...0.491.0) (2026-10-29)
+
+
+### Features
+
+* **execution:** add the Robinhood PancakeSwap Infinity CL executor ([344515c](https://github.com/propeller-heads/tycho/commit/344515c7e916b572d80ddb7bed84595ce0f2bcae))
+* **execution:** add the Robinhood PancakeSwap Infinity CL executor ([#1699](https://github.com/propeller-heads/tycho/issues/1699)) ([73e50ce](https://github.com/propeller-heads/tycho/commit/73e50ce08d48f9bd549200ae73775c0ea7cdd7e8))
+
+## [0.490.1](https://github.com/propeller-heads/tycho/compare/0.490.0...0.490.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **storage:** rank token owners by numeric balance ([d089a58](https://github.com/propeller-heads/tycho/commit/d089a5872dc71d33ae09d4e8c4b14f7716ee076f))
+
+## [0.490.0](https://github.com/propeller-heads/tycho/compare/0.489.0...0.490.0) (2026-10-28)
+
+
+### Features
+
+* **execution:** add AeroBasicExecutor for aero_basic pools ([d9e4ef4](https://github.com/propeller-heads/tycho/commit/d9e4ef4ce7945d97854a9b33d7d670b8b0613b1f))
+* **execution:** register aero_cl on the existing CL executors ([3dd49ee](https://github.com/propeller-heads/tycho/commit/3dd49ee05d23562a4d1ca7fa71e888cd9356f20b))
+* **execution:** route aero_cl swaps through the Slipstreams encoder ([4a055a7](https://github.com/propeller-heads/tycho/commit/4a055a7cf12f87c6c375c10954ded5716143c39b))
+* integrate AERO v1.1 aero_cl and aero_basic pools ([#1694](https://github.com/propeller-heads/tycho/issues/1694)) ([3eea1f3](https://github.com/propeller-heads/tycho/commit/3eea1f327445047fa2c61d7533fe59cee66070a3))
+* **integration-test:** test aero_cl and aero_basic pools ([ca4865d](https://github.com/propeller-heads/tycho/commit/ca4865d602c7735d293d701a805f067305ab4244))
+* **simulation:** add aero_basic native simulation ([72f6504](https://github.com/propeller-heads/tycho/commit/72f6504725d06e52436027a4259c652b4d0ad58c))
+* **simulation:** simulate aero_cl pools with the AERO swap hook fee ([15c4459](https://github.com/propeller-heads/tycho/commit/15c445914cb9e0adcbc0f00b4d329e3a9a8142d9))
+* **substreams:** index AERO v1.1 basic pools ([e3f669e](https://github.com/propeller-heads/tycho/commit/e3f669ebd4ea0ebb3c920ae089450fcdd594f17a))
+* **substreams:** index AERO v1.1 CL pools ([3c1c8da](https://github.com/propeller-heads/tycho/commit/3c1c8da38b2b07911269608eb9e06e49006606c3))
+
+
+### Bug Fixes
+
+* **execution:** pass forge fmt and Slither on the AeroBasicExecutor PR ([2291c08](https://github.com/propeller-heads/tycho/commit/2291c080405fbe019554e4c13dd3437f09fcca8b))
+
+## [0.489.0](https://github.com/propeller-heads/tycho/compare/0.488.0...0.489.0) (2026-10-28)
+
+
+### Features
+
+* expose the HTTP poll feed, book helpers and the SwapEncoder trait ([#1689](https://github.com/propeller-heads/tycho/issues/1689)) ([978940e](https://github.com/propeller-heads/tycho/commit/978940e27d77eb05ce2d3386cb5e78692f8266ea))
+* **snapshot-feed:** expose default_ws_feed_config and document HttpSource ([4cb995e](https://github.com/propeller-heads/tycho/commit/4cb995eae828abba8ab9d87f59dbf4d0ebccc6b8))
+* **tycho-execution:** make the SwapEncoder trait public ([dc62016](https://github.com/propeller-heads/tycho/commit/dc6201603bb143f71ad2e2c332409afff3999e0b))
+* **tycho-simulation:** expose the HTTP poll feed and book helpers ([ac7794b](https://github.com/propeller-heads/tycho/commit/ac7794b65b9f8e094a915d1305fe2959de0a3a98))
+
+## [0.488.0](https://github.com/propeller-heads/tycho/compare/0.487.0...0.488.0) (2026-10-28)
+
+
+### Features
+
+* **execution:** add the Native and Liquorice fallback executors ([ca0dbc6](https://github.com/propeller-heads/tycho/commit/ca0dbc6d257314ef83e016dda76a74efd3544235))
+* **execution:** add the Native and Liquorice fallback executors ([#1670](https://github.com/propeller-heads/tycho/issues/1670)) ([cba1603](https://github.com/propeller-heads/tycho/commit/cba1603402405c5cd173ca1032c632cbcfdb5f08))
+
+
+### Bug Fixes
+
+* **execution:** give the Liquorice fallback config its venue addresses ([89695c7](https://github.com/propeller-heads/tycho/commit/89695c7b2f7398e01020465ff8ed16e43394aba8))
+
+## [0.487.0](https://github.com/propeller-heads/tycho/compare/0.486.0...0.487.0) (2026-10-28)
+
+
+### Features
+
+* **bebop:** split the pricing stream from the book assembly ([4f44df5](https://github.com/propeller-heads/tycho/commit/4f44df5c5827d6dbe165b2fdeb4729d1585ad696))
+* **book:** expose book parts that venue price types are built from ([39142e9](https://github.com/propeller-heads/tycho/commit/39142e9ad100201dc054958bbdb2ed7ebb069a00))
+* **hashflow:** split the price poll from the book assembly ([465f159](https://github.com/propeller-heads/tycho/commit/465f1599c75a4215df29738ccc3fff9a0967ff74))
+* **metric:** split the price poll from the book assembly ([b5267c0](https://github.com/propeller-heads/tycho/commit/b5267c0eca03ab0bf0e6d0bd1aa8d8649e8343ce))
+* **snapshot-feed:** let other crates implement a WebSocket source ([37b5247](https://github.com/propeller-heads/tycho/commit/37b5247719bcdb310163789f86a02b570eab2190))
+* **tycho-simulation:** give each assembler its own builder ([db4790e](https://github.com/propeller-heads/tycho/commit/db4790e6a805c25aa4cb1c4117e87e98a4ee5de1))
+* **tycho-simulation:** split RFQ and Metric feeds into prices and books ([#1685](https://github.com/propeller-heads/tycho/issues/1685)) ([f89e72d](https://github.com/propeller-heads/tycho/commit/f89e72d9c086d2a14e55601c869d9d0ed167c40f))
+
+
+### Bug Fixes
+
+* **bebop:** pick the USD conversion pair in a fixed order ([2e919cc](https://github.com/propeller-heads/tycho/commit/2e919ccfc02a8d9ce741f4b30d5a7d2a5e691300))
+* **hashflow:** share one HTTP client between quote and levels ([0f4de90](https://github.com/propeller-heads/tycho/commit/0f4de9011cde35c56027d7afbf813cd57e521de4))
+
+## [0.486.0](https://github.com/propeller-heads/tycho/compare/0.485.1...0.486.0) (2026-10-27)
+
+
+### Features
+
+* **integration-test:** add a Grafana dashboard for pAMM simulation quality ([4c5bd57](https://github.com/propeller-heads/tycho/commit/4c5bd5702658db87b6a4bd1a697715058ed0d855))
+* **integration-test:** simulate price level swaps with the stream's overrides ([7f956cc](https://github.com/propeller-heads/tycho/commit/7f956cc6610dea869ba6cd6b6c48ff4c6d9ca2dc))
+* **integration-test:** simulate price level swaps with the stream's overrides ([#1673](https://github.com/propeller-heads/tycho/issues/1673)) ([8dcb726](https://github.com/propeller-heads/tycho/commit/8dcb72683e1452e9753b282df2cf4ddcc13477de))
+
+## [0.485.1](https://github.com/propeller-heads/tycho/compare/0.485.0...0.485.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **indexer:** add a zstd level 1 compressor for state answers ([ce64e8a](https://github.com/propeller-heads/tycho/commit/ce64e8a93aac8304635ece25cbf3baa9c18d5586))
+* **indexer:** compress state answers at zstd level 1 ([d5d79ec](https://github.com/propeller-heads/tycho/commit/d5d79ec0027a3ce72a5a29980a86d634fc3ce602))
+* **indexer:** compress state answers at zstd level 1 ([#1676](https://github.com/propeller-heads/tycho/issues/1676)) ([17407bd](https://github.com/propeller-heads/tycho/commit/17407bdce246b96092ee523d2a7b16551ac04c81))
+
 ## [0.485.0](https://github.com/propeller-heads/tycho/compare/0.484.0...0.485.0) (2026-10-27)
 
 

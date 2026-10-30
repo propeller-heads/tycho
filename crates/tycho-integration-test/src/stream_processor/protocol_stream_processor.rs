@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use futures::{Stream, StreamExt};
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -13,8 +13,8 @@ use tycho_simulation::{
     evm::{
         decoder::StreamDecodeError,
         engine_db::tycho_db::PreCachedDB,
-        override_stream::StateOverrideProvider,
         protocol::{
+            aero_basic::state::AeroBasicState,
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
@@ -121,9 +121,6 @@ pub struct ProtocolStreamProcessor {
     protocols: Option<Vec<String>>,
     partial_blocks: bool,
     no_tls: bool,
-    /// State override providers registered on the stream, keyed by protocol system. Empty leaves
-    /// the builder to install its own defaults.
-    override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
 }
 
 impl ProtocolStreamProcessor {
@@ -148,7 +145,6 @@ impl ProtocolStreamProcessor {
             protocols,
             partial_blocks,
             no_tls,
-            override_providers: HashMap::new(),
         })
     }
 
@@ -157,17 +153,6 @@ impl ProtocolStreamProcessor {
     /// that is not enabled, or names a protocol twice.
     pub fn with_protocol_tvl_thresholds(mut self, thresholds: Vec<ProtocolTvlThreshold>) -> Self {
         self.protocol_tvl_thresholds = thresholds;
-        self
-    }
-
-    /// Registers `providers` as the pools' state override sources, taking precedence over the
-    /// builder's own defaults so the process opens one Titan connection rather than one per
-    /// consumer.
-    pub fn with_override_providers(
-        mut self,
-        providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
-    ) -> Self {
-        self.override_providers = providers;
         self
     }
 
@@ -258,10 +243,6 @@ impl ProtocolStreamProcessor {
             protocol_stream =
                 self.add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
         }
-        for (protocol_system, provider) in &self.override_providers {
-            protocol_stream =
-                protocol_stream.with_override_provider(protocol_system, provider.clone());
-        }
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
         }
@@ -311,6 +292,8 @@ impl ProtocolStreamProcessor {
                 "vm:bopamm".to_string(),
                 "ring_swap_v2".to_string(),
                 "vm:balancer_v3".to_string(),
+                "aero_cl".to_string(),
+                "aero_basic".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -322,6 +305,8 @@ impl ProtocolStreamProcessor {
                 "aerodrome_v1".to_string(),
                 "lunarbase".to_string(),
                 "pancakeswap_infinity_cl".to_string(),
+                "aero_cl".to_string(),
+                "aero_basic".to_string(),
                 "pancakeswap_infinity_bin".to_string(),
             ],
             Chain::Bsc => vec![
@@ -368,6 +353,8 @@ impl ProtocolStreamProcessor {
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
                     "pancakeswap_infinity_cl".to_string(),
+                    "aero_cl".to_string(),
+                    "aero_basic".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -376,6 +363,8 @@ impl ProtocolStreamProcessor {
                     "uniswap_v3".to_string(),
                     "uniswap_v4".to_string(),
                     "pancakeswap_v3".to_string(),
+                    "aero_cl".to_string(),
+                    "aero_basic".to_string(),
                 ]
             }
             _ => vec![],
@@ -536,6 +525,16 @@ impl ProtocolStreamProcessor {
             "aerodrome_v1" => {
                 stream =
                     stream.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
+            }
+            "aero_cl" => {
+                stream = stream.exchange::<AerodromeSlipstreamsState>(
+                    "aero_cl",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "aero_basic" => {
+                stream = stream.exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None);
             }
             "vm:fermiswap" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(

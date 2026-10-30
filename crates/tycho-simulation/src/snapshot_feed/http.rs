@@ -1,7 +1,7 @@
 //! Feeds that poll: the shared poll loop, the source trait a provider implements for it, and
 //! the one-request helper those sources fetch with.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -47,7 +47,7 @@ pub struct HttpFeedConfig {
 /// The values every HTTP feed builder starts from. The relation among them worth keeping through
 /// a retune: the withdrawal age outlasts a poll that hangs to its deadline, so one slow poll does
 /// not blank the book.
-pub(crate) fn default_http_feed_config() -> HttpFeedConfig {
+pub fn default_http_feed_config() -> HttpFeedConfig {
     HttpFeedConfig {
         poll_interval: Duration::from_secs(5),
         request_timeout: Duration::from_secs(10),
@@ -69,7 +69,7 @@ pub(crate) fn default_http_feed_config() -> HttpFeedConfig {
 /// soon as the last receiver goes away, mid-poll included, since nothing it fetched from then on
 /// could reach anyone; polling itself never runs out, so a feed is otherwise stopped by dropping
 /// its future, which withdraws the published snapshot on the way out.
-pub(crate) async fn run_http_poll_feed<S: HttpSource>(
+pub async fn run_http_poll_feed<S: HttpSource>(
     config: HttpFeedConfig,
     publisher: Publisher<S::Snapshot>,
     source: S,
@@ -118,10 +118,20 @@ pub(crate) async fn run_http_poll_feed<S: HttpSource>(
 
 /// The provider-specific half of an HTTP-polling feed: one call fetches one complete snapshot.
 /// [`run_http_poll_feed`] owns the source and drives it by reference.
-pub(crate) trait HttpSource: Send + Sync {
+pub trait HttpSource: Send + Sync {
+    /// The complete snapshot one poll yields. Each snapshot replaces the previous one, so it must
+    /// not be a delta.
     type Snapshot: Send + Sync + 'static;
 
-    async fn fetch(&self) -> Result<Self::Snapshot, FeedError>;
+    /// Fetches one complete snapshot. The loop calls this once per poll and gives it the config's
+    /// `request_timeout`; an implementation may be written as `async fn` as long as its future is
+    /// `Send`.
+    ///
+    /// Return [`FeedError::Fatal`] when polling again cannot produce a different answer; this
+    /// ends the feed. Any other error, like a poll that overruns `request_timeout`, counts as one
+    /// failed poll toward `max_consecutive_failures` (unset by default, which polls forever) and
+    /// backs off before the next poll. Only `Ok` clears the failure count.
+    fn fetch(&self) -> impl Future<Output = Result<Self::Snapshot, FeedError>> + Send;
 }
 
 /// Every snapshot the provider answers with, and as a last item the error the feed gives up on.
@@ -224,10 +234,10 @@ fn polled_snapshots<S: HttpSource>(
 /// takes one, because what a failing status means is the venue's to say and not this module's.
 ///
 /// A plain `fn`, so the verdict rests on what the venue said and on nothing else.
-pub(crate) type RefusalCheck = fn(&str) -> bool;
+pub type RefusalCheck = fn(&str) -> bool;
 
 /// For a venue that refuses nothing outright, so every failing answer is worth another attempt.
-pub(crate) fn nothing_refused(_body: &str) -> bool {
+pub fn nothing_refused(_body: &str) -> bool {
     false
 }
 
@@ -276,9 +286,9 @@ async fn read_bytes(
     Ok(body)
 }
 
-/// Sends `request` and parses its JSON body, fetching as [`fetch_bytes`] does; an unparseable
+/// Sends `request` and parses its JSON body, fetching as `fetch_bytes` does; an unparseable
 /// body is a [`FeedError::Parsing`] naming `what`.
-pub(crate) async fn fetch_json<T: DeserializeOwned>(
+pub async fn fetch_json<T: DeserializeOwned>(
     request: RequestBuilder,
     what: &str,
     refused: RefusalCheck,

@@ -43,6 +43,7 @@
         "sushiswap_v2": "0x0017c84f2B3414514B67Bfc9a63830c8E0E690d0",
         "pancakeswap_v2": "0xFb89Ca30E5Ff1863237dD24aAF2189bD1cA6CC0D",
         "uniswap_v3": "0x667cB014F2b3C470b53089d984c3CCA840d23052",
+        "aero_cl": "0x667cB014F2b3C470b53089d984c3CCA840d23052",
         "pancakeswap_v3": "0x667cB014F2b3C470b53089d984c3CCA840d23052",
         "uniswap_v4": "0xD2798b649E965E5d33FD7D36C87b1fD6709d0B04",
         "vm:balancer_v2": "0x38e6Dca40C5c96Ca4F5e3F7583571E723F11836f",
@@ -70,7 +71,10 @@
         "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9",
         "fallback:rfq:metric": "0x3067880b419209FC6e961F08E0cDFfC1F21d2873",
         "fallback:rfq:bebop": "0x4dC7b66A563cEB85D3cD5998294c72ce7026894a",
-        "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28"
+        "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28",
+        "aero_basic": "0x9929EE6e01C0d599C4b791c6D6093293b05Ea91C",
+        "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
+        "fallback:rfq:liquorice": "0xCe74a3c15cE5d86c30aD1f02CD0b18582Fbb1C65"
       },
       "superseded": [{
         "status": "superseded",
@@ -107,6 +111,7 @@
         "ekubo_v3": "0x021D3C156948bEf1ae9C842259386522e25993B7",
         "rfq:bebop": "0xF35839C54A33FE88867ACB3deac9dB3AdB9bFA78",
         "aerodrome_slipstreams": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
+        "aero_cl": "0xE12eb9FcD93c7ffabfEd66B20D4B0dF02b44F6B3",
         "native_wrapper": "0x68AF9cDcc2e177e9D75c60f132b8DC52EAF1adBf",
         "lunarbase": "0xf435299a20c1405c957C3F407cc3E9b9df76ee7b",
         "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
@@ -115,7 +120,9 @@
         "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De",
         "fallback:rfq:metric": "0x8e0d294fC45fdFb6De21ae533132872E37F22B5b",
         "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B",
-        "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25"
+        "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
+        "aero_basic": "0xf6F8fb2321FB8431400ae546037cD2AE969a2c22",
+        "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c"
       },
       "superseded": [{
         "status": "superseded",
@@ -180,12 +187,15 @@
       "executors": {
         "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
         "uniswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
+        "aero_cl": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
         "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
         "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
         "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF",
-        "fallback:rfq:metric": "0x918335AF35DdDFad0C6E0d3beF95A6F9a0F02C3c"
+        "fallback:rfq:metric": "0x918335AF35DdDFad0C6E0d3beF95A6F9a0F02C3c",
+        "aero_basic": "0xf122B4408662172260Dd60DDFD45e4f9d15B38ce",
+        "fallback:rfq:native": "0x9BAC15444f4ec473f045D47C03701469B59D7F9e"
       },
       "superseded": [{
         "status": "superseded",
@@ -225,7 +235,8 @@
         "ring_swap_v2": "0x5De5D17985716AB919b806023Bd0Ed294450FFd7",
         "fallback:rfq:metric": "0x78FddACdd167d25efb81d5a45a9A3003Fd8c0643",
         "lunarbase": "0x99576B7C64Fe225785bd69E91fc9dC857Dd7AaA5",
-        "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d"
+        "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d",
+        "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79"
       },
       "superseded": [{
         "status": "superseded",
@@ -329,12 +340,16 @@
         "gigadex_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
         "ramses_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
         "up_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
+        "aero_cl": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
         "uniswap_v4": "0xe781c1869c9D8E60dDfcD8F8fb5213Ed8Ad07366",
         "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
         "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
         "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
         "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D",
-        "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C"
+        "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C",
+        "aero_basic": "0xCdBfd7f55Df4B60f34d8774c650feBB1baF5E34f",
+        "fallback:rfq:native": "0xcfa779974cCDaDD36A0D5dF6Ca61020C74aa038D",
+        "pancakeswap_infinity_cl": "0x4e80394e1cAF5cDeE6D57aEBa2dCE9B333b33E45"
       },
       "superseded": [{
         "status": "superseded",
@@ -369,7 +384,9 @@
       "executors": {
         "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
         "uniswap_v3": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
-        "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D"
+        "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D",
+        "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
+        "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
       },
       "superseded": []
     }

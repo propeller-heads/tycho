@@ -59,7 +59,7 @@ services/
   debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
     plan_restrictions.rs    Per-user API limits via X-User-Plan header (plans.yaml)
-    compression.rs          Zstd response compression
+    compression.rs          Zstd response compression: the middleware (level 3), and level 1 for state responses
     metrics.rs              RPC request metrics
     pagination.rs           Request pagination validation
 

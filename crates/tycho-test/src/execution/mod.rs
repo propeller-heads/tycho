@@ -54,7 +54,9 @@ const MAX_CONCURRENT_BATCHES: usize = 4;
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
 ///
 /// `oracle_overwrites` are storage slots applied to every simulation, merged per account after
-/// the balance, allowance and protocol overwrites.
+/// the balance, allowance and protocol overwrites. Each input's own
+/// [`account_overwrites`](TychoExecutionInput::account_overwrites) are applied last, to that
+/// simulation only.
 ///
 /// # Errors
 /// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
@@ -246,6 +248,9 @@ async fn simulate_swap_transaction_on(
                 }
             }
         }
+        if let Some(ref account_overwrites) = info.account_overwrites {
+            merge_account_overwrites(&mut state_overwrites, account_overwrites);
+        }
 
         inputs.insert(
             simulation_id.clone(),
@@ -414,6 +419,41 @@ fn merge_storage_overwrites(
     }
 }
 
+/// Adds `accounts` to one simulation's overwrites. An account's balance, nonce, code and full
+/// storage (`state`) replace the ones set before, and its `state_diff` slots merge in slot by slot.
+fn merge_account_overwrites(
+    overwrites: &mut AddressHashMap<AccountOverride>,
+    accounts: &AddressHashMap<AccountOverride>,
+) {
+    for (address, account) in accounts {
+        let merged = overwrites.entry(*address).or_default();
+        if account.balance.is_some() {
+            merged.balance = account.balance;
+        }
+        if account.nonce.is_some() {
+            merged.nonce = account.nonce;
+        }
+        if account.code.is_some() {
+            merged.code = account.code.clone();
+        }
+        if account.state.is_some() {
+            // A full storage replaces every slot set before it.
+            merged.state = account.state.clone();
+            merged.state_diff = None;
+        }
+        if let Some(state_diff) = &account.state_diff {
+            merged
+                .state_diff
+                .get_or_insert_with(Default::default)
+                .extend(
+                    state_diff
+                        .iter()
+                        .map(|(slot, value)| (*slot, *value)),
+                );
+        }
+    }
+}
+
 fn collect_fermiswap_pairs(
     execution_info: &HashMap<String, TychoExecutionInput>,
 ) -> miette::Result<Vec<(Address, Address)>> {
@@ -510,6 +550,73 @@ mod tests {
             .expect("state diff is set");
         assert_eq!(state_diff.get(&LANE), Some(&VALUE));
         assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
+    }
+
+    /// A simulation's own account replaces the balance and nonce set before it, and adds its
+    /// slots to the ones set before it.
+    #[test]
+    fn an_input_account_replaces_the_balance_and_nonce_and_adds_its_slots() {
+        let mut overwrites = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default()
+                .with_balance(U256::from(1))
+                .with_nonce(1)
+                .with_state_diff(vec![(LANE, VALUE)]),
+        )]);
+        let accounts = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default()
+                .with_balance(U256::from(2))
+                .with_nonce(2)
+                .with_state_diff(vec![(OTHER_LANE, VALUE)]),
+        )]);
+
+        merge_account_overwrites(&mut overwrites, &accounts);
+
+        let merged = &overwrites[&REGISTRY];
+        assert_eq!((merged.balance, merged.nonce), (Some(U256::from(2)), Some(2)));
+        let state_diff = merged
+            .state_diff
+            .as_ref()
+            .expect("state diff is set");
+        assert_eq!(state_diff.get(&LANE), Some(&VALUE));
+        assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
+    }
+
+    /// A simulation's own account that sets only storage keeps the balance set before it.
+    #[test]
+    fn an_input_account_without_a_balance_keeps_the_balance_set_before() {
+        let mut overwrites = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default().with_balance(U256::from(1)),
+        )]);
+        let accounts = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
+        )]);
+
+        merge_account_overwrites(&mut overwrites, &accounts);
+
+        assert_eq!(overwrites[&REGISTRY].balance, Some(U256::from(1)));
+    }
+
+    /// A simulation's own full storage replaces the slots set before it.
+    #[test]
+    fn an_input_account_with_full_storage_replaces_the_slots_set_before() {
+        let mut overwrites = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
+        )]);
+        let storage = B256HashMap::from_iter([(OTHER_LANE, VALUE)]);
+        let accounts = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride { state: Some(storage.clone()), ..Default::default() },
+        )]);
+
+        merge_account_overwrites(&mut overwrites, &accounts);
+
+        let merged = &overwrites[&REGISTRY];
+        assert_eq!((merged.state.as_ref(), merged.state_diff.as_ref()), (Some(&storage), None));
     }
 
     #[test]

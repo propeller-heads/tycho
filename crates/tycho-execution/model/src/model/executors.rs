@@ -40,6 +40,8 @@ pub enum Executor {
     UniswapV2,
     UniswapV3,
     NativeWrap,
+    /// Also models `AeroBasicExecutor`, which inherits `AerodromeV1Executor` and only changes how
+    /// the requested output amount is priced.
     AerodromeV1,
     LiquidityParty,
     LunarBase,
