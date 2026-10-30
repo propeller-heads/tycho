@@ -82,6 +82,14 @@ pub fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
     out
 }
 
+/// `pools[pool_id]` base slot of a Bin pool. Pool ids are bytes32 on chain.
+pub fn pool_base_slot(pool_id: &[u8]) -> [u8; 32] {
+    let pool_id: &[u8; 32] = pool_id
+        .try_into()
+        .expect("pool id is 32 bytes");
+    pool_state_base_slot(pool_id, BIN_POOLS_MAPPING_SLOT)
+}
+
 /// Slot of `mapping[key]` for the mapping stored `offset` slots after `base`.
 ///
 /// `base` is a hash, so the offset can carry out of the low byte. Solidity stores `mapping[k]` at

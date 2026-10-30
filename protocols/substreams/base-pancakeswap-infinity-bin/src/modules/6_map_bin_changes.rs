@@ -1,11 +1,12 @@
 use crate::{
     keys::{pool_key, tree_key},
     modules::map_pool_created::decode_address,
-    parameters::{self, BIN_POOLS_MAPPING_SLOT},
+    parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
         BinDelta, BinDeltas, Events, LeftBin,
     },
+    storage::{in_window, storage_writes_by_tx, tx_index, with_floors, WritesBySlot},
 };
 use std::collections::HashMap;
 use substreams::store::{StoreGet, StoreGetInt64, StoreGetRaw};
@@ -36,23 +37,15 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
     active_id_store: &A,
     bin_trees_store: &T,
 ) -> Result<BinDeltas, substreams::errors::Error> {
-    let writes_by_tx = super::map_tree_changes::storage_writes_by_tx(block, pool_manager);
+    let writes_by_tx = storage_writes_by_tx(block, pool_manager, &events.pool_events);
 
     let no_writes = HashMap::new();
     let mut deltas: Vec<BinDelta> = Vec::new();
     let mut left_bins: Vec<LeftBin> = Vec::new();
-    // Floor for the storage-write lookup, per transaction: writes at or below the previous
-    // BinPoolManager log belong to that log, not to this one.
-    let mut prev_log: HashMap<u64, u64> = HashMap::new();
-    for event in &events.pool_events {
-        let tx_index = event
-            .transaction
-            .as_ref()
-            .expect("3_map_events sets a transaction on every event")
-            .index;
+    for (event, floor) in with_floors(&events.pool_events) {
         // Not an error: events that touch no bins never look one up.
         let writes = writes_by_tx
-            .get(&tx_index)
+            .get(&tx_index(event))
             .unwrap_or(&no_writes);
         let pool = event.pool_id.as_slice();
         // Active bin before and after the event, `None` for events that touch no bins. Only a
@@ -86,10 +79,6 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
                 (None, Vec::new())
             }
         };
-        let floor = prev_log
-            .get(&tx_index)
-            .copied()
-            .unwrap_or(0);
         let mut event_deltas = event_to_deltas(event, writes, swap_bins, floor)?;
         for delta in &mut event_deltas {
             delta.was_in_tree = bin_in_tree(bin_trees_store, pool, delta.bin_id, delta.ordinal - 1);
@@ -115,12 +104,9 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
             }
         }
         deltas.extend(event_deltas);
-        prev_log.insert(tx_index, event.log_ordinal);
     }
 
-    // Deterministic for the join in 8_map_protocol_changes.
-    deltas.sort_unstable_by_key(|delta| (delta.ordinal, delta.bin_id));
-
+    // Events arrive in ordinal order and each event's bins are sorted, so the deltas are too.
     Ok(BinDeltas { deltas, left_bins })
 }
 
@@ -212,18 +198,12 @@ fn bin_in_tree<S: StoreGet<Vec<u8>>>(store: &S, pool_id: &[u8], bin_id: u32, ord
 /// every other event, which names its bins itself.
 fn event_to_deltas(
     event: &PoolEvent,
-    writes: &HashMap<Vec<u8>, Vec<&StorageChange>>,
+    writes: &WritesBySlot,
     swap_bins: Vec<u32>,
-    prev_log_ordinal: u64,
+    floor: u64,
 ) -> Result<Vec<BinDelta>, substreams::errors::Error> {
     let pool_id = &event.pool_id;
-    let base = parameters::pool_state_base_slot(
-        pool_id
-            .as_slice()
-            .try_into()
-            .expect("pool id is 32 bytes"),
-        BIN_POOLS_MAPPING_SLOT,
-    );
+    let base = parameters::pool_base_slot(pool_id);
 
     // Carried onto every delta so map_balance_changes needs no second lookup.
     let currency0 = &event.currency0;
@@ -252,27 +232,25 @@ fn event_to_deltas(
     for bin_id in bin_ids {
         let slot = parameters::bin_reserve_slot(&base, bin_id);
 
-        // Contract writes the bin before emitting, so the event's writes sit between the previous
-        // log and this one. Both bounds matter: a later event in the same tx may rewrite the slot,
-        // and an earlier one's write must not be replayed as this event's. Several writes to one
-        // slot net out to the first one's old value and the last one's new value.
-        let window: Vec<&StorageChange> = writes
+        // Several writes to one slot net out to the first one's old value and the last one's new
+        // value.
+        let mut bounds: Option<(&StorageChange, &StorageChange)> = None;
+        for change in writes
             .get(slot.as_slice())
             .into_iter()
             .flatten()
-            .filter(|change| {
-                change.ordinal > prev_log_ordinal && change.ordinal < event.log_ordinal
-            })
-            .copied()
-            .collect();
-        let first = window
-            .iter()
-            .min_by_key(|change| change.ordinal);
-        let last = window
-            .iter()
-            .max_by_key(|change| change.ordinal);
+            .filter(|change| in_window(change.ordinal, floor, event.log_ordinal))
+        {
+            bounds = Some(match bounds {
+                None => (change, change),
+                Some((first, last)) => (
+                    if change.ordinal < first.ordinal { change } else { first },
+                    if change.ordinal > last.ordinal { change } else { last },
+                ),
+            });
+        }
 
-        match first.zip(last) {
+        match bounds {
             Some((first, last)) => deltas.push(BinDelta {
                 pool_id: pool_id.clone(),
                 currency0: currency0.clone(),
@@ -337,7 +315,7 @@ mod tests {
     }
 
     fn write(bin_id: u32, old: Vec<u8>, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_state_base_slot(&pool_id_bytes(), BIN_POOLS_MAPPING_SLOT);
+        let base = parameters::pool_base_slot(&pool_id_bytes());
         StorageChange {
             address: POOL_MANAGER.to_vec(),
             key: parameters::bin_reserve_slot(&base, bin_id).to_vec(),
@@ -347,8 +325,8 @@ mod tests {
         }
     }
 
-    fn index(changes: &[StorageChange]) -> HashMap<Vec<u8>, Vec<&StorageChange>> {
-        let mut map: HashMap<Vec<u8>, Vec<&StorageChange>> = HashMap::new();
+    fn index(changes: &[StorageChange]) -> WritesBySlot<'_> {
+        let mut map = WritesBySlot::new();
         for change in changes {
             map.entry(change.key.clone())
                 .or_default()

@@ -1,7 +1,4 @@
-use crate::{
-    abi::bin_pool_manager::events::Initialize,
-    parameters::{self, BIN_POOLS_MAPPING_SLOT},
-};
+use crate::{abi::bin_pool_manager::events::Initialize, parameters};
 use ethabi::ethereum_types::Address;
 use serde::Deserialize;
 use substreams::scalar::BigInt;
@@ -170,7 +167,7 @@ fn initial_protocol_fees(
     log: &eth::Log,
     pool_manager: &[u8],
 ) -> (u32, u32) {
-    let slot0_key = parameters::pool_state_base_slot(&event.id, BIN_POOLS_MAPPING_SLOT);
+    let slot0_key = parameters::pool_base_slot(&event.id);
     let slot0_write = tx
         .calls
         .iter()
@@ -211,7 +208,6 @@ mod tests {
     use tiny_keccak::{Hasher, Keccak};
 
     use super::*;
-    use crate::parameters::BIN_POOLS_MAPPING_SLOT;
 
     const POOL_MANAGER: &str = "C697d2898e0D09264376196696c51D7aBbbAA4a9";
     const VAULT: &str = "238a358808379702088667322f80aC48bAd5e6c4";
@@ -328,7 +324,7 @@ mod tests {
     fn slot0_write_at(new_value: [u8; 32], ordinal: u64) -> StorageChange {
         StorageChange {
             address: hex::decode(POOL_MANAGER).unwrap(),
-            key: parameters::pool_state_base_slot(&POOL_ID, BIN_POOLS_MAPPING_SLOT).to_vec(),
+            key: parameters::pool_base_slot(&POOL_ID).to_vec(),
             old_value: vec![0u8; 32],
             new_value: new_value.to_vec(),
             ordinal,
@@ -516,7 +512,7 @@ mod tests {
     /// `keccak(pool_id ++ 5)` is ours.
     #[test]
     fn slot0_writes_for_other_slots_are_ignored() {
-        let other_pool = parameters::pool_state_base_slot(&[0xcd; 32], BIN_POOLS_MAPPING_SLOT);
+        let other_pool = parameters::pool_base_slot(&[0xcd; 32]);
         let block = block_with(
             initialize_log(&[0u8; 20], 7, &parameters(0, 10), ACTIVE_ID),
             vec![
