@@ -1,3 +1,11 @@
+## [0.493.0](https://github.com/propeller-heads/tycho/compare/0.492.1...0.493.0) (2026-10-30)
+
+
+### Features
+
+* **execution:** export group_swaps and SwapGroup ([eb654d8](https://github.com/propeller-heads/tycho/commit/eb654d8ab20b6770c0c4dd7d9f5c20cbeef143d7))
+* **execution:** export group_swaps and SwapGroup ([#1696](https://github.com/propeller-heads/tycho/issues/1696)) ([68c2579](https://github.com/propeller-heads/tycho/commit/68c2579748923bc987b9aaf9d959e60f5579920a))
+
 ## [0.492.1](https://github.com/propeller-heads/tycho/compare/0.492.0...0.492.1) (2026-10-30)
 
 
