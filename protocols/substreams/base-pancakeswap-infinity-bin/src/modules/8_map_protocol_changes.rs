@@ -29,9 +29,9 @@ type PoolAddress = Vec<u8>;
 // modules/mod.rs are what make `.into()` below compile.
 /// Assembles `BlockChanges`: created components, entity attributes, balance changes.
 ///
-/// Emits `active_id` per Swap, `protocol_fees/*` per ProtocolFeeUpdated, `bins/{bin_id}` per
-/// BinDelta, `active_in_tree` per BinDelta on the active bin, and a `bins/{bin_id}` deletion per
-/// left bin that was published.
+/// Emits `active_id` per Swap, `protocol_fees/*` per ProtocolFeeUpdated, `bins/{bin_id}/reserve_x`
+/// and `bins/{bin_id}/reserve_y` per BinDelta, `active_in_tree` per BinDelta on the active bin, and
+/// deletions of both reserve attributes per left bin that was published.
 ///
 /// A BinDelta carries absolute before and after values, so no accumulator store as in CL. The
 /// reserves store answers only for a left bin, which the swap did not write: whether it held
@@ -143,10 +143,11 @@ pub fn collect_transaction_changes<S: StoreGet<Vec<u8>>>(
         .collect()
 }
 
-/// `bins/{id}` attributes in log order: one per visible delta, and a deletion per left bin that
-/// still held reserves, so was published while active. Plus `active_in_tree` per delta that
-/// writes the active bin: the simulation keeps only visible bins, so this is the one bit that
-/// tells it whether a swap moving off the active bin leaves it reachable.
+/// `bins/{id}/reserve_x` and `bins/{id}/reserve_y` in log order: a pair per visible delta, and a
+/// pair of deletions per left bin that still held reserves, so was published while active. Plus
+/// `active_in_tree` per delta that writes the active bin: the simulation keeps only visible bins,
+/// so this is the one bit that tells it whether a swap moving off the active bin leaves it
+/// reachable.
 ///
 /// Log order because the builder keeps the last write per attribute within a transaction.
 fn bin_attributes<S: StoreGet<Vec<u8>>>(
@@ -168,13 +169,13 @@ fn bin_attributes<S: StoreGet<Vec<u8>>>(
         let Some(change) = change else {
             continue;
         };
-        let attribute = Attribute {
-            name: format!("bins/{}", delta.bin_id),
-            // Raw packed word, so indexing and simulation cannot drift.
-            value: delta.new_packed,
-            change: change.into(),
-        };
-        attributes.push((delta.ordinal, tx, delta.pool_id, attribute));
+        let packed = parameters::reserve_word(&delta.new_packed)
+            .expect("map_bin_changes widens every reserve word to 32 bytes");
+        let (x, y) = parameters::unpack_reserves(&packed);
+        for (name, value) in reserve_attributes(delta.bin_id, x, y) {
+            let attribute = Attribute { name, value, change: change.into() };
+            attributes.push((delta.ordinal, tx.clone(), delta.pool_id.clone(), attribute));
+        }
     }
     for left in bin_deltas.left_bins {
         // Deleting an attribute that was never published fails the indexer's storage write, so
@@ -185,18 +186,26 @@ fn bin_attributes<S: StoreGet<Vec<u8>>>(
         if !held_reserves {
             continue;
         }
-        let attribute = Attribute {
-            name: format!("bins/{}", left.bin_id),
-            value: vec![],
-            change: ChangeType::Deletion.into(),
-        };
-        attributes.push((left.ordinal, left.transaction.unwrap(), left.pool_id, attribute));
+        let tx = left.transaction.unwrap();
+        for (name, _) in reserve_attributes(left.bin_id, 0, 0) {
+            let attribute = Attribute { name, value: vec![], change: ChangeType::Deletion.into() };
+            attributes.push((left.ordinal, tx.clone(), left.pool_id.clone(), attribute));
+        }
     }
     attributes.sort_by_key(|(ordinal, ..)| *ordinal);
     attributes
         .into_iter()
         .map(|(_, tx, pool_id, attribute)| (tx, pool_id, attribute))
         .collect()
+}
+
+/// The two reserve attributes of a bin, each a 16-byte big-endian `u128`. Unpacked here so no
+/// reader has to know which half of `reserveOfBin` is which.
+fn reserve_attributes(bin_id: u32, x: u128, y: u128) -> [(String, Vec<u8>); 2] {
+    [
+        (format!("bins/{bin_id}/reserve_x"), x.to_be_bytes().to_vec()),
+        (format!("bins/{bin_id}/reserve_y"), y.to_be_bytes().to_vec()),
+    ]
 }
 
 fn is_zero(value: &[u8]) -> bool {
@@ -366,10 +375,44 @@ mod tests {
             .collect()
     }
 
+    fn reserves(bin_id: u32, change: ChangeType) -> Vec<(String, ChangeType)> {
+        vec![
+            (format!("bins/{bin_id}/reserve_x"), change),
+            (format!("bins/{bin_id}/reserve_y"), change),
+        ]
+    }
+
+    /// The word is unpacked once, here: y is the first 16 bytes on chain, x the last, and each
+    /// attribute carries its half as a plain 16-byte big-endian number.
+    #[test]
+    fn reserve_attributes_carry_each_half_unpacked() {
+        let mut packed = [0u8; 32];
+        packed[15] = 7;
+        packed[31] = 3;
+        let bin_deltas = BinDeltas {
+            deltas: vec![delta(100, 1, (true, false, word(0)), (true, false, packed.to_vec()))],
+            left_bins: vec![],
+        };
+
+        let values: Vec<(String, Vec<u8>)> = bin_attributes(bin_deltas, &reserves_store(vec![]))
+            .into_iter()
+            .map(|(_, _, attribute)| (attribute.name, attribute.value))
+            .collect();
+
+        let mut x = vec![0u8; 16];
+        x[15] = 3;
+        let mut y = vec![0u8; 16];
+        y[15] = 7;
+        assert_eq!(
+            values,
+            vec![("bins/100/reserve_x".to_string(), x), ("bins/100/reserve_y".to_string(), y)]
+        );
+    }
+
     /// A left bin is deleted only if it held reserves, since only then was it published.
     /// Deleting an attribute that was never published fails the indexer's storage write.
     #[rstest]
-    #[case::held_dust(vec![(3, 100, word(1))], vec![("bins/100".to_string(), ChangeType::Deletion)])]
+    #[case::held_dust(vec![(3, 100, word(1))], reserves(100, ChangeType::Deletion))]
     #[case::emptied_before(vec![(3, 100, word(1)), (5, 100, word(0))], vec![])]
     #[case::never_written(vec![], vec![])]
     fn left_bin_is_deleted_only_if_it_held_reserves(
@@ -416,10 +459,7 @@ mod tests {
 
         assert_eq!(
             names_and_changes(bin_deltas, &store),
-            vec![
-                ("bins/100".to_string(), ChangeType::Deletion),
-                ("bins/100".to_string(), ChangeType::Creation),
-            ]
+            [reserves(100, ChangeType::Deletion), reserves(100, ChangeType::Creation)].concat()
         );
     }
 }

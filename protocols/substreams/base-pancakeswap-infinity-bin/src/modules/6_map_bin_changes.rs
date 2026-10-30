@@ -755,8 +755,8 @@ mod tests {
         )
     }
 
-    /// Storage values leave here as 32-byte words whatever length Firehose gave them, so the
-    /// published `bins/{id}` always decodes; a longer value is a broken layout.
+    /// Storage values leave here as 32-byte words whatever length Firehose gave them, so they
+    /// always unpack; a longer value is a broken layout.
     #[test]
     fn reserve_words_are_widened_to_32_bytes() {
         let deltas = run_block(

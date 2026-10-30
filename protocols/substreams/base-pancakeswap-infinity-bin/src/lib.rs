@@ -20,8 +20,9 @@
 //! <https://github.com/pancakeswap/infinity-core/tree/7c04695f/src/pool-bin>
 //!
 //! Attributes. Static: `pool_id`, `key_lp_fee`, `bin_step`, `parameters`, `pool_manager`,
-//! optional `hook_address`. State: `balance_owner`, `active_id`, `fee`,
-//! `protocol_fees/zero2one`, `protocol_fees/one2zero`, `bins/{bin_id}`.
+//! optional `hook_address`. State: `balance_owner`, `active_id`, `active_in_tree`, `fee`,
+//! `protocol_fees/zero2one`, `protocol_fees/one2zero`, `bins/{bin_id}/reserve_x`,
+//! `bins/{bin_id}/reserve_y`.
 
 pub mod abi;
 pub mod modules;
