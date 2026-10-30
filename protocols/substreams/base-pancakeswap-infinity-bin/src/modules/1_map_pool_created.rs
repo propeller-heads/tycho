@@ -11,6 +11,7 @@ use tycho_substreams::prelude::*;
 
 /// Per-chain deployment addresses, hex without the 0x prefix.
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct Params {
     /// `BinPoolManager`, the emitter of `Initialize`.
     pool_manager: String,
@@ -18,7 +19,8 @@ struct Params {
     vault: String,
 }
 
-fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
+/// Decodes a 20-byte address given as hex without the `0x` prefix.
+pub fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
     let bytes =
         hex::decode(value).map_err(|err| anyhow::anyhow!("Invalid {name} {value:?}: {err}"))?;
     if bytes.len() != 20 {
@@ -388,7 +390,16 @@ mod tests {
             Params { pool_manager: POOL_MANAGER.to_string(), vault: VAULT.to_string() }
         );
         assert!(serde_qs::from_str::<Params>(POOL_MANAGER).is_err(), "bare address is rejected");
-        assert!(decode_address("vault", "0x1234").is_err(), "0x prefix and short input rejected");
+        assert!(
+            serde_qs::from_str::<Params>(&format!(
+                "pool_manager={POOL_MANAGER}&vault={VAULT}&pool_mgr={POOL_MANAGER}"
+            ))
+            .is_err(),
+            "a misspelled key is rejected, not ignored"
+        );
+        assert!(decode_address("vault", "0x1234").is_err(), "0x prefix is not hex");
+        assert!(decode_address("vault", "1234").is_err(), "2 bytes are not an address");
+        assert_eq!(decode_address("vault", VAULT).unwrap(), hex::decode(VAULT).unwrap());
     }
 
     #[test]
