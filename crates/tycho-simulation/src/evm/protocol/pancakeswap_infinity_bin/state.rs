@@ -19,7 +19,10 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     pancakeswap_infinity_bin::{
-        attributes::{apply_reserve, decode_bin_id, decode_bool, decode_u16, parse_bin_key},
+        attributes::{
+            apply_reserve, decode_bin_id_attribute, decode_bool_attribute, decode_u16_attribute,
+            parse_bin_key,
+        },
         math::{
             bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
             constants::{BIN_ID_COUNT, MAX_LIQUIDITY_PER_BIN, PIPS_DENOMINATOR},
@@ -448,13 +451,13 @@ impl ProtocolSim for PancakeswapInfinityBinState {
     ) -> Result<(), TransitionError> {
         for (key, value) in delta.updated_attributes.iter() {
             match key.as_str() {
-                "active_id" => self.active_id = decode_bin_id(key, value)?,
-                "active_in_tree" => self.active_in_tree = decode_bool(key, value)?,
+                "active_id" => self.active_id = decode_bin_id_attribute(key, value)?,
+                "active_in_tree" => self.active_in_tree = decode_bool_attribute(key, value)?,
                 "protocol_fees/zero2one" => {
-                    self.protocol_fee_zero_for_one = decode_u16(key, value)?
+                    self.protocol_fee_zero_for_one = decode_u16_attribute(key, value)?
                 }
                 "protocol_fees/one2zero" => {
-                    self.protocol_fee_one_for_zero = decode_u16(key, value)?
+                    self.protocol_fee_one_for_zero = decode_u16_attribute(key, value)?
                 }
                 _ if key.starts_with("bins/") => apply_reserve(&mut self.bins, key, value)?,
                 _ => {}
