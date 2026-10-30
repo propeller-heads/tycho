@@ -56,10 +56,10 @@ pub fn calculate_swap_fee(protocol_fee: u16, lp_fee: u32) -> u32 {
     protocol_fee + lp_fee - (numerator / u64::from(PIPS_DENOMINATOR)) as u32
 }
 
-/// Protocol's cut of a bin's fee, rounded down. Callers pass the input side's fee: `zero2one` when
-/// selling token0, `one2zero` otherwise.
+/// Protocol's cut of a bin's fee, rounded down. `protocol_fee` is the input side's half:
+/// `zero2one` when selling token0, `one2zero` otherwise.
 ///
-/// This leaves the pool, so `swap` subtracts it before crediting the bin. Skipping it overstates
+/// This amount leaves the pool rather than staying in the bin. Skipping it overstates
 /// every reserve after a swap.
 ///
 /// [`PackedUint128Math.sol#L219-L247`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/math/PackedUint128Math.sol#L219-L247)

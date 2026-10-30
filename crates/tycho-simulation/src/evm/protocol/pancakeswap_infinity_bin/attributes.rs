@@ -131,7 +131,7 @@ pub fn parse_bin_key(key: &str) -> Result<(u32, Reserve), AttributeError> {
 /// Applies one `bins/{id}/reserve_*` attribute to the bin map, creating the bin if needed. The
 /// other half is untouched, so a bin whose halves arrive in separate deltas still ends up whole.
 ///
-/// Bins left at `(0, 0)` are the caller's to drop.
+/// Leaves a bin at `(0, 0)` in place; dropping such bins is a separate step.
 pub fn apply_reserve(
     bins: &mut BTreeMap<u32, (u128, u128)>,
     key: &str,
