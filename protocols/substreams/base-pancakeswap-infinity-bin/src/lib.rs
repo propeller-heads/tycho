@@ -1,3 +1,4 @@
+// The `substreams::handlers` macros expand to `pub fn`s taking raw pointers.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! PancakeSwap Infinity Liquidity Book (Bin) pools.
 //!

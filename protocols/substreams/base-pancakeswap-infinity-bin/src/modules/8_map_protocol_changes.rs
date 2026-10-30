@@ -59,7 +59,6 @@ pub fn map_protocol_changes(
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn collect_transaction_changes<S: StoreGet<Vec<u8>>>(
     created_pools: BlockEntityChanges,
     events: Events,

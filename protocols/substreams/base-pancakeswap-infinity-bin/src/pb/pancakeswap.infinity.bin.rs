@@ -48,7 +48,7 @@ pub struct TreeDeltas {
     #[prost(message, repeated, tag="1")]
     pub deltas: ::prost::alloc::vec::Vec<TreeDelta>,
 }
-/// Absolute reserves of one bin, before and after a transaction touched it.
+/// Absolute reserves of one bin, before and after one event touched it.
 ///
 /// Unlike CL ticks, these are NOT deltas. The events do not carry per-bin amounts, so the values
 /// are read out of the BinPoolManager storage diff (see 6_map_bin_changes.rs). Both sides are kept

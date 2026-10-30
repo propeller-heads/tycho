@@ -4,9 +4,9 @@
 //! [16, 32) hold a `uint16` bin step instead of an `int24` tick spacing, and the pools mapping
 //! slot differs.
 //!
-//! Layout (`src/libraries/math/ParametersHelper.sol:12-29`,
-//! `src/pool-bin/libraries/BinPoolParametersHelper.sol`), bits counted from the least significant
-//! bit of the bytes32:
+//! Layout, bits counted from the least significant bit of the bytes32:
+//! [ParametersHelper](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/libraries/math/ParametersHelper.sol#L12-L29),
+//! [BinPoolParametersHelper](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPoolParametersHelper.sol).
 //!
 //! ```text
 //! [0, 16)   hooks registration bitmap (bit index = IBinHooks.sol offsets)
@@ -50,6 +50,7 @@ pub(crate) fn is_dynamic_fee(fee: u32) -> bool {
 /// Storage slot of `BinPoolManager.pools`. The inherited state takes slots 0-3 (`_owner`,
 /// `_paused`, `protocolFeesAccrued`, `protocolFeeController`); Bin's `uint16 maxBinStep` packs into
 /// slot 3 beside that address and `minBinShareForDonate` takes 4, so `pools` is 5. CL is 4.
+/// [BinPoolManager](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol).
 ///
 /// A wrong slot returns plausible numbers, never an error. The chain-pinned tests below are what
 /// catches it.
@@ -66,9 +67,10 @@ pub(crate) fn bin_step(parameters: &[u8; 32]) -> u16 {
 
 /// `keccak256(pool_id ++ uint256(mapping_slot))`: the slot of `pools[pool_id].slot0`.
 ///
-/// Struct layout from there (`src/pool-bin/libraries/BinPool.sol:54-68`): `+0` slot0,
-/// `+1` reserveOfBin, `+2` shareOfBin, `+3` positions, `+4` the bin tree. slot0 packs
-/// `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee` (`BinSlot0.sol:9`).
+/// Struct layout from there: `+0` slot0, `+1` reserveOfBin, `+2` shareOfBin, `+3` positions,
+/// `+4` the bin tree ([BinPool.State](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L54-L68)). slot0
+/// packs `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee`
+/// ([BinSlot0](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/types/BinSlot0.sol#L9)).
 pub(crate) fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
     let mut hasher = Keccak::v256();
     hasher.update(pool_id);

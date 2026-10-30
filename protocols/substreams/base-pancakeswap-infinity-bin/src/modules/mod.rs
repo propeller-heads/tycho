@@ -23,7 +23,7 @@ pub mod store_bin_trees;
 #[path = "6_map_bin_changes.rs"]
 pub mod map_bin_changes;
 
-#[path = "6_map_store_balance_changes.rs"]
+#[path = "7_map_store_balance_changes.rs"]
 pub mod map_store_balance_changes;
 
 #[path = "7_store_bin_reserves.rs"]

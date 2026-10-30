@@ -38,9 +38,8 @@ pub(crate) fn decode_address(
 /// The attribute names are this package's own, and `PancakeswapInfinityBinState` is written
 /// against them, so they are load-bearing.
 ///
-/// Two things the CL package gets differently, both of which compile either way: Bin's slot0 packs
-/// `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee` (`BinSlot0.sol:9`), and its pools
-/// mapping is at slot 5, not 4.
+/// The protocol fee is read from the pool's slot0 write, whose layout and storage slot are Bin's
+/// own: see `parameters::BIN_POOLS_MAPPING_SLOT` and `parameters::protocol_fee_from_slot0`.
 #[substreams::handlers::map]
 pub fn map_pools_created(
     params: String,
@@ -211,7 +210,8 @@ mod tests {
 
     const POOL_MANAGER: &str = "C697d2898e0D09264376196696c51D7aBbbAA4a9";
     const VAULT: &str = "238a358808379702088667322f80aC48bAd5e6c4";
-    /// 2^23, the reference bin. Real pools start here, and its signed encoding widens to 4 bytes.
+    /// 2^23, the bin at price 1.0. A real pool starts at its own price's bin; this one is used
+    /// because its signed encoding widens to 4 bytes.
     const ACTIVE_ID: u32 = 1 << 23;
     const CURRENCY0: [u8; 20] = [0x11; 20];
     const CURRENCY1: [u8; 20] = [0x22; 20];
@@ -226,8 +226,8 @@ mod tests {
         out
     }
 
-    /// Bin slot0: `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee` (`BinSlot0.sol:9`).
-    /// CL packs it differently, so this cannot be copied.
+    /// Bin slot0: `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee`.
+    /// [`BinSlot0.sol#L9`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/types/BinSlot0.sol#L9)
     fn slot0(active_id: u32, zero_for_one: u32, one_for_zero: u32, lp_fee: u32) -> [u8; 32] {
         let protocol_fee = (one_for_zero << 12) | zero_for_one;
         let mut out = [0u8; 32];
