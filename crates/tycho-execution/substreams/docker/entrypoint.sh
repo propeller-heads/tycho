@@ -43,8 +43,29 @@ wait_for_db() {
 	done
 }
 
+# Each file runs in one transaction and waits at most 10 s for a lock. An ALTER TABLE queued
+# behind a long query on `trades` would otherwise queue every later query behind itself: every
+# sink's setup and Grafana's panels. A lock timeout rolls the file back and it is retried every
+# 30 s, up to 10 times; any other error fails at once.
 apply_sql() {
-	psql "$(pg_uri "$DSN")" -q -v ON_ERROR_STOP=1 "$@"
+	local attempt err
+	err=$(mktemp)
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do
+		if PGOPTIONS="-c lock_timeout=10s" psql "$(pg_uri "$DSN")" -q -v ON_ERROR_STOP=1 "$@" 2>"$err"; then
+			cat "$err" >&2
+			rm -f "$err"
+			return
+		fi
+		cat "$err" >&2
+		if ! grep -q "lock timeout" "$err"; then
+			rm -f "$err"
+			return 1
+		fi
+		echo "lock timeout applying $* (attempt $attempt of 10), retrying in 30 s" >&2
+		sleep 30
+	done
+	rm -f "$err"
+	return 1
 }
 
 mode="${1:-sink}"
