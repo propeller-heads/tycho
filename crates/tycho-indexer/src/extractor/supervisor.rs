@@ -170,9 +170,12 @@ impl ExtractorSupervisor {
                                     )),
                                 };
                             }
-                            ControlMessage::Subscribe(sender) => {
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
                                 self
-                                    .insert_subscriber(sender, SubscriberKind::Client)
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
                                     .await;
                             }
                         }
@@ -272,6 +275,7 @@ impl ExtractorSupervisor {
                             info!(
                                 extractor = %self.id,
                                 subscriber_id,
+                                kind = ?subscriber.kind,
                                 "Removed a closed subscriber during restart"
                             );
                             removed.push(subscriber_id);
@@ -280,6 +284,7 @@ impl ExtractorSupervisor {
                             warn!(
                                 extractor = %self.id,
                                 subscriber_id,
+                                kind = ?subscriber.kind,
                                 "Removed a client subscriber whose channel is full during restart"
                             );
                             slow_client_removals(&self.id).increment(1);
@@ -317,9 +322,12 @@ impl ExtractorSupervisor {
                                 );
                                 return Ok(());
                             }
-                            ControlMessage::Subscribe(sender) => {
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
                                 self
-                                    .insert_subscriber(sender, SubscriberKind::Client)
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
                                     .await;
                             }
                         }

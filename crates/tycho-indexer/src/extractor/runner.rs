@@ -25,6 +25,7 @@ use tycho_common::{
 };
 use tycho_ethereum::services::entrypoint_tracer::tracer::EVMEntrypointService;
 use tycho_storage::postgres::cache::CachedGateway;
+use uuid::Uuid;
 
 use crate::{
     extractor::{
@@ -99,7 +100,7 @@ const CLIENT_SUBSCRIPTION_CHANNEL_SIZE: usize = 128;
 
 pub enum ControlMessage {
     Stop,
-    Subscribe(Sender<DeltaCommand>),
+    Subscribe { sender: Sender<DeltaCommand>, subscription_id: Uuid, user_identity: Option<String> },
 }
 
 /// A trait for a message sender that can be used to subscribe to messages.
@@ -107,7 +108,11 @@ pub enum ControlMessage {
 /// Extracted out of [`ExtractorHandle`] to allow for easier testing.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+    async fn subscribe(
+        &self,
+        subscription_id: Uuid,
+        user_identity: Option<String>,
+    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
 }
 
 #[derive(Clone)]
@@ -137,7 +142,11 @@ impl ExtractorHandle {
 #[async_trait]
 impl MessageSender for ExtractorHandle {
     #[instrument(skip(self))]
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+    async fn subscribe(
+        &self,
+        subscription_id: Uuid,
+        user_identity: Option<String>,
+    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
         let (tx, rx) = mpsc::channel(CLIENT_SUBSCRIPTION_CHANNEL_SIZE);
         // Define a timeout duration
         let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
@@ -146,7 +155,7 @@ impl MessageSender for ExtractorHandle {
         let send_result = tokio::time::timeout(
             timeout_duration,
             self.control_tx
-                .send(ControlMessage::Subscribe(tx)),
+                .send(ControlMessage::Subscribe { sender: tx, subscription_id, user_identity }),
         )
         .await;
 
@@ -159,12 +168,12 @@ impl MessageSender for ExtractorHandle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubscriberKind {
     /// An in-process consumer that must see every message, such as `PendingDeltas`.
     Internal,
     /// A websocket client, which reads at the speed of its own connection.
-    Client,
+    Client { subscription_id: Uuid, user_identity: Option<String> },
 }
 
 /// A receiver of an extractor's [`DeltaCommand`]s.
@@ -193,7 +202,7 @@ impl Subscriber {
                 Ok(()) => Delivery::Sent,
                 Err(_) => Delivery::Closed,
             },
-            SubscriberKind::Client => match self.sender.try_send(command) {
+            SubscriberKind::Client { .. } => match self.sender.try_send(command) {
                 Ok(()) => Delivery::Sent,
                 Err(TrySendError::Full(_)) => Delivery::Full,
                 Err(TrySendError::Closed(_)) => Delivery::Closed,
@@ -467,11 +476,15 @@ impl ExtractorRunner {
             {
                 Delivery::Sent => {}
                 Delivery::Closed => {
-                    debug!(subscriber_id, "Removed a closed subscriber");
+                    debug!(subscriber_id, kind = ?subscriber.kind, "Removed a closed subscriber");
                     to_remove.push(subscriber_id);
                 }
                 Delivery::Full => {
-                    warn!(subscriber_id, "Removed a client subscriber whose channel is full");
+                    warn!(
+                        subscriber_id,
+                        kind = ?subscriber.kind,
+                        "Removed a client subscriber whose channel is full"
+                    );
                     slow_client_removals.increment(1);
                     to_remove.push(subscriber_id);
                 }
@@ -644,6 +657,10 @@ mod test {
         assert_eq!(compute_start_block(Some(&block), 500), Ok(1001));
     }
 
+    fn client_kind() -> SubscriberKind {
+        SubscriberKind::Client { subscription_id: Uuid::new_v4(), user_identity: None }
+    }
+
     /// A subscriber of `kind` with a channel of `capacity`, holding `queued` messages.
     fn subscriber(
         kind: SubscriberKind,
@@ -661,8 +678,8 @@ mod test {
 
     #[tokio::test]
     async fn test_propagate_msg_removes_full_client_without_waiting() {
-        let (full_client, mut full_client_rx) = subscriber(SubscriberKind::Client, 1, 1);
-        let (client, mut client_rx) = subscriber(SubscriberKind::Client, 4, 0);
+        let (full_client, mut full_client_rx) = subscriber(client_kind(), 1, 1);
+        let (client, mut client_rx) = subscriber(client_kind(), 4, 0);
         let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 4, 0);
         let subscribers =
             Arc::new(Mutex::new(HashMap::from([(0, full_client), (1, client), (2, internal)])));
@@ -767,10 +784,10 @@ mod test {
         let snapshotter = recorder.snapshotter();
         let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
         let removals = metrics::with_local_recorder(&recorder, || slow_client_removals(&id));
-        let (full_client, _full_client_rx) = subscriber(SubscriberKind::Client, 1, 1);
-        let (closed_client, closed_client_rx) = subscriber(SubscriberKind::Client, 1, 0);
+        let (full_client, _full_client_rx) = subscriber(client_kind(), 1, 1);
+        let (closed_client, closed_client_rx) = subscriber(client_kind(), 1, 0);
         drop(closed_client_rx);
-        let (client, _client_rx) = subscriber(SubscriberKind::Client, 4, 0);
+        let (client, _client_rx) = subscriber(client_kind(), 4, 0);
         let subscribers = Arc::new(Mutex::new(HashMap::from([
             (0, full_client),
             (1, closed_client),
@@ -791,7 +808,7 @@ mod test {
 
     #[tokio::test]
     async fn test_deliver_reports_full_client_without_waiting() {
-        let (client, _rx) = subscriber(SubscriberKind::Client, 1, 1);
+        let (client, _rx) = subscriber(client_kind(), 1, 1);
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(1),
@@ -805,7 +822,7 @@ mod test {
 
     #[tokio::test]
     async fn test_deliver_reports_closed_for_both_kinds() {
-        for kind in [SubscriberKind::Client, SubscriberKind::Internal] {
+        for kind in [client_kind(), SubscriberKind::Internal] {
             let (sub, rx) = subscriber(kind, 1, 0);
             drop(rx);
 
@@ -813,21 +830,23 @@ mod test {
                 sub.deliver(DeltaCommand::Block(one_msg()))
                     .await,
                 Delivery::Closed,
-                "{kind:?}"
+                "{:?}",
+                sub.kind
             );
         }
     }
 
     #[tokio::test]
     async fn test_deliver_sends_when_there_is_room() {
-        for kind in [SubscriberKind::Client, SubscriberKind::Internal] {
+        for kind in [client_kind(), SubscriberKind::Internal] {
             let (sub, mut rx) = subscriber(kind, 1, 0);
 
             assert_eq!(
                 sub.deliver(DeltaCommand::Block(one_msg()))
                     .await,
                 Delivery::Sent,
-                "{kind:?}"
+                "{:?}",
+                sub.kind
             );
             assert!(matches!(rx.try_recv(), Ok(DeltaCommand::Block(_))));
         }
