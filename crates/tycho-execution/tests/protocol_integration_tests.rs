@@ -4049,11 +4049,11 @@ fn test_sequential_encoding_strategy_sky() {
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
 
-/// Infinity static attributes: LP fee and the `parameters` word with the tick spacing or bin step
-/// at byte 29 and no hook bits.
-fn pancakeswap_infinity_attributes(lp_fee: u32, key_byte: u8) -> HashMap<String, Bytes> {
+/// Infinity static attributes: LP fee and the `parameters` word with the low byte of the tick
+/// spacing or bin step at byte 29 and no hook bits. The live pools used here fit in that byte.
+fn pancakeswap_infinity_attributes(lp_fee: u32, step_low_byte: u8) -> HashMap<String, Bytes> {
     let mut parameters = vec![0u8; 32];
-    parameters[29] = key_byte;
+    parameters[29] = step_low_byte;
     HashMap::from([
         ("key_lp_fee".to_string(), Bytes::from(BigInt::from(lp_fee).to_signed_bytes_be())),
         ("parameters".to_string(), Bytes::from(parameters)),
@@ -4069,7 +4069,7 @@ fn test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in() {
     //
     // Native input settles by value in the Vault callback. The Forge test runs a USDC -> ETH leg
     // first, since only the USDC it leaves in the pool lets ETH -> USDC fill at the fork block.
-    let usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+    let base_usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
     // Live Base ETH/USDC Bin pool: LP fee 201, bin step 10.
     let swap = Swap::new(
@@ -4080,7 +4080,7 @@ fn test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in() {
             ..Default::default()
         },
         default_token(eth()),
-        default_token(usdc.clone()),
+        default_token(base_usdc.clone()),
         BigUint::ZERO,
     );
 
@@ -4090,7 +4090,7 @@ fn test_single_encoding_strategy_pancakeswap_infinity_bin_eth_in() {
         bob_address(),
         bob_address(),
         eth(),
-        usdc,
+        base_usdc,
         BigUint::from(15_208_480_279_872u64),
         // The swap's output after the Forge test's first leg, so the replay must match it exactly.
         BigUint::from(49_999u64),
@@ -4131,8 +4131,8 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
     //
     // Two Infinity hops, so two vault locks back to back, ending in native ETH. The encoder
     // rebuilds each PoolKey from the static attributes; the component ids are not encoded.
-    let usdt = Bytes::from("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2");
-    let usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+    let base_usdt = Bytes::from("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2");
+    let base_usdc = Bytes::from("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
     // Live Base USDC/USDT CL pool: LP fee 5, tick spacing 2.
     let cl_swap = Swap::new(
@@ -4142,8 +4142,8 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
             static_attributes: pancakeswap_infinity_attributes(5, 2),
             ..Default::default()
         },
-        default_token(usdt.clone()),
-        default_token(usdc.clone()),
+        default_token(base_usdt.clone()),
+        default_token(base_usdc.clone()),
         BigUint::ZERO,
     );
     // Live Base ETH/USDC Bin pool: LP fee 201, bin step 10.
@@ -4154,7 +4154,7 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
             static_attributes: pancakeswap_infinity_attributes(201, 10),
             ..Default::default()
         },
-        default_token(usdc.clone()),
+        default_token(base_usdc),
         default_token(eth()),
         BigUint::ZERO,
     );
@@ -4165,7 +4165,7 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
     let solution = Solution::new(
         alice_address(),
         bob_address(),
-        usdt,
+        base_usdt,
         eth(),
         BigUint::from(100_000u64),
         // The route's output at the Forge test's fork block, so the replay must match it exactly.

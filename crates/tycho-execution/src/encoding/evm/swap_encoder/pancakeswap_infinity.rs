@@ -130,8 +130,9 @@ mod tests {
     /// Native ETH as the router represents it, `ETH_ADDRESS` in `NativeETH.sol`.
     const ROUTER_ETH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-    /// A live pool's static attributes plus `extra`. `key_byte` is byte 29 of `parameters`, which
-    /// holds the CL pool's tick spacing and the Bin pool's bin step alike.
+    /// A live pool's static attributes plus `extra`. `step_low_byte` is byte 29 of `parameters`,
+    /// the low byte of the CL pool's tick spacing or the Bin pool's bin step; the live pools used
+    /// here have values that fit in it.
     //
     // protocol_system is required, not defaulted: the pool-type byte comes from it and
     // ..Default::default() leaves it empty, hitting the error arm.
@@ -139,12 +140,12 @@ mod tests {
         protocol_system: &str,
         token_in: &str,
         token_out: &str,
-        lp_fee: u8,
-        key_byte: u8,
+        lp_fee: u32,
+        step_low_byte: u8,
         extra: &[(&str, Bytes)],
     ) -> Swap {
         let mut parameters = vec![0u8; 32];
-        parameters[29] = key_byte;
+        parameters[29] = step_low_byte;
         let mut static_attributes: HashMap<String, Bytes> = HashMap::from([
             ("key_lp_fee".into(), Bytes::from(BigInt::from(lp_fee).to_signed_bytes_be())),
             ("parameters".into(), Bytes::from(parameters)),
@@ -203,10 +204,10 @@ mod tests {
     fn test_encode_pancakeswap_infinity_swap(
         #[case] protocol_system: &str,
         #[case] pool_type: &str,
-        #[case] lp_fee: u8,
-        #[case] key_byte: u8,
+        #[case] lp_fee: u32,
+        #[case] step_low_byte: u8,
     ) {
-        let swap = swap_fixture_with_key(protocol_system, USDC, USDT, lp_fee, key_byte, &[]);
+        let swap = swap_fixture_with_key(protocol_system, USDC, USDT, lp_fee, step_low_byte, &[]);
         let hex_swap = encode(encode_swap(&swap).unwrap());
 
         assert_eq!(
@@ -220,8 +221,9 @@ mod tests {
                 "01",
                 pool_type,
                 &format!("{lp_fee:06x}"),
-                // parameters: tick spacing or bin step at byte 29, hook bitmap zero
-                &format!("{:0>58}{key_byte:02x}0000", ""),
+                // parameters: low byte of the tick spacing or bin step at byte 29, hook bitmap
+                // zero
+                &format!("{:0>58}{step_low_byte:02x}0000", ""),
                 // hook address (not set, so zero)
                 "0000000000000000000000000000000000000000",
             ]
@@ -277,7 +279,8 @@ mod tests {
     }
 
     /// The hook is read from `hook_address`. A `hooks` attribute is ignored: the CL package emits
-    /// it as zero for `UniswapV4State`, never as the pool's hook.
+    /// it as zero for `UniswapV4State`, and the cl-hooks package emits the real hook under both
+    /// names, so `hook_address` is the one that is always right.
     #[rstest]
     #[case::hook_address("hook_address", "7777777777777777777777777777777777777777")]
     #[case::hooks("hooks", "0000000000000000000000000000000000000000")]
