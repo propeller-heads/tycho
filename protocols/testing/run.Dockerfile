@@ -20,10 +20,15 @@ WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
 COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
 RUN chmod +x /usr/local/bin/forge
 # Fetch forge lib submodules (not present in Docker context due to .dockerignore
-# excluding .git/ and CI checkout not always fetching submodules).
+# excluding .git/ and CI checkout not always fetching submodules). Pinned to the submodule
+# commits: an unpinned install takes the latest release, which can require a newer solc than
+# the `solc_version` in foundry.toml and fail the build.
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
     git init && \
-    forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
+    forge install \
+        foundry-rs/forge-std@e4aef94c1768803a16fe19f7ce8b65defd027cfd \
+        OpenZeppelin/openzeppelin-contracts@11dc5e3809ebe07d5405fe524385cbe4f890a08b \
+        --no-git && \
     apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 RUN forge build
 
