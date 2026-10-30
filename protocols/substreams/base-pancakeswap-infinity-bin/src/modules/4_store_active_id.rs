@@ -58,36 +58,19 @@ mod tests {
     }
 
     fn initialize(active_id: u32) -> pool_event::Type {
-        pool_event::Type::Initialize(pool_event::Initialize {
-            fee: 0,
-            bin_step: 10,
-            active_id,
-            hooks: String::new(),
-            parameters: Vec::new(),
-        })
+        pool_event::Type::Initialize(pool_event::Initialize { active_id })
     }
 
     fn swap(active_id: u32) -> pool_event::Type {
-        pool_event::Type::Swap(pool_event::Swap {
-            sender: String::new(),
-            amount0: "0".into(),
-            amount1: "0".into(),
-            active_id,
-            fee: 0,
-        })
+        pool_event::Type::Swap(pool_event::Swap { active_id })
     }
 
     fn mint() -> pool_event::Type {
-        pool_event::Type::Mint(pool_event::Mint {
-            sender: String::new(),
-            ids: vec![1],
-            salt: String::new(),
-        })
+        pool_event::Type::Mint(pool_event::Mint { ids: vec![1] })
     }
 
     fn donate() -> pool_event::Type {
         pool_event::Type::Donate(pool_event::Donate {
-            sender: String::new(),
             amount0: "0".into(),
             amount1: "0".into(),
             bin_id: 1,

@@ -19,23 +19,23 @@ use tiny_keccak::{Hasher, Keccak};
 /// Hook permission bit offsets (`src/pool-bin/interfaces/IBinHooks.sol:10-23`). Not v4's address
 /// bits, where `beforeSwap` is 7 and `afterSwap` 6. These four match `ICLHooks.sol` but the enums
 /// differ elsewhere, so read them from IBinHooks.
-pub const HOOKS_BEFORE_SWAP_OFFSET: u8 = 6;
-pub const HOOKS_AFTER_SWAP_OFFSET: u8 = 7;
-pub const HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET: u8 = 10;
-pub const HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET: u8 = 11;
+pub(crate) const HOOKS_BEFORE_SWAP_OFFSET: u8 = 6;
+pub(crate) const HOOKS_AFTER_SWAP_OFFSET: u8 = 7;
+pub(crate) const HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET: u8 = 10;
+pub(crate) const HOOKS_AFTER_SWAP_RETURNS_DELTA_OFFSET: u8 = 11;
 
 /// `LPFeeLibrary.DYNAMIC_FEE_FLAG` (`src/libraries/LPFeeLibrary.sol:19`): the pool's LP fee comes
 /// from its hook.
-pub const DYNAMIC_FEE_FLAG: u32 = 0x800000;
+pub(crate) const DYNAMIC_FEE_FLAG: u32 = 0x800000;
 
 /// Low 16 bits of `parameters`.
-pub fn hooks_registration_bitmap(parameters: &[u8; 32]) -> u16 {
+pub(crate) fn hooks_registration_bitmap(parameters: &[u8; 32]) -> u16 {
     u16::from_be_bytes([parameters[30], parameters[31]])
 }
 
 /// True if any hook callback that can change swap amounts or fees is registered:
 /// beforeSwap, afterSwap, or either returns-delta variant.
-pub fn has_swap_hooks(parameters: &[u8; 32]) -> bool {
+pub(crate) fn has_swap_hooks(parameters: &[u8; 32]) -> bool {
     let mask = (1u16 << HOOKS_BEFORE_SWAP_OFFSET) |
         (1u16 << HOOKS_AFTER_SWAP_OFFSET) |
         (1u16 << HOOKS_BEFORE_SWAP_RETURNS_DELTA_OFFSET) |
@@ -43,7 +43,7 @@ pub fn has_swap_hooks(parameters: &[u8; 32]) -> bool {
     hooks_registration_bitmap(parameters) & mask != 0
 }
 
-pub fn is_dynamic_fee(fee: u32) -> bool {
+pub(crate) fn is_dynamic_fee(fee: u32) -> bool {
     fee == DYNAMIC_FEE_FLAG
 }
 
@@ -53,14 +53,14 @@ pub fn is_dynamic_fee(fee: u32) -> bool {
 ///
 /// A wrong slot returns plausible numbers, never an error. The chain-pinned tests below are what
 /// catches it.
-pub const BIN_POOLS_MAPPING_SLOT: u8 = 5;
+pub(crate) const BIN_POOLS_MAPPING_SLOT: u8 = 5;
 
 /// `uint16` bin step from bits [16, 32): price ratio between adjacent bins in basis points, so
 /// `price(id) = (1 + bin_step / 10_000) ^ (id - 2^23)`. Where CL has a 24-bit signed tick spacing,
 /// so two bytes and no sign extension.
 ///
 /// Byte `i` holds bits `[8*(31-i), 8*(31-i)+8)`, putting [16, 32) in bytes 28 and 29.
-pub fn bin_step(parameters: &[u8; 32]) -> u16 {
+pub(crate) fn bin_step(parameters: &[u8; 32]) -> u16 {
     u16::from_be_bytes([parameters[28], parameters[29]])
 }
 
@@ -69,7 +69,7 @@ pub fn bin_step(parameters: &[u8; 32]) -> u16 {
 /// Struct layout from there (`src/pool-bin/libraries/BinPool.sol:54-68`): `+0` slot0,
 /// `+1` reserveOfBin, `+2` shareOfBin, `+3` positions, `+4` the bin tree. slot0 packs
 /// `[0,24) activeId | [24,48) protocolFee | [48,72) lpFee` (`BinSlot0.sol:9`).
-pub fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
+pub(crate) fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
     let mut hasher = Keccak::v256();
     hasher.update(pool_id);
     // Slot index goes in the last byte. CL writes `slot[24..]` because its parameter is u64;
@@ -83,7 +83,7 @@ pub fn pool_state_base_slot(pool_id: &[u8; 32], mapping_slot: u8) -> [u8; 32] {
 }
 
 /// `pools[pool_id]` base slot of a Bin pool. Pool ids are bytes32 on chain.
-pub fn pool_base_slot(pool_id: &[u8]) -> [u8; 32] {
+pub(crate) fn pool_base_slot(pool_id: &[u8]) -> [u8; 32] {
     let pool_id: &[u8; 32] = pool_id
         .try_into()
         .expect("pool id is 32 bytes");
@@ -118,25 +118,25 @@ fn mapping_slot(base: &[u8; 32], offset: u8, key: u32) -> [u8; 32] {
 }
 
 /// Slot holding `reserveOfBin[bin_id]`, the mapping at `base + 1`.
-pub fn bin_reserve_slot(base: &[u8; 32], bin_id: u32) -> [u8; 32] {
+pub(crate) fn bin_reserve_slot(base: &[u8; 32], bin_id: u32) -> [u8; 32] {
     mapping_slot(base, 1, bin_id)
 }
 
 /// Slot holding `level1[segment >> 8]`, the bin tree middle word at `base + 5`. Bit
 /// `segment & 0xff` of the word says whether segment `segment` holds a tree bin.
-pub fn tree_level1_slot(base: &[u8; 32], key: u32) -> [u8; 32] {
+pub(crate) fn tree_level1_slot(base: &[u8; 32], key: u32) -> [u8; 32] {
     mapping_slot(base, 5, key)
 }
 
 /// Slot holding `level2[segment]`, the bin tree leaf word at `base + 6`. `segment` is
 /// `bin_id >> 8`; bit `bin_id & 0xff` of the word says whether the bin is in the tree.
-pub fn tree_level2_slot(base: &[u8; 32], segment: u32) -> [u8; 32] {
+pub(crate) fn tree_level2_slot(base: &[u8; 32], segment: u32) -> [u8; 32] {
     mapping_slot(base, 6, segment)
 }
 
 /// A storage value as the 32-byte word it encodes. A shorter value is left-padded, as `bit_is_set`
 /// reads tree words; a longer one is not a word.
-pub fn reserve_word(value: &[u8]) -> Result<[u8; 32], anyhow::Error> {
+pub(crate) fn reserve_word(value: &[u8]) -> Result<[u8; 32], anyhow::Error> {
     let mut word = [0u8; 32];
     let start = word
         .len()
@@ -157,7 +157,7 @@ pub fn reserve_word(value: &[u8]) -> Result<[u8; 32], anyhow::Error> {
 /// `PackedUint128Math` puts x in bits [0,128) and y in [128,256) (`decodeX` is
 /// `and(z, MASK_128)`, `decodeY` is `shr(128, z)`). Big endian, so y is the FIRST 16 bytes and x
 /// the LAST: reversed from reading order, and swapping them swaps the two token balances.
-pub fn unpack_reserves(packed: &[u8; 32]) -> (u128, u128) {
+pub(crate) fn unpack_reserves(packed: &[u8; 32]) -> (u128, u128) {
     let mut y = [0u8; 16];
     let mut x = [0u8; 16];
     y.copy_from_slice(&packed[..16]);
@@ -167,11 +167,11 @@ pub fn unpack_reserves(packed: &[u8; 32]) -> (u128, u128) {
 
 /// `(zero_for_one, one_for_zero)` from a packed uint24
 /// (`src/libraries/ProtocolFeeLibrary.sol:22-31`).
-pub fn split_protocol_fee(protocol_fee: u32) -> (u32, u32) {
+pub(crate) fn split_protocol_fee(protocol_fee: u32) -> (u32, u32) {
     (protocol_fee & 0xfff, (protocol_fee >> 12) & 0xfff)
 }
 
-pub fn protocol_fee_from_slot0(slot0: &[u8; 32]) -> u32 {
+pub(crate) fn protocol_fee_from_slot0(slot0: &[u8; 32]) -> u32 {
     // bits [24, 48) from the LSB = bytes 26..29 (BinSlot0.sol:9). CL's [184, 208) is bytes 6..9.
     u32::from_be_bytes([0, slot0[26], slot0[27], slot0[28]]) & 0xff_ffff
 }

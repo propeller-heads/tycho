@@ -347,17 +347,11 @@ mod tests {
     }
 
     fn mint(ids: Vec<u32>) -> Type {
-        Type::Mint(pool_event::Mint { sender: String::new(), ids, salt: String::new() })
+        Type::Mint(pool_event::Mint { ids })
     }
 
     fn swap(active_id: u32) -> Type {
-        Type::Swap(pool_event::Swap {
-            sender: String::new(),
-            amount0: "0".into(),
-            amount1: "0".into(),
-            active_id,
-            fee: 0,
-        })
+        Type::Swap(pool_event::Swap { active_id })
     }
 
     #[test]
@@ -430,12 +424,11 @@ mod tests {
     }
 
     fn burn(ids: Vec<u32>) -> Type {
-        Type::Burn(pool_event::Burn { sender: String::new(), ids, salt: String::new() })
+        Type::Burn(pool_event::Burn { ids })
     }
 
     fn donate(amount0: &str, amount1: &str, bin_id: u32) -> Type {
         Type::Donate(pool_event::Donate {
-            sender: String::new(),
             amount0: amount0.into(),
             amount1: amount1.into(),
             bin_id,
@@ -931,10 +924,7 @@ mod tests {
     /// No bins touched, no lookups.
     #[test]
     fn protocol_fee_updated_yields_nothing() {
-        let kind = Type::ProtocolFeeUpdated(pool_event::ProtocolFeeUpdated {
-            pool_id: pool_id_bytes().to_vec(),
-            protocol_fee: 1,
-        });
+        let kind = Type::ProtocolFeeUpdated(pool_event::ProtocolFeeUpdated { protocol_fee: 1 });
         assert!(
             event_to_deltas(&event(kind, 9), &index(&[]), Vec::new(), 0)
                 .unwrap()

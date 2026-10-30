@@ -10,14 +10,14 @@ use crate::pb::pancakeswap::infinity::bin::events::PoolEvent;
 
 /// Every write to one slot, in call order. Not sorted: a nested call's writes sit between its
 /// caller's, so readers take the min and max ordinal rather than the first and last entry.
-pub type WritesBySlot<'a> = HashMap<Vec<u8>, Vec<&'a StorageChange>>;
+pub(crate) type WritesBySlot<'a> = HashMap<Vec<u8>, Vec<&'a StorageChange>>;
 
 /// Successful, non-reverted writes to `pool_manager` in the transactions `events` came from.
 ///
 /// Per transaction because two transactions in one block can write the same slot; every write
 /// because one transaction can mint into a bin then swap through it. Transactions without an
 /// event are skipped: nothing reads their writes, and most blocks have no event at all.
-pub fn storage_writes_by_tx<'a>(
+pub(crate) fn storage_writes_by_tx<'a>(
     block: &'a eth::Block,
     pool_manager: &[u8],
     events: &[PoolEvent],
@@ -49,7 +49,7 @@ pub fn storage_writes_by_tx<'a>(
 }
 
 /// Index of the transaction an event came from.
-pub fn tx_index(event: &PoolEvent) -> u64 {
+pub(crate) fn tx_index(event: &PoolEvent) -> u64 {
     event
         .transaction
         .as_ref()
@@ -61,7 +61,7 @@ pub fn tx_index(event: &PoolEvent) -> u64 {
 /// in the same transaction, or 0. Writes at or below the floor belong to that earlier log.
 ///
 /// `events` must be in ordinal order, as `3_map_events` emits them.
-pub fn with_floors(events: &[PoolEvent]) -> impl Iterator<Item = (&PoolEvent, u64)> {
+pub(crate) fn with_floors(events: &[PoolEvent]) -> impl Iterator<Item = (&PoolEvent, u64)> {
     let mut prev_log: HashMap<u64, u64> = HashMap::new();
     events.iter().map(move |event| {
         let floor = prev_log
@@ -76,7 +76,7 @@ pub fn with_floors(events: &[PoolEvent]) -> impl Iterator<Item = (&PoolEvent, u6
 /// The contract writes before it emits, so an event's writes sit strictly between the previous
 /// log and its own. Both bounds matter: a later event in the same transaction may rewrite the
 /// slot, and an earlier one's write must not be replayed as this event's.
-pub fn in_window(ordinal: u64, floor: u64, log_ordinal: u64) -> bool {
+pub(crate) fn in_window(ordinal: u64, floor: u64, log_ordinal: u64) -> bool {
     ordinal > floor && ordinal < log_ordinal
 }
 
@@ -99,11 +99,7 @@ mod tests {
                 to: vec![],
                 index: tx_index,
             }),
-            r#type: Some(pool_event::Type::Mint(pool_event::Mint {
-                sender: String::new(),
-                ids: vec![],
-                salt: String::new(),
-            })),
+            r#type: Some(pool_event::Type::Mint(pool_event::Mint { ids: vec![] })),
         }
     }
 

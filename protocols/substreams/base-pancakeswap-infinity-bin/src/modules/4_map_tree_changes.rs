@@ -146,7 +146,7 @@ mod tests {
     }
 
     fn mint(ids: Vec<u32>) -> Type {
-        Type::Mint(pool_event::Mint { sender: String::new(), ids, salt: String::new() })
+        Type::Mint(pool_event::Mint { ids })
     }
 
     fn word(byte: u8) -> Vec<u8> {
