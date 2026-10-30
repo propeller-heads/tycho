@@ -417,8 +417,6 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
         );
     }
 
-    /// @dev Funds the executor with tokenIn, swaps all of it and checks it reached ALICE as
-    /// tokenOut.
     /// @dev Swaps `amountIn` through the executor and pins the exact output at ALICE. The Bin
     /// pool is far shallower than the CL one at this block, so its cases size the input
     /// themselves rather than draining the pool and reverting BinPool__OutOfLiquidity.
