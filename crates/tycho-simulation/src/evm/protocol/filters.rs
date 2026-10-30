@@ -87,7 +87,7 @@ pub fn balancer_v3_pool_filter(component: &ComponentWithState) -> bool {
 }
 
 pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
-    const PAUSED_POOLS: [&str; 5] = [
+    const PAUSED_POOLS: [&str; 18] = [
         // The components below are properly paused by substreams but the way indexer
         // handles tracing atm wrongly paused all components due to tracing failure. The
         // failure is unrelated to any issues with the protocol itself.
@@ -98,6 +98,21 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
         // a high tvl value.
         "0x2886a01a0645390872a9eb99dae1283664b0c524",
         "0x276084527b801e00db8e4410504f9baf93f72c67",
+        // Swaps paused by Fluid governance. The simulation does not read the `paused`
+        // attribute, so a swap through these pools reverts with DexT1__SwapAndArbitragePaused.
+        "0x8710039d5de6840ede452a85672b32270a709ae2",
+        "0xd64e12101614209ee810efde214542a2cb68d9fd",
+        "0x0ffda76c8a06d03c104f58ece336348488487e60",
+        "0xba9ed8ae94c70ef9aa2cd1045ed473aaa405c6c7",
+        "0x1dd125c32e4b5086c63cc13b3ca02c4a2a61fa9b",
+        "0xf063bd202e45d6b2843102cb4ece339026645d4a",
+        "0xdd5f2afab5ae5484339f9ad40fb4d51fc5c96be3",
+        "0xc6ca3e74e4af761ee4d0fba922b72408aac3a819",
+        "0xb0960263e39c70c9b6e9ea2a382b18095264a364",
+        "0x862fc0a67623a4e6f0776103340836c91728b06d",
+        "0x505844cbb4ca37af433cf0abf247d6a2abed705d",
+        "0x86df50987c744efc5a0cef83f8efd87e1880dab1",
+        "0xb96cee75211700bc148b95b1c907d726791f4457",
     ];
 
     if PAUSED_POOLS.contains(

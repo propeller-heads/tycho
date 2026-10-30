@@ -2037,6 +2037,128 @@ fn test_single_encoding_strategy_slipstreams() {
 }
 
 #[test]
+fn test_single_encoding_strategy_aero_cl() {
+    // WETH -> (AERO CL) -> cbBTC
+    let pool = ProtocolComponent {
+        id: String::from("0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(10).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let swap =
+        Swap::new(pool, default_token(weth.clone()), default_token(cbbtc.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        cbbtc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_aero_cl", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_aero_cl() {
+    // WETH -> (AERO CL) -> USDC -> (AERO CL) -> cbBTC
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x4a7af46bc8abc00048c6c7920a1488daf568366c"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(50).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let usdc_cbbtc_pool = ProtocolComponent {
+        id: String::from("0x784e539f15ca2d19449a6311c5dab6cf37d8f1ba"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(100).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let swap1 = Swap::new(
+        weth_usdc_pool,
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 = Swap::new(
+        usdc_cbbtc_pool,
+        default_token(usdc.clone()),
+        default_token(cbbtc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        cbbtc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_aero_cl", hex_calldata.as_str());
+}
+
+#[test]
 fn test_sequential_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC -> (Slipstreams) -> cbBTC
     let slipstreams_weth_usdc_pool = ProtocolComponent {
@@ -2219,6 +2341,120 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_aerodrome_v1", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_aero_basic() {
+    // WETH -> (AERO basic volatile) -> USDC
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x800eb395b577b234c5065c8e0ccb0f3a1401b2c2"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let swap = Swap::new(
+        weth_usdc_pool,
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        usdc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_aero_basic", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_aero_basic() {
+    // DOLA -> (AERO basic stable) -> USDC -> (AERO basic volatile) -> WETH
+    let dola_usdc_pool = ProtocolComponent {
+        id: String::from("0x9bfc7e23feefee8cf08ba544e7cd5c28c79f1679"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x800eb395b577b234c5065c8e0ccb0f3a1401b2c2"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let dola = Bytes::from("0x4621b7a9c75199271f773ebd9a499dbd165c3191");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let swap1 = Swap::new(
+        dola_usdc_pool,
+        default_token(dola.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 = Swap::new(
+        weth_usdc_pool,
+        default_token(usdc.clone()),
+        default_token(weth.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        dola,
+        weth,
+        BigUint::from_str("100000000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_aero_basic", hex_calldata.as_str());
 }
 
 #[test]

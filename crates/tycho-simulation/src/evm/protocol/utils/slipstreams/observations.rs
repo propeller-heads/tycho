@@ -152,6 +152,20 @@ impl Observations {
         Ok(next_index)
     }
 
+    /// The observation stored at ring index `index`, if any has been written there.
+    pub fn get(&self, index: u16) -> Option<&Observation> {
+        self.observations.get(index as usize)
+    }
+
+    /// The observation at ring position `idx`; a slot never written reads as uninitialized, as
+    /// zeroed storage does on chain.
+    fn slot(&self, idx: usize) -> Observation {
+        self.observations
+            .get(idx)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn timestamp_at(&self, index: u16, cardinality: u16) -> Result<u32, SimulationError> {
         let idx = index as usize;
         if idx >= self.observations.len() {
@@ -199,24 +213,17 @@ impl Observations {
         let mut l = (index as usize + 1) % cardinality as usize;
         let mut r = l + cardinality as usize - 1;
 
-        loop {
+        // On chain a search that never brackets the target runs out of gas and reverts.
+        while l <= r {
             let i = (l + r) / 2;
-            let before_idx = i % cardinality as usize;
-            if before_idx >= self.observations.len() {
-                return Err(self.observation_index_err(before_idx, index, cardinality));
-            }
-            let before_or_at = self.observations[before_idx];
+            let before_or_at = self.slot(i % cardinality as usize);
 
             if !before_or_at.initialized {
                 l = i + 1;
                 continue;
             }
 
-            let after_idx = (i + 1) % cardinality as usize;
-            if after_idx >= self.observations.len() {
-                return Err(self.observation_index_err(after_idx, index, cardinality));
-            }
-            let at_or_after = self.observations[after_idx];
+            let at_or_after = self.slot((i + 1) % cardinality as usize);
             let target_at_or_after = lte(time, before_or_at.block_timestamp, target);
             if target_at_or_after && lte(time, target, at_or_after.block_timestamp) {
                 return Ok((before_or_at, at_or_after));
@@ -259,16 +266,9 @@ impl Observations {
             return Ok((before_or_at, transform(&before_or_at, target, tick, liquidity)?));
         }
 
-        let next_idx = (index as usize + 1) % cardinality as usize;
-        if next_idx >= self.observations.len() {
-            return Err(self.observation_index_err(next_idx, index, cardinality));
-        }
-        before_or_at = self.observations[next_idx];
+        before_or_at = self.slot((index as usize + 1) % cardinality as usize);
         if !before_or_at.initialized {
-            if self.observations.is_empty() {
-                return Err(SimulationError::FatalError("No observations available".to_string()));
-            }
-            before_or_at = self.observations[0];
+            before_or_at = self.slot(0);
         }
 
         if !lte(time, before_or_at.block_timestamp, target) {
@@ -319,9 +319,11 @@ impl Observations {
                 as i64;
             let target_delta = target.wrapping_sub(before_or_at.block_timestamp) as i64;
 
+            // `Oracle.observeSingle` divides before it multiplies; both truncate towards zero.
             let tick_cumulative = before_or_at.tick_cumulative +
-                ((at_or_after.tick_cumulative - before_or_at.tick_cumulative) * target_delta /
-                    observation_time_delta);
+                (at_or_after.tick_cumulative - before_or_at.tick_cumulative) /
+                    observation_time_delta *
+                    target_delta;
 
             let seconds_per_liquidity_cumulative_x128 = {
                 let delta = safe_sub_u256(

@@ -14,6 +14,7 @@ use tycho_simulation::{
         decoder::StreamDecodeError,
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aero_basic::state::AeroBasicState,
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
@@ -290,6 +291,8 @@ impl ProtocolStreamProcessor {
                 "vm:bopamm".to_string(),
                 "ring_swap_v2".to_string(),
                 "vm:balancer_v3".to_string(),
+                "aero_cl".to_string(),
+                "aero_basic".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -301,6 +304,8 @@ impl ProtocolStreamProcessor {
                 "aerodrome_v1".to_string(),
                 "lunarbase".to_string(),
                 "pancakeswap_infinity_cl".to_string(),
+                "aero_cl".to_string(),
+                "aero_basic".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
@@ -345,6 +350,8 @@ impl ProtocolStreamProcessor {
                     "ekubo_v3".to_string(),
                     "up_v3".to_string(),
                     "pancakeswap_infinity_cl".to_string(),
+                    "aero_cl".to_string(),
+                    "aero_basic".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -353,6 +360,8 @@ impl ProtocolStreamProcessor {
                     "uniswap_v3".to_string(),
                     "uniswap_v4".to_string(),
                     "pancakeswap_v3".to_string(),
+                    "aero_cl".to_string(),
+                    "aero_basic".to_string(),
                 ]
             }
             _ => vec![],
@@ -506,6 +515,16 @@ impl ProtocolStreamProcessor {
             "aerodrome_v1" => {
                 stream =
                     stream.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
+            }
+            "aero_cl" => {
+                stream = stream.exchange::<AerodromeSlipstreamsState>(
+                    "aero_cl",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
+            "aero_basic" => {
+                stream = stream.exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None);
             }
             "vm:fermiswap" => {
                 stream = stream.exchange::<EVMPoolState<PreCachedDB>>(

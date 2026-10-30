@@ -10,55 +10,23 @@ use crate::{
     book::{
         all_pairs::{BookCollector, ComponentLayout, MarketMaker, QuoteRule, VenueBook},
         component::maker_component_id,
-        tvl, BookFeedConfig, BookSnapshot, ReceivedAt,
+        tvl, Book, BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
     rfq::protocols::hashflow::{
-        client::HashflowClient,
-        models::HashflowMarketMakerLevels,
+        client::{HashflowClient, HashflowLevelsClient},
+        models::{HashflowMarketMakerLevels, HashflowPrices},
         state::{HashflowAllPairsState, HashflowState},
         PROTOCOL_TYPE,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
 
-/// Fetches one complete Hashflow book per poll: every market maker's levels between the
-/// configured tokens whose normalized TVL clears the threshold, one simulate-ready book per maker
-/// and pair.
+/// Fetches one complete Hashflow book per poll: the prices of every market maker, built into
+/// books by its [`HashflowBookAssembler`].
 #[derive(Clone, Debug)]
 pub struct HashflowBookSource {
-    /// The protocol system stamped on this source's components: the venue's own, or its
-    /// fallback-router one for a feed built with `with_fallback_router()`.
-    pub protocol_system: &'static str,
-    pub book_config: BookFeedConfig,
-    /// USD-priced tokens the book's TVL is normalized into before the threshold applies.
-    pub usd_quote_tokens: Arc<HashSet<Bytes>>,
-    /// Requests binding quotes; shared with every state this source emits.
-    pub client: Arc<HashflowClient>,
-    /// Whether the venue's pairs are published as one component or one each.
-    pub component_layout: ComponentLayout<QuoteRule>,
-}
-
-impl HashflowBookSource {
-    /// The TVL in USD quote-token units, converted through every pair the response priced —
-    /// each market maker's level set is one such pair.
-    fn normalized_tvl(
-        &self,
-        raw_tvl: f64,
-        quote_token: &Bytes,
-        levels_by_mm: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
-    ) -> Option<f64> {
-        tvl::tvl_in_usd(
-            raw_tvl,
-            quote_token,
-            &self.usd_quote_tokens,
-            levels_by_mm
-                .values()
-                .flatten()
-                .map(|mm_level| {
-                    (&mm_level.pair.base_token, &mm_level.pair.quote_token, &mm_level.levels)
-                }),
-        )
-    }
+    pub(super) prices: HashflowPricesSource,
+    pub(super) assembler: HashflowBookAssembler,
 }
 
 impl HttpSource for HashflowBookSource {
@@ -66,26 +34,79 @@ impl HttpSource for HashflowBookSource {
 
     /// Both requests (market makers, then their levels) count as one poll.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
+        let prices = self.prices.fetch().await?;
+        Ok(BookSnapshot::received_now(self.assembler.collect(prices)))
+    }
+}
+
+/// Reads the market makers and their price levels through a [`HashflowLevelsClient`].
+#[derive(Clone, Debug)]
+pub(super) struct HashflowPricesSource {
+    client: HashflowLevelsClient,
+}
+
+impl HashflowPricesSource {
+    pub(super) fn new(client: HashflowLevelsClient) -> Self {
+        Self { client }
+    }
+}
+
+impl HttpSource for HashflowPricesSource {
+    type Snapshot = HashflowPrices;
+
+    /// Fetches the market makers, then their price levels, in one poll.
+    async fn fetch(&self) -> Result<HashflowPrices, FeedError> {
         let market_makers = self
             .client
             .fetch_market_makers()
             .await?;
-        let levels_by_mm = self
+        let levels_by_maker = self
             .client
             .fetch_price_levels(&market_makers)
             .await?;
-        debug!(market_makers = levels_by_mm.len(), "fetched price levels");
+        debug!(market_makers = levels_by_maker.len(), "fetched price levels");
+        Ok(HashflowPrices { levels_by_maker })
+    }
+}
 
+/// Turns [`HashflowPrices`] into the books [`HashflowFeed`](super::feed::HashflowFeed) would
+/// publish for the same poll: every market maker's levels between the configured tokens whose
+/// normalized TVL clears the threshold, one simulate-ready book per maker and pair, whose states
+/// request firm quotes through the assembler's client. Created by
+/// [`HashflowBookAssemblerBuilder`](super::feed::HashflowBookAssemblerBuilder), which also makes
+/// the one a [`HashflowFeed`](super::feed::HashflowFeed) uses.
+#[derive(Clone, Debug)]
+pub struct HashflowBookAssembler {
+    /// The protocol system stamped on the components: the venue's own, or its fallback-router
+    /// one for a feed built with `with_fallback_router()`.
+    pub(super) protocol_system: &'static str,
+    pub(super) book_config: BookFeedConfig,
+    /// USD-priced tokens the book's TVL is normalized into before the threshold applies.
+    pub(super) usd_quote_tokens: Arc<HashSet<Bytes>>,
+    /// Requests binding quotes; shared with every state built here.
+    pub(super) client: Arc<HashflowClient>,
+    /// Whether the venue's pairs are published as one component or one each.
+    pub(super) component_layout: ComponentLayout<QuoteRule>,
+}
+
+impl HashflowBookAssembler {
+    /// Returns the books for `prices`, keyed by component id.
+    pub fn books(&self, prices: HashflowPrices) -> HashMap<String, Book> {
+        self.collect(prices).into_map()
+    }
+
+    pub(super) fn collect(&self, prices: HashflowPrices) -> Books {
+        let levels_by_maker = prices.levels_by_maker;
         let mut collector = BookCollector::new(
             self.protocol_system,
             PROTOCOL_TYPE,
             self.book_config.chain,
             self.component_layout,
         );
-        for (mm_name, mm_levels) in levels_by_mm.iter() {
-            for mm_level in mm_levels {
-                let base_bytes = &mm_level.pair.base_token;
-                let quote_bytes = &mm_level.pair.quote_token;
+        for (maker_name, maker_levels) in levels_by_maker.iter() {
+            for maker_level in maker_levels {
+                let base_bytes = &maker_level.pair.base_token;
+                let quote_bytes = &maker_level.pair.quote_token;
                 let Some((base_token, quote_token)) = self
                     .book_config
                     .pair_tokens(base_bytes, quote_bytes)
@@ -95,13 +116,13 @@ impl HttpSource for HashflowBookSource {
 
                 // Hashflow's levels price one direction, so the reverse pair is a different book.
                 let component_id =
-                    maker_component_id(self.protocol_system, base_bytes, quote_bytes, mm_name);
-                let tvl = mm_level.levels.notional();
-                let Some(normalized_tvl) = self.normalized_tvl(tvl, quote_bytes, &levels_by_mm)
+                    maker_component_id(self.protocol_system, base_bytes, quote_bytes, maker_name);
+                let tvl = maker_level.levels.notional();
+                let Some(normalized_tvl) = self.normalized_tvl(tvl, quote_bytes, &levels_by_maker)
                 else {
                     debug!(
                         %component_id,
-                        market_maker = %mm_name,
+                        market_maker = %maker_name,
                         "skipping pair, no levels price its quote token in a USD quote token"
                     );
                     continue;
@@ -114,109 +135,86 @@ impl HttpSource for HashflowBookSource {
                     continue;
                 }
 
-                // `levels_by_mm` stays borrowed for the TVL normalization lookups above.
+                // `levels_by_maker` stays borrowed for the TVL normalization lookups above.
                 let state = HashflowState::new(
                     base_token.clone(),
                     quote_token.clone(),
-                    mm_level.clone(),
-                    mm_name.clone(),
+                    maker_level.clone(),
+                    maker_name.clone(),
                     Arc::clone(&self.client),
                 );
                 collector.push(
                     component_id,
-                    VenueBook { signer: MarketMaker(mm_name.clone()), updated_at: None, state },
+                    VenueBook { signer: MarketMaker(maker_name.clone()), updated_at: None, state },
                 );
             }
         }
-        Ok(BookSnapshot::received_now(collector.finish::<HashflowAllPairsState>()))
+        collector.finish::<HashflowAllPairsState>()
+    }
+
+    /// The TVL in USD quote-token units, converted through every pair the response priced —
+    /// each market maker's level set is one such pair.
+    fn normalized_tvl(
+        &self,
+        raw_tvl: f64,
+        quote_token: &Bytes,
+        levels_by_maker: &HashMap<String, Vec<HashflowMarketMakerLevels>>,
+    ) -> Option<f64> {
+        tvl::tvl_in_usd(
+            raw_tvl,
+            quote_token,
+            &self.usd_quote_tokens,
+            levels_by_maker
+                .values()
+                .flatten()
+                .map(|maker_level| {
+                    (
+                        &maker_level.pair.base_token,
+                        &maker_level.pair.quote_token,
+                        &maker_level.levels,
+                    )
+                }),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        str::FromStr,
+    };
 
     use rstest::rstest;
-    use tycho_common::{models::Chain, simulation::errors::SimulationError};
+    use tycho_common::{simulation::errors::SimulationError, Bytes};
 
     use super::*;
     use crate::{
         book::{
-            all_pairs::QuoteRule,
-            component::PairState,
+            all_pairs::{ComponentLayout, QuoteRule},
+            assert_same_books,
+            component::{maker_component_id, PairState},
             decode_swap_directions,
             levels::{Levels, PriceLevel},
-            test_token_map,
         },
         rfq::protocols::hashflow::{
-            models::HashflowPair, FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
+            state::HashflowState,
+            test_support::{
+                assembler_for, levels_client, prices_source, two_maker_server, weth_usdc_levels,
+                UNPRICED, USDC, WETH,
+            },
+            FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM,
         },
         snapshot_feed::http::test_support::spawn_http_server,
     };
 
-    /// A source over an empty token universe with USDC and USDT as the USD quote tokens.
-    fn test_source() -> HashflowBookSource {
-        source_for("https://hashflow.example", &[], 1.0)
-    }
-
     /// A source whose endpoints live under `endpoint`, serving `tokens` (18 decimals each) above
     /// `min_tvl_usd`, with USDC and USDT as the USD quote tokens.
     fn source_for(endpoint: &str, tokens: &[&Bytes], min_tvl_usd: f64) -> HashflowBookSource {
-        let quote_tokens = HashSet::from([
-            Bytes::from_str(USDC).unwrap(),
-            Bytes::from_str("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap(), // USDT
-        ]);
-        let entries: Vec<_> = tokens
-            .iter()
-            .map(|address| (*address, "T", 18))
-            .collect();
         HashflowBookSource {
-            component_layout: ComponentLayout::PerPair,
-            protocol_system: PROTOCOL_SYSTEM,
-            book_config: BookFeedConfig {
-                chain: Chain::Ethereum,
-                tokens: Arc::new(test_token_map(&entries)),
-                min_tvl_usd,
-            },
-            usd_quote_tokens: Arc::new(quote_tokens),
-            client: Arc::new(HashflowClient::new(
-                Some(endpoint),
-                1,
-                "test_user".to_string(),
-                "test_key".to_string(),
-                Duration::from_secs(5),
-            )),
+            prices: prices_source(endpoint),
+            assembler: assembler_for(endpoint, tokens, min_tvl_usd),
         }
-    }
-
-    const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
-    const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-    const UNPRICED: &str = "0x1234567890123456789012345678901234567890";
-
-    /// The response carries one market maker's WETH/USDC level at 3000.
-    #[rstest]
-    #[case::usd_quote_token_is_taken_as_is(USDC, 1000.0, Some(1000.0))]
-    #[case::other_quote_token_is_converted_through_its_usd_level(WETH, 2.0, Some(6000.0))]
-    #[case::quote_token_without_usd_level_has_no_tvl(UNPRICED, 1000.0, None)]
-    fn normalized_tvl_converts_into_usd_quote_tokens(
-        #[case] quote_token: &str,
-        #[case] raw_tvl: f64,
-        #[case] expected: Option<f64>,
-    ) {
-        let source = test_source();
-        let weth_usdc = HashflowMarketMakerLevels {
-            pair: HashflowPair {
-                base_token: Bytes::from_str(WETH).unwrap(),
-                quote_token: Bytes::from_str(USDC).unwrap(),
-            },
-            levels: Levels::new(vec![PriceLevel { quantity: 1.0, price: 3000.0 }]).unwrap(),
-        };
-        let levels = HashMap::from([("test_mm".to_string(), vec![weth_usdc])]);
-
-        let result =
-            source.normalized_tvl(raw_tvl, &Bytes::from_str(quote_token).unwrap(), &levels);
-
-        assert_eq!(result, expected);
     }
 
     #[rstest]
@@ -257,11 +255,9 @@ mod tests {
             }
         })
         .await;
-        let source = HashflowBookSource {
-            protocol_system: FALLBACK_PROTOCOL_SYSTEM,
-            component_layout,
-            ..source_for(&server.url(), &[&weth, &usdc], 0.0)
-        };
+        let mut source = source_for(&server.url(), &[&weth, &usdc], 0.0);
+        source.assembler.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        source.assembler.component_layout = component_layout;
 
         let books = source.fetch().await.unwrap().books;
 
@@ -406,10 +402,7 @@ mod tests {
         #[case] expected: FeedError,
     ) {
         let server = spawn_http_server(move |_| Some(("200 OK", body.to_string()))).await;
-        let source = source_for(&server.url(), &[], 1.0);
-
-        let error = source
-            .client
+        let error = levels_client(&server.url())
             .fetch_price_levels(&["mm1".to_string()])
             .await
             .unwrap_err();
@@ -456,10 +449,8 @@ mod tests {
             }
         })
         .await;
-        let source = HashflowBookSource {
-            component_layout: ComponentLayout::AllPairs(rule),
-            ..source_for(&server.url(), &[&weth, &usdc], 1000.0)
-        };
+        let mut source = source_for(&server.url(), &[&weth, &usdc], 1000.0);
+        source.assembler.component_layout = ComponentLayout::AllPairs(rule);
 
         let books = source.fetch().await.unwrap().books;
 
@@ -477,7 +468,7 @@ mod tests {
             Bytes::from(attribute.as_bytes())
         );
 
-        let tokens = &source.book_config.tokens;
+        let tokens = &source.assembler.book_config.tokens;
         // Hashflow's first level is the minimum tradable size, so the swap is one whole WETH.
         let swap = |state: &dyn tycho_common::simulation::protocol_sim::ProtocolSim| {
             state.get_amount_out(
@@ -523,14 +514,12 @@ mod tests {
             }
         })
         .await;
-        let source = HashflowBookSource {
-            component_layout: ComponentLayout::AllPairs(QuoteRule::OncePerMaker),
-            ..source_for(&server.url(), &[&weth, &usdc], 1000.0)
-        };
+        let mut source = source_for(&server.url(), &[&weth, &usdc], 1000.0);
+        source.assembler.component_layout = ComponentLayout::AllPairs(QuoteRule::OncePerMaker);
 
         let books = source.fetch().await.unwrap().books;
         let state = &books.values().next().unwrap().state;
-        let tokens = &source.book_config.tokens;
+        let tokens = &source.assembler.book_config.tokens;
         let swap = |whole_weth: u64| {
             state.get_amount_out(
                 num_bigint::BigUint::from(whole_weth) * num_bigint::BigUint::from(10u64).pow(17),
@@ -549,5 +538,43 @@ mod tests {
             other => panic!("expected the venue's floor, got {other:?}"),
         }
         assert!(swap(10).is_ok(), "one WETH is small_mm's minimum");
+    }
+
+    /// Books rebuilt from serialized prices match the source's published books for the same
+    /// poll.
+    #[tokio::test]
+    async fn prices_round_trip_builds_the_published_books() {
+        let weth = Bytes::from_str(WETH).unwrap();
+        let usdc = Bytes::from_str(USDC).unwrap();
+        let server = two_maker_server().await;
+        let source = source_for(&server.url(), &[&weth, &usdc], 1.0);
+        let published = source.fetch().await.unwrap().books;
+        let prices = source.prices.fetch().await.unwrap();
+
+        let sent = serde_json::to_string(&prices).unwrap();
+        let received: HashflowPrices = serde_json::from_str(&sent).unwrap();
+
+        assert_eq!(received, prices);
+        assert_same_books(&source.assembler.books(received), &published);
+        assert_eq!(published.len(), 1, "only mm1's pair is between the served tokens");
+    }
+
+    /// The response carries one market maker's WETH/USDC level at 3000.
+    #[rstest]
+    #[case::usd_quote_token_is_taken_as_is(USDC, 1000.0, Some(1000.0))]
+    #[case::other_quote_token_is_converted_through_its_usd_level(WETH, 2.0, Some(6000.0))]
+    #[case::quote_token_without_usd_level_has_no_tvl(UNPRICED, 1000.0, None)]
+    fn normalized_tvl_converts_into_usd_quote_tokens(
+        #[case] quote_token: &str,
+        #[case] raw_tvl: f64,
+        #[case] expected: Option<f64>,
+    ) {
+        let assembler = assembler_for("https://hashflow.example", &[], 1.0);
+        let levels = HashMap::from([("test_mm".to_string(), vec![weth_usdc_levels()])]);
+
+        let result =
+            assembler.normalized_tvl(raw_tvl, &Bytes::from_str(quote_token).unwrap(), &levels);
+
+        assert_eq!(result, expected);
     }
 }

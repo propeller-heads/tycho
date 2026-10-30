@@ -27,6 +27,7 @@ use crate::{
             utils::{
                 add_fee_markup,
                 slipstreams::{
+                    aero_hook_fee::{AeroHookFee, Execution, HookFee, PoolOracle},
                     dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
                     observations::{Observation, Observations},
                     raw_target_price,
@@ -70,6 +71,11 @@ const TICK_CROSSING_GAS_COST: i32 = 70_000;
 const TWAP_FEE_OVERHEAD: i32 = 65_000;
 // Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
 const SWAP_BASE_GAS: i32 = 125_000;
+// AERO v1.1 pools call their swap hook, which runs the TWAP observe and stores the block fee,
+// then record the swap on the pool tape and settle the gauge. Measured with eth_simulateV1 of
+// single-step swaps on Base: ~312-317k for the pool's swap against ~140k for an Aerodrome
+// Slipstreams pool. Replaces TWAP_FEE_OVERHEAD.
+const AERO_HOOK_GAS: i32 = 160_000;
 // Conservative max gas for a single swap. Used to cap get_limits iteration.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 // Maximum initialized ticks that can be crossed within MAX_SWAP_GAS.
@@ -86,6 +92,10 @@ pub struct AerodromeSlipstreamsState {
     /// is the next block for a confirmed update and the still-open block for a flashblock
     /// update.
     execution_block_timestamp: u64,
+    /// Number of the block a quote is expected to execute in; maintained like
+    /// `execution_block_timestamp`. The AERO swap hook caches its fee per block number.
+    #[serde(default)]
+    execution_block_number: u64,
     liquidity: u128,
     sqrt_price: U256,
     observation_index: u16,
@@ -105,6 +115,10 @@ pub struct AerodromeSlipstreamsState {
     step_cache: SwapStepCache,
     observations: Observations,
     dfc: DynamicFeeConfig,
+    /// Fee settings of an AERO v1.1 pool, whose swap hook sets the fee instead of a fee module.
+    /// When set, `dfc` is unused.
+    #[serde(default)]
+    aero_hook: Option<AeroHookFee>,
     /// What quotes may assume about the swap's position within its execution block; see
     /// [`BlockPositionAssumption`].
     position_assumption: BlockPositionAssumption,
@@ -146,6 +160,7 @@ impl AerodromeSlipstreamsState {
         Ok(AerodromeSlipstreamsState {
             id,
             execution_block_timestamp,
+            execution_block_number: 0,
             liquidity,
             sqrt_price,
             observation_index,
@@ -157,8 +172,15 @@ impl AerodromeSlipstreamsState {
             step_cache: SwapStepCache::default(),
             observations: Observations::new(observations),
             dfc,
+            aero_hook: None,
             position_assumption: BlockPositionAssumption::default(),
         })
+    }
+
+    /// Prices swaps with an AERO v1.1 swap hook instead of the dynamic fee module.
+    pub fn with_aero_hook(mut self, hook: AeroHookFee) -> Self {
+        self.aero_hook = Some(hook);
+        self
     }
 
     /// Sets what quotes assume about the swap's position within its execution block.
@@ -170,6 +192,10 @@ impl AerodromeSlipstreamsState {
     }
 
     fn get_fee(&self) -> Result<ResolvedFee, SimulationError> {
+        if let Some(hook) = &self.aero_hook {
+            let fee = self.hook_fee(hook)?;
+            return Ok(ResolvedFee { fee: fee.fee, observed_twap: fee.observed_twap });
+        }
         get_dynamic_fee(
             &self.dfc,
             self.default_fee,
@@ -180,6 +206,24 @@ impl AerodromeSlipstreamsState {
             &self.observations,
             self.execution_block_timestamp as u32,
             self.position_assumption == BlockPositionAssumption::First,
+        )
+    }
+
+    fn hook_fee(&self, hook: &AeroHookFee) -> Result<HookFee, SimulationError> {
+        hook.resolve(
+            &PoolOracle {
+                tick: self.tick,
+                liquidity: self.liquidity,
+                observation_index: self.observation_index,
+                observation_cardinality: self.observation_cardinality,
+                observations: &self.observations,
+            },
+            self.default_fee,
+            Execution {
+                block: self.execution_block_number,
+                timestamp: self.execution_block_timestamp as u32,
+                first_in_block: self.position_assumption == BlockPositionAssumption::First,
+            },
         )
     }
 
@@ -262,6 +306,16 @@ impl AerodromeSlipstreamsState {
     ) -> (Self, Result<(), SimulationError>) {
         let mut state = self.clone();
         state.step_cache = SwapStepCache::default();
+        // The block's first swap stores the block fee every later swap in the block pays.
+        if let (Some(hook), Some(state_hook)) = (&self.aero_hook, state.aero_hook.as_mut()) {
+            match self.hook_fee(hook) {
+                Ok(HookFee { block_fee_to_store: Some(fee), .. }) => {
+                    state_hook.store_block_fee(self.execution_block_number, fee)
+                }
+                Ok(_) => {}
+                Err(err) => return (state, Err(err)),
+            }
+        }
         let observation = state.record_observation(tick);
         state.liquidity = liquidity;
         state.tick = tick;
@@ -305,7 +359,13 @@ impl AerodromeSlipstreamsState {
             liquidity: self.liquidity,
         };
         let resolved_fee = self.get_fee()?;
-        let twap_overhead = if resolved_fee.observed_twap { TWAP_FEE_OVERHEAD } else { 0 };
+        let twap_overhead = if self.aero_hook.is_some() {
+            AERO_HOOK_GAS
+        } else if resolved_fee.observed_twap {
+            TWAP_FEE_OVERHEAD
+        } else {
+            0
+        };
         let mut gas_used = U256::from((SWAP_BASE_GAS + twap_overhead) as u64);
         let mut n_loops = 0;
 
@@ -660,13 +720,18 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         {
             self.default_fee = u32::from(default_fee.clone());
         }
-        self.dfc
-            .update_from_attributes(&delta.updated_attributes)
-            .map_err(|err| {
-                TransitionError::DecodeError(format!(
-                    "Failed to update dynamic fee module config: {err}"
-                ))
-            })?;
+        if let Some(hook) = self.aero_hook.as_mut() {
+            hook.update_from_attributes(&delta.updated_attributes)
+                .map_err(TransitionError::DecodeError)?;
+        } else {
+            self.dfc
+                .update_from_attributes(&delta.updated_attributes)
+                .map_err(|err| {
+                    TransitionError::DecodeError(format!(
+                        "Failed to update dynamic fee module config: {err}"
+                    ))
+                })?;
+        }
         if let Some(tick) = delta.updated_attributes.get("tick") {
             // This is a hotfix because if the tick has never been updated after creation, it's
             // currently encoded as H256::zero(), therefore, we can't decode this as i32.
@@ -742,11 +807,14 @@ impl ProtocolSim for AerodromeSlipstreamsState {
     /// the unchanged timestamp.
     fn apply_block(&mut self, block: &BlockContext) -> bool {
         let timestamp = block.timestamp();
-        if timestamp == self.execution_block_timestamp {
+        if timestamp == self.execution_block_timestamp &&
+            block.number() == self.execution_block_number
+        {
             return false;
         }
         let fee_before = self.get_fee().ok();
         self.execution_block_timestamp = timestamp;
+        self.execution_block_number = block.number();
         fee_before != self.get_fee().ok()
     }
 
@@ -822,6 +890,10 @@ impl ProtocolSim for AerodromeSlipstreamsState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "aero_cl_replay_tests.rs"]
+mod aero_cl_replay_tests;
 
 #[cfg(test)]
 mod tests {

@@ -200,7 +200,8 @@ impl SwapEncoderRegistry {
             "ring_swap_v2" => {
                 Ok(Box::new(RingSwapV2SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "aerodrome_v1" => {
+            // AERO basic pools take Aerodrome V1 calldata; only their executor differs.
+            "aerodrome_v1" | "aero_basic" => {
                 Ok(Box::new(AerodromeV1SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:balancer_v2" => {
