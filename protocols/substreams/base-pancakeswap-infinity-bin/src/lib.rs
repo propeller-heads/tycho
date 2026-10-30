@@ -29,5 +29,6 @@ pub mod keys;
 pub mod modules;
 pub mod parameters;
 pub mod pb;
+pub mod storage;
 
 pub use modules::*;

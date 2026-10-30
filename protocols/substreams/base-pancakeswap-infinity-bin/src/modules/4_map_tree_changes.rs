@@ -1,13 +1,14 @@
 use crate::{
     modules::map_pool_created::decode_address,
-    parameters::{self, BIN_POOLS_MAPPING_SLOT},
+    parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
         Events, TreeDelta, TreeDeltas,
     },
+    storage::{in_window, storage_writes_by_tx, tx_index, with_floors, WritesBySlot},
 };
 use std::collections::HashMap;
-use substreams_ethereum::pb::eth::v2::{self as eth, Call, StorageChange};
+use substreams_ethereum::pb::eth::v2::{self as eth};
 
 /// Bin tree words rewritten by mints and burns, read out of BinPoolManager storage diffs.
 ///
@@ -22,75 +23,25 @@ pub fn map_tree_changes(
     events: Events,
 ) -> Result<TreeDeltas, substreams::errors::Error> {
     let pool_manager = decode_address("pool_manager", &params)?;
-    let writes_by_tx = storage_writes_by_tx(&block, &pool_manager);
+    let writes_by_tx = storage_writes_by_tx(&block, &pool_manager, &events.pool_events);
 
     let no_writes = HashMap::new();
     let mut deltas: Vec<TreeDelta> = Vec::new();
-    let mut prev_log: HashMap<u64, u64> = HashMap::new();
-    for event in &events.pool_events {
-        let tx_index = event
-            .transaction
-            .as_ref()
-            .expect("3_map_events sets a transaction on every event")
-            .index;
+    for (event, floor) in with_floors(&events.pool_events) {
         let writes = writes_by_tx
-            .get(&tx_index)
+            .get(&tx_index(event))
             .unwrap_or(&no_writes);
-        let floor = prev_log
-            .get(&tx_index)
-            .copied()
-            .unwrap_or(0);
         deltas.extend(event_to_tree_deltas(event, writes, floor));
-        prev_log.insert(tx_index, event.log_ordinal);
     }
 
-    deltas.sort_unstable_by_key(|delta| (delta.ordinal, delta.level, delta.key));
-
+    // Events arrive in ordinal order and each event's words are sorted, so the deltas are too.
     Ok(TreeDeltas { deltas })
-}
-
-/// Successful, non-reverted storage writes to `pool_manager`, per transaction then per slot,
-/// every write kept in ordinal order.
-///
-/// Per transaction because two transactions in one block can write the same slot; every write
-/// because one transaction can mint into a bin then swap through it.
-pub(super) fn storage_writes_by_tx<'a>(
-    block: &'a eth::Block,
-    pool_manager: &[u8],
-) -> HashMap<u64, HashMap<Vec<u8>, Vec<&'a StorageChange>>> {
-    let mut writes_by_tx: HashMap<u64, HashMap<Vec<u8>, Vec<&StorageChange>>> = HashMap::new();
-    for tx in block
-        .transaction_traces
-        .iter()
-        .filter(|tx| tx.status == 1)
-    {
-        let slots = writes_by_tx
-            .entry(u64::from(tx.index))
-            .or_default();
-        for change in tx
-            .calls
-            .iter()
-            .filter(|call: &&Call| !call.state_reverted)
-            .flat_map(|call| call.storage_changes.iter())
-            .filter(|change| change.address == pool_manager)
-        {
-            slots
-                .entry(change.key.clone())
-                .or_default()
-                .push(change);
-        }
-    }
-    writes_by_tx
 }
 
 /// Tree words one event rewrote: `level2` per touched segment, `level1` per touched group of 256
 /// segments. A word with no write in the window `(floor, log_ordinal)` is unchanged, so nothing is
 /// emitted for it.
-fn event_to_tree_deltas(
-    event: &PoolEvent,
-    writes: &HashMap<Vec<u8>, Vec<&StorageChange>>,
-    floor: u64,
-) -> Vec<TreeDelta> {
+fn event_to_tree_deltas(event: &PoolEvent, writes: &WritesBySlot, floor: u64) -> Vec<TreeDelta> {
     let bin_ids: &[u32] = match event.r#type.as_ref().unwrap() {
         pool_event::Type::Mint(mint) => &mint.ids,
         pool_event::Type::Burn(burn) => &burn.ids,
@@ -101,13 +52,7 @@ fn event_to_tree_deltas(
     };
 
     let pool_id = &event.pool_id;
-    let base = parameters::pool_state_base_slot(
-        pool_id
-            .as_slice()
-            .try_into()
-            .expect("pool id is 32 bytes"),
-        BIN_POOLS_MAPPING_SLOT,
-    );
+    let base = parameters::pool_base_slot(pool_id);
 
     let mut words: Vec<(u32, u32)> = bin_ids
         .iter()
@@ -129,9 +74,7 @@ fn event_to_tree_deltas(
                 .and_then(|slot_writes| {
                     slot_writes
                         .iter()
-                        .filter(|change| {
-                            change.ordinal > floor && change.ordinal < event.log_ordinal
-                        })
+                        .filter(|change| in_window(change.ordinal, floor, event.log_ordinal))
                         .max_by_key(|change| change.ordinal)
                 })
                 .map(|change| TreeDelta {
@@ -149,6 +92,7 @@ fn event_to_tree_deltas(
 mod tests {
     use super::*;
     use crate::pb::pancakeswap::infinity::bin::{events::pool_event::Type, Transaction};
+    use substreams_ethereum::pb::eth::v2::StorageChange;
 
     const POOL_MANAGER: [u8; 20] = [0xc6; 20];
     const POOL_ID: &str = "abababababababababababababababababababababababababababababababab";
@@ -161,12 +105,12 @@ mod tests {
     }
 
     fn leaf_write(segment: u32, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_state_base_slot(&pool_id_bytes(), BIN_POOLS_MAPPING_SLOT);
+        let base = parameters::pool_base_slot(&pool_id_bytes());
         tree_write(parameters::tree_level2_slot(&base, segment), new, ordinal)
     }
 
     fn middle_write(key: u32, new: Vec<u8>, ordinal: u64) -> StorageChange {
-        let base = parameters::pool_state_base_slot(&pool_id_bytes(), BIN_POOLS_MAPPING_SLOT);
+        let base = parameters::pool_base_slot(&pool_id_bytes());
         tree_write(parameters::tree_level1_slot(&base, key), new, ordinal)
     }
 
@@ -180,8 +124,8 @@ mod tests {
         }
     }
 
-    fn index(changes: &[StorageChange]) -> HashMap<Vec<u8>, Vec<&StorageChange>> {
-        let mut map: HashMap<Vec<u8>, Vec<&StorageChange>> = HashMap::new();
+    fn index(changes: &[StorageChange]) -> WritesBySlot<'_> {
+        let mut map = WritesBySlot::new();
         for change in changes {
             map.entry(change.key.clone())
                 .or_default()

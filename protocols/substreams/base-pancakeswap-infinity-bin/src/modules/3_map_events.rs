@@ -35,27 +35,25 @@ pub fn map_events(
     pools_store: StoreGetProto<Pool>,
 ) -> Result<Events, anyhow::Error> {
     let pool_manager = decode_address("pool_manager", &params)?;
-    let mut pool_manager_events = block
+    let mut pool_events = Vec::new();
+    for tx in block
         .transaction_traces
-        .into_iter()
+        .iter()
         .filter(|tx| tx.status == 1)
-        .flat_map(|tx| {
-            let receipt = tx
-                .receipt
-                .as_ref()
-                .expect("all transaction traces have a receipt");
+    {
+        let receipt = tx
+            .receipt
+            .as_ref()
+            .expect("all transaction traces have a receipt");
+        for log in &receipt.logs {
+            if let Some(event) = log_to_event(log, tx, &pool_manager, &pools_store) {
+                pool_events.push(event);
+            }
+        }
+    }
+    pool_events.sort_unstable_by_key(|event| event.log_ordinal);
 
-            receipt
-                .logs
-                .iter()
-                .filter_map(|log| log_to_event(log, &tx, &pool_manager, &pools_store))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    pool_manager_events.sort_unstable_by_key(|e| e.log_ordinal);
-
-    Ok(Events { pool_events: pool_manager_events })
+    Ok(Events { pool_events })
 }
 
 /// Resolves the pool the log belongs to and wraps the decoded payload. `decode_log` already
