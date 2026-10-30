@@ -45,6 +45,7 @@ const deploy_protocols = {
         "fallback:rfq:hashflow",
         "fallback:rfq:native",
         "fallback:rfq:liquorice",
+        "subsidy",
     ],
     "base": [
         "aero_basic",
@@ -64,6 +65,7 @@ const deploy_protocols = {
         "fallback:rfq:bebop",
         "fallback:rfq:native",
         "pancakeswap_infinity_cl",
+        "subsidy",
     ],
     "unichain": [
         "uniswap_v2",
@@ -72,6 +74,7 @@ const deploy_protocols = {
         "vm:curve",
         "velodrome_slipstreams",
         "native_wrapper",
+        "subsidy",
     ],
     "arbitrum": [
         "aero_basic",
@@ -83,6 +86,7 @@ const deploy_protocols = {
         "rfq:native",
         "fallback:rfq:metric",
         "fallback:rfq:native",
+        "subsidy",
     ],
     "polygon": [
         "uniswap_v2",
@@ -90,7 +94,8 @@ const deploy_protocols = {
         "uniswap_v4",
         "native_wrapper",
         "rfq:metric",
-        "fallback:rfq:metric"
+        "fallback:rfq:metric",
+        "subsidy",
     ],
     "bsc": [
         "ring_swap_v2",
@@ -106,12 +111,14 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:native",
         "lunarbase",
+        "subsidy",
     ],
     "plasma": [
         "uniswap_v3",
         "fluid_v1",
         "vm:curve",
         "native_wrapper",
+        "subsidy",
     ],
     "robinhood": [
         "aero_basic",
@@ -125,12 +132,14 @@ const deploy_protocols = {
         "rfq:native",
         "fallback:rfq:metric",
         "fallback:rfq:native",
+        "subsidy",
     ],
     "arc": [
         "aero_basic",
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+        "subsidy",
     ],
 };
 
