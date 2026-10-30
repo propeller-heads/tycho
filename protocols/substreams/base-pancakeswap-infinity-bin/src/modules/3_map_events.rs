@@ -1,0 +1,301 @@
+use crate::{
+    abi::bin_pool_manager::events::{Burn, Donate, Initialize, Mint, ProtocolFeeUpdated, Swap},
+    keys::pool_key,
+    modules::map_pool_created::decode_address,
+    pb::pancakeswap::infinity::bin::{
+        events::{
+            pool_event::{self, Type},
+            PoolEvent,
+        },
+        Events, Pool,
+    },
+};
+use substreams::store::{StoreGet, StoreGetProto};
+use substreams_ethereum::{
+    pb::eth::v2::{self as eth, Log, TransactionTrace},
+    Event,
+};
+
+/// Decodes BinPoolManager logs of known pools into `Events`, sorted by log ordinal.
+///
+/// `Donate` is decoded here, unlike the CL package: in Bin a donate moves real bin reserves, not
+/// just fee growth, so skipping it would drift balances.
+///
+/// `Mint` and `Burn` keep only `ids[]`. The packed `amounts[]` are ignored because
+/// `6_map_bin_changes` reads the resulting reserves from storage instead.
+///
+/// Ordinals are load-bearing: `6_map_bin_changes` joins these events to storage writes and to
+/// `store_active_id` by ordinal, so `log_ordinal` must be the log's own and the output must stay
+/// sorted.
+#[substreams::handlers::map]
+pub fn map_events(
+    params: String,
+    block: eth::Block,
+    pools_store: StoreGetProto<Pool>,
+) -> Result<Events, anyhow::Error> {
+    let pool_manager = decode_address("pool_manager", &params)?;
+    let mut pool_events = Vec::new();
+    for tx in block
+        .transaction_traces
+        .iter()
+        .filter(|tx| tx.status == 1)
+    {
+        let receipt = tx
+            .receipt
+            .as_ref()
+            .expect("all transaction traces have a receipt");
+        for log in &receipt.logs {
+            if let Some(event) = log_to_event(log, tx, &pool_manager, &pools_store) {
+                pool_events.push(event);
+            }
+        }
+    }
+    pool_events.sort_unstable_by_key(|event| event.log_ordinal);
+
+    Ok(Events { pool_events })
+}
+
+/// Resolves the pool the log belongs to and wraps the decoded payload. `decode_log` already
+/// rejected other emitters, so an unknown pool id here was filtered out at creation.
+fn log_to_event(
+    log: &Log,
+    tx: &TransactionTrace,
+    pool_manager: &[u8],
+    pools_store: &StoreGetProto<Pool>,
+) -> Option<PoolEvent> {
+    let (pool_id, event) = decode_log(log, pool_manager)?;
+    let pool = pools_store.get_last(pool_key(&pool_id))?;
+
+    Some(PoolEvent {
+        log_ordinal: log.ordinal,
+        pool_id,
+        currency0: pool.currency0,
+        currency1: pool.currency1,
+        transaction: Some(tx.into()),
+        r#type: Some(event),
+    })
+}
+
+/// Pool id and payload of a BinPoolManager log, `None` for any other log.
+///
+/// `Initialize` is decoded here as well as in `1_map_pool_created` because `store_active_id` seeds
+/// the active bin from it.
+fn decode_log(log: &Log, pool_manager: &[u8]) -> Option<(Vec<u8>, Type)> {
+    if log.address != pool_manager {
+        return None;
+    }
+    if let Some(init) = Initialize::match_and_decode(log) {
+        Some((
+            init.id.to_vec(),
+            Type::Initialize(pool_event::Initialize { active_id: init.active_id.into() }),
+        ))
+    } else if let Some(swap) = Swap::match_and_decode(log) {
+        Some((swap.id.to_vec(), Type::Swap(pool_event::Swap { active_id: swap.active_id.into() })))
+    } else if let Some(mint) = Mint::match_and_decode(log) {
+        Some((mint.id.to_vec(), Type::Mint(pool_event::Mint { ids: bin_ids(&mint.ids) })))
+    } else if let Some(burn) = Burn::match_and_decode(log) {
+        Some((burn.id.to_vec(), Type::Burn(pool_event::Burn { ids: bin_ids(&burn.ids) })))
+    } else if let Some(donate) = Donate::match_and_decode(log) {
+        Some((
+            donate.id.to_vec(),
+            Type::Donate(pool_event::Donate {
+                amount0: donate.amount0.to_string(),
+                amount1: donate.amount1.to_string(),
+                bin_id: donate.bin_id.into(),
+            }),
+        ))
+    } else if let Some(fee_updated) = ProtocolFeeUpdated::match_and_decode(log) {
+        Some((
+            fee_updated.id.to_vec(),
+            Type::ProtocolFeeUpdated(pool_event::ProtocolFeeUpdated {
+                protocol_fee: fee_updated.protocol_fee.into(),
+            }),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Bin ids are `uint256[]` on the wire, u24 in practice.
+fn bin_ids(ids: &[substreams::scalar::BigInt]) -> Vec<u32> {
+    ids.iter()
+        .map(|id| Into::<u32>::into(id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use tiny_keccak::{Hasher, Keccak};
+
+    use crate::modules::test_fixtures::{POOL_ID, POOL_MANAGER};
+
+    const SENDER: [u8; 20] = [0x11; 20];
+
+    fn topic(signature: &str) -> Vec<u8> {
+        let mut hasher = Keccak::v256();
+        hasher.update(signature.as_bytes());
+        let mut out = [0u8; 32];
+        hasher.finalize(&mut out);
+        out.to_vec()
+    }
+
+    fn word(value: u128) -> Vec<u8> {
+        let mut out = vec![0u8; 32];
+        out[16..].copy_from_slice(&value.to_be_bytes());
+        out
+    }
+
+    fn padded(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; 32 - bytes.len()];
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    fn log(signature: &str, indexed: &[Vec<u8>], data: Vec<Vec<u8>>) -> Log {
+        let mut topics = vec![topic(signature)];
+        topics.extend(indexed.iter().cloned());
+
+        Log {
+            address: POOL_MANAGER.to_vec(),
+            topics,
+            data: data.concat(),
+            index: 0,
+            block_index: 0,
+            ordinal: 7,
+        }
+    }
+
+    /// `activeId` is the last word of the data, a u24 in a full word.
+    #[test]
+    fn initialize_carries_the_active_id() {
+        let mut parameters = vec![0u8; 32];
+        // Bin step above an empty hook bitmap.
+        parameters[28..].copy_from_slice(&(10u32 << 16).to_be_bytes());
+        let log = log(
+            "Initialize(bytes32,address,address,address,uint24,bytes32,uint24)",
+            &[POOL_ID.to_vec(), padded(&SENDER), padded(&[0x22; 20])],
+            vec![word(0), word(7), parameters, word(8_388_608)],
+        );
+
+        let (pool_id, event) = decode_log(&log, &POOL_MANAGER).expect("Initialize decodes");
+
+        assert_eq!(pool_id, POOL_ID.to_vec());
+        let Type::Initialize(init) = event else { panic!("wrong event type") };
+        assert_eq!(init.active_id, 8_388_608);
+    }
+
+    /// The post-swap active id is the third data word, after the two signed amounts.
+    #[test]
+    fn swap_carries_the_post_active_id() {
+        let mut negative = vec![0xffu8; 32];
+        negative[31] = 0xfe;
+        let log = log(
+            "Swap(bytes32,address,int128,int128,uint24,uint24,uint16)",
+            &[POOL_ID.to_vec(), padded(&SENDER)],
+            vec![word(1_000), negative, word(8_388_607), word(7), word(0)],
+        );
+
+        let (_, event) = decode_log(&log, &POOL_MANAGER).expect("Swap decodes");
+
+        let Type::Swap(swap) = event else { panic!("wrong event type") };
+        assert_eq!(swap.active_id, 8_388_607);
+    }
+
+    /// ABI head and tail of a dynamic array: `[offset]` in the head, `[len, items..]` in the tail.
+    fn array(items: &[u128]) -> Vec<Vec<u8>> {
+        let mut out = vec![word(items.len() as u128)];
+        out.extend(items.iter().map(|item| word(*item)));
+        out
+    }
+
+    /// `ids` sits behind an offset, between a salt and two more dynamic or static words, so a
+    /// decoder that reads the head words as ids would see offsets instead.
+    #[rstest]
+    #[case::mint(
+        "Mint(bytes32,address,uint256[],bytes32,bytes32[],bytes32,bytes32)",
+        // head: offset(ids), salt, offset(amounts), compositionFeeAmount, feeAmountToProtocol
+        vec![word(5 * 32), word(0), word(8 * 32), word(0), word(0)]
+    )]
+    #[case::burn(
+        "Burn(bytes32,address,uint256[],bytes32,bytes32[])",
+        // head: offset(ids), salt, offset(amounts)
+        vec![word(3 * 32), word(0), word(6 * 32)]
+    )]
+    fn mint_and_burn_carry_their_bin_ids(#[case] signature: &str, #[case] head: Vec<Vec<u8>>) {
+        let mut data = head;
+        data.extend(array(&[8_388_600, 8_388_601]));
+        data.extend(array(&[1, 2]));
+        let log = log(signature, &[POOL_ID.to_vec(), padded(&SENDER)], data);
+
+        let (pool_id, event) = decode_log(&log, &POOL_MANAGER).expect("log decodes");
+
+        assert_eq!(pool_id, POOL_ID.to_vec());
+        let ids = match event {
+            Type::Mint(mint) => mint.ids,
+            Type::Burn(burn) => burn.ids,
+            other => panic!("wrong event type: {other:?}"),
+        };
+        assert_eq!(ids, vec![8_388_600, 8_388_601]);
+    }
+
+    /// A donate's amounts are int128, so a negative one survives as a signed decimal string.
+    #[test]
+    fn donate_carries_signed_amounts_and_the_bin() {
+        let mut negative = vec![0xffu8; 32];
+        negative[31] = 0xfb;
+        let log = log(
+            "Donate(bytes32,address,int128,int128,uint24)",
+            &[POOL_ID.to_vec(), padded(&SENDER)],
+            vec![word(1_000), negative, word(8_388_607)],
+        );
+
+        let (_, event) = decode_log(&log, &POOL_MANAGER).expect("Donate decodes");
+
+        let Type::Donate(donate) = event else { panic!("wrong event type") };
+        assert_eq!((donate.amount0.as_str(), donate.amount1.as_str()), ("1000", "-5"));
+        assert_eq!(donate.bin_id, 8_388_607);
+    }
+
+    #[test]
+    fn foreign_emitter_is_skipped() {
+        let mut log = log(
+            "Swap(bytes32,address,int128,int128,uint24,uint24,uint16)",
+            &[POOL_ID.to_vec(), padded(&SENDER)],
+            vec![word(1_000), word(0), word(8_388_607), word(7), word(0)],
+        );
+        log.address = vec![0x77; 20];
+
+        assert!(decode_log(&log, &POOL_MANAGER).is_none(), "only the pool manager's logs count");
+    }
+
+    /// The CL manager emits `ProtocolFeeUpdated(bytes32,uint24)` with the same signature, so only
+    /// the emitter tells a Bin pool's fee update from a CL pool's. The same log from the Bin
+    /// manager decodes, so a skip can only come from the address.
+    #[test]
+    fn protocol_fee_update_from_another_manager_is_skipped() {
+        let mut log = log("ProtocolFeeUpdated(bytes32,uint24)", &[POOL_ID.to_vec()], vec![word(7)]);
+        let (pool_id, event) =
+            decode_log(&log, &POOL_MANAGER).expect("the Bin manager's update decodes");
+        assert_eq!(pool_id, POOL_ID.to_vec());
+        let Type::ProtocolFeeUpdated(updated) = event else { panic!("wrong event type") };
+        assert_eq!(updated.protocol_fee, 7);
+
+        log.address = vec![0xc7; 20];
+        assert!(decode_log(&log, &POOL_MANAGER).is_none(), "a CL manager's update must not");
+    }
+
+    /// Only the six BinPoolManager events decode; everything else in a block is skipped.
+    #[rstest]
+    #[case::wrong_signature("Transfer(address,address,uint256)")]
+    #[case::cl_pool_event("Swap(bytes32,address,int128,int128,uint160,uint24,int24,uint24)")]
+    fn unrelated_logs_are_skipped(#[case] signature: &str) {
+        let log = log(signature, &[POOL_ID.to_vec(), padded(&SENDER)], vec![word(0)]);
+
+        assert!(
+            decode_log(&log, &POOL_MANAGER).is_none(),
+            "{signature} must not decode as a Bin event"
+        );
+    }
+}

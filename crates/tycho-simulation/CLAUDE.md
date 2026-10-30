@@ -24,9 +24,10 @@ for any protocol indexed by Tycho.
     `aero_basic/`, `aerodrome_v1/`, `aerodrome_slipstreams/`, `velodrome_slipstreams/`,
     `pancakeswap_v2/`,
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
-    `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution. `aerodrome_slipstreams/` also
-    serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for `aero_cl` the fee comes from the
-    pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`) instead of a dynamic fee module.
+    `erc4626/`, `rocketpool/`, `pancakeswap_infinity_bin/`): Pure Rust math, no EVM execution.
+    `aerodrome_slipstreams/` also serves Robinhood `up_v3` and AERO v1.1 `aero_cl` pools; for
+    `aero_cl` the fee comes from the pool's swap hook (`utils/slipstreams/aero_hook_fee.rs`)
+    instead of a dynamic fee module.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and

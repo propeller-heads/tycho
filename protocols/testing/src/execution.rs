@@ -38,7 +38,7 @@ const LUNARBASE_BYTECODE_JSON: &str = include_str!("../fixtures/LunarBase.runtim
 const SKY_BYTECODE_JSON: &str = include_str!("../fixtures/Sky.runtime.json");
 const SLIPSTREAMS_BYTECODE_JSON: &str = include_str!("../fixtures/Slipstreams.runtime.json");
 const LIDO_V4_BYTECODE_JSON: &str = include_str!("../fixtures/LidoV4.runtime.json");
-const PANCAKESWAP_INFINITY_CL_BYTECODE_JSON: &str =
+const PANCAKESWAP_INFINITY_BYTECODE_JSON: &str =
     include_str!("../fixtures/PancakeswapInfinity.runtime.json");
 const PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/PancakeswapInfinityRobinhood.runtime.json");
@@ -73,8 +73,9 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("aero_cl", SLIPSTREAMS_BYTECODE_JSON);
     map.insert("lido_v4", LIDO_V4_BYTECODE_JSON);
     map.insert("up_v3", SLIPSTREAMS_BYTECODE_JSON);
-    map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
-    map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_CL_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl", PANCAKESWAP_INFINITY_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_cl_hooks", PANCAKESWAP_INFINITY_BYTECODE_JSON);
+    map.insert("pancakeswap_infinity_bin", PANCAKESWAP_INFINITY_BYTECODE_JSON);
     map
 });
 

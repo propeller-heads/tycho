@@ -40,6 +40,7 @@ use crate::encoding::{
 
 /// The protocol system of a Uniswap V4 pool whose pool key names a hook.
 const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
+const PANCAKESWAP_INFINITY_BIN: &str = "pancakeswap_infinity_bin";
 const PANCAKESWAP_INFINITY_CL: &str = "pancakeswap_infinity_cl";
 const PANCAKESWAP_INFINITY_CL_HOOKS: &str = "pancakeswap_infinity_cl_hooks";
 
@@ -147,33 +148,31 @@ impl SwapEncoderRegistry {
     /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
     /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
     ///
-    /// `pancakeswap_infinity_cl_hooks` resolves to the `pancakeswap_infinity_cl` encoder the same
-    /// way: one Infinity executor serves hooked and hookless CL pools alike.
+    /// `pancakeswap_infinity_cl_hooks` and `pancakeswap_infinity_bin` resolve to the
+    /// `pancakeswap_infinity_cl` encoder the same way: one Infinity executor serves hooked and
+    /// hookless CL pools and Bin pools, picking the pool type by a byte in the swap data. Bin only
+    /// on the chains whose executor holds a BinPoolManager; the Robinhood one has none and would
+    /// revert `UnknownPoolType(1)`.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
         }
-        if protocol_system == UNISWAP_V4_HOOKS {
-            return self.encoders.get("uniswap_v4");
-        }
-        if protocol_system == PANCAKESWAP_INFINITY_CL_HOOKS {
-            return self
-                .encoders
-                .get(PANCAKESWAP_INFINITY_CL);
-        }
-        if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
-            return self
-                .encoders
-                .get(PRICE_LEVEL_STREAM_KEY);
-        }
-        if protocol_system.starts_with(FALLBACK_PREFIX) &&
-            protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
-            !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
-        {
-            return self.encoders.get(FALLBACK_KEY);
-        }
-        None
+        let has_bin_pool_manager = matches!(self.chain, Chain::Base | Chain::Bsc);
+        let family = match protocol_system {
+            UNISWAP_V4_HOOKS => "uniswap_v4",
+            PANCAKESWAP_INFINITY_CL_HOOKS => PANCAKESWAP_INFINITY_CL,
+            PANCAKESWAP_INFINITY_BIN if has_bin_pool_manager => PANCAKESWAP_INFINITY_CL,
+            _ if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) => PRICE_LEVEL_STREAM_KEY,
+            _ if protocol_system.starts_with(FALLBACK_PREFIX) &&
+                protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+                !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) =>
+            {
+                FALLBACK_KEY
+            }
+            _ => return None,
+        };
+        self.encoders.get(family)
     }
 
     /// The executor address of every encoder in this registry, keyed by protocol system.
@@ -215,13 +214,13 @@ impl SwapEncoderRegistry {
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            PANCAKESWAP_INFINITY_CL |
-            PANCAKESWAP_INFINITY_CL_HOOKS |
-            "pancakeswap_infinity_bin" => Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
-                executor_address,
-                self.chain,
-                config,
-            )?)),
+            PANCAKESWAP_INFINITY_CL | PANCAKESWAP_INFINITY_CL_HOOKS | PANCAKESWAP_INFINITY_BIN => {
+                Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
+                    executor_address,
+                    self.chain,
+                    config,
+                )?))
+            }
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -466,21 +465,33 @@ mod tests {
         assert_eq!(hooked.executor_address(), core.executor_address());
     }
 
-    /// Hooked Infinity CL pools swap through the same executor as hookless ones, so the
-    /// `pancakeswap_infinity_cl` entry serves them without a deployment of their own.
-    #[test]
-    fn test_pancakeswap_infinity_cl_hooks_resolves_to_the_cl_encoder() {
+    /// One Infinity executor serves hooked CL pools and Bin pools, so the `pancakeswap_infinity_cl`
+    /// entry serves them without a deployment of their own. Bin only where the executor holds a
+    /// BinPoolManager: the Robinhood one has none.
+    #[rstest]
+    #[case::cl_hooks_on_bsc(Chain::Bsc, "pancakeswap_infinity_cl_hooks", true)]
+    #[case::bin_on_base(Chain::Base, "pancakeswap_infinity_bin", true)]
+    #[case::bin_on_bsc(Chain::Bsc, "pancakeswap_infinity_bin", true)]
+    #[case::bin_on_robinhood(Chain::Robinhood, "pancakeswap_infinity_bin", false)]
+    fn test_pancakeswap_infinity_aliases_resolve_to_the_cl_encoder(
+        #[case] chain: Chain,
+        #[case] protocol_system: &str,
+        #[case] resolves: bool,
+    ) {
         let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
-        let executors = format!(r#"{{"bsc": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
+        let executors = format!(r#"{{"{chain}": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
 
-        let registry = SwapEncoderRegistry::new(Chain::Bsc)
+        let registry = SwapEncoderRegistry::new(chain)
             .add_default_encoders(Some(executors))
             .unwrap();
 
-        let hooks = registry
-            .get_encoder("pancakeswap_infinity_cl_hooks")
-            .expect("a hooked Infinity CL pool must resolve to the Infinity encoder");
-        assert_eq!(hooks.executor_address(), &Bytes::from_str(executor).unwrap());
+        match registry.get_encoder(protocol_system) {
+            Some(encoder) if resolves => {
+                assert_eq!(encoder.executor_address(), &Bytes::from_str(executor).unwrap())
+            }
+            None if !resolves => {}
+            found => panic!("{protocol_system} on {chain}: resolved = {}", found.is_some()),
+        }
     }
 
     #[test]
