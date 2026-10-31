@@ -1,3 +1,20 @@
+## [0.495.0](https://github.com/propeller-heads/tycho/compare/0.494.0...0.495.0) (2026-10-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* **simulation:** continue a fill on the same pair of a used RFQ venue (#1588)
+* **simulation:** continue a fill on the same pair of an all-pairs venue
+
+### Features
+
+* **simulation:** add the marginal price of a level ladder ([8d57114](https://github.com/propeller-heads/tycho/commit/8d57114220171e0d038070878dfce6df7f946621))
+* **simulation:** continue a fill in the price level stream state ([7668512](https://github.com/propeller-heads/tycho/commit/766851293bf11f43e4d9339b332ea72987d700ce))
+* **simulation:** continue a fill in the price level stream state ([#1702](https://github.com/propeller-heads/tycho/issues/1702)) ([9412060](https://github.com/propeller-heads/tycho/commit/941206049d0135cc8248ff3a84c79d2a8bc9acc8))
+* **simulation:** continue a fill on the same pair of a used RFQ venue ([#1588](https://github.com/propeller-heads/tycho/issues/1588)) ([e115852](https://github.com/propeller-heads/tycho/commit/e115852a7e50e8e0dff816c7721df72abb6cb880))
+* **simulation:** continue a fill on the same pair of an all-pairs venue ([b5c62bb](https://github.com/propeller-heads/tycho/commit/b5c62bb49855e6fd79ca01a30d9176eb6e764bef))
+* **simulation:** price the RFQ books after a fill ([0dbd252](https://github.com/propeller-heads/tycho/commit/0dbd252c419c02db60bd224121fc89cb388bdd6d))
+
 ## [0.494.0](https://github.com/propeller-heads/tycho/compare/0.493.0...0.494.0) (2026-10-30)
 
 
