@@ -49,6 +49,7 @@ use tycho_simulation::{
     protocol::models::ProtocolComponent,
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
+        euclid::{self, feed::EuclidFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
@@ -150,13 +151,16 @@ async fn main() {
     let (liquorice_user, liquorice_key) =
         (env::var("LIQUORICE_USER").ok(), env::var("LIQUORICE_KEY").ok());
     let native_key = env::var("NATIVE_API_KEY").ok();
+    // Euclid's gateway is public, so it takes no credentials: EUCLID_ENABLED=true opts in.
+    let euclid_enabled = env::var("EUCLID_ENABLED").is_ok_and(|enabled| enabled == "true");
     if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none()) &&
-        native_key.is_none()
+        native_key.is_none() &&
+        !euclid_enabled
     {
         if cli.disable_pamm {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, or drop --disable-pamm to run Metric on its own.");
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, set EUCLID_ENABLED=true, or drop --disable-pamm to run Metric on its own.");
         } else {
             println!(
                 "No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n"
@@ -261,6 +265,29 @@ async fn main() {
         feeds
             .add(bebop::PROTOCOL_SYSTEM, bebop_feed)
             .expect("each provider is added once");
+    }
+
+    if let (true, Some(usd_quote_tokens)) = (euclid_enabled, &usd_quote_tokens) {
+        println!("Setting up Euclid feed...\n");
+        let mut builder = EuclidFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens));
+        if let Ok(api_url) = env::var("EUCLID_API_URL") {
+            builder = builder.api_url(api_url);
+        }
+        if let Ok(api_key) = env::var("EUCLID_API_KEY") {
+            builder = builder.api_key(api_key);
+        }
+        if all_pairs {
+            builder = builder.all_pairs();
+        }
+        // Euclid serves Ethereum only.
+        match builder.build() {
+            Ok(euclid_feed) => {
+                feeds
+                    .add(euclid::PROTOCOL_SYSTEM, euclid_feed)
+                    .expect("each provider is added once");
+            }
+            Err(e) => eprintln!("Skipping Euclid feed: {e}"),
+        }
     }
 
     if let (Some(user), Some(key), Some(usd_quote_tokens)) =
