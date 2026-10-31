@@ -154,7 +154,9 @@ for any protocol indexed by Tycho.
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
-  round-trip); `PriceLevelStreamState` quotes by interpolating its quotes and refuses to quote
+  round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
+  fill so a later swap on the same direction continues it (the caller merges swaps on one
+  direction into one; the other direction is refused), and refuses to quote
   once its message is one slot old (`quotable_until`, monotonic, never serialized, ignored by
   `eq`; `without_quote_guard` on the builder turns it off for slow quoters). A message carries one
   flat `books` list — one book per venue and pair, priced in human units as float
