@@ -11,7 +11,10 @@ use tycho_common::models::ExtractorIdentity;
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
 use crate::extractor::{
     factory::ExtractorFactory,
-    runner::{ControlMessage, ExtractorHandle, SubscriptionsMap},
+    runner::{
+        slow_client_removals, ControlMessage, Delivery, ExtractorHandle, Subscriber,
+        SubscriberKind, SubscriptionsMap,
+    },
     DeltaCommand, ExtractionError,
 };
 
@@ -79,20 +82,25 @@ impl ExtractorSupervisor {
         }
     }
 
-    /// Registers a subscriber.
+    /// Registers an in-process subscriber.
     ///
-    /// The subscriber receives every [`DeltaCommand`] the extractor emits, across restarts.
-    /// External subscribers joining at runtime go through
+    /// The subscriber receives every [`DeltaCommand`] the extractor emits, across restarts: the
+    /// extractor waits for room in its channel. External subscribers joining at runtime go through
     /// [`MessageSender::subscribe`](crate::extractor::runner::MessageSender::subscribe) on an
-    /// [`ExtractorHandle`] instead.
+    /// [`ExtractorHandle`] instead; they are removed when their channel is full.
     pub async fn add_subscriber(&mut self, sender: Sender<DeltaCommand>) {
+        self.insert_subscriber(sender, SubscriberKind::Internal)
+            .await;
+    }
+
+    async fn insert_subscriber(&mut self, sender: Sender<DeltaCommand>, kind: SubscriberKind) {
         let subscriber_id = self.next_subscriber_id;
         self.next_subscriber_id += 1;
-        info!(extractor = %self.id, subscriber_id, "New extractor subscription");
+        info!(extractor = %self.id, subscriber_id, ?kind, "New extractor subscription");
         self.subscriptions
             .lock()
             .await
-            .insert(subscriber_id, sender);
+            .insert(subscriber_id, Subscriber { sender, kind });
     }
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
@@ -162,8 +170,13 @@ impl ExtractorSupervisor {
                                     )),
                                 };
                             }
-                            ControlMessage::Subscribe(sender) => {
-                                self.add_subscriber(sender).await;
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+                                self
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -251,23 +264,36 @@ impl ExtractorSupervisor {
             // subscriptions.
             {
                 let mut subs = self.subscriptions.lock().await;
-                let mut closed = Vec::new();
-                for (subscriber_id, sender) in subs.iter() {
-                    if sender
-                        .send(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
+                let mut removed = Vec::new();
+                for (&subscriber_id, subscriber) in subs.iter() {
+                    match subscriber
+                        .deliver(DeltaCommand::ExtractorRestarted(self.id.name.clone()))
                         .await
-                        .is_err()
                     {
-                        closed.push(*subscriber_id);
+                        Delivery::Sent => {}
+                        Delivery::Closed => {
+                            info!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                kind = ?subscriber.kind,
+                                "Removed a closed subscriber during restart"
+                            );
+                            removed.push(subscriber_id);
+                        }
+                        Delivery::Full => {
+                            warn!(
+                                extractor = %self.id,
+                                subscriber_id,
+                                kind = ?subscriber.kind,
+                                "Removed a client subscriber whose channel is full during restart"
+                            );
+                            slow_client_removals(&self.id).increment(1);
+                            removed.push(subscriber_id);
+                        }
                     }
                 }
-                for subscriber_id in closed {
+                for subscriber_id in removed {
                     subs.remove(&subscriber_id);
-                    info!(
-                        extractor = %self.id,
-                        subscriber_id,
-                        "Removed closed subscriber during restart"
-                    );
                 }
             }
 
@@ -296,8 +322,13 @@ impl ExtractorSupervisor {
                                 );
                                 return Ok(());
                             }
-                            ControlMessage::Subscribe(sender) => {
-                                self.add_subscriber(sender).await;
+                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+                                self
+                                    .insert_subscriber(
+                                        sender,
+                                        SubscriberKind::Client { subscription_id, user_identity },
+                                    )
+                                    .await;
                             }
                         }
                     }
