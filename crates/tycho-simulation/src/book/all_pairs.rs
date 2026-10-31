@@ -3,8 +3,13 @@
 //! By default a feed publishes one component per pair, which is what a consumer routes through.
 //! A venue that signs a quote per trade can only sign so many for one route. A consumer carries
 //! simulated state between swaps per component, so the venue can instead publish one component
-//! for every pair it prices. Each swap then records the book it used, and the next swap on the
-//! returned state is held to the venue's [`QuoteRule`].
+//! for every pair it prices. Each swap then records its fill, the signer and the totals of its
+//! pair and direction, and the next swap on the returned state is held to the venue's
+//! [`QuoteRule`].
+//!
+//! A swap on a pair and direction that already has a fill continues it: the state prices it as
+//! the next part of one merged swap whose input is everything filled there so far. Any other
+//! pair or direction is held to the rule, with the signers of the fills on other pairs spent.
 //!
 //! The books are the ones the per-pair layout would publish. Every price comes from one of
 //! them, and a quote goes to the book that priced the swap.
@@ -17,6 +22,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use num_bigint::BigUint;
+use num_traits::{CheckedSub, Zero};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tycho_common::{
     models::{token::Token, Chain},
@@ -55,6 +61,12 @@ impl<R> From<Option<R>> for ComponentLayout<R> {
 }
 
 /// How often one route may take a quote from a venue published as [`ComponentLayout::AllPairs`].
+///
+/// A rule counts directed pairs, not swaps. The caller merges all the swaps of its route on one
+/// pair and direction into one swap and asks for one firm quote for it, on the state before the
+/// first of them. Each swap it simulates on the way takes the state the previous one returned,
+/// and the state prices a swap on a pair it already filled as the continuation of that merged
+/// swap. Only a swap on another pair or direction is held to the rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuoteRule {
     /// Each market maker signs once. For a venue that names its makers and lets the taker pick
@@ -208,19 +220,41 @@ pub(crate) struct VenueBook<P, S> {
     pub state: P,
 }
 
+/// What a route has filled on one directed pair of a venue: the merged swap of every swap on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PairFill<S> {
+    pub token_in: Bytes,
+    pub token_out: Bytes,
+    /// Who signs the merged swap, and so whose turn it spends on every other pair.
+    pub signer: S,
+    /// The input of the merged swap so far, in atomic units.
+    pub amount_in: BigUint,
+    /// The output the merged swap has paid so far, in atomic units.
+    pub amount_out: BigUint,
+}
+
+impl<S> PairFill<S> {
+    fn is_on(&self, token_in: &Bytes, token_out: &Bytes) -> bool {
+        &self.token_in == token_in && &self.token_out == token_out
+    }
+}
+
 /// Every book a venue publishes, behind one component.
 ///
 /// A swap goes to the book that pays best among those still allowed to quote, and the state it
-/// returns records that book as spent. Nothing here prices anything itself.
+/// returns records the fill of its pair and direction. Nothing here prices anything itself.
 ///
 /// The books are shared, so what a swap copies to hand back the state it leaves behind is a
-/// reference count and the set of books it has spent.
+/// reference count and the fills.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "P: Serialize + DeserializeOwned + PairState, T: Turns")]
 pub(crate) struct AllPairs<P, T: Turns> {
     books: Arc<VenueBooks<P, T::Signer>>,
-    /// The turns every swap this state is downstream of has taken.
-    spent: T,
+    /// The turns before any swap, which carry the rule. What a swap may quote is derived from
+    /// them and the fills.
+    untaken: T,
+    /// The fill of every directed pair a swap has been made on, one each.
+    fills: Vec<PairFill<T::Signer>>,
 }
 
 /// A venue's books and, for each direction, which of them price it.
@@ -275,13 +309,20 @@ impl<P: PairState, S> From<Vec<VenueBook<P, S>>> for VenueBooks<P, S> {
 /// A book and what it answered to a swap.
 type Answered<'a, P, S> = (&'a VenueBook<P, S>, Result<GetAmountOutResult, SimulationError>);
 
-impl<P: PairState, T: Turns> AllPairs<P, T> {
+/// `amount` less `taken`, or nothing where `taken` is more.
+fn saturating_sub(amount: BigUint, taken: &BigUint) -> BigUint {
+    amount
+        .checked_sub(taken)
+        .unwrap_or_default()
+}
+
+impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
     pub fn new(books: Vec<VenueBook<P, T::Signer>>, rule: T::Rule) -> Self {
-        AllPairs { books: Arc::new(books.into()), spent: T::untaken(rule) }
+        AllPairs { books: Arc::new(books.into()), untaken: T::untaken(rule), fills: Vec::new() }
     }
 
     pub fn rule(&self) -> QuoteRule {
-        self.spent.quote_rule()
+        self.untaken.quote_rule()
     }
 
     /// Every direction the venue prices, which is what its component advertises.
@@ -328,16 +369,54 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
             .map(|index| &self.books.books[*index])
     }
 
-    /// The books that price `token_in` into `token_out` and may still quote.
+    /// The fill a route has on `token_in` into `token_out`, if it made a swap there.
+    fn fill_on(&self, token_in: &Bytes, token_out: &Bytes) -> Option<&PairFill<T::Signer>> {
+        self.fills
+            .iter()
+            .find(|fill| fill.is_on(token_in, token_out))
+    }
+
+    /// The input of the swap `amount_in` joins on `token_in` into `token_out`: the whole of the
+    /// merged swap when the route already filled there, `amount_in` itself otherwise.
+    pub fn merged_input(
+        &self,
+        amount_in: &BigUint,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> BigUint {
+        match self.fill_on(token_in, token_out) {
+            Some(fill) => &fill.amount_in + amount_in,
+            None => amount_in.clone(),
+        }
+    }
+
+    /// What a swap on `token_in` into `token_out` may quote: the fresh turns less those of the
+    /// fills on every other directed pair. The fill on this pair spends nothing, since its swap
+    /// and the new one are one swap.
+    fn turns_for(&self, token_in: &Bytes, token_out: &Bytes) -> T {
+        let mut turns = self.untaken.clone();
+        for fill in &self.fills {
+            if !fill.is_on(token_in, token_out) {
+                turns.spend(&fill.signer);
+            }
+        }
+        turns
+    }
+
+    /// The books that price `token_in` into `token_out` and may still quote under `turns`.
     ///
     /// The error says which of the two it is: a direction the venue does not price is the same
     /// invalid input it is for a per-pair book, while books whose turn this route has spent are
     /// liquidity that exists and is unavailable here.
-    fn candidates(
-        &self,
+    fn candidates<'a, 'b>(
+        &'a self,
+        turns: &'b T,
         token_in: &Bytes,
         token_out: &Bytes,
-    ) -> Result<impl Iterator<Item = &VenueBook<P, T::Signer>>, SimulationError> {
+    ) -> Result<
+        impl Iterator<Item = &'a VenueBook<P, T::Signer>> + use<'a, 'b, P, T>,
+        SimulationError,
+    > {
         let mut pricing = self
             .books_pricing(token_in, token_out)
             .peekable();
@@ -348,7 +427,7 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
             ));
         }
         let mut quotable = pricing
-            .filter(|book| self.spent.allows(&book.signer))
+            .filter(|book| turns.allows(&book.signer))
             .peekable();
         if quotable.peek().is_none() {
             return Err(SimulationError::RecoverableError(
@@ -358,26 +437,32 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
         Ok(quotable)
     }
 
-    /// The same books with the turn of `signer`'s book spent.
-    fn spending(&self, signer: &T::Signer) -> Self {
-        let mut spent = self.spent.clone();
-        spent.spend(signer);
-        AllPairs { books: Arc::clone(&self.books), spent }
+    /// The same books with `fill` in place of the fill on its pair.
+    fn filled(&self, fill: PairFill<T::Signer>) -> Self {
+        let mut fills = Vec::with_capacity(self.fills.len() + 1);
+        for kept in &self.fills {
+            if !kept.is_on(&fill.token_in, &fill.token_out) {
+                fills.push(kept.clone());
+            }
+        }
+        fills.push(fill);
+        AllPairs { books: Arc::clone(&self.books), untaken: self.untaken.clone(), fills }
     }
 
-    /// The book that answers `amount_in` best, and its answer.
+    /// The book that answers `merged_in` best, and its answer.
     fn best(
         &self,
-        amount_in: &BigUint,
+        merged_in: &BigUint,
         token_in: &Bytes,
         token_out: &Bytes,
     ) -> Result<Answered<'_, P, T::Signer>, SimulationError> {
+        let turns = self.turns_for(token_in, token_out);
         let mut best: Option<Answered<'_, P, T::Signer>> = None;
-        for book in self.candidates(token_in, token_out)? {
+        for book in self.candidates(&turns, token_in, token_out)? {
             let (sold, bought) = book.tokens(token_in);
             let answer = book
                 .state
-                .get_amount_out(amount_in.clone(), sold, bought);
+                .get_amount_out(merged_in.clone(), sold, bought);
             if best
                 .as_ref()
                 .is_none_or(|(_, taken)| rank(taken) < rank(&answer))
@@ -388,12 +473,22 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
         best.ok_or_else(|| no_book_ranked("answer this swap"))
     }
 
-    /// The best price among the books that may still quote `base` into `quote`.
+    /// The best price among the books that may still quote `base` into `quote`. On a pair the
+    /// route has filled, it is the best price of the next unit after the merged swap so far.
     pub fn spot_price(&self, base: &Bytes, quote: &Bytes) -> Result<f64, SimulationError> {
+        let turns = self.turns_for(base, quote);
+        let filled = self.fill_on(base, quote);
         let mut best: Option<Result<f64, SimulationError>> = None;
-        for book in self.candidates(base, quote)? {
-            let (base, quote) = book.tokens(base);
-            let price = book.state.spot_price(base, quote);
+        for book in self.candidates(&turns, base, quote)? {
+            let (base_token, quote_token) = book.tokens(base);
+            let price = match filled {
+                Some(fill) => book
+                    .state
+                    .marginal_price(base, quote, &fill.amount_in),
+                None => book
+                    .state
+                    .spot_price(base_token, quote_token),
+            };
             if best
                 .as_ref()
                 .is_none_or(|taken| taken.as_ref().ok() < price.as_ref().ok())
@@ -406,17 +501,27 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
 
     /// The limits of the book that buys most in total among those that may still quote the
     /// direction. A swap fills against one book, so the venue's limit is that book's, not the
-    /// sum of every book's.
+    /// sum of every book's. On a pair the route has filled, each book's limits are what is left
+    /// after the merged swap so far.
     pub fn get_limits(
         &self,
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        let turns = self.turns_for(&sell_token, &buy_token);
+        let filled = self.fill_on(&sell_token, &buy_token);
         let mut best: Option<Result<(BigUint, BigUint), SimulationError>> = None;
-        for book in self.candidates(&sell_token, &buy_token)? {
+        for book in self.candidates(&turns, &sell_token, &buy_token)? {
             let limits = book
                 .state
-                .get_limits(sell_token.clone(), buy_token.clone());
+                .get_limits(sell_token.clone(), buy_token.clone())
+                .map(|(sell, buy)| match filled {
+                    Some(fill) => (
+                        saturating_sub(sell, &fill.amount_in),
+                        saturating_sub(buy, &fill.amount_out),
+                    ),
+                    None => (sell, buy),
+                });
             let bought = |limits: &Result<(BigUint, BigUint), SimulationError>| {
                 limits
                     .as_ref()
@@ -433,9 +538,11 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
         best.unwrap_or_else(|| Err(no_book_ranked("report its limits")))
     }
 
-    /// Whether these are the same books, in the same order, with the same turns spent.
+    /// Whether these are the same books, in the same order, under the same rule and with the
+    /// same fills.
     pub fn same_books(&self, other: &Self) -> bool {
-        self.spent == other.spent &&
+        self.untaken == other.untaken &&
+            self.fills == other.fills &&
             self.books().len() == other.books().len() &&
             self.books()
                 .iter()
@@ -448,7 +555,9 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
     /// The swap against the best book available, handed back as `W` — the venue's own state
     /// type, which is what a consumer carries on rather than the single book it just used.
     ///
-    /// `W` has spent the turn of the book that filled, including on the state attached to a
+    /// On a pair and direction the route already filled, the swap continues that fill: the best
+    /// book prices the merged input, and the result pays the merged output less what the fill
+    /// paid, at zero gas. `W` records the merged fill, including on the state attached to a
     /// partial fill.
     pub fn amount_out<W>(
         &self,
@@ -459,16 +568,29 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
     where
         W: From<Self> + ProtocolSim + 'static,
     {
-        let (book, answer) = self.best(amount_in, token_in, token_out)?;
-        let quoted = || -> Box<dyn ProtocolSim> { Box::new(W::from(self.spending(&book.signer))) };
-        match answer {
-            Ok(mut result) => {
-                result.new_state = quoted();
-                Ok(result)
+        let merged_in = self.merged_input(amount_in, token_in, token_out);
+        let (book, answer) = self.best(&merged_in, token_in, token_out)?;
+        let previous = self.fill_on(token_in, token_out);
+        let continued = |mut result: GetAmountOutResult| {
+            let merged_out = result.amount.clone();
+            if let Some(previous) = previous {
+                result.amount = saturating_sub(merged_out.clone(), &previous.amount_out);
+                result.gas = BigUint::zero();
             }
-            Err(SimulationError::InvalidInput(message, Some(mut partial))) => {
-                partial.new_state = quoted();
-                Err(SimulationError::InvalidInput(message, Some(partial)))
+            let fill = PairFill {
+                token_in: token_in.clone(),
+                token_out: token_out.clone(),
+                signer: book.signer.clone(),
+                amount_in: merged_in.clone(),
+                amount_out: merged_out,
+            };
+            result.new_state = Box::new(W::from(self.filled(fill)));
+            result
+        };
+        match answer {
+            Ok(result) => Ok(continued(result)),
+            Err(SimulationError::InvalidInput(message, Some(partial))) => {
+                Err(SimulationError::InvalidInput(message, Some(continued(partial))))
             }
             Err(refused) => Err(refused),
         }
@@ -476,15 +598,16 @@ impl<P: PairState, T: Turns> AllPairs<P, T> {
 
     /// The book a quote for this swap goes to: the one [`Self::amount_out`] picks on this state.
     ///
-    /// Asked on the state a swap returned, the book it used is spent, so the quote names another
-    /// book or the state reports that there is none.
+    /// On a pair the route has filled, that is the best book for the merged swap. Asked on the
+    /// state before the first swap of a pair, it names the book for the amount given.
     pub fn quoting_book(
         &self,
         amount_in: &BigUint,
         token_in: &Bytes,
         token_out: &Bytes,
     ) -> Result<&P, SimulationError> {
-        let (book, _) = self.best(amount_in, token_in, token_out)?;
+        let merged_in = self.merged_input(amount_in, token_in, token_out);
+        let (book, _) = self.best(&merged_in, token_in, token_out)?;
         Ok(&book.state)
     }
 }
@@ -520,10 +643,25 @@ fn rank(answer: &Result<GetAmountOutResult, SimulationError>) -> (u8, Option<&Bi
     }
 }
 
+/// A book that can price the next unit once part of its ladder is already filled.
+pub(crate) trait PricesAfterFill {
+    /// The price of the next unit of `token_in` into `token_out` after `filled` atomic units of
+    /// it went in, at the ladder a swap in that direction fills. A recoverable error once the
+    /// ladder has no liquidity left, and the same invalid input a swap reports for tokens the
+    /// book does not price.
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError>;
+}
+
 /// What a venue refuses whatever book would price it, such as a size below every maker's floor.
 ///
 /// A venue that refuses on size alone answers it here rather than letting a book price something
-/// the venue will not sign. Refusing nothing is the default.
+/// the venue will not sign. It is asked about the input of the whole merged swap, which on a pair
+/// the route already filled is more than the amount just given. Refusing nothing is the default.
 pub(crate) trait RefusesQuote {
     fn check_amount(
         &self,
@@ -550,9 +688,10 @@ macro_rules! all_pairs_state {
     ) => {
         $(#[$doc])*
         ///
-        /// A swap spends the turn of the book it filled against, as the [`QuoteRule`] the
-        /// component was published under counts it. The next swap on the state it returned sees
-        /// that turn gone.
+        /// A swap records its fill, the signer and the totals of its pair and direction. The next
+        /// swap on the state it returned continues that fill on the same pair and direction, as
+        /// one merged swap. On any other pair or direction the signer's turn is gone, as the
+        /// [`QuoteRule`] the component was published under counts it.
         ///
         /// [`QuoteRule`]: crate::book::all_pairs::QuoteRule
         #[derive(Clone, Debug, Serialize, Deserialize, ::derive_more::From)]
@@ -583,9 +722,14 @@ macro_rules! all_pairs_state {
                 ::tycho_common::simulation::protocol_sim::GetAmountOutResult,
                 ::tycho_common::simulation::errors::SimulationError,
             > {
+                let merged_in = self.0.merged_input(
+                    &amount_in,
+                    &token_in.address,
+                    &token_out.address,
+                );
                 $crate::book::all_pairs::RefusesQuote::check_amount(
                     self,
-                    &amount_in,
+                    &merged_in,
                     &token_in.address,
                     &token_out.address,
                 )?;
@@ -658,8 +802,7 @@ macro_rules! all_pairs_state {
         #[::async_trait::async_trait]
         impl ::tycho_common::simulation::indicatively_priced::IndicativelyPriced for $wrapper {
             /// Asks the book that [`ProtocolSim::get_amount_out`] picks on this state, and no
-            /// other: on the state a swap returned, that book's turn is spent, so the quote
-            /// goes to another book or the state reports that there is none left.
+            /// other: on a pair the route filled, the best book for the merged swap.
             async fn request_signed_quote(
                 &self,
                 params: ::tycho_common::models::protocol::GetAmountOutParams,
@@ -696,7 +839,7 @@ pub(crate) fn all_pairs_component_id(protocol_system: &str) -> Bytes {
 ///
 /// `None` where the venue priced nothing a consumer could route through, which is a component
 /// that would carry no tokens and no directions.
-pub(crate) fn all_pairs_book<P: PairState, T: Turns, W>(
+pub(crate) fn all_pairs_book<P: PairState + PricesAfterFill, T: Turns, W>(
     protocol_system: &str,
     protocol_type: &str,
     chain: Chain,
@@ -750,7 +893,7 @@ pub(crate) struct BookCollector<P, T: Turns> {
     venue_books: Vec<VenueBook<P, T::Signer>>,
 }
 
-impl<P: PairState, T: Turns> BookCollector<P, T> {
+impl<P: PairState + PricesAfterFill, T: Turns> BookCollector<P, T> {
     pub fn new(
         protocol_system: &'static str,
         protocol_type: &'static str,
@@ -838,6 +981,21 @@ mod tests {
         /// zero is a priced direction with nothing behind it.
         fn directions(&self) -> Vec<(Bytes, Bytes)> {
             sim::directions(&self.base, &self.quote, self.out_per_in > 0, false)
+        }
+    }
+
+    impl PricesAfterFill for TestBook {
+        fn marginal_price(
+            &self,
+            _token_in: &Bytes,
+            _token_out: &Bytes,
+            filled: &BigUint,
+        ) -> Result<f64, SimulationError> {
+            if filled < &whole(self.depth) {
+                Ok(self.out_per_in as f64)
+            } else {
+                Err(SimulationError::RecoverableError("No liquidity".to_string()))
+            }
         }
     }
 
@@ -1017,6 +1175,40 @@ mod tests {
         }
     }
 
+    /// A book of `maker` paying `out_per_in` of the token `quote` for every `base` up to `depth`
+    /// of them.
+    fn book_on(
+        maker: &str,
+        (base, quote): (u8, u8),
+        out_per_in: u64,
+        depth: u64,
+    ) -> VenueBook<TestBook, MarketMaker> {
+        let tokens = tokens();
+        VenueBook {
+            signer: MarketMaker(maker.to_string()),
+            updated_at: None,
+            state: TestBook {
+                base: tokens[&addr(base)].clone(),
+                quote: tokens[&addr(quote)].clone(),
+                out_per_in,
+                depth,
+            },
+        }
+    }
+
+    /// Sells `count` whole tokens of the token named by the byte `sell` for the one named by
+    /// `buy`, on whatever state a previous swap returned.
+    fn swap(
+        state: &dyn ProtocolSim,
+        count: u64,
+        (sell, buy): (u8, u8),
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        let tokens = tokens();
+        state.get_amount_out(whole(count), &tokens[&addr(sell)], &tokens[&addr(buy)])
+    }
+
+    const A_TO_B: (u8, u8) = (0xaa, 0xbb);
+
     fn venue(books: Vec<VenueBook<TestBook, MarketMaker>>, rule: QuoteRule) -> TestVenue {
         TestVenue(AllPairs::new(books, rule))
     }
@@ -1051,54 +1243,136 @@ mod tests {
         }
     }
 
-    /// What one swap spends is what the next is held to: another maker may still quote where
-    /// the venue as a whole may not, and the partial fill's state is the venue's, not the book's.
+    /// A swap on another pair or direction is held to the rule: the maker that signed the first
+    /// swap has spent its turn there, and under the venue rule so has everyone else.
     #[rstest]
-    #[case::once_per_maker(QuoteRule::OncePerMaker, Some(2))]
-    #[case::once_per_venue(QuoteRule::OncePerVenue, None)]
-    fn the_second_swap_is_held_to_the_rule(
+    #[case::other_pair_once_per_maker(QuoteRule::OncePerMaker, (0xbb, 0xcc), Some(2))]
+    #[case::other_pair_once_per_venue(QuoteRule::OncePerVenue, (0xbb, 0xcc), None)]
+    #[case::opposite_direction_once_per_maker(QuoteRule::OncePerMaker, (0xbb, 0xaa), None)]
+    #[case::opposite_direction_once_per_venue(QuoteRule::OncePerVenue, (0xbb, 0xaa), None)]
+    fn a_swap_on_another_pair_is_held_to_the_rule(
         #[case] rule: QuoteRule,
-        #[case] second_pays: Option<u64>,
+        #[case] other: (u8, u8),
+        #[case] other_pays: Option<u64>,
     ) {
-        let venue = venue(vec![book("generous", 3, 10), book("cheap", 2, 10)], rule);
-
-        let first = venue
-            .amount_out(&whole(1), &addr(0xaa), &addr(0xbb))
-            .unwrap();
+        let venue = venue(
+            vec![
+                book_on("m1", (0xaa, 0xbb), 3, 10),
+                book_on("m1", (0xbb, 0xcc), 7, 10),
+                book_on("m2", (0xbb, 0xcc), 2, 10),
+                book_on("m1", (0xbb, 0xaa), 4, 10),
+            ],
+            rule,
+        );
+        let first = swap(&venue, 1, A_TO_B).unwrap();
         assert_eq!(first.amount, whole(3));
 
-        let second = first.new_state.get_amount_out(
-            whole(1),
-            &tokens()[&addr(0xaa)],
-            &tokens()[&addr(0xbb)],
-        );
-        match (second, second_pays) {
+        match (swap(first.new_state.as_ref(), 1, other), other_pays) {
             (Ok(second), Some(pays)) => assert_eq!(second.amount, whole(pays)),
             (Err(SimulationError::RecoverableError(message)), None) => {
                 assert_eq!(message, "Every book pricing this swap already quoted in this route")
             }
-            (second, _) => panic!("expected a second swap paying {second_pays:?}, got {second:?}"),
+            (second, _) => panic!("expected a swap paying {other_pays:?}, got {second:?}"),
         }
     }
 
-    /// The state a partial fill carries on is the venue's, so what the route learns about the
-    /// quote it spent survives a shortfall.
+    /// Chunks on one pair pay what one swap of their sum pays, and only the first costs gas. The
+    /// maker may change for the merged amount, and the quote goes to the one that prices it.
     #[test]
-    fn a_partial_fill_carries_the_venue_on() {
-        let venue = venue(vec![book("shallow", 2, 1)], QuoteRule::OncePerVenue);
+    fn chunks_on_one_pair_pay_what_one_merged_swap_pays() {
+        // One A pays 5 B at the shallow maker; three A are 9 B at the deep one.
+        let venue =
+            venue(vec![book("shallow", 5, 2), book("deep", 3, 10)], QuoteRule::OncePerMaker);
+
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let second = swap(first.new_state.as_ref(), 2, A_TO_B).unwrap();
+
+        assert_eq!(first.amount, whole(5));
+        assert_eq!(first.gas, BigUint::from(100u64));
+        assert_eq!(second.amount, whole(9) - whole(5));
+        assert_eq!(second.gas, BigUint::zero());
+        let merged = swap(&venue, 3, A_TO_B).unwrap();
+        assert_eq!(&first.amount + &second.amount, merged.amount);
+        let quoted = venue
+            .0
+            .quoting_book(&whole(3), &addr(0xaa), &addr(0xbb))
+            .unwrap();
+        assert_eq!(quoted.out_per_in, 3, "the merged amount goes to the deep maker");
+    }
+
+    /// The state a first swap returned names the book for the merged swap, not the book that
+    /// priced the first chunk.
+    #[test]
+    fn the_quoting_book_of_a_filled_pair_prices_the_merged_amount() {
+        let venue =
+            venue(vec![book("shallow", 5, 2), book("deep", 3, 10)], QuoteRule::OncePerMaker);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let filled = first
+            .new_state
+            .as_any()
+            .downcast_ref::<TestVenue>()
+            .unwrap();
+
+        let quoted = filled
+            .0
+            .quoting_book(&whole(2), &addr(0xaa), &addr(0xbb))
+            .unwrap();
+
+        assert_eq!(quoted.out_per_in, 3);
+    }
+
+    /// A chunk that passes the depth of the merged swap is a partial fill, and the state it
+    /// carries is the one that continues from the depth.
+    #[test]
+    fn a_chunk_past_the_depth_is_a_partial_fill_that_carries_the_fill() {
+        let venue = venue(vec![book("m1", 2, 3)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 2, A_TO_B).unwrap();
 
         let Err(SimulationError::InvalidInput(_, Some(partial))) =
-            venue.amount_out(&whole(4), &addr(0xaa), &addr(0xbb))
+            swap(first.new_state.as_ref(), 3, A_TO_B)
         else {
             panic!("expected a partial fill");
         };
-        let after = partial.new_state.get_amount_out(
-            whole(1),
-            &tokens()[&addr(0xaa)],
-            &tokens()[&addr(0xbb)],
-        );
+        assert_eq!(partial.amount, whole(2), "the three A the book holds pay 6, 4 were paid");
+        assert_eq!(partial.gas, BigUint::zero());
 
-        assert!(matches!(after, Err(SimulationError::RecoverableError(_))), "got {after:?}");
+        let Err(SimulationError::InvalidInput(_, Some(again))) =
+            swap(partial.new_state.as_ref(), 1, A_TO_B)
+        else {
+            panic!("expected a partial fill");
+        };
+        assert_eq!(again.amount, BigUint::zero(), "the book has paid everything it holds");
+    }
+
+    /// What a route has filled survives serialization, which is what a consumer's recording
+    /// replays.
+    #[test]
+    fn a_serialized_fill_still_continues() {
+        let venue = venue(vec![book("m1", 3, 10)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let filled = first
+            .new_state
+            .as_any()
+            .downcast_ref::<TestVenue>()
+            .unwrap();
+
+        let replayed: TestVenue =
+            serde_json::from_str(&serde_json::to_string(filled).unwrap()).unwrap();
+
+        assert!(ProtocolSim::eq(&replayed, filled));
+        assert_eq!(swap(&replayed, 1, A_TO_B).unwrap().gas, BigUint::zero());
+    }
+
+    /// A swap changes the state, so a state that filled something is not the one that did not.
+    #[test]
+    fn states_with_different_fills_are_different_states() {
+        let venue = venue(vec![book("m1", 3, 10)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+        let second = swap(first.new_state.as_ref(), 1, A_TO_B).unwrap();
+
+        assert!(!ProtocolSim::eq(&venue, first.new_state.as_ref()));
+        assert!(!ProtocolSim::eq(first.new_state.as_ref(), second.new_state.as_ref()));
+        assert!(ProtocolSim::eq(&venue, &venue.clone()));
     }
 
     /// A direction no book prices is the invalid input it is for a per-pair book, not an
@@ -1114,8 +1388,7 @@ mod tests {
         assert!(matches!(unknown, Err(SimulationError::InvalidInput(_, None))), "got {unknown:?}");
     }
 
-    /// Spot price and limits come from the best book available, and a spent venue reports
-    /// neither.
+    /// Spot price and limits come from the best book available.
     #[test]
     fn the_price_and_the_limits_are_the_best_books() {
         // The cheap book takes more A in total, the generous one buys more B with what it takes.
@@ -1137,15 +1410,68 @@ mod tests {
             (whole(8), whole(24)),
             "the limits of the book that buys most, not the sum of both"
         );
+    }
 
-        let spent = venue
-            .amount_out(&whole(1), &addr(0xaa), &addr(0xbb))
-            .unwrap()
-            .new_state;
-        assert!(matches!(
-            spent.get_limits(addr(0xaa), addr(0xbb)),
-            Err(SimulationError::RecoverableError(_))
-        ));
+    /// The state a partial fill carries on is the venue's, so the turn the quote spent survives
+    /// a shortfall.
+    #[test]
+    fn a_partial_fill_spends_the_turn_like_a_full_one() {
+        let venue = venue(
+            vec![book_on("m1", (0xaa, 0xbb), 2, 1), book_on("m1", (0xbb, 0xcc), 1, 1)],
+            QuoteRule::OncePerVenue,
+        );
+
+        let Err(SimulationError::InvalidInput(_, Some(partial))) = swap(&venue, 4, A_TO_B) else {
+            panic!("expected a partial fill");
+        };
+        let after = swap(partial.new_state.as_ref(), 1, (0xbb, 0xcc));
+
+        assert!(matches!(after, Err(SimulationError::RecoverableError(_))), "got {after:?}");
+    }
+
+    /// After a fill, the limits are what the books have left of it.
+    #[test]
+    fn the_limits_of_a_filled_pair_are_what_is_left() {
+        let venue =
+            venue(vec![book("cheap", 2, 10), book("generous", 3, 8)], QuoteRule::OncePerVenue);
+        let first = swap(&venue, 1, A_TO_B).unwrap();
+
+        // The generous book had (8, 24) and the fill took (1, 3); the cheap one has (9, 17) left.
+        assert_eq!(
+            first
+                .new_state
+                .get_limits(addr(0xaa), addr(0xbb))
+                .unwrap(),
+            (whole(7), whole(21))
+        );
+    }
+
+    /// After a fill, the price is that of the next unit, from the best book that still has one.
+    #[test]
+    fn the_price_of_a_filled_pair_is_the_next_unit() {
+        let venue =
+            venue(vec![book("cheap", 2, 10), book("generous", 3, 8)], QuoteRule::OncePerVenue);
+        let spot = |state: &dyn ProtocolSim| {
+            let tokens = tokens();
+            state.spot_price(&tokens[&addr(0xaa)], &tokens[&addr(0xbb)])
+        };
+
+        let within_both = swap(&venue, 1, A_TO_B).unwrap();
+        let past_one = swap(&venue, 9, A_TO_B).unwrap();
+        let past_both = swap(&venue, 11, A_TO_B);
+        let Err(SimulationError::InvalidInput(_, Some(past_both))) = past_both else {
+            panic!("expected a partial fill");
+        };
+
+        assert_eq!(spot(within_both.new_state.as_ref()).unwrap(), 3.0);
+        assert_eq!(spot(past_one.new_state.as_ref()).unwrap(), 2.0);
+        assert!(
+            matches!(
+                spot(past_both.new_state.as_ref()),
+                Err(SimulationError::RecoverableError(message)) if message == "No liquidity"
+            ),
+            "the whole depth is used"
+        );
     }
 
     /// A venue whose books all price nothing is a component with no tokens and no directions,

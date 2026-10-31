@@ -17,7 +17,7 @@ use tycho_common::{
 
 use crate::{
     book::{
-        all_pairs::{all_pairs_state, RefusesQuote, SignedByMakers},
+        all_pairs::{all_pairs_state, PricesAfterFill, RefusesQuote, SignedByMakers},
         component::PairState,
         sim::{self, SwapDirection},
     },
@@ -100,6 +100,18 @@ impl PairState for HashflowState {
     /// under — and the venue publishes the other way round as its own book.
     fn directions(&self) -> Vec<(Bytes, Bytes)> {
         sim::directions(&self.base_token, &self.quote_token, !self.levels.levels.is_empty(), false)
+    }
+}
+
+impl PricesAfterFill for HashflowState {
+    fn marginal_price(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+        filled: &BigUint,
+    ) -> Result<f64, SimulationError> {
+        self.valid_direction_guard(token_in, token_out)?;
+        sim::marginal_price(&self.levels.levels, filled, self.base_token.decimals)
     }
 }
 
@@ -251,12 +263,16 @@ impl HashflowAllPairsState {
 mod tests {
     use std::str::FromStr;
 
+    use rstest::rstest;
     use tokio::time::Duration;
     use tycho_common::models::Chain;
 
     use super::*;
     use crate::{
-        book::levels::{Levels, PriceLevel},
+        book::{
+            all_pairs::{AllPairs, MarketMaker, QuoteRule, VenueBook},
+            levels::{Levels, PriceLevel},
+        },
         rfq::protocols::hashflow::models::HashflowPair,
     };
 
@@ -331,6 +347,60 @@ mod tests {
             market_maker: "test_mm".to_string(),
             client: Some(empty_client()),
         }
+    }
+
+    /// After some input went in, the next unit is priced at the level where the fill stopped,
+    /// and a reverse swap is rejected like a token outside the pair.
+    #[rstest]
+    #[case::in_the_first_level(250_000_000_000_000_000, Some(3000.0))]
+    #[case::on_the_second_boundary(2_000_000_000_000_000_000, Some(2999.0))]
+    #[case::past_the_depth(7_000_000_000_000_000_000, None)]
+    fn the_price_after_a_fill_is_the_level_where_it_stopped(
+        #[case] filled: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let state = create_test_hashflow_state();
+
+        let price = state.marginal_price(&weth().address, &usdc().address, &BigUint::from(filled));
+        let reverse =
+            state.marginal_price(&usdc().address, &weth().address, &BigUint::from(filled));
+
+        match (price, expected) {
+            (Ok(price), Some(expected)) => assert_eq!(price, expected),
+            (Err(SimulationError::RecoverableError(message)), None) => {
+                assert_eq!(message, "No liquidity")
+            }
+            (price, _) => panic!("expected {expected:?}, got {price:?}"),
+        }
+        assert!(matches!(reverse, Err(SimulationError::InvalidInput(_, None))), "{reverse:?}");
+    }
+
+    /// The venue's minimum is checked against the whole merged swap: a chunk below it is refused
+    /// alone and accepted as the continuation of a swap that already reached it.
+    #[test]
+    fn the_minimum_applies_to_the_merged_amount() {
+        let book = VenueBook {
+            signer: MarketMaker("test_mm".to_string()),
+            updated_at: None,
+            state: create_test_hashflow_state(),
+        };
+        let venue = HashflowAllPairsState::from(AllPairs::new(vec![book], QuoteRule::OncePerMaker));
+        let minimum = venue.0.books()[0].state.min_amount_in();
+        let chunk = minimum.clone() / 5u8;
+
+        let alone = venue.get_amount_out(chunk.clone(), &weth(), &usdc());
+        let first = venue
+            .get_amount_out(minimum, &weth(), &usdc())
+            .unwrap();
+        let continued = first
+            .new_state
+            .get_amount_out(chunk, &weth(), &usdc());
+
+        assert!(
+            matches!(alone, Err(SimulationError::RecoverableError(_))),
+            "a chunk below the minimum is refused on its own: {alone:?}"
+        );
+        assert!(continued.is_ok(), "{continued:?}");
     }
 
     /// A book of one level advertises that level as both its minimum and its depth, so the

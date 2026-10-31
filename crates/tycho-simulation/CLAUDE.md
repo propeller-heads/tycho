@@ -101,10 +101,15 @@ for any protocol indexed by Tycho.
     on the two that name their makers) that publishes a venue as one component for every pair it
     prices: `AllPairs<P, T>` holds the per-pair states the other layout would publish, picks the
     best book still allowed to quote under the component's `QuoteRule` (`once_per_maker`,
-    `once_per_venue`), and records it as spent in the state the swap returns. `T` is how the venue
-    counts turns — `SignedByMakers` where it names the maker behind each book, `SignedByVenue`
-    where it signs its own quotes and so has no rule to pick, which is why only the first pair of
-    builders takes one. A venue's `<Venue>AllPairsState` is a newtype over `AllPairs<P, T>`,
+    `once_per_venue`), and records a `PairFill` (signer, total input and output of the pair and
+    direction) in the state the swap returns. A caller that splits an order merges all swaps on
+    one pair and direction into one swap and one firm quote, so a swap on a filled pair is priced
+    as the continuation of that merged swap (the best book for the merged input, less the output
+    already paid, at zero gas), while any other pair or direction has the fills' signers spent
+    under the rule. `PricesAfterFill` (backed by `Levels::marginal_price`) gives the price of the
+    next unit after a fill. `T` is how the venue counts turns — `SignedByMakers` where it names
+    the maker behind each book, `SignedByVenue` where it signs its own quotes and so has no rule
+    to pick, which is why only the first pair of builders takes one. A venue's `<Venue>AllPairsState` is a newtype over `AllPairs<P, T>`,
     because `#[typetag::serde]` registers concrete types; the `all_pairs_state!` macro declares it
     from those two types, so the four differ only in them and in what a venue refuses before a
     book is picked (`RefusesQuote::check_amount`). A book reporting no direction is left out of
@@ -149,7 +154,9 @@ for any protocol indexed by Tycho.
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
-  round-trip); `PriceLevelStreamState` quotes by interpolating its quotes and refuses to quote
+  round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
+  fill so a later swap on the same direction continues it (the caller merges swaps on one
+  direction into one; the other direction is refused), and refuses to quote
   once its message is one slot old (`quotable_until`, monotonic, never serialized, ignored by
   `eq`; `without_quote_guard` on the builder turns it off for slow quoters). A message carries one
   flat `books` list — one book per venue and pair, priced in human units as float
