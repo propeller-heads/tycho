@@ -186,8 +186,10 @@ where
         post_processor: Option<fn(BlockChanges) -> BlockChanges>,
         writer: WriterStatus,
     ) -> Result<Self, ExtractionError> {
-        // Read before the cursor. A process that becomes the leader after this read starts
-        // following, and takes over from the cursor the former leader left.
+        // Read the role before the cursor. A role only changes from follower to leader. A leader
+        // role here means the epoch increment came first, so the cursor below is final. A process
+        // that becomes the leader after this read builds the extractor as a follower; it takes
+        // over on its next block and reads the cursor again then.
         let commit_mode = match writer.role() {
             Role::Leader => CommitMode::Committing { floor: None },
             Role::Follower => CommitMode::Following,
