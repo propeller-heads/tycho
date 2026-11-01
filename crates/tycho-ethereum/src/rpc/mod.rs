@@ -660,6 +660,45 @@ impl EthereumRpcClient {
             })
     }
 
+    /// Executes the `eth_call` requests in one batch request at `block`, whatever the batching
+    /// config.
+    ///
+    /// Returns one result per request, in request order. A call that fails, e.g. one that
+    /// reverts, gives an error for that request only. Only a failed batch request is retried.
+    #[instrument(level = "debug", skip(self, requests), fields(call_count = requests.len()))]
+    pub(crate) async fn batch_eth_call(
+        &self,
+        requests: &[TransactionRequest],
+        block: BlockNumberOrTag,
+    ) -> Result<Vec<Result<Bytes, RPCError>>, RPCError> {
+        let results = self
+            .retry_policy
+            .call_with_retry(|| async {
+                let mut batch = self.inner.new_batch();
+                let calls = requests
+                    .iter()
+                    .map(|request| batch.add_call::<_, Bytes>("eth_call", &(request, block)))
+                    .collect::<Result<Vec<_>, RpcError<TransportErrorKind>>>()?;
+                batch.send().await?;
+                Ok(join_all(calls).await)
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(
+                    format!("Failed to send an eth_call batch request for block {block}"),
+                    e,
+                )
+            })?;
+        Ok(results
+            .into_iter()
+            .map(|result| {
+                result.map_err(|e| {
+                    RPCError::from_alloy(format!("eth_call in batch for block {block} failed"), e)
+                })
+            })
+            .collect())
+    }
+
     /// Executes `eth_call` with EVM state overrides.
     ///
     /// Injects arbitrary bytecode or storage at specified addresses before the call executes.
@@ -1972,6 +2011,82 @@ mod tests {
         }
 
         m.assert();
+    }
+
+    fn mock_batch_eth_call_client(server: &ServerGuard) -> EthereumRpcClient {
+        EthereumRpcClient::new(&server.url())
+            .expect("Failed to create EthereumRpcClient")
+            .with_retry((&retry::tests::mock_retry_policy()).into())
+    }
+
+    fn batch_eth_call_requests() -> Vec<TransactionRequest> {
+        vec![TransactionRequest::default(); 3]
+    }
+
+    #[tokio::test]
+    async fn test_batch_eth_call_returns_one_result_per_request() {
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(
+                r#"[
+                {"jsonrpc":"2.0","id":0,"result":"0x01"},
+                {"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x"}},
+                {"jsonrpc":"2.0","id":2,"result":"0x02"}
+            ]"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let results = mock_batch_eth_call_client(&server)
+            .batch_eth_call(&batch_eth_call_requests(), BlockNumberOrTag::Latest)
+            .await
+            .expect("batch request failed");
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), &Bytes::from("0x01"));
+        assert!(results[1]
+            .as_ref()
+            .is_err_and(RPCError::is_execution_reverted));
+        assert_eq!(results[2].as_ref().unwrap(), &Bytes::from("0x02"));
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn test_batch_eth_call_retries_failed_batch_request() {
+        let mut server = Server::new_async().await;
+        let failure = mock_retryable_failure(&mut server).await;
+        // Ids count up per request: the first attempt used 0 to 2.
+        let success = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(
+                r#"[
+                {"jsonrpc":"2.0","id":3,"result":"0x01"},
+                {"jsonrpc":"2.0","id":4,"result":"0x02"},
+                {"jsonrpc":"2.0","id":5,"result":"0x03"}
+            ]"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let results = mock_batch_eth_call_client(&server)
+            .batch_eth_call(&batch_eth_call_requests(), BlockNumberOrTag::Latest)
+            .await
+            .expect("batch request failed");
+
+        assert_eq!(
+            results
+                .into_iter()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>(),
+            vec![Bytes::from("0x01"), Bytes::from("0x02"), Bytes::from("0x03")]
+        );
+        failure.assert();
+        success.assert();
     }
 
     #[tokio::test]

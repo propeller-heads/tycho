@@ -8,14 +8,17 @@ use tycho_common::{
     models::{
         blockchain::BlockTag,
         protocol::QualityRange,
-        token::{Token, TokenOwnerStore, TokenQuality, TransferCost, TransferTax},
+        token::{Token, TokenQuality, TransferCost, TransferTax},
         Chain, PaginationParams,
     },
     storage::ProtocolGateway,
     traits::TokenAnalyzer,
     Bytes,
 };
-use tycho_ethereum::{rpc::EthereumRpcClient, services::token_analyzer::EthCallDetector};
+use tycho_ethereum::{
+    rpc::EthereumRpcClient,
+    services::token_analyzer::{EthCallDetector, OnChainTokenOwners},
+};
 
 use crate::cli::AnalyzeTokenArgs;
 
@@ -191,33 +194,21 @@ async fn analyze_batch(
         })
         .collect::<HashMap<_, _>>();
 
-    let liquidity_token_owners = token_owner
+    let candidates_per_token = token_owner
         .into_iter()
-        .filter_map(|(address, (cid, balance))| {
-            if let Some(pc) = components.get(&cid) {
-                let liq_owner = balance_owners
-                    .get(&pc.id)
-                    .cloned()
-                    .or_else(|| {
-                        pc.contract_addresses
-                            // TODO: Currently, it's assumed that the pool is always the first
-                            // contract in the protocol component. This approach is a temporary
-                            // workaround and needs to be revisited for a more robust solution.
-                            .first()
-                            .cloned()
-                            .or_else(|| Bytes::from_str(&pc.id).ok())
-                    });
-
-                liq_owner.map(|liq_owner| (address, (liq_owner, balance)))
-            } else {
+        .filter_map(|(address, (cid, _))| {
+            let Some(pc) = components.get(&cid) else {
                 warn!(component_id=?cid, "Failed to find component for id!");
-                None
-            }
+                return None;
+            };
+            let candidates =
+                pool_holder_candidates(balance_owners.get(&pc.id), &pc.contract_addresses, &pc.id);
+            Some((address, candidates))
         })
         .collect::<HashMap<_, _>>();
     let analyzer = EthCallDetector::new(
         rpc,
-        Arc::new(TokenOwnerStore::new(liquidity_token_owners)),
+        Arc::new(OnChainTokenOwners::new(rpc, BlockTag::Latest, candidates_per_token)),
         settlement_contract,
     );
     let mut outcome = PassOutcome::default();
@@ -288,6 +279,30 @@ fn apply_analysis(
     t.gas = gas
         .map(|g| vec![Some(g)])
         .unwrap_or_default();
+}
+
+/// Lists the addresses that may hold a pool's tokens, in preference order: the pool's
+/// `balance_owner`, then its id, then its contract addresses. Indexed data does not say which
+/// of these holds the tokens (a Curve pool lists its factory too), so the caller checks them
+/// on-chain; the order only breaks ties between equal balances. Values that are not 20-byte
+/// addresses (e.g. 32-byte Uniswap V4 pool ids) are left out.
+fn pool_holder_candidates(
+    balance_owner: Option<&Bytes>,
+    contract_addresses: &[Bytes],
+    component_id: &str,
+) -> Vec<Bytes> {
+    let id = Bytes::from_str(component_id).ok();
+    let mut candidates: Vec<Bytes> = Vec::new();
+    for candidate in balance_owner
+        .into_iter()
+        .chain(id.as_ref())
+        .chain(contract_addresses)
+    {
+        if candidate.len() == 20 && !candidates.contains(candidate) {
+            candidates.push(candidate.clone());
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -648,5 +663,106 @@ mod test {
         analyze_tokens(args, &rpc, Arc::new(gw))
             .await
             .expect("analyze tokens failed");
+    }
+
+    const FACTORY: &str = "0x6a8cbed756804b16e05e741edabd5cb544ae21bf";
+    const POOL: &str = "0xc2921134073151490193ac7369313c8e0b08e1e7";
+    const POOL_MANAGER: &str = "0x000000000004444c5dc75cb358380d2e3de08a90";
+    const V4_POOL_ID: &str = "0x59314e0cea576298222ac289dcf684c0a76758329c8bf164bbc759816dc4efa3";
+
+    #[rstest]
+    #[case::id_before_contract_addresses(None, &[FACTORY, POOL], POOL, &[POOL, FACTORY])]
+    #[case::balance_owner_first(Some(POOL_MANAGER), &[POOL], POOL, &[POOL_MANAGER, POOL])]
+    #[case::v4_pool_id_is_not_an_address(Some(POOL_MANAGER), &[], V4_POOL_ID, &[POOL_MANAGER])]
+    #[case::native_pool_falls_back_to_id(None, &[], POOL, &[POOL])]
+    #[case::malformed_balance_owner_dropped(Some("0x1234"), &[], POOL, &[POOL])]
+    fn test_pool_holder_candidates(
+        #[case] balance_owner: Option<&str>,
+        #[case] contracts: &[&str],
+        #[case] component_id: &str,
+        #[case] expected: &[&str],
+    ) {
+        let balance_owner = balance_owner.map(Bytes::from);
+        let contracts = contracts
+            .iter()
+            .map(|c| Bytes::from(*c))
+            .collect::<Vec<_>>();
+
+        let res = pool_holder_candidates(balance_owner.as_ref(), &contracts, component_id);
+
+        assert_eq!(
+            res,
+            expected
+                .iter()
+                .map(|e| Bytes::from(*e))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // requires a running ethereum node
+    #[ignore = "require RPC connection"]
+    #[test_log::test(tokio::test)]
+    async fn test_recovery_pass_promotes_usdtb_from_curve_pool() {
+        let rpc_url = std::env::var("RPC_URL").expect("RPC URL must be set for testing");
+        let rpc = EthereumRpcClient::new(&rpc_url).expect("failed to create rpc client");
+        let usdtb = "0xc139190f447e929f090edeb554d95abb8b18ac1c";
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
+        let mut gw = testing::MockGateway::new();
+        gw.expect_get_token_owners()
+            .returning(move |_, _, _| {
+                Box::pin(async move {
+                    Ok(HashMap::from([(
+                        Bytes::from(usdtb),
+                        (POOL.to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68")),
+                    )]))
+                })
+            });
+        gw.expect_get_protocol_components()
+            .returning(move |_, _, _, _, _| {
+                Box::pin(async move {
+                    Ok(WithTotal {
+                        entity: vec![ProtocolComponent::new(
+                            POOL,
+                            "vm:curve",
+                            "pool",
+                            Chain::Ethereum,
+                            vec![Bytes::from(usdc), Bytes::from(usdtb)],
+                            vec![Bytes::from(FACTORY), Bytes::from(POOL)],
+                            HashMap::new(),
+                            ChangeType::Creation,
+                            Bytes::from("0x00"),
+                            NaiveDateTime::default(),
+                        )],
+                        total: Some(1),
+                    })
+                })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        gw.expect_update_tokens()
+            .once()
+            .returning(|updated| {
+                assert_eq!(updated[0].quality, 100, "USDtb should be promoted: {updated:?}");
+                Box::pin(async { Ok(()) })
+            });
+
+        let outcome = analyze_batch(
+            Chain::Ethereum,
+            &rpc,
+            vec![test_token_at(usdtb, 5)],
+            Arc::new(Semaphore::new(1)),
+            Arc::new(gw),
+            "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58"
+                .parse()
+                .unwrap(),
+            AnalysisPass::Recovery,
+        )
+        .await
+        .expect("analyze batch failed");
+
+        assert_eq!(outcome, PassOutcome { promoted: 1, ..Default::default() });
     }
 }

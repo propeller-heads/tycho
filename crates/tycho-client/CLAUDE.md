@@ -43,9 +43,14 @@ TychoStreamBuilder (stream.rs)
 2. `HttpRPCClient` fetches initial snapshot at that block synchronously; all subsequent new
    components are fetched via background tasks (`spawn_snapshot_task`) so the delta loop never
    blocks on RPC. Each component moves through `SnapshotStatus` (`Deferred` → `InFlight`
-   → removed on success, or `RetryNext` / `Blacklisted` on failure). When `partial_blocks` is
-   enabled, brand-new components are held in `Deferred` state until the first message of the next
-   block, then promoted to `InFlight`.
+   → removed on success, or `Backoff` / `Blacklisted` on failure). A transient failure,
+   including a stale snapshot block from an extractor that is still syncing, starts a backoff
+   for the whole extractor. Until it ends, every component that needs a snapshot waits in
+   `Backoff`; the first delta after it re-queues them together. The backoff doubles with each
+   consecutive failure up to a cap (`SNAPSHOT_BACKOFF_MAX`) and resets on the next successful
+   snapshot. Results of tasks spawned before the backoff started neither reset nor lengthen it.
+   When `partial_blocks` is enabled, brand-new components are held in `Deferred` state until the
+   first message of the next block, then promoted to `InFlight`, or to `Backoff` while one runs.
 3. `BlockSynchronizer` waits for all synchronizers, then emits a `FeedMessage` per block
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are kept but skipped
 

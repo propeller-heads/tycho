@@ -153,6 +153,21 @@ impl Levels {
             })
     }
 
+    /// The price of the next input unit after `filled` units went in: the price of the level
+    /// where a fill of `filled` stops, which is the following level when it ends exactly on a
+    /// boundary. `None` once `filled` reaches the depth of the ladder, and for an amount that is
+    /// not a number.
+    pub fn marginal_price(&self, filled: f64) -> Option<f64> {
+        let mut depth = 0.0;
+        for level in &self.0 {
+            depth += level.quantity;
+            if filled < depth {
+                return Some(level.price);
+            }
+        }
+        None
+    }
+
     /// Average output per input unit for filling `amount_in`, priced on the part the ladder
     /// absorbs when it cannot absorb everything. `None` when nothing is consumed — an empty
     /// ladder, or an amount that is not a positive number, or one too large to subtract.
@@ -251,6 +266,26 @@ mod tests {
         let partial = ladder.fill(5.0);
         assert_eq!(partial, Fill { amount_out: 8998.0, remaining_in: 2.0 });
         assert!(!partial.is_complete());
+    }
+
+    #[rstest]
+    #[case::nothing_filled(0.0, Some(3000.0))]
+    #[case::inside_the_first_level(0.5, Some(3000.0))]
+    #[case::on_the_boundary(1.0, Some(2999.0))]
+    #[case::inside_the_second_level(2.5, Some(2999.0))]
+    #[case::on_the_depth(3.0, None)]
+    #[case::past_the_depth(4.0, None)]
+    #[case::not_a_number(f64::NAN, None)]
+    fn marginal_price_is_the_price_of_the_next_unit(
+        #[case] filled: f64,
+        #[case] expected: Option<f64>,
+    ) {
+        assert_eq!(ladder().marginal_price(filled), expected);
+    }
+
+    #[test]
+    fn marginal_price_of_an_empty_ladder_is_none() {
+        assert_eq!(Levels::default().marginal_price(0.0), None);
     }
 
     #[rstest]

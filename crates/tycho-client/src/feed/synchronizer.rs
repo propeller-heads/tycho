@@ -45,6 +45,19 @@ use crate::{
 pub const DEFAULT_SNAPSHOT_JITTER: Duration = Duration::from_secs(60);
 /// Lowest accepted maximum delay before a restarted synchronizer requests a snapshot.
 pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
+/// Background snapshot backoff after the first transient failure.
+const SNAPSHOT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// Longest background snapshot backoff.
+const SNAPSHOT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// Returns the background snapshot backoff after `failures` consecutive transient failures.
+/// One failure gives [`SNAPSHOT_BACKOFF_BASE`]; each further failure doubles it, up to
+/// [`SNAPSHOT_BACKOFF_MAX`].
+fn snapshot_backoff_duration(failures: u32) -> Duration {
+    SNAPSHOT_BACKOFF_BASE
+        .saturating_mul(2u32.saturating_pow(failures.saturating_sub(1)))
+        .min(SNAPSHOT_BACKOFF_MAX)
+}
 
 #[derive(Error, Debug)]
 pub enum SynchronizerError {
@@ -148,6 +161,22 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     /// from the moment it's queued until its snapshot is successfully applied (at which point it
     /// moves into `component_tracker.components`).
     snapshot_queue: HashMap<String, SnapshotStatus>,
+    /// Backoff started by a transient background snapshot failure and reset by the next
+    /// successful one. It covers the whole extractor because a stale snapshot block or a rate
+    /// limit fails every component's request, not only the one that failed.
+    snapshot_backoff: Option<SnapshotBackoff>,
+}
+
+/// An extractor's background snapshot backoff.
+#[derive(Debug, Clone, Copy)]
+struct SnapshotBackoff {
+    /// When the failure that started this backoff was drained. Results of tasks spawned before
+    /// it neither reset nor lengthen the backoff.
+    started_at: Instant,
+    /// No background snapshot is fetched before this instant.
+    retry_at: Instant,
+    /// Consecutive transient failures; sets the length of the next backoff.
+    failures: u32,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -233,8 +262,9 @@ enum SnapshotStatus {
     Deferred,
     /// A background snapshot task has been spawned and is in-flight.
     InFlight,
-    /// The last fetch attempt failed transiently; will be re-queued on the next delta.
-    RetryNext,
+    /// Waiting for the extractor's snapshot backoff to end; the component is re-queued on the
+    /// first delta after it.
+    Backoff,
     /// The fetch failed permanently; component is excluded until the synchronizer restarts.
     Blacklisted,
 }
@@ -250,6 +280,7 @@ struct SnapshotFetchResult {
 struct SnapshotTask {
     component_ids: Vec<String>,
     snapshot_block: u64,
+    spawned_at: Instant,
     receiver: oneshot::Receiver<Result<SnapshotFetchResult, SynchronizerError>>,
 }
 
@@ -450,6 +481,7 @@ where
             snapshot_tasks: Vec::new(),
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
+            snapshot_backoff: None,
         }
     }
 
@@ -769,20 +801,21 @@ where
                                 let (to_add, to_remove) =
                                     self.component_tracker.filter_updated_components(&deltas);
 
-                                // Harvest transient retries now so they feed into truly_new.
-                                // TVL changes are not re-emitted, so without explicit re-queuing
-                                // a transiently failed component would never be retried.
-                                // Remove from the map first so the truly_new filter below treats
-                                // them the same as brand-new components.
-                                let retry_ids: Vec<String> = self
-                                    .snapshot_queue
-                                    .iter()
-                                    .filter(|(_, s)| matches!(s, SnapshotStatus::RetryNext))
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-                                for id in &retry_ids {
-                                    self.snapshot_queue.remove(id);
-                                }
+                                self.remove_from_backoff(&to_remove);
+
+                                // Once the backoff has ended, take the waiting components out of
+                                // `snapshot_queue`, so the `truly_new` filter below treats them
+                                // like brand-new components. TVL changes are not re-emitted, so
+                                // without this a component that failed transiently would never be
+                                // retried.
+                                let retry_ids: Vec<String> = if self.in_snapshot_backoff() {
+                                    Vec::new()
+                                } else {
+                                    self.snapshot_queue
+                                        .extract_if(|_, s| matches!(s, SnapshotStatus::Backoff))
+                                        .map(|(id, _)| id)
+                                        .collect()
+                                };
 
                                 // Components not yet tracked and not in the staged state machine
                                 // (not in-flight, not deferred, not blacklisted). Merges
@@ -849,7 +882,9 @@ where
                                     }
 
                                     // Accumulate truly_new into the deferred set for the current
-                                    // block; they will be fired when the next block arrives.
+                                    // block; they will be fired when the next block arrives,
+                                    // unless a snapshot backoff is running, in which case they
+                                    // move to `Backoff`.
                                     for id in truly_new {
                                         self.snapshot_queue
                                             .insert(id, SnapshotStatus::Deferred);
@@ -988,15 +1023,49 @@ where
         }
     }
 
+    /// Returns true while the extractor's snapshot backoff runs.
+    fn in_snapshot_backoff(&self) -> bool {
+        self.snapshot_backoff
+            .is_some_and(|backoff| Instant::now() < backoff.retry_at)
+    }
+
+    /// Marks `component_ids` as `SnapshotStatus::Backoff` in `snapshot_queue`, to be fetched when
+    /// the backoff ends.
+    fn queue_in_backoff(&mut self, component_ids: Vec<String>) {
+        debug!(
+            components = ?component_ids,
+            extractor = %self.extractor_id.name,
+            "snapshot_queued_in_backoff"
+        );
+        for id in component_ids {
+            self.snapshot_queue
+                .insert(id, SnapshotStatus::Backoff);
+        }
+    }
+
+    /// Removes the components of `component_ids` that wait for the snapshot backoff from the
+    /// queue, so they are not fetched when it ends.
+    fn remove_from_backoff(&mut self, component_ids: &[String]) {
+        for id in component_ids {
+            if self.snapshot_queue.get(id) == Some(&SnapshotStatus::Backoff) {
+                self.snapshot_queue.remove(id);
+            }
+        }
+    }
+
     /// Spawns a background snapshot task for `component_ids` at `snapshot_header`. If no other
     /// task is already in-flight, starts buffering deltas from `current_delta` so the snapshot
-    /// can be brought up to date when the task drains.
+    /// can be brought up to date when the task drains. While a snapshot backoff runs, queues the
+    /// components to wait for it instead.
     fn spawn_snapshot_task(
         &mut self,
         component_ids: Vec<String>,
         snapshot_header: BlockHeader,
         current_delta: &BlockAggregatedChanges,
     ) {
+        if self.in_snapshot_backoff() {
+            return self.queue_in_backoff(component_ids);
+        }
         let snapshot_block = snapshot_header.number;
 
         if self.snapshot_tasks.is_empty() {
@@ -1022,8 +1091,12 @@ where
             self.snapshot_queue
                 .insert(id.clone(), SnapshotStatus::InFlight);
         }
-        self.snapshot_tasks
-            .push(SnapshotTask { component_ids, snapshot_block, receiver: rx });
+        self.snapshot_tasks.push(SnapshotTask {
+            component_ids,
+            snapshot_block,
+            spawned_at: Instant::now(),
+            receiver: rx,
+        });
     }
 
     /// Drains any background snapshot tasks that have completed. Returns a `Snapshot` containing
@@ -1042,6 +1115,14 @@ where
                     );
                     for id in &p.component_ids {
                         self.snapshot_queue.remove(id);
+                    }
+                    // A task spawned before the backoff started says nothing about whether the
+                    // failure that started it has cleared.
+                    if self
+                        .snapshot_backoff
+                        .is_none_or(|backoff| p.spawned_at >= backoff.started_at)
+                    {
+                        self.snapshot_backoff = None;
                     }
                     let new_component_ids: Vec<String> = fetch_result
                         .components
@@ -1065,16 +1146,30 @@ where
                 }
                 Ok(Err(e)) => {
                     if e.is_transient() {
+                        let now = Instant::now();
+                        // A task spawned before the backoff started failed for the same reason,
+                        // so it does not lengthen the backoff.
+                        let backoff = match self.snapshot_backoff {
+                            Some(current) if p.spawned_at < current.started_at => current,
+                            previous => {
+                                let failures = previous.map_or(0, |b| b.failures) + 1;
+                                SnapshotBackoff {
+                                    started_at: now,
+                                    retry_at: now + snapshot_backoff_duration(failures),
+                                    failures,
+                                }
+                            }
+                        };
+                        self.snapshot_backoff = Some(backoff);
                         warn!(
                             components = ?p.component_ids,
                             extractor = %self.extractor_id.name,
                             err = %e,
-                            "Background snapshot fetch failed transiently; will retry next block"
+                            failures = backoff.failures,
+                            retry_in = ?backoff.retry_at.saturating_duration_since(now),
+                            "Background snapshot fetch failed transiently; backing off"
                         );
-                        for id in &p.component_ids {
-                            self.snapshot_queue
-                                .insert(id.clone(), SnapshotStatus::RetryNext);
-                        }
+                        self.queue_in_backoff(p.component_ids);
                     } else {
                         warn!(
                             components = ?p.component_ids,
@@ -4567,6 +4662,365 @@ mod test {
 
         let _ = close_tx.send(());
         jh.await.expect("Task should not panic");
+    }
+
+    #[test]
+    fn test_snapshot_backoff_duration() {
+        assert_eq!(snapshot_backoff_duration(0), Duration::from_secs(1));
+        assert_eq!(snapshot_backoff_duration(1), Duration::from_secs(1));
+        assert_eq!(snapshot_backoff_duration(2), Duration::from_secs(2));
+        assert_eq!(snapshot_backoff_duration(5), Duration::from_secs(16));
+        assert_eq!(snapshot_backoff_duration(9), Duration::from_secs(256));
+        assert_eq!(snapshot_backoff_duration(10), SNAPSHOT_BACKOFF_MAX);
+        assert_eq!(snapshot_backoff_duration(u32::MAX), SNAPSHOT_BACKOFF_MAX);
+    }
+
+    /// The sorted component ids of every background snapshot fetch, in fetch order.
+    type FetchedBatches = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+    /// A started synchronizer whose RPC client scripts background snapshot fetches.
+    struct BackoffHarness {
+        deltas_tx: Sender<BlockAggregatedChanges>,
+        block_rx: Receiver<SyncResult<StateSyncMessage<BlockHeader>>>,
+        fetched_batches: FetchedBatches,
+        /// Notified once per background fetch. The mock answers synchronously, so by the time a
+        /// waiter wakes, the fetch task has sent its result.
+        fetched: Arc<tokio::sync::Notify>,
+        close_tx: oneshot::Sender<()>,
+        join_handle: JoinHandle<()>,
+    }
+
+    impl BackoffHarness {
+        /// Starts a synchronizer that tracks `Component1` after its initial sync. The background
+        /// fetch with index `n` (from 0) fails with a stale block when `fails(n)` is true and
+        /// otherwise returns the requested components.
+        async fn start(fails: impl Fn(usize) -> bool + Send + 'static) -> Self {
+            let fetched_batches = FetchedBatches::default();
+            let fetched = Arc::new(tokio::sync::Notify::new());
+            let mut rpc_client = make_mock_client();
+            let batches = fetched_batches.clone();
+            let notify = fetched.clone();
+            rpc_client
+                .expect_get_protocol_components()
+                .withf(|params: &crate::rpc::ProtocolComponentsParams| {
+                    params.component_ids().is_some()
+                })
+                .returning(move |params| {
+                    let mut ids = params
+                        .component_ids()
+                        .cloned()
+                        .unwrap_or_default();
+                    ids.sort();
+                    let fetch_index = {
+                        let mut batches = batches.lock().unwrap();
+                        batches.push(ids.clone());
+                        batches.len() - 1
+                    };
+                    notify.notify_one();
+                    if fails(fetch_index) {
+                        return Err(RPCError::StaleBlock(
+                            "version is older than the 10 minute limit".to_string(),
+                        ));
+                    }
+                    let components: Vec<ProtocolComponent> = ids
+                        .into_iter()
+                        .map(|id| ProtocolComponent { id, ..Default::default() })
+                        .collect();
+                    let total = components.len() as i64;
+                    Ok(Page::new(components, total, 0, 100))
+                });
+            rpc_client
+                .expect_get_protocol_components()
+                .returning(|_| {
+                    Ok(Page::new(
+                        vec![ProtocolComponent {
+                            id: "Component1".to_string(),
+                            ..Default::default()
+                        }],
+                        1,
+                        0,
+                        100,
+                    ))
+                });
+            rpc_client
+                .expect_get_snapshots()
+                .returning(|request, _chunk_size, _concurrency| {
+                    let states = request
+                        .components
+                        .iter()
+                        .map(|(id, component)| {
+                            let state = ComponentWithState {
+                                state: ProtocolComponentState::new(
+                                    id,
+                                    Default::default(),
+                                    Default::default(),
+                                ),
+                                component: component.clone(),
+                                component_tvl: Some(100.0),
+                                entrypoints: vec![],
+                            };
+                            (id.clone(), state)
+                        })
+                        .collect();
+                    Ok(Snapshot { states, vm_storage: HashMap::new() })
+                });
+            rpc_client
+                .expect_get_traced_entry_points()
+                .returning(|_| Ok(Page::new(HashMap::new(), 0, 0, 0)));
+
+            let mut deltas_client = MockDeltasClient::new();
+            let (deltas_tx, rx) = channel(1);
+            deltas_client
+                .expect_subscribe()
+                .return_once(move |_, _| Ok((Uuid::default(), rx)));
+            deltas_client
+                .expect_unsubscribe()
+                .return_once(|_| Ok(()));
+
+            let mut state_sync =
+                with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client));
+            state_sync
+                .initialize()
+                .await
+                .expect("Init failed");
+            let (handle, block_rx) = state_sync.start().await;
+            let (join_handle, close_tx) = handle.split();
+            let mut harness =
+                Self { deltas_tx, block_rx, fetched_batches, fetched, close_tx, join_handle };
+            harness
+                .sync_block(make_block_changes(1, None))
+                .await;
+            harness
+        }
+
+        /// Sends `delta` and waits for the synchronizer to emit that block.
+        async fn sync_block(&mut self, delta: BlockAggregatedChanges) {
+            self.deltas_tx
+                .send(delta)
+                .await
+                .expect("Deltas channel open");
+            timeout(Duration::from_millis(200), self.block_rx.recv())
+                .await
+                .expect("Should receive a block")
+                .expect("Channel open")
+                .expect("No error");
+        }
+
+        /// Sends block `block_number` with the given component TVLs.
+        async fn sync_block_with_tvl(&mut self, block_number: u64, tvls: &[(&str, f64)]) {
+            let mut delta = make_block_changes(block_number, None);
+            delta.component_tvl = tvls
+                .iter()
+                .map(|(id, tvl)| (id.to_string(), *tvl))
+                .collect();
+            self.sync_block(delta).await;
+        }
+
+        /// Waits until the next background snapshot fetch has run.
+        async fn wait_for_fetch(&self) {
+            timeout(Duration::from_millis(200), self.fetched.notified())
+                .await
+                .expect("Expected a background snapshot fetch");
+        }
+
+        fn fetched_batches(&self) -> Vec<Vec<String>> {
+            self.fetched_batches
+                .lock()
+                .unwrap()
+                .clone()
+        }
+
+        async fn close(self) {
+            let _ = self.close_tx.send(());
+            self.join_handle
+                .await
+                .expect("Task should not panic");
+        }
+    }
+
+    /// Timeline (clock paused, backoffs 1 s then 2 s):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails with a stale block
+    /// - Block 3: #1 drains into a 1 s backoff; "Fresh" crosses the threshold and waits
+    /// - +1 s, block 4: backoff ended → "Late" and "Fresh" fetched together as #2, which fails
+    /// - Block 5: #2 drains into a 2 s backoff
+    /// - +1 s, block 6: still backing off; no fetch
+    /// - +1 s, block 7: backoff ended → fetch #3
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff() {
+        let mut harness = BackoffHarness::start(|_| true).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(3, &[("Fresh", 100.0)])
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(5, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(6, None))
+            .await;
+        let batches_before_second_backoff_ends = harness.fetched_batches().len();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(7, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        let late_and_fresh = vec!["Fresh".to_string(), "Late".to_string()];
+        assert_eq!(
+            fetched_batches,
+            vec![vec!["Late".to_string()], late_and_fresh.clone(), late_and_fresh]
+        );
+        assert_eq!(
+            batches_before_second_backoff_ends, 2,
+            "Second backoff must be longer than the first"
+        );
+    }
+
+    /// Timeline (clock paused):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails with a stale block
+    /// - Block 3: #1 drains into a 1 s backoff; "Gone" crosses the threshold and waits
+    /// - Block 4: "Gone" drops below the threshold and leaves the queue
+    /// - +1 s, block 5: backoff ended → only "Late" is fetched
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff_tvl_drop() {
+        let mut harness = BackoffHarness::start(|_| true).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(3, &[("Gone", 100.0)])
+            .await;
+        harness
+            .sync_block_with_tvl(4, &[("Gone", 0.0)])
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(5, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert_eq!(fetched_batches, vec![vec!["Late".to_string()], vec!["Late".to_string()]]);
+    }
+
+    /// Timeline (clock paused):
+    /// - Block 2: "Late" crosses the TVL threshold → fetch #1 fails, starting a 1 s backoff
+    /// - +1 s, block 4: fetch #2 of "Late" succeeds, which resets the backoff on the next drain
+    /// - Block 5: "Other" crosses the threshold → fetch #3 fails
+    /// - +1 s, block 7: a reset backoff lasts 1 s again, so "Other" is fetched as #4
+    #[test_log::test(tokio::test(start_paused = true))]
+    async fn test_background_snapshot_backoff_reset() {
+        let mut harness = BackoffHarness::start(|fetch_index| fetch_index != 1).await;
+
+        harness
+            .sync_block_with_tvl(2, &[("Late", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(3, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block_with_tvl(5, &[("Other", 100.0)])
+            .await;
+        harness.wait_for_fetch().await;
+        harness
+            .sync_block(make_block_changes(6, None))
+            .await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        harness
+            .sync_block(make_block_changes(7, None))
+            .await;
+        harness.wait_for_fetch().await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert_eq!(
+            fetched_batches,
+            vec![
+                vec!["Late".to_string()],
+                vec!["Late".to_string()],
+                vec!["Other".to_string()],
+                vec!["Other".to_string()],
+            ]
+        );
+    }
+
+    /// A snapshot task in flight for `component_id`, spawned now, and the sender that completes
+    /// it.
+    fn snapshot_task_in_flight(
+        component_id: &str,
+    ) -> (SnapshotTask, oneshot::Sender<Result<SnapshotFetchResult, SynchronizerError>>) {
+        let (tx, receiver) = oneshot::channel();
+        let task = SnapshotTask {
+            component_ids: vec![component_id.to_string()],
+            snapshot_block: 1,
+            spawned_at: Instant::now(),
+            receiver,
+        };
+        (task, tx)
+    }
+
+    fn stale_block_error() -> SynchronizerError {
+        SynchronizerError::RPCError(RPCError::StaleBlock(
+            "version is older than the 10 minute limit".to_string(),
+        ))
+    }
+
+    /// Timeline (clock paused): "OldOk" and "OldErr" are spawned, then 1 ms later "New". "New"
+    /// fails and starts a 1 s backoff. After it ends, "OldOk" succeeds and "OldErr" fails;
+    /// neither result touches the backoff, because both tasks were spawned before it started.
+    #[tokio::test(start_paused = true)]
+    async fn test_drain_snapshot_results_spawned_before_backoff() {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (old_ok, old_ok_tx) = snapshot_task_in_flight("OldOk");
+        let (old_err, old_err_tx) = snapshot_task_in_flight("OldErr");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let (new, new_tx) = snapshot_task_in_flight("New");
+        state_sync
+            .snapshot_tasks
+            .extend([old_ok, old_err, new]);
+
+        let _ = new_tx.send(Err(stale_block_error()));
+        state_sync.drain_completed_snapshots();
+        let backoff_started = state_sync
+            .snapshot_backoff
+            .expect("The failure of New starts a backoff");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let _ = old_ok_tx.send(Ok(SnapshotFetchResult {
+            components: HashMap::new(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot::default(),
+            snapshot_block: 1,
+        }));
+        let _ = old_err_tx.send(Err(stale_block_error()));
+        state_sync.drain_completed_snapshots();
+
+        let backoff = state_sync
+            .snapshot_backoff
+            .expect("Results of older tasks do not reset the backoff");
+        assert_eq!(backoff.failures, 1);
+        assert_eq!(backoff.retry_at, backoff_started.retry_at);
     }
 
     /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:

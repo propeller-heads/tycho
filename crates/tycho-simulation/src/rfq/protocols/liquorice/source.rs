@@ -315,9 +315,8 @@ mod tests {
         assert_eq!(book.component.id, expected_id);
     }
 
-    /// Published as one component, each market maker pricing a pair becomes its own book: a
-    /// route takes one quote per maker, so two makers on one pair serve two swaps and a third
-    /// finds none left.
+    /// Published as one component, each market maker pricing a pair becomes its own book: the
+    /// better maker takes the swap, and a second swap on the pair continues it at no gas.
     #[tokio::test]
     async fn fetch_splits_the_makers_of_a_pair_under_one_component() {
         let weth = Bytes::from_str(WETH).unwrap();
@@ -357,7 +356,7 @@ mod tests {
         };
         let best = swap(book.state.as_ref()).unwrap();
         let second = swap(best.new_state.as_ref()).unwrap();
-        assert!(best.amount > second.amount, "the better maker quotes first");
-        assert!(swap(second.new_state.as_ref()).is_err(), "two makers quote two swaps and no more");
+        assert_eq!(second.amount, best.amount, "the better maker keeps the merged swap");
+        assert_eq!(second.gas, num_bigint::BigUint::default());
     }
 }
