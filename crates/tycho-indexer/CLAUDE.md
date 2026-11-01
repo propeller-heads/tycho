@@ -109,6 +109,14 @@ extractor read its cursor, so the plugin loads its state from the database after
 follower the leader can commit in between: the stream then starts below the block of the plugin's
 state, and the plugin sees those blocks again (it does not trace again an entry point with a stored
 result) instead of missing them.
+Such a follower's messages for the replayed blocks can still differ from the leader's: a contract
+first tracked inside the replayed range counts as tracked already, so the message carries only its
+traced changes and not its full state, and a token first stored inside the range is known already,
+so a traced token contract gets only its traced slots. The database never holds this difference:
+an extractor that commits is built while no other process writes, either as the first leader or,
+after a takeover, from the cursor once the former leader is fenced (see "Restart to take over").
+Known and not yet fixed; reading the cursor and the plugin's state in one database snapshot
+removes it.
 
 ### Revert handling
 
