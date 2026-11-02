@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap},
 };
 
+use alloy::primitives::U256;
 use itertools::Either;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -24,7 +25,9 @@ use crate::evm::protocol::{
             parse_bin_key,
         },
         math::{
-            bin::{get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id},
+            bin::{
+                get_amounts_out, get_drain_amounts, get_liquidity, get_price_from_id, BinAmounts,
+            },
             constants::{BIN_ID_COUNT, MAX_LIQUIDITY_PER_BIN, PIPS_DENOMINATOR},
             fee::{calculate_swap_fee, protocol_fee_amount},
         },
@@ -42,6 +45,49 @@ use crate::evm::protocol::{
 // `EncodedSolution::estimated_gas`, so these size the solution's gas as well as ranking routes.
 const SWAP_BASE_GAS: u64 = 202_000;
 const GAS_PER_BIN_CROSSED: u64 = 12_100;
+
+/// The pool takes the input and returns the output as `int128`, so an amount past this reverts.
+const MAX_POOL_AMOUNT: u128 = i128::MAX as u128;
+
+/// A bin's reserves after a step: the input credited less the protocol's share, the output taken.
+///
+/// Errors where the pool reverts, so `swap` propagates it and `get_limits` stops before the bin:
+/// the input reserve overflowing `u128`, or the bin's liquidity passing `MAX_LIQUIDITY_PER_BIN`.
+fn credit_bin(
+    id: u32,
+    (x, y): (u128, u128),
+    swap_for_y: bool,
+    price: U256,
+    step: &BinAmounts,
+    protocol_fee: u16,
+    swap_fee: u32,
+) -> Result<(u128, u128), SimulationError> {
+    let (reserve_in, reserve_out) = if swap_for_y { (x, y) } else { (y, x) };
+    // The protocol's cut leaves the pool: off the input, never off the output.
+    let credited =
+        step.amount_in_with_fee - protocol_fee_amount(step.fee_amount, protocol_fee, swap_fee)?;
+    let new_reserve_in = reserve_in
+        .checked_add(credited)
+        .ok_or_else(|| {
+            SimulationError::InvalidInput(
+                format!("bin {id} reserve overflows crediting {credited}"),
+                None,
+            )
+        })?;
+    let new_reserve_out = reserve_out - step.amount_out;
+    let (new_x, new_y) = if swap_for_y {
+        (new_reserve_in, new_reserve_out)
+    } else {
+        (new_reserve_out, new_reserve_in)
+    };
+    if get_liquidity(new_x, new_y, price)? > MAX_LIQUIDITY_PER_BIN {
+        return Err(SimulationError::InvalidInput(
+            format!("bin {id} exceeds MAX_LIQUIDITY_PER_BIN after the swap"),
+            None,
+        ));
+    }
+    Ok((new_x, new_y))
+}
 
 /// A PancakeSwap Infinity Bin pool.
 ///
@@ -174,33 +220,10 @@ impl PancakeswapInfinityBinState {
 
             // A bin with nothing on the output side is skipped, not an error.
             if reserve_out > 0 {
-                let reserve_in = if swap_for_y { x } else { y };
                 let price = get_price_from_id(active, self.bin_step)?;
                 let step = get_amounts_out(reserve_out, swap_fee, price, swap_for_y, left)?;
-                // The protocol's cut leaves the pool: off the input, never off the output.
-                let protocol_share = protocol_fee_amount(step.fee_amount, protocol_fee, swap_fee)?;
-                let credited = step.amount_in_with_fee - protocol_share;
-                let new_reserve_in = reserve_in
-                    .checked_add(credited)
-                    .ok_or_else(|| {
-                        SimulationError::InvalidInput(
-                            format!("bin {active} reserve overflows crediting {credited}"),
-                            None,
-                        )
-                    })?;
-                let new_reserve_out = reserve_out - step.amount_out;
-                let (new_x, new_y) = if swap_for_y {
-                    (new_reserve_in, new_reserve_out)
-                } else {
-                    (new_reserve_out, new_reserve_in)
-                };
-
-                if get_liquidity(new_x, new_y, price)? > MAX_LIQUIDITY_PER_BIN {
-                    return Err(SimulationError::InvalidInput(
-                        format!("bin {active} exceeds MAX_LIQUIDITY_PER_BIN after the swap"),
-                        None,
-                    ));
-                }
+                let (new_x, new_y) =
+                    credit_bin(active, (x, y), swap_for_y, price, &step, protocol_fee, swap_fee)?;
 
                 if new_x == 0 && new_y == 0 {
                     new_state.bins.remove(&active);
@@ -240,7 +263,7 @@ impl PancakeswapInfinityBinState {
         // The pool narrows the output with `safeInt128` before returning it.
         //
         // [`BinPool.sol#L210-L212`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/libraries/BinPool.sol#L210-L212)
-        if amount_out > i128::MAX as u128 {
+        if amount_out > MAX_POOL_AMOUNT {
             return Err(SimulationError::InvalidInput(
                 format!("output {amount_out} exceeds int128"),
                 None,
@@ -366,7 +389,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
         let swap_for_y = token_in < token_out;
         let amount = amount_in
             .to_u128()
-            .filter(|amount| *amount <= i128::MAX as u128)
+            .filter(|amount| *amount <= MAX_POOL_AMOUNT)
             .ok_or_else(|| {
                 SimulationError::InvalidInput(
                     format!("amount_in exceeds int128: {amount_in}"),
@@ -406,11 +429,10 @@ impl ProtocolSim for PancakeswapInfinityBinState {
 
         let protocol_fee = self.protocol_fee(swap_for_y);
         let swap_fee = self.swap_fee(swap_for_y);
-        let max_amount = i128::MAX as u128;
         let mut total_in = 0u128;
         let mut total_out = 0u128;
         for (&id, &(x, y)) in bins {
-            let (reserve_in, reserve_out) = if swap_for_y { (x, y) } else { (y, x) };
+            let reserve_out = if swap_for_y { y } else { x };
             if reserve_out == 0 {
                 continue;
             }
@@ -418,17 +440,10 @@ impl ProtocolSim for PancakeswapInfinityBinState {
             let Some(step) = get_drain_amounts(reserve_out, swap_fee, price, swap_for_y)? else {
                 break;
             };
-            // Draining credits the bin the input less the protocol's cut, which `swap` rejects
-            // past the cap. A partial fill might still fit, but a floor can stop short.
-            let credited = step.amount_in_with_fee -
-                protocol_fee_amount(step.fee_amount, protocol_fee, swap_fee)?;
-            let Some(new_reserve_in) = reserve_in.checked_add(credited) else {
+            // Draining credits the bin what `swap` would, so the walk stops where `swap` errors.
+            // A partial fill might still fit, but a floor can stop short.
+            if credit_bin(id, (x, y), swap_for_y, price, &step, protocol_fee, swap_fee).is_err() {
                 break;
-            };
-            let (new_x, new_y) = if swap_for_y { (new_reserve_in, 0) } else { (0, new_reserve_in) };
-            match get_liquidity(new_x, new_y, price) {
-                Ok(liquidity) if liquidity <= MAX_LIQUIDITY_PER_BIN => {}
-                Ok(_) | Err(_) => break,
             }
             let (Some(next_in), Some(next_out)) = (
                 total_in.checked_add(step.amount_in_with_fee),
@@ -436,7 +451,7 @@ impl ProtocolSim for PancakeswapInfinityBinState {
             ) else {
                 break;
             };
-            if next_in > max_amount || next_out > max_amount {
+            if next_in > MAX_POOL_AMOUNT || next_out > MAX_POOL_AMOUNT {
                 break;
             }
             total_in = next_in;
