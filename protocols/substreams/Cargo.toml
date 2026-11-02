@@ -39,6 +39,7 @@ members = [
     "ethereum-ring-swap-v2",
     "ethereum-sky",
     "polygon-ramses-v3",
+    "ethereum-nami-v4",
     "ethereum-etherfi",
     "base-pancakeswap-infinity-cl",
     "bsc-pancakeswap-infinity-cl-hooks",

@@ -18,6 +18,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>robinswap_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>gigadex_v3</code></td><td>Native (<code>UniswapV3State</code>)</td><td>20 μs (0.02 ms)</td><td>Robinhood</td><td></td></tr>
 <tr><td><code>ramses_v3</code></td><td>Native (<code>RamsesV3State</code>)</td><td>-</td><td>Robinhood</td><td></td></tr>
+<tr><td><code>nami_v4</code></td><td>Hybrid (<code>NamiV4State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum, Base, Robinhood</td><td>An Algebra Integral fork. When a pool's plugin sets the swap fee, each quote runs the plugin's <code>beforeSwap</code> in the EVM to get it.<br>The plugin's <code>afterSwap</code> may run a back-run arbitrage and reverts the swap unless at least the plugin's <code>minGasLeft</code> gas remains at the hook. The deployed plugins set it to 1,000,000, so a swap that uses about 370k gas needs a gas limit near 1.4M. A gas estimate from the node, <code>eth_estimateGas</code>, includes this requirement. A limit you derive from the quoted gas alone does not, and quoted gas covers a swap without a back-run. The pool's <code>mevx_router</code>, <code>min_gas_left</code> and <code>call_gas_budget</code> attributes carry the plugin's settings, and <code>incentive</code> names its farming incentive, if any.</td></tr>
 <tr><td><code>quickswap_v2</code></td><td>Native (<code>UniswapV2State</code>)</td><td>3 μs (0.003 ms)</td><td>Polygon</td><td></td></tr>
 <tr><td><code>ekubo_v2</code></td><td>Native (<code>EkuboState</code>)</td><td>1.5 μs (0.0015 ms)</td><td>Ethereum</td><td></td></tr>
 <tr><td><code>ekubo_v3</code></td><td>Native (<code>EkuboV3State</code>)</td><td>9μs</td><td>Ethereum, Robinhood</td><td>Some extensions are unsupported. Use <code>ekubo_v3_extension_filter</code>. It also drops SignedExclusiveSwap pools, which need a per-swap signature passed to the encoder as <code>user_data</code>. If you can supply that signature, use <code>ekubo_v3_extension_filter_with_signed_exclusive_swap</code> instead to keep those pools.</td></tr>
@@ -81,6 +82,7 @@ fn register_exchanges(
                 .exchange::<SkyState>("sky", tvl_filter.clone(), None)
                 .exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None)
                 .exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None)
+                .exchange::<NamiV4State>("nami_v4", tvl_filter.clone(), None)
         }
         Chain::Base => {
             builder = builder
@@ -91,6 +93,7 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aerodrome_slipstreams", tvl_filter.clone(), None)
+                .exchange::<NamiV4State>("nami_v4", tvl_filter.clone(), None)
         }
         Chain::Unichain => {
             builder = builder
@@ -133,6 +136,7 @@ fn register_exchanges(
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
+                .exchange::<NamiV4State>("nami_v4", tvl_filter.clone(), None)
         }
         _ => {}
     }

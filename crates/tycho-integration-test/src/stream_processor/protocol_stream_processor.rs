@@ -32,6 +32,7 @@ use tycho_simulation::{
             fluid::FluidV1,
             lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
+            nami_v4::state::NamiV4State,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
             ring_swap_v2::state::RingSwapV2State,
@@ -486,6 +487,9 @@ impl ProtocolStreamProcessor {
             }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
+            }
+            "nami_v4" => {
+                stream = stream.exchange::<NamiV4State>("nami_v4", tvl_filter.clone(), None);
             }
             "rocketpool" => {
                 stream = stream.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);

@@ -1,0 +1,138 @@
+specVersion: v0.1.0
+package:
+  name: "base_nami_v4"
+  version: v0.2.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-nami-v4"
+
+protobuf:
+  files:
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - nami.proto
+  importPaths:
+    - ./proto/v1
+    - ../../../proto/
+  excludePaths:
+    - google
+    - tycho
+    - sf/ethereum
+    - sf/substreams
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_nami_v4.wasm
+
+modules:
+  - name: map_pools_created
+    kind: map
+    initialBlock: 51235349 # Nami factory deployment
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pools
+    kind: store
+    updatePolicy: set_if_not_exists
+    valueType: proto:nami.v4.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: map_events
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:nami.v4.Events
+
+  - name: map_balance_changes
+    kind: map
+    inputs:
+      - map: map_events
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_ticks_changes
+    kind: map
+    inputs:
+      - map: map_events
+    output:
+      type: proto:nami.v4.TickDeltas
+
+  # Net and gross liquidity per tick, under `<pool>:<tick>:net` and `<pool>:<tick>:gross`.
+  - name: store_ticks_liquidity
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
+  - name: store_pool_current_tick
+    kind: store
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  - name: map_liquidity_changes
+    kind: map
+    inputs:
+      - map: map_events
+      - store: store_pool_current_tick
+    output:
+      type: proto:nami.v4.LiquidityChanges
+
+  - name: store_liquidity
+    kind: store
+    updatePolicy: set_sum
+    valueType: bigint
+    inputs:
+      - map: map_liquidity_changes
+
+  - name: store_pool_plugins
+    kind: store
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_events
+
+  - name: map_plugin_events
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pool_plugins
+    output:
+      type: proto:nami.v4.Events
+
+  - name: map_protocol_changes
+    kind: map
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_ticks_changes
+      - store: store_ticks_liquidity
+      - map: map_liquidity_changes
+      - store: store_liquidity
+        mode: deltas
+      - store: store_pool_plugins
+      - map: map_plugin_events
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_pools_created: "0xf4502A98A15e82D66d28D2381E2F3A407ea45b83"

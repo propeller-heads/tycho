@@ -1,0 +1,19 @@
+substreams_yaml_path: ./ethereum-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  - name: test_weth_usdc_pool
+    start_block: 26171941
+    stop_block: 26187031
+    expected_components:
+      - id: "0x152cfc187a0c0695eb946c3a2f0a8c6604f0026d"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+        static_attributes: {}
+        creation_tx: "0x429e23ec274d70e1631d9253ce21a5ef438a2804365ada0e6fdf0a946ee8af08"
+        skip_simulation: false

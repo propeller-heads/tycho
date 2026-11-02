@@ -26,13 +26,13 @@ use crate::encoding::{
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
             maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
-            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
-            native_fallback::NativeFallbackSwapEncoder, native_wrap::WrapSwapEncoder,
-            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
-            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            metric_fallback::MetricFallbackSwapEncoder, nami_v4::NamiV4SwapEncoder,
+            native::NativeSwapEncoder, native_fallback::NativeFallbackSwapEncoder,
+            native_wrap::WrapSwapEncoder, pancakeswap_infinity::PancakeswapInfinitySwapEncoder,
+            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -209,6 +209,9 @@ impl SwapEncoderRegistry {
             }
             p if UNISWAP_V3_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "nami_v4" => {
+                Ok(Box::new(NamiV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
             // A hooked pool swaps through the same PoolManager as a core one; the encoder reads
             // the pool's hook out of its `hooks` attribute either way.
