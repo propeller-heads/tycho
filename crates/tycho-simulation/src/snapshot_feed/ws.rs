@@ -296,10 +296,18 @@ mod tests {
     impl WsSource for NoSource {
         type Snapshot = u32;
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop rejects the config before it builds a request"
+        )]
         fn request(&self) -> Result<Request<()>, FeedError> {
             unreachable!("the loop must reject the config before building a request")
         }
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop rejects the config before it reads a payload"
+        )]
         fn decode(&mut self, _payload: WsPayload) -> Result<Option<u32>, FeedError> {
             unreachable!()
         }
@@ -449,6 +457,10 @@ mod tests {
             Err(self.0.clone())
         }
 
+        #[expect(
+            clippy::unreachable,
+            reason = "the loop that drives this source never decodes a payload without connecting"
+        )]
         fn decode(&mut self, _: WsPayload) -> Result<Option<u32>, FeedError> {
             unreachable!("the feed never connects")
         }

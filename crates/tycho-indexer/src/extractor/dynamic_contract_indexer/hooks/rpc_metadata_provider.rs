@@ -1015,7 +1015,13 @@ mod tests {
             BatchError::HttpServer { .. } => {
                 // Expected - server errors should be retried and then fail
             }
-            other => panic!("Expected HttpServer error, got: {:?}", other),
+            other @ (BatchError::Network(_) |
+            BatchError::HttpClient { .. } |
+            BatchError::JsonParse(_) |
+            BatchError::ResponseRead(_) |
+            BatchError::MaxRetriesExhausted { .. }) => {
+                panic!("Expected HttpServer error, got: {:?}", other)
+            }
         }
     }
 

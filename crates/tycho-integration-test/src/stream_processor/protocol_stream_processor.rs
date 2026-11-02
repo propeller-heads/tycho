@@ -363,7 +363,9 @@ impl ProtocolStreamProcessor {
                     "aero_basic".to_string(),
                 ]
             }
-            _ => vec![],
+            Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {
+                vec![]
+            }
         }
     }
 

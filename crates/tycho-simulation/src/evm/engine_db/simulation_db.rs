@@ -161,19 +161,20 @@ impl<P: Provider + Debug + 'static> SimulationDB<P> {
         self.block = Some(block);
         for (address, update_info) in updates.iter() {
             let mut revert_entry = StateUpdate::default();
-            if let Some(current_account) = self
+            let current_balance = self
                 .read_account_storage()?
                 .get_account_info(address)
-            {
-                revert_entry.balance = Some(current_account.balance);
+                .map(|account| account.balance);
+            if let Some(balance) = current_balance {
+                revert_entry.balance = Some(balance);
             }
             if let Some(storage_updates) = update_info.storage.as_ref() {
                 let mut revert_storage = HashMap::default();
                 for index in storage_updates.keys() {
-                    if let Some(s) = self
+                    let stored = self
                         .read_account_storage()?
-                        .get_permanent_storage(address, index)
-                    {
+                        .get_permanent_storage(address, index);
+                    if let Some(s) = stored {
                         revert_storage.insert(*index, s);
                     }
                 }
@@ -507,7 +508,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, str::FromStr};
+    use std::str::FromStr;
 
     use alloy::primitives::U160;
     use rstest::rstest;
@@ -517,14 +518,14 @@ mod tests {
     use crate::evm::engine_db::utils::{get_client, get_runtime};
 
     #[rstest]
-    #[expect(clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_query_storage_latest_block() -> Result<(), Box<dyn Error>> {
+    fn test_query_storage_latest_block() {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create test client"),
             get_runtime().expect("Failed to create test runtime"),
             None,
         );
-        let address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
+        let address =
+            Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc").expect("valid address");
         let index = U256::from_limbs_slice(&[8]);
         db.init_account(address, AccountInfo::default(), None, false)
             .expect("Failed to init account");
@@ -535,7 +536,6 @@ mod tests {
         // There is no assertion, but has the querying failed, we would have panicked by now.
         // This test is not deterministic as it depends on the current state of the blockchain.
         // See the next test where we do this for a specific block.
-        Ok(())
     }
 
     #[rstest]

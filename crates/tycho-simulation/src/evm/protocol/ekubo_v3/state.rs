@@ -124,7 +124,13 @@ impl ProtocolSim for EkuboV3State {
     fn fee(&self) -> f64 {
         let fee = match self {
             Self::Ve33(pool) => pool.swap_fee(),
-            _ => self.key().config.fee,
+            Self::Concentrated(_) |
+            Self::FullRange(_) |
+            Self::Stableswap(_) |
+            Self::Oracle(_) |
+            Self::Twamm(_) |
+            Self::MevCapture(_) |
+            Self::BoostedFees(_) => self.key().config.fee,
         };
         fee as f64 / (2f64.powi(64))
     }

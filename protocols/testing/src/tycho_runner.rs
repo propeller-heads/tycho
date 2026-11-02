@@ -347,6 +347,11 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Robinhood => Some("https://mainnet.robinhood.streamingfast.io:443".to_string()),
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
         Chain::Bsc => Some("https://bnb.streamingfast.io:443".to_string()),
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Arbitrum |
+        Chain::Plasma |
+        Chain::Custom(_) |
         _ => None,
     }
 }

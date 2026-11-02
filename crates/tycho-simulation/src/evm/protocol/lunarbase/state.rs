@@ -1320,6 +1320,10 @@ mod tests {
                             U256::from(1u64) << if x_to_y { 97usize } else { 95usize };
                     }
                     "invalid math" => state.max_punishment_x24 = 1 << 24,
+                    #[expect(
+                        clippy::unreachable,
+                        reason = "the test cases only name the cases above"
+                    )]
                     _ => unreachable!(),
                 }
                 let limits = state.get_limits(Bytes::from(sell), Bytes::from(buy));

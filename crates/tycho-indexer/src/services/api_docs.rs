@@ -117,7 +117,7 @@ mod tests {
                     collect_refs(item, root, missing);
                 }
             }
-            _ => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 

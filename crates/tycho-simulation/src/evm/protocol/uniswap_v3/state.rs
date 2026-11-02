@@ -206,7 +206,9 @@ impl UniswapV3State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -906,7 +908,9 @@ mod tests {
                     _ => panic!("Partial amount out result is None. Expected partial result."),
                 }
             }
-            _ => panic!("Test failed: was expecting a SimulationError::InsufficientData"),
+            SimulationError::FatalError(_) | SimulationError::RecoverableError(_) => {
+                panic!("Test failed: was expecting a SimulationError::InsufficientData")
+            }
         }
     }
 

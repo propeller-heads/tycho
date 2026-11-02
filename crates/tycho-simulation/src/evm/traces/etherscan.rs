@@ -134,7 +134,15 @@ fn convert_chain(chain: &tycho_common::models::Chain) -> alloy_chains::Chain {
         Chain::Base => alloy_chains::Chain::from_id(8453),
         Chain::Arbitrum => alloy_chains::Chain::from_id(42161),
         Chain::Unichain => alloy_chains::Chain::from_id(1291), // Unichain testnet
-        _ => alloy_chains::Chain::from_id(1),                  // Default to mainnet
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Bsc |
+        Chain::Polygon |
+        Chain::Plasma |
+        Chain::Robinhood |
+        Chain::Arc |
+        Chain::Custom(_) |
+        _ => alloy_chains::Chain::from_id(1), // Default to mainnet
     }
 }
 

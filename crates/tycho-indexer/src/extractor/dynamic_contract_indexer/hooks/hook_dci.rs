@@ -1928,7 +1928,7 @@ mod tests {
         // Note: This is an integration test that requires real DB and RPC connections
         // It should be run manually with proper environment setup
         #[tokio::test]
-        #[ignore] // This test requires real DB and RPC connections
+        #[ignore = "requires a running Postgres and RPC_URL"]
         async fn test_hook_dci_process_block_update_integration() {
             // Initialize tracing for tests
             #[expect(
@@ -2140,7 +2140,7 @@ mod tests {
 
         // Additional test for handling state updates on existing components
         #[tokio::test]
-        #[ignore] // This test requires real DB and RPC connections
+        #[ignore = "requires a running Postgres and RPC_URL"]
         async fn test_hook_dci_process_block_update_with_state_changes() {
             let chain = Chain::Ethereum;
             let router_address = Address::from("0x1234567890123456789012345678901234567890");

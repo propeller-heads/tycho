@@ -277,7 +277,7 @@ impl AccountStorage {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, str::FromStr};
+    use std::str::FromStr;
 
     use revm::primitives::KECCAK_EMPTY;
 
@@ -285,12 +285,12 @@ mod tests {
     use crate::evm::account_storage::{Account, AccountStorage};
 
     #[test]
-    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_insert_account() -> Result<(), Box<dyn Error>> {
+    fn test_insert_account() {
         let mut account_storage = AccountStorage::default();
         let expected_nonce = 100;
         let expected_balance = U256::from(500);
-        let acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
+        let acc_address =
+            Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc").expect("valid address");
         let info: AccountInfo = AccountInfo {
             nonce: expected_nonce,
             balance: expected_balance,
@@ -316,14 +316,13 @@ mod tests {
             storage_value, expected_storage_value,
             "Storage value should match expected value"
         );
-        Ok(())
     }
 
     #[test]
-    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_update_account_info() -> Result<(), Box<dyn Error>> {
+    fn test_update_account_info() {
         let mut account_storage = AccountStorage::default();
-        let acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
+        let acc_address =
+            Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc").expect("valid address");
         let info: AccountInfo = AccountInfo {
             nonce: 100,
             balance: U256::from(500),
@@ -366,7 +365,6 @@ mod tests {
             updated_storage_value,
             "Storage value should be updated"
         );
-        Ok(())
     }
 
     #[test]

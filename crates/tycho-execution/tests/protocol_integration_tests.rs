@@ -2813,7 +2813,7 @@ fn test_sequential_encoding_strategy_lido_v4_submit_then_wrap() {
 }
 
 #[test]
-#[ignore] // Performs real Angstrom API call
+#[ignore = "requires ANGSTROM_API_KEY"]
 fn test_single_swap_with_univ4_angstrom() {
     //  USDC ─── (USV4-angstrom) ──> WETH
 

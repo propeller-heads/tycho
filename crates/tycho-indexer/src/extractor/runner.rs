@@ -261,6 +261,10 @@ impl ExtractorRunner {
     pub fn run(mut self) -> JoinHandle<Result<(), ExtractionError>> {
         info!("Extractor {} started!", self.extractor.get_id());
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "without an explicit handle, `run` is only called from a task on the indexer's multi-thread runtime"
+        )]
         let runtime = self
             .runtime_handle
             .clone()

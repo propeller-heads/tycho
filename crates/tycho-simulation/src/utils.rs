@@ -147,7 +147,7 @@ pub fn get_default_url(chain: &Chain) -> Option<String> {
         Chain::Arbitrum => Some("tycho-arbitrum-beta.propellerheads.xyz".to_string()),
         Chain::Polygon => Some("tycho-polygon-beta.propellerheads.xyz".to_string()),
         Chain::Robinhood => Some("tycho-robinhood-beta.propellerheads.xyz".to_string()),
-        _ => None,
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => None,
     }
 }
 
@@ -196,6 +196,12 @@ fn map_rpc_error(err: &RPCError, context: &str) -> SimulationError {
         RPCError::UrlParsing(_, _) | RPCError::FormatRequest(_) => {
             SimulationError::InvalidInput(message, None)
         }
-        _ => SimulationError::FatalError(message),
+        RPCError::HttpClient(..) |
+        RPCError::ParseResponse(_) |
+        RPCError::StaleBlock(_) |
+        RPCError::UnknownExtractor(_) |
+        RPCError::Fatal(_) |
+        RPCError::RateLimited(_) |
+        RPCError::ServerUnreachable(_) => SimulationError::FatalError(message),
     }
 }

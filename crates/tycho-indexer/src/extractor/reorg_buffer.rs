@@ -1468,7 +1468,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Unexpected block sequence")]
     fn test_insert_wrong_block() {
         let mut reorg_buffer = ReorgBuffer::new();
         reorg_buffer

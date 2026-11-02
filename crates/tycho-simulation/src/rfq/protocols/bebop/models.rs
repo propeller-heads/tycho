@@ -329,7 +329,13 @@ impl TryFrom<Chain> for BebopSupportedChain {
             Chain::Arbitrum => Ok(BebopSupportedChain::Arbitrum),
             // Optimism and HyperEVM answer to their chain id alone, since Tycho has no name
             // for either.
-            other => match other.try_id() {
+            other @ (Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Unichain |
+            Chain::Plasma |
+            Chain::Arc |
+            Chain::Custom(_) |
+            _) => match other.try_id() {
                 Ok(10) => Ok(BebopSupportedChain::Optimism),
                 Ok(999) => Ok(BebopSupportedChain::HyperEvm),
                 Ok(chain_id) => Err(format!("Bebop does not serve {chain} (chain id {chain_id})")),

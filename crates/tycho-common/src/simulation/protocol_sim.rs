@@ -626,6 +626,7 @@ mod tests {
         }
 
         #[typetag::serde]
+        #[expect(clippy::todo, reason = "test double: the test only serializes it")]
         impl ProtocolSim for DummyProtocol {
             fn clone_box(&self) -> Box<dyn ProtocolSim> {
                 todo!()

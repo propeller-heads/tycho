@@ -731,7 +731,7 @@ mod test {
     fn account_delta(address: &Bytes, x: u64, change: ChangeType) -> AccountDelta {
         let (balance, code) = match change {
             ChangeType::Creation => (Some(Bytes::from(x)), Some(Bytes::from("0x6000"))),
-            _ => (None, None),
+            ChangeType::Update | ChangeType::Deletion => (None, None),
         };
         AccountDelta::new(
             Chain::Ethereum,

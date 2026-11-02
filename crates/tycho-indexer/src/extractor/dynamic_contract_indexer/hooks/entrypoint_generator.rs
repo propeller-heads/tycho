@@ -1394,9 +1394,6 @@ mod tests {
         let token1 = Address::from([2u8; 20]);
 
         // Create mock detected balance slots
-        let mut detected_slots = HashMap::new();
-        detected_slots.insert(token0.clone(), Bytes::from([0x12; 32])); // Mock detected slot for token0
-        detected_slots.insert(token1.clone(), Bytes::from([0x34; 32])); // Mock detected slot for token1
 
         // Create mock balance slot detector with detected slots
         let mut mock_detector = MockBalanceSlotDetector::new();

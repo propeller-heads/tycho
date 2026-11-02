@@ -309,7 +309,7 @@ impl App {
                                         self.input_mode = false;
                                         self.input_buffer.clear();
                                     },
-                                    _ => {}
+                                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Tab | KeyCode::BackTab | KeyCode::Delete | KeyCode::Insert | KeyCode::F(_) | KeyCode::Char(_) | KeyCode::Null | KeyCode::CapsLock | KeyCode::ScrollLock | KeyCode::NumLock | KeyCode::PrintScreen | KeyCode::Pause | KeyCode::Menu | KeyCode::KeypadBegin | KeyCode::Media(_) | KeyCode::Modifier(_) => {}
                                 }
                             } else {
                                 match key.code {
@@ -351,7 +351,7 @@ impl App {
                                             self.show_popup = !self.show_popup;
                                         }
                                     },
-                                    _ => {}
+                                    KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Tab | KeyCode::BackTab | KeyCode::Delete | KeyCode::Insert | KeyCode::F(_) | KeyCode::Char(_) | KeyCode::Null | KeyCode::CapsLock | KeyCode::ScrollLock | KeyCode::NumLock | KeyCode::PrintScreen | KeyCode::Pause | KeyCode::Menu | KeyCode::KeypadBegin | KeyCode::Media(_) | KeyCode::Modifier(_) => {}
                                 }
                             }
                         }

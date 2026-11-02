@@ -1234,21 +1234,20 @@ mod tests {
         }
 
         /// The result of validating this entry, which the message carries as its only one.
-        #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
-        fn outcome(&self) -> Result<VenueOverrides, EntryRejection> {
-            let mut outcomes = validate(parsed(&self.message()));
-            assert_eq!(outcomes.len(), 1, "expected exactly one venue entry");
-            outcomes.remove(0)
+        fn outcome(&self) -> [Result<VenueOverrides, EntryRejection>; 1] {
+            validate(parsed(&self.message()))
+                .try_into()
+                .expect("expected exactly one venue entry")
         }
 
         fn rejection(&self) -> EntryRejection {
-            self.outcome()
-                .expect_err("the entry was accepted")
+            let [outcome] = self.outcome();
+            outcome.expect_err("the entry was accepted")
         }
 
         fn validated(&self) -> VenueOverrides {
-            self.outcome()
-                .expect("the entry was refused")
+            let [outcome] = self.outcome();
+            outcome.expect("the entry was refused")
         }
     }
 

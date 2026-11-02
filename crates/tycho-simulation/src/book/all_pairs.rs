@@ -1046,6 +1046,7 @@ mod tests {
             Ok((whole(self.depth), whole(self.depth * self.out_per_in)))
         }
 
+        #[expect(clippy::unimplemented, reason = "test doubles never transition")]
         fn delta_transition(
             &mut self,
             _delta: ProtocolStateDelta,
@@ -1126,6 +1127,7 @@ mod tests {
             self.0.get_limits(sell_token, buy_token)
         }
 
+        #[expect(clippy::unimplemented, reason = "test doubles never transition")]
         fn delta_transition(
             &mut self,
             _delta: ProtocolStateDelta,

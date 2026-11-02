@@ -2023,7 +2023,9 @@ fn deserialize_retriggers_from_value(
                                 format!("Failed to deserialize AddressStorageLocation: {}", e)
                             })?
                         }
-                        _ => return Err("Invalid retrigger format".to_string()),
+                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) => {
+                            return Err("Invalid retrigger format".to_string())
+                        }
                     };
 
                     result.insert((key, addr_storage));

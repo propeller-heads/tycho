@@ -378,7 +378,9 @@ impl UniswapV4State {
                             )),
                         ));
                     }
-                    _ => return Err(SimulationError::FatalError("Unknown error".to_string())),
+                    TickListErrorKind::BelowSmallest | TickListErrorKind::AtOrAboveLargest => {
+                        return Err(SimulationError::FatalError("Unknown error".to_string()))
+                    }
                 },
             };
 
@@ -627,6 +629,10 @@ impl ProtocolSim for UniswapV4State {
 
     // Not possible to implement correctly with the current interface because we need to know the
     // swap direction.
+    #[expect(
+        clippy::todo,
+        reason = "fee() returns no error and the trait documents the panic for asymmetric fees"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -756,9 +762,10 @@ impl ProtocolSim for UniswapV4State {
                     .before_swap(before_swap_params, None, None)
                     .map_err(|e| match e {
                         SimulationError::InvalidInput(..) => e,
-                        e => SimulationError::FatalError(format!(
-                            "BeforeSwap hook simulation failed: {e:?}"
-                        )),
+                        e @ (SimulationError::FatalError(_) |
+                        SimulationError::RecoverableError(_)) => SimulationError::FatalError(
+                            format!("BeforeSwap hook simulation failed: {e:?}"),
+                        ),
                     })?;
 
                 before_swap_gas = before_swap_result.gas_estimate;

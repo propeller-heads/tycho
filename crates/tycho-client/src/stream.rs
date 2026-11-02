@@ -180,7 +180,7 @@ impl TychoStreamBuilder {
             Chain::Plasma => (1, 10, 20, 100),   // ~1s block time
             Chain::Robinhood => (1, 5, 20, 100), // Typically closer to 0.1s
             Chain::Arc => (1, 5, 20, 100),       // Typically closer to 0.5s
-            _ => {
+            Chain::Custom(_) | _ => {
                 let block_time = chain.block_time_secs();
                 (block_time, block_time * 3, 50, block_time * 50)
             }

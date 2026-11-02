@@ -623,7 +623,11 @@ mod tests {
             MetadataError::GenerationFailed(msg) => {
                 assert_eq!(msg, "Generator failed");
             }
-            _ => panic!("Expected GenerationFailed error"),
+            other @ (MetadataError::ProviderFailed(_) |
+            MetadataError::UnknownError(_) |
+            MetadataError::MissingData(..)) => {
+                panic!("Expected GenerationFailed error, got: {:?}", other)
+            }
         }
     }
 

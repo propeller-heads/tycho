@@ -246,7 +246,14 @@ impl TryFrom<Chain> for NativeSupportedChain {
             Chain::Arbitrum => Ok(NativeSupportedChain::Arbitrum),
             Chain::Base => Ok(NativeSupportedChain::Base),
             Chain::Robinhood => Ok(NativeSupportedChain::Robinhood),
-            unserved => Err(format!("Native does not serve {unserved}")),
+            unserved @ (Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Unichain |
+            Chain::Polygon |
+            Chain::Plasma |
+            Chain::Arc |
+            Chain::Custom(_) |
+            _) => Err(format!("Native does not serve {unserved}")),
         }
     }
 }

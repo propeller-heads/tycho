@@ -643,7 +643,9 @@ impl SynchronizerStream {
             SynchronizerState::Ready(b) |
             SynchronizerState::Delayed(b) |
             SynchronizerState::Advanced(b) => Some(b),
-            _ => None,
+            SynchronizerState::Started |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Ended(_) => None,
         }
     }
 }
@@ -1129,7 +1131,11 @@ where
             .iter()
             .filter_map(|stream| match &stream.state {
                 SynchronizerState::Ready(header) => Some(header),
-                _ => None,
+                SynchronizerState::Started |
+                SynchronizerState::Delayed(_) |
+                SynchronizerState::Stale(_) |
+                SynchronizerState::Advanced(_) |
+                SynchronizerState::Ended(_) => None,
             });
         ready
             .clone()
@@ -1301,7 +1307,8 @@ mod tests {
 
         // For testing: trigger a close signal to make the synchronizer exit
         async fn trigger_close(&self) {
-            if let Some(close_tx) = self.close_tx.lock().await.take() {
+            let close_tx = self.close_tx.lock().await.take();
+            if let Some(close_tx) = close_tx {
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "the synchronizer may already have exited and dropped its receiver"
@@ -1595,7 +1602,11 @@ mod tests {
                 assert_eq!(h.number, expected_block, "wrong block number");
                 assert_eq!(h.partial_block_index, expected_partial, "wrong partial index");
             }
-            other => panic!("expected Ready, got {:?}", other),
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Delayed(_) |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => panic!("expected Ready, got {:?}", other),
         }
     }
 
@@ -2935,7 +2946,11 @@ mod tests {
             SynchronizerState::Ready(h) => {
                 assert_eq!((h.number, h.partial_block_index), (number, partial), "{name}");
             }
-            other => panic!("{name}: expected Ready, got {other:?}"),
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Delayed(_) |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => panic!("{name}: expected Ready, got {other:?}"),
         }
     }
 
@@ -2946,7 +2961,12 @@ mod tests {
             SynchronizerState::Ready(h) | SynchronizerState::Delayed(h) => {
                 assert_eq!((h.number, h.partial_block_index), (number, partial), "{name}");
             }
-            other => panic!("{name}: expected Ready or Delayed, got {other:?}"),
+            other @ (SynchronizerState::Started |
+            SynchronizerState::Stale(_) |
+            SynchronizerState::Advanced(_) |
+            SynchronizerState::Ended(_)) => {
+                panic!("{name}: expected Ready or Delayed, got {other:?}")
+            }
         }
     }
 

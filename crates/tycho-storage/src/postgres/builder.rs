@@ -230,6 +230,10 @@ mod test_serial_db {
                         .expect("pool should connect")
                 }
             };
+            #[expect(
+                clippy::collection_is_never_read,
+                reason = "the vector keeps the connections checked out until the end of the test"
+            )]
             let mut held = Vec::new();
             for _ in 0..rpc_pool.status().max_size {
                 held.push(connect(rpc_pool).await);

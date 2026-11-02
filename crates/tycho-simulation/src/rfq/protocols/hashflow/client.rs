@@ -709,7 +709,10 @@ mod tests {
             RFQError::ConnectionError(msg) => {
                 assert!(msg.contains("timed out"), "Expected timeout error, got: {}", msg);
             }
-            _ => panic!("Expected ConnectionError, got: {:?}", err),
+            RFQError::ParsingError(_) |
+            RFQError::FatalError(_) |
+            RFQError::InvalidInput(_) |
+            RFQError::QuoteNotFound(_) => panic!("Expected ConnectionError, got: {:?}", err),
         }
         // Should have timed out around 200ms, definitely less than 400ms
         assert!(

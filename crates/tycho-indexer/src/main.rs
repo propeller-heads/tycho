@@ -679,6 +679,10 @@ async fn create_indexing_tasks(
     let shutdown_task =
         tokio::spawn(shutdown_handler(server_handle, extractor_handles, Some(gw_writer_handle)));
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
+    )]
     let runtime = extraction_runtime
         .cloned()
         .unwrap_or_else(|| tokio::runtime::Handle::current());
@@ -746,6 +750,10 @@ async fn build_all_extractors(
         )
         .await;
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`run_spkg` passes no extraction runtime and runs inside `#[tokio::main]`'s multi-thread runtime"
+        )]
         let runtime_handle = runtime
             .cloned()
             .unwrap_or_else(|| tokio::runtime::Handle::current());

@@ -134,7 +134,8 @@ where
             // the value is present or is being written to
             // If the values is None, we likely hit a should_cache = false entry while in-flight,
             //  so we simply behave as if it was a cache miss.
-            if let Some(res) = inflight_val.value.lock().await.clone() {
+            let inflight_res = inflight_val.value.lock().await.clone();
+            if let Some(res) = inflight_res {
                 tracing::Span::current().record("miss", false);
                 trace!("CacheHit");
                 counter!("rpc_cache_hits", "cache" => self.name.clone()).increment(1);

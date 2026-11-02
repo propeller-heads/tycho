@@ -407,7 +407,14 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
                     ));
                 }
             }
-            _ => {
+            GethTrace::Default(_) |
+            GethTrace::Erc7562Tracer(_) |
+            GethTrace::CallTracer(_) |
+            GethTrace::FlatCallTracer(_) |
+            GethTrace::PreStateTracer(_) |
+            GethTrace::NoopTracer(_) |
+            GethTrace::MuxTracer(_) |
+            GethTrace::JS(_) => {
                 error!("Failed to parse trace result as hashmap: unexpected format");
                 return Err(SlotDetectorError::ParseError(
                     "Failed to parse trace result as hashmap: unexpected format".to_string(),

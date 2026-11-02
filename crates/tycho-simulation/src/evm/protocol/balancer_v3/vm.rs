@@ -557,7 +557,11 @@ where
         }
         // `PoolState` covers families this module never builds, so the maths library adding one
         // cannot reach here through a state it produced.
-        _ => Err(SimulationError::FatalError(format!(
+        PoolState::Base(_) |
+        PoolState::GyroECLP(_) |
+        PoolState::ReClamm(_) |
+        PoolState::LiquidityBootstrapping(_) |
+        PoolState::FixedPriceLBP(_) => Err(SimulationError::FatalError(format!(
             "balancer_v3 pool {pool} holds a state of a family this module does not build"
         ))),
     }

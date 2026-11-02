@@ -153,7 +153,13 @@ impl BalancerV3State {
             PoolState::QuantAmm(state) => {
                 QuantAmmPool::new(state.clone()).map(|pool| Box::new(pool) as Box<dyn PoolBase>)
             }
-            other => Err(PoolError::UnsupportedPoolType(other.pool_type().to_string())),
+            other @ (PoolState::Base(_) |
+            PoolState::GyroECLP(_) |
+            PoolState::ReClamm(_) |
+            PoolState::LiquidityBootstrapping(_) |
+            PoolState::FixedPriceLBP(_)) => {
+                Err(PoolError::UnsupportedPoolType(other.pool_type().to_string()))
+            }
         }
     }
 
@@ -255,7 +261,11 @@ impl BalancerV3State {
                     ))
                 })?
             }
-            other => {
+            other @ (PoolState::Base(_) |
+            PoolState::GyroECLP(_) |
+            PoolState::ReClamm(_) |
+            PoolState::LiquidityBootstrapping(_) |
+            PoolState::FixedPriceLBP(_)) => {
                 return Err(SimulationError::FatalError(format!(
                     "balancer_v3 pool {} holds unsupported state `{}`",
                     self.pool_address,
@@ -562,7 +572,11 @@ impl BalancerV3State {
             PoolState::Stable(state) => state.base.balances_live_scaled_18 = balances,
             PoolState::ReClammV2(state) => state.base.balances_live_scaled_18 = balances,
             PoolState::QuantAmm(state) => state.base.balances_live_scaled_18 = balances,
-            _ => {}
+            PoolState::Base(_) |
+            PoolState::GyroECLP(_) |
+            PoolState::ReClamm(_) |
+            PoolState::LiquidityBootstrapping(_) |
+            PoolState::FixedPriceLBP(_) => {}
         }
     }
 }

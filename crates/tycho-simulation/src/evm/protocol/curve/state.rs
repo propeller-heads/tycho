@@ -628,7 +628,11 @@ mod tests {
     fn pending_state_preserves_admin_fee_for_exchange() {
         let (mut state, token_in, token_out) = v1_two_coin_state();
         let pool = state.pool.clone();
-        let Pool::StableSwapV1 { balances, rates: _, amp, fee } = pool else { unreachable!() };
+        #[expect(clippy::unreachable, reason = "v1_two_coin_state builds a StableSwapV1 pool")]
+        let Pool::StableSwapV1 { balances, rates: _, amp, fee } = pool
+        else {
+            unreachable!()
+        };
         let raw = RawPoolState {
             variant: CurveVariant::StableSwapV1,
             balances,

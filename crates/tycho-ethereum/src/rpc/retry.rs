@@ -129,7 +129,7 @@ impl<E: std::borrow::Borrow<RawValue>> RetryableError for RpcError<TransportErro
             }
             Self::ErrorResp(err) => err.is_retry_err() || has_custom_retry_code(err),
             Self::NullResp => true,
-            _ => false,
+            Self::UnsupportedFeature(_) | Self::LocalUsageError(_) => false,
         }
     }
 

@@ -115,7 +115,9 @@ impl SynchronizerError {
             SynchronizerError::Timeout(_) |
             SynchronizerError::ConnectionError(_) |
             SynchronizerError::ConnectionClosed => true,
-            _ => false,
+            SynchronizerError::ChannelError(_) |
+            SynchronizerError::CloseError(_) |
+            SynchronizerError::Internal(_) => false,
         }
     }
 }
@@ -130,7 +132,15 @@ impl From<DeltasError> for SynchronizerError {
     fn from(err: DeltasError) -> Self {
         match err {
             DeltasError::NotConnected => SynchronizerError::ConnectionClosed,
-            _ => SynchronizerError::ConnectionError(err.to_string()),
+            DeltasError::UriParsing(..) |
+            DeltasError::SubscriptionAlreadyPending |
+            DeltasError::ServerError(_) |
+            DeltasError::TransportError(_) |
+            DeltasError::BufferFull |
+            DeltasError::AlreadyConnected |
+            DeltasError::ConnectionClosed |
+            DeltasError::ConnectionError(_) |
+            DeltasError::Fatal(_) => SynchronizerError::ConnectionError(err.to_string()),
         }
     }
 }
@@ -3347,6 +3357,10 @@ mod test {
         let mut deltas_client = MockDeltasClient::new();
         let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
         let mut resubscribed_tx = Some(resubscribed_tx);
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "holds the senders so the subscription channels stay open"
+        )]
         let mut open_senders = Vec::new();
         let mut calls = 0;
         deltas_client

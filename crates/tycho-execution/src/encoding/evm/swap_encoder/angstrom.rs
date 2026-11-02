@@ -483,7 +483,7 @@ mod tests {
     /// the transaction will land in. Nothing in the encoder checks the block numbers it encodes,
     /// so an API that started returning only past blocks would otherwise go unnoticed.
     #[test]
-    #[ignore] // Performs real Angstrom API and RPC calls
+    #[ignore = "requires ANGSTROM_API_KEY and RPC_URL"]
     fn test_live_window_brackets_the_current_block() {
         let api = ApiConfig::from_env().expect("ANGSTROM_API_KEY must be set");
 

@@ -36,7 +36,7 @@ impl TryFromMessage for AccountDelta {
         // bytes. None means "code unchanged" for Updates, but is incorrect for Creations.
         let code = match change {
             ChangeType::Creation => Some(msg.code.into()),
-            _ => {
+            ChangeType::Update | ChangeType::Deletion => {
                 if !msg.code.is_empty() {
                     Some(msg.code.into())
                 } else {

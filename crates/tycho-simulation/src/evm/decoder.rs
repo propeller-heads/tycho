@@ -1455,6 +1455,7 @@ impl ProtocolSim for MockProtocolSim {
         "MockProtocolSim"
     }
 
+    #[expect(clippy::unreachable, reason = "the mock is never deserialized through its typetag")]
     fn typetag_deserialize(&self) {
         unreachable!()
     }

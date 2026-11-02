@@ -178,8 +178,10 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             } else {
                 total_gas += BigUint::from(match *solution.user_transfer_type() {
                     UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-                    _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                                      * similar overheads */
+                    UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+                        DEFAULT_TOKEN_TRANSFER_GAS
+                    } /* TransferFrom and UseVaultsFunds have
+                       * similar overheads */
                 });
             }
         }
@@ -187,8 +189,10 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         // for split swaps the funds always go through the router first
         total_gas += BigUint::from(match *solution.user_transfer_type() {
             UserTransferType::TransferFromPermit2 => USER_PERMIT2_TRANSFER,
-            _ => DEFAULT_TOKEN_TRANSFER_GAS, /* TransferFrom and UseVaultsFunds have
-                                              * similar overheads */
+            UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => {
+                DEFAULT_TOKEN_TRANSFER_GAS
+            } /* TransferFrom and UseVaultsFunds have
+               * similar overheads */
         });
     }
 

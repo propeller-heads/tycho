@@ -95,6 +95,16 @@ impl Cli {
             self.buy_token = Some(match self.chain {
                 Chain::Ethereum => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
                 Chain::Base => "0x4200000000000000000000000000000000000006".to_string(),
+                Chain::Starknet |
+                Chain::ZkSync |
+                Chain::Arbitrum |
+                Chain::Bsc |
+                Chain::Unichain |
+                Chain::Polygon |
+                Chain::Plasma |
+                Chain::Robinhood |
+                Chain::Arc |
+                Chain::Custom(_) |
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \
@@ -109,6 +119,16 @@ impl Cli {
             self.sell_token = Some(match self.chain {
                 Chain::Ethereum => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                 Chain::Base => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
+                Chain::Starknet |
+                Chain::ZkSync |
+                Chain::Arbitrum |
+                Chain::Bsc |
+                Chain::Unichain |
+                Chain::Polygon |
+                Chain::Plasma |
+                Chain::Robinhood |
+                Chain::Arc |
+                Chain::Custom(_) |
                 _ => {
                     panic!(
                         "The book quickstart knows no default tokens on {chain}: pass \

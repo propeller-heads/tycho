@@ -911,7 +911,7 @@ mod benchmark {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "benchmark; requires DATABASE_URL pointing at a running Postgres"]
     async fn token_cache_benchmark() {
         let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let chain = std::env::var("BENCH_CHAIN")

@@ -1115,6 +1115,10 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    #[expect(
+        clippy::todo,
+        reason = "fee() returns no error and the fee depends on the swap direction"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -1276,6 +1280,10 @@ where
     }
 
     /// Implemented manually because `typetag` macro not supports generics
+    #[expect(
+        clippy::unreachable,
+        reason = "typetag only emits a call to this method to flag a missing attribute; it is never invoked"
+    )]
     fn typetag_deserialize(&self) {
         // https://github.com/dtolnay/typetag/blob/21ae0d40c9f73443a20204ab4a134441355b52f7/impl/src/tagged_trait.rs#L140
         unreachable!("Only to catch missing typetag attribute on impl blocks. Not called.")

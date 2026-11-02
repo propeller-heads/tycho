@@ -420,12 +420,11 @@ fn storage_error_from_diesel(
     id: &str,
     fetch_args: Option<String>,
 ) -> PostgresError {
+    use diesel::result::{DatabaseErrorKind, Error};
+
     let err_string = err.to_string();
     match err {
-        diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            details,
-        ) => {
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, details) => {
             if let Some(col) = details.column_name() {
                 if col == "id" {
                     return PostgresError(StorageError::DuplicateEntry(
@@ -436,7 +435,7 @@ fn storage_error_from_diesel(
             }
             PostgresError(StorageError::Unexpected(err_string))
         }
-        diesel::result::Error::NotFound => {
+        Error::NotFound => {
             if let Some(related_entitiy) = fetch_args {
                 return PostgresError(StorageError::NoRelatedEntity(
                     entity.to_owned(),
@@ -446,6 +445,16 @@ fn storage_error_from_diesel(
             }
             PostgresError(StorageError::NotFound(entity.to_owned(), id.to_owned()))
         }
+        Error::InvalidCString(_) |
+        Error::DatabaseError(..) |
+        Error::QueryBuilderError(_) |
+        Error::DeserializationError(_) |
+        Error::SerializationError(_) |
+        Error::RollbackErrorOnCommit { .. } |
+        Error::RollbackTransaction |
+        Error::AlreadyInTransaction |
+        Error::NotInTransaction |
+        Error::BrokenTransactionManager |
         _ => PostgresError(StorageError::Unexpected(err_string)),
     }
 }

@@ -392,7 +392,7 @@ impl Inner {
                         debug!("Cancel pending failed: receiver deallocated!");
                     }
                 }
-                _ => {
+                SubscriptionInfo::Active | SubscriptionInfo::RequestedUnsubscription(_) => {
                     error!(?extractor_id, "Pending subscription in wrong state")
                 }
             }
@@ -717,7 +717,14 @@ impl WsDeltasClient {
                     tungstenite::Error::Io(_) | tungstenite::Error::Protocol(_) => {
                         DeltasError::ConnectionError(Box::new(error))
                     }
-                    _ => DeltasError::Fatal(error.to_string()),
+                    tungstenite::Error::Tls(_) |
+                    tungstenite::Error::Capacity(_) |
+                    tungstenite::Error::WriteBufferFull(_) |
+                    tungstenite::Error::Utf8 |
+                    tungstenite::Error::AttackAttempt |
+                    tungstenite::Error::Url(_) |
+                    tungstenite::Error::Http(_) |
+                    tungstenite::Error::HttpFormat(_) => DeltasError::Fatal(error.to_string()),
                 });
             }
         };

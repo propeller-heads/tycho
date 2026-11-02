@@ -132,6 +132,16 @@ where
         let router_code = match self.chain {
             Chain::Ethereum => Bytes::from(V4_MINI_ROUTER_BYTECODE),
             Chain::Unichain => Bytes::from(UNICHAIN_V4_MINI_ROUTER_BYTECODE),
+            Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Arbitrum |
+            Chain::Base |
+            Chain::Bsc |
+            Chain::Polygon |
+            Chain::Plasma |
+            Chain::Robinhood |
+            Chain::Arc |
+            Chain::Custom(_) |
             _ => {
                 return Err(ExtractionError::Unknown(format!(
                     "Unsupported chain for UniswapV4 Hooks DCI: {}",

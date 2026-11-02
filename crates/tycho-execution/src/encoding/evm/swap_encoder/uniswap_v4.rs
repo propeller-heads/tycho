@@ -526,7 +526,7 @@ mod tests {
         };
 
         #[test]
-        #[ignore] // Performs real Angstrom API call
+        #[ignore = "requires ANGSTROM_API_KEY"]
         fn test_encode_grouped_swap_integration() {
             // This test performs a grouped swap: USDC -> WETH -> USDT on two consecutive Angstrom
             // pools

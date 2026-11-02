@@ -415,7 +415,11 @@ fn to_value(value: &impl Serialize) -> Value {
 fn render(value: &Value) -> String {
     let text = match value {
         Value::String(text) => text.clone(),
-        other => other.to_string(),
+        other @ (Value::Null |
+        Value::Bool(_) |
+        Value::Number(_) |
+        Value::Array(_) |
+        Value::Object(_)) => other.to_string(),
     };
     if text.len() <= MAX_LOGGED_VALUE_LEN {
         return text;

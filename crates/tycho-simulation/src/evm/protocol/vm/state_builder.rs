@@ -466,7 +466,9 @@ mod tests {
             SimulationError::FatalError(field) => {
                 assert_eq!(field, "Adapter contract bytecode not set")
             }
-            _ => panic!("Unexpected error type"),
+            SimulationError::InvalidInput(..) | SimulationError::RecoverableError(_) => {
+                panic!("Unexpected error type")
+            }
         }
     }
 

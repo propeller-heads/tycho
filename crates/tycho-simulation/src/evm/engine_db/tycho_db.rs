@@ -417,7 +417,8 @@ impl DatabaseRef for PreCachedDB {
 
     /// If block header is set, returns the hash. Otherwise, returns a zero hash.
     fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        match self.read_inner()?.block.clone() {
+        let block = self.read_inner()?.block.clone();
+        match block {
             Some(header) => Ok(B256::from_slice(&header.hash)),
             None => Ok(B256::default()),
         }
@@ -471,9 +472,9 @@ mod tests {
     }
 
     #[rstest]
-    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_account_storage(mock_db: PreCachedDB) -> Result<(), Box<dyn Error>> {
-        let mock_acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
+    fn test_account_storage(mock_db: PreCachedDB) {
+        let mock_acc_address =
+            Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc").expect("valid address");
         let storage_address = U256::from(1);
         let mut permanent_storage: HashMap<U256, U256> = HashMap::new();
         permanent_storage.insert(storage_address, U256::from(10));
@@ -486,13 +487,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage, U256::from(10));
-        Ok(())
     }
 
     #[rstest]
-    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_account_storage_zero(mock_db: PreCachedDB) -> Result<(), Box<dyn Error>> {
-        let mock_acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
+    fn test_account_storage_zero(mock_db: PreCachedDB) {
+        let mock_acc_address =
+            Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc").expect("valid address");
         let storage_address = U256::from(1);
         mock_db
             .init_account(mock_acc_address, AccountInfo::default(), None, false)
@@ -503,7 +503,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage, U256::ZERO);
-        Ok(())
     }
 
     #[rstest]
@@ -545,16 +544,18 @@ mod tests {
     /// must end up at the snapshot values, otherwise the DB is left mixed-epoch and VM-based
     /// protocols quote against a state that never existed on-chain.
     #[rstest]
-    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
-    fn test_creation_reapply_overwrites_existing_account(
-        mock_db: PreCachedDB,
-    ) -> Result<(), Box<dyn Error>> {
-        let address = Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46")?;
+    fn test_creation_reapply_overwrites_existing_account(mock_db: PreCachedDB) {
+        let address =
+            Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46").expect("valid address");
         let slot = U256::from(1);
 
-        mock_db.update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))?;
+        mock_db
+            .update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))
+            .expect("initial snapshot update succeeds");
         // Account is now warm; the outage window ends and a fresh full snapshot arrives.
-        mock_db.update(vec![snapshot(address, &[(1, 999), (2, 42)], 20)], Some(header(2)))?;
+        mock_db
+            .update(vec![snapshot(address, &[(1, 999), (2, 42)], 20)], Some(header(2)))
+            .expect("snapshot reapply succeeds");
 
         assert_eq!(
             mock_db.get_storage(&address, &slot),
@@ -574,20 +575,19 @@ mod tests {
             Some(U256::from(20)),
             "re-applied snapshot must refresh the native balance"
         );
-        Ok(())
     }
 
     /// Contrast case: the continuously-connected path. Per-block deltas arrive as
     /// `ChangeType::Update` and must refresh slots on existing accounts.
     #[rstest]
-    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
-    fn test_delta_update_refreshes_existing_slot(
-        mock_db: PreCachedDB,
-    ) -> Result<(), Box<dyn Error>> {
-        let address = Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46")?;
+    fn test_delta_update_refreshes_existing_slot(mock_db: PreCachedDB) {
+        let address =
+            Address::from_str("0xd51a44d3fae010294c616388b506acda1bfaae46").expect("valid address");
         let slot = U256::from(1);
 
-        mock_db.update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))?;
+        mock_db
+            .update(vec![snapshot(address, &[(1, 100)], 10)], Some(header(1)))
+            .expect("initial snapshot update succeeds");
         let delta = AccountUpdate {
             address,
             chain: Chain::Ethereum,
@@ -596,14 +596,15 @@ mod tests {
             code: None,
             change: ChangeType::Update,
         };
-        mock_db.update(vec![delta], Some(header(2)))?;
+        mock_db
+            .update(vec![delta], Some(header(2)))
+            .expect("delta update succeeds");
 
         assert_eq!(
             mock_db.get_storage(&address, &slot),
             Some(U256::from(200)),
             "delta updates must refresh slots on existing accounts"
         );
-        Ok(())
     }
 
     #[rstest]
@@ -840,7 +841,7 @@ mod tests {
     /// cargo test --package src --lib -- --ignored --exact --nocapture
     /// evm::engine_db::tycho_db::tests::test_tycho_db_connection
     /// ```
-    #[ignore]
+    #[ignore = "requires a running TychoDB instance"]
     #[rstest]
     fn test_tycho_db_connection() {
         tracing_subscriber::fmt()

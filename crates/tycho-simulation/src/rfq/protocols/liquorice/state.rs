@@ -95,6 +95,10 @@ impl PricesAfterFill for LiquoriceState {
 
 #[typetag::serde]
 impl ProtocolSim for LiquoriceState {
+    #[expect(
+        clippy::todo,
+        reason = "the trait method returns no error, and a book has no separate fee to report"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -147,7 +151,9 @@ impl ProtocolSim for LiquoriceState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        todo!()
+        Err(TransitionError::DecodeError(
+            "Liquorice state is snapshot-based and does not support deltas".into(),
+        ))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {

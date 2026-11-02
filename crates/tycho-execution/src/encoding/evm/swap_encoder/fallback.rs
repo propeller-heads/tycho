@@ -121,7 +121,10 @@ impl FallbackProtocol {
             FallbackProtocol::UniswapV2 => &[UNISWAP_V2_FORKS],
             // Slipstream pools use Uniswap V3's `swap` and callback.
             FallbackProtocol::UniswapV3 => &[UNISWAP_V3_FORKS, SLIPSTREAMS_FORKS],
-            _ => &[],
+            FallbackProtocol::UniswapV4 |
+            FallbackProtocol::Curve |
+            FallbackProtocol::FluidV1 |
+            FallbackProtocol::AerodromeV1 => &[],
         }
     }
 

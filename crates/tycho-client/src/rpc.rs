@@ -1429,7 +1429,13 @@ impl HttpRPCClient {
                 }
             }
             RPCError::RateLimited(None) => e.into(),
-            _ => backoff::Error::permanent(e),
+            RPCError::UrlParsing(..) |
+            RPCError::FormatRequest(_) |
+            RPCError::HttpClient(..) |
+            RPCError::ParseResponse(_) |
+            RPCError::StaleBlock(_) |
+            RPCError::UnknownExtractor(_) |
+            RPCError::Fatal(_) => backoff::Error::permanent(e),
         }
     }
 
@@ -2963,7 +2969,9 @@ mod tests {
                 assert_eq!(msg, "Service down");
                 assert_eq!(retry_after, Some(Duration::from_millis(50))); // Fast test duration
             }
-            _ => panic!("Expected transient error for ServerUnreachable"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for ServerUnreachable")
+            }
         }
     }
 
@@ -2984,7 +2992,9 @@ mod tests {
             backoff::Error::Transient { err: RPCError::RateLimited(retry_after), .. } => {
                 assert_eq!(retry_after, Some(future_time));
             }
-            _ => panic!("Expected transient error for RateLimited"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for RateLimited")
+            }
         }
 
         // Verify that retry_after was stored in the client state
@@ -3008,7 +3018,9 @@ mod tests {
             backoff::Error::Transient { err: RPCError::RateLimited(None), .. } => {
                 // This is expected - no retry-after still allows retries with default policy
             }
-            _ => panic!("Expected transient error for RateLimited without retry-after"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected transient error for RateLimited without retry-after")
+            }
         }
     }
 
@@ -3028,7 +3040,9 @@ mod tests {
             backoff::Error::Permanent(RPCError::ParseResponse(msg)) => {
                 assert_eq!(msg, "Invalid JSON");
             }
-            _ => panic!("Expected permanent error for ParseResponse"),
+            backoff::Error::Permanent(_) | backoff::Error::Transient { .. } => {
+                panic!("Expected permanent error for ParseResponse")
+            }
         }
     }
 

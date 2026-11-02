@@ -908,8 +908,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
-    async fn test_subscribe_and_unsubscribe() -> Result<(), String> {
+    async fn test_subscribe_and_unsubscribe() {
         tracing_subscriber::fmt()
             .with_test_writer()
             .try_init()
@@ -1056,13 +1055,10 @@ mod tests {
             .await
             .expect("Failed to send close message");
         debug!("Closed connection");
-
-        Ok(())
     }
 
     #[actix_rt::test]
-    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
-    async fn test_subscribe_with_compression() -> Result<(), String> {
+    async fn test_subscribe_with_compression() {
         tracing_subscriber::fmt()
             .with_test_writer()
             .try_init()
@@ -1156,8 +1152,6 @@ mod tests {
             .await
             .expect("Failed to send close message");
         debug!("Closed connection");
-
-        Ok(())
     }
 
     #[test]
@@ -1391,7 +1385,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::ExtractorNotFound(reported_id) => {
                         assert_eq!(reported_id, extractor_id.into());
                     }
-                    _ => panic!("Expected ExtractorNotFound error, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected ExtractorNotFound error, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1448,7 +1447,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::SubscriptionNotFound(reported_id) => {
                         assert_eq!(reported_id, fake_subscription_id);
                     }
-                    _ => panic!("Expected SubscriptionNotFound error, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected SubscriptionNotFound error, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1506,7 +1510,12 @@ mod tests {
                         assert!(error.contains("EOF while parsing"));
                         assert_eq!(msg, malformed_json)
                     }
-                    _ => panic!("Expected ParseError, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscribeError(_) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected ParseError, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1709,7 +1718,12 @@ mod tests {
                     tycho_common::dto::WebsocketError::SubscribeError(reported_id) => {
                         assert_eq!(reported_id, extractor_id.into());
                     }
-                    _ => panic!("Expected SubscribeError, got: {:?}", error),
+                    other @ tycho_common::dto::WebsocketError::ExtractorNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::SubscriptionNotFound(_) |
+                    other @ tycho_common::dto::WebsocketError::ParseError(..) |
+                    other @ tycho_common::dto::WebsocketError::CompressionError(..) => {
+                        panic!("Expected SubscribeError, got: {:?}", other)
+                    }
                 }
             } else {
                 panic!("Expected error response, got: {:?}", websocket_message);
@@ -1943,8 +1957,7 @@ mod tests {
     /// Verifies that when the last subscription's channel closes, the WS connection itself
     /// is closed — an idle connection with no subscriptions wastes a client connection slot.
     #[actix_rt::test]
-    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
-    async fn test_connection_closed_when_last_subscription_ends() -> Result<(), String> {
+    async fn test_connection_closed_when_last_subscription_ends() {
         tracing_subscriber::fmt()
             .with_test_writer()
             .try_init()
@@ -2002,7 +2015,5 @@ mod tests {
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
             other => panic!("Expected connection close, got: {:?}", other),
         }
-
-        Ok(())
     }
 }

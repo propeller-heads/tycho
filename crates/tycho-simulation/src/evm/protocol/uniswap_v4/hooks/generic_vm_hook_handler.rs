@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Rate limits on Unichain RPC free tier
+    #[ignore = "requires network access to the public Unichain RPC, which is rate limited"]
     fn test_before_and_after_swap() {
         let block = BlockHeader {
             number: 15797251,

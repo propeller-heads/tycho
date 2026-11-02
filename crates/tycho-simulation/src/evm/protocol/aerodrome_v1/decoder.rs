@@ -166,6 +166,7 @@ mod tests {
             "is_stable" => {
                 static_attributes.remove(missing_attribute);
             }
+            #[expect(clippy::unreachable, reason = "the test cases only name the attributes above")]
             _ => unreachable!("unexpected attribute under test: {missing_attribute}"),
         }
 

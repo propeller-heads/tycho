@@ -881,7 +881,9 @@ fn reclamm_pool_with_a_zero_invariant_is_reported_not_panicked() {
             reason.contains("no usable price range"),
             "expected the price-range report, got: {reason}"
         ),
-        other => panic!("expected a recoverable error, got {other:?}"),
+        other @ (SimulationError::FatalError(_) | SimulationError::InvalidInput(..)) => {
+            panic!("expected a recoverable error, got {other:?}")
+        }
     }
 }
 

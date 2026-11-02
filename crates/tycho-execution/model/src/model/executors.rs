@@ -691,35 +691,51 @@ impl Executor {
         _swap_index: u8,
     ) -> Result<CallbackTransferData, Error> {
         match self {
-            Self::Curve => unimplemented!(),
-            Self::ERC4626 => unimplemented!(),
+            Self::Curve => Err(Error::warning("Curve.get_callback_transfer_data is not modeled")),
+            Self::ERC4626 => {
+                Err(Error::warning("ERC4626.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L159
             Self::FluidV1 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 receiver: Address::Named("fluid-v1-liquidity"),
             }),
-            Self::MaverickV2 => unimplemented!(),
+            Self::MaverickV2 => {
+                Err(Error::warning("MaverickV2.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L107
             Self::Slipstreams => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::UniswapV2 => unimplemented!(),
+            Self::UniswapV2 => {
+                Err(Error::warning("UniswapV2.get_callback_transfer_data is not modeled"))
+            }
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L105
             Self::UniswapV3 => Ok(CallbackTransferData {
                 transfer_type: TransferType::Transfer,
                 // called via delegatecall. therefore not the router
                 receiver: state.msg_sender(),
             }),
-            Self::NativeWrap => unimplemented!(),
-            Self::AerodromeV1 => unimplemented!(),
-            Self::LiquidityParty => unimplemented!(),
-            Self::LunarBase => unimplemented!(),
-            Self::PropAMM => unimplemented!(),
-            Self::TychoSubsidizing => {
-                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
+            Self::NativeWrap => {
+                Err(Error::warning("NativeWrap.get_callback_transfer_data is not modeled"))
             }
+            Self::AerodromeV1 => {
+                Err(Error::warning("AerodromeV1.get_callback_transfer_data is not modeled"))
+            }
+            Self::LiquidityParty => {
+                Err(Error::warning("LiquidityParty.get_callback_transfer_data is not modeled"))
+            }
+            Self::LunarBase => {
+                Err(Error::warning("LunarBase.get_callback_transfer_data is not modeled"))
+            }
+            Self::PropAMM => {
+                Err(Error::warning("PropAMM.get_callback_transfer_data is not modeled"))
+            }
+            Self::TychoSubsidizing => Err(Error::warning(
+                "TychoSubsidizing points the callback slot at its inner executor",
+            )),
         }
     }
 
@@ -729,8 +745,8 @@ impl Executor {
     )]
     pub fn handle_callback(&self, _params: &Params, state: &mut State) -> Result<(), Error> {
         match self {
-            Self::Curve => unimplemented!("Curve doesn't use callbacks"),
-            Self::ERC4626 => unimplemented!("ERC4626 doesn't use callbacks"),
+            Self::Curve => Err(Error::warning("Curve doesn't use callbacks")),
+            Self::ERC4626 => Err(Error::warning("ERC4626 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/FluidV1Executor.sol#L117
             Self::FluidV1 => {
                 let dex: Address = state.tload("fluid_v1_current_dex")?;
@@ -739,24 +755,22 @@ impl Executor {
                 }
                 Ok(())
             }
-            Self::MaverickV2 => unimplemented!("MaverickV2 doesn't use callbacks"),
+            Self::MaverickV2 => Err(Error::warning("MaverickV2 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/SlipstreamsExecutor.sol#L60
             // not worth modeling as it has no reverts or side effects
             Self::Slipstreams => Ok(()),
-            Self::UniswapV2 => unimplemented!("UniswapV2 doesn't use callbacks"),
+            Self::UniswapV2 => Err(Error::warning("UniswapV2 doesn't use callbacks")),
             // https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol#L58
             // not worth modeling as it has no reverts or side effects
             Self::UniswapV3 => Ok(()),
-            Self::NativeWrap => unimplemented!("Wrap doesn't use callbacks"),
-            Self::AerodromeV1 => unimplemented!("AerodromeV1 doesn't use callbacks"),
-            Self::LiquidityParty => unimplemented!("LiquidityParty doesn't use callbacks"),
-            Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
-            Self::PropAMM => {
-                unimplemented!("PropAMM doesn't use callbacks")
-            }
-            Self::TychoSubsidizing => {
-                unimplemented!("TychoSubsidizing points the callback slot at its inner executor")
-            }
+            Self::NativeWrap => Err(Error::warning("Wrap doesn't use callbacks")),
+            Self::AerodromeV1 => Err(Error::warning("AerodromeV1 doesn't use callbacks")),
+            Self::LiquidityParty => Err(Error::warning("LiquidityParty doesn't use callbacks")),
+            Self::LunarBase => Err(Error::warning("LunarBase doesn't use callbacks")),
+            Self::PropAMM => Err(Error::warning("PropAMM doesn't use callbacks")),
+            Self::TychoSubsidizing => Err(Error::warning(
+                "TychoSubsidizing points the callback slot at its inner executor",
+            )),
         }
     }
 

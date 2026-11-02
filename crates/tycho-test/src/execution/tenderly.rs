@@ -217,7 +217,7 @@ pub fn get_overwrites_string(
                                         owner, spender, amount
                                     ));
                                 }
-                                _ => {}
+                                SlotMetadata::Balance { .. } | SlotMetadata::Allowance { .. } => {}
                             }
                         }
                     }

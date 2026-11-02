@@ -81,8 +81,9 @@ pub(crate) fn coerce_error(
         SimulationEngineError::StorageError(message) => {
             SimulationError::RecoverableError(message.clone())
         }
-        _ => SimulationError::FatalError(err.clone().to_string()), /* Otherwise return the
-                                                                    * original error */
+        SimulationEngineError::OutOfGas(..) | SimulationEngineError::TraceError(_) => {
+            SimulationError::FatalError(err.clone().to_string())
+        }
     }
 }
 
@@ -252,13 +253,22 @@ pub(crate) async fn get_code_for_contract(
             RpcError::Transport(err) => Err(SimulationError::RecoverableError(format!(
                 "Failed to get code for contract due to internal RPC error: {err:?}"
             ))),
-            _ => Err(SimulationError::FatalError(format!(
+            RpcError::ErrorResp(_) |
+            RpcError::NullResp |
+            RpcError::UnsupportedFeature(_) |
+            RpcError::LocalUsageError(_) |
+            RpcError::SerError(_) |
+            RpcError::DeserError { .. } => Err(SimulationError::FatalError(format!(
                 "Failed to get code for contract. Invalid response from RPC: {e:?}"
             ))),
         },
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "keeps alloy's non-Sync provider future out of the Send + Sync future TryFromWithBlock requires; panics on a current-thread runtime"
+)]
 fn sync_get_code(
     connection_string: &str,
     addr: Address,
@@ -548,7 +558,7 @@ mod tests {
     use crate::utils::hexstring_to_vec;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[cfg_attr(not(feature = "network_tests"), ignore)]
+    #[cfg_attr(not(feature = "network_tests"), ignore = "requires RPC_URL")]
     async fn test_get_code_for_address() {
         let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| {
             dotenv().expect("Missing .env file");

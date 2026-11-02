@@ -313,7 +313,7 @@ mod tests {
     /// --fork-url <RPC-URL> And set up the following env var as RPC_URL=127.0.0.1:8545
     /// Use an account from anvil to fill the anvil_account and anvil_private_key variables
     #[test]
-    #[cfg_attr(not(feature = "fork-tests"), ignore)]
+    #[cfg_attr(not(feature = "fork-tests"), ignore = "requires an Anvil fork at RPC_URL")]
     fn test_permit() {
         let anvil_account = Bytes::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap();
         let anvil_private_key =

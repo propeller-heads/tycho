@@ -223,6 +223,10 @@ impl RocketpoolState {
 
 #[typetag::serde]
 impl ProtocolSim for RocketpoolState {
+    #[expect(
+        clippy::unimplemented,
+        reason = "fee() returns no error and the trait documents the panic for asymmetric fees"
+    )]
     fn fee(&self) -> f64 {
         unimplemented!("Rocketpool has asymmetric fees; use spot_price or get_amount_out instead")
     }

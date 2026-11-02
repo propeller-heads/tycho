@@ -1789,7 +1789,9 @@ where
 
     #[instrument(skip_all)]
     async fn handle_progress(&self, _inp: ModulesProgress) -> Result<(), ExtractionError> {
-        todo!()
+        Err(ExtractionError::Unknown(
+            "handle_progress is not supported by ProtocolExtractor".to_string(),
+        ))
     }
 }
 pub struct ExtractorPgGateway {
@@ -2012,7 +2014,6 @@ impl ExtractorGateway for ExtractorPgGateway {
         let mut account_changes: Vec<(Bytes, AccountDelta)> = vec![];
         let mut component_balance_changes: Vec<ComponentBalance> = vec![];
         let mut account_balance_changes: Vec<AccountBalance> = vec![];
-        let mut protocol_tokens: HashSet<Bytes> = HashSet::new();
         let mut new_entrypoints: HashMap<ComponentId, HashSet<EntryPoint>> = HashMap::new();
         let mut new_entrypoint_params: HashMap<
             EntryPointId,
@@ -2032,7 +2033,6 @@ impl ExtractorGateway for ExtractorPgGateway {
             // Map new protocol components
             for new_protocol_component in tx_update.protocol_components.values() {
                 new_protocol_components.push(new_protocol_component.clone());
-                protocol_tokens.extend(new_protocol_component.tokens.clone());
             }
 
             // Map new accounts/contracts
@@ -2857,13 +2857,13 @@ mod test {
             broadcast.push(message.block.number);
         }
 
-        if let Some(handle) = extractor
+        let commit_handle = extractor
             .gateway
             .commit_handle
             .lock()
             .await
-            .take()
-        {
+            .take();
+        if let Some(handle) = commit_handle {
             handle.await.unwrap().unwrap();
         }
 
@@ -2981,6 +2981,10 @@ mod test {
             100,
         );
         let ret = vec![t3.clone()];
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test runs on a multi-thread runtime (`flavor = \"multi_thread\"`)"
+        )]
         preprocessor
             .expect_get_tokens()
             .return_once(|_, balance_owner_store, _| {
@@ -5756,7 +5760,7 @@ mod test_serial_db {
     }
 
     // Tests a forward call with a native contract creation and an account update
-    #[ignore]
+    #[ignore = "requires a running Postgres"]
     #[tokio::test]
     async fn test_forward_native_protocol() {
         run_against_db(|pool| async move {
@@ -5937,7 +5941,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor.gateway.commit_handle.lock().await.take() {
+            let commit_handle = extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 
@@ -6123,7 +6133,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor.gateway.commit_handle.lock().await.take() {
+            let commit_handle = extractor
+                .gateway
+                .commit_handle
+                .lock()
+                .await
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 
@@ -6365,13 +6381,13 @@ mod test_serial_db {
             }
 
             // Wait for the extractor to finish processing
-            if let Some(handle) = extractor
+            let commit_handle = extractor
                 .gateway
                 .commit_handle
                 .lock()
                 .await
-                .take()
-            {
+                .take();
+            if let Some(handle) = commit_handle {
                 handle.await.unwrap().unwrap();
             }
 

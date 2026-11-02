@@ -124,7 +124,9 @@ fn default_stablecoin(chain: Chain) -> &'static str {
         Chain::Bsc => "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
         Chain::Polygon => "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
         Chain::Robinhood => "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
-        _ => panic!("No default sell token for chain {chain}. Please pass --sell-token."),
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {
+            panic!("No default sell token for chain {chain}. Please pass --sell-token.")
+        }
     }
 }
 
@@ -279,7 +281,7 @@ async fn main() {
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
         }
-        _ => {}
+        Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Arc | Chain::Custom(_) | _ => {}
     }
 
     let protocol_stream = protocol_stream
