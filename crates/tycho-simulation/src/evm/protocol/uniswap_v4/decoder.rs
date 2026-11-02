@@ -61,7 +61,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             .ok_or_else(|| InvalidSnapshotError::MissingAttribute("liquidity".to_string()))?
             .clone();
 
-        let liquidity = u128::from(liq);
+        let liquidity = u128::try_from(liq)?;
 
         let sqrt_price = U256::from_be_slice(
             snapshot
@@ -71,16 +71,16 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("sqrt_price".to_string()))?,
         );
 
-        let lp_fee = u32::from(
+        let lp_fee = u32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("key_lp_fee")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("key_lp_fee".to_string()))?
                 .clone(),
-        );
+        )?;
 
-        let zero2one_protocol_fee = u32::from(
+        let zero2one_protocol_fee = u32::try_from(
             snapshot
                 .state
                 .attributes
@@ -89,8 +89,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     InvalidSnapshotError::MissingAttribute("protocol_fees/zero2one".to_string())
                 })?
                 .clone(),
-        );
-        let one2zero_protocol_fee = u32::from(
+        )?;
+        let one2zero_protocol_fee = u32::try_from(
             snapshot
                 .state
                 .attributes
@@ -99,19 +99,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     InvalidSnapshotError::MissingAttribute("protocol_fees/one2zero".to_string())
                 })?
                 .clone(),
-        );
+        )?;
 
         let fees: UniswapV4Fees =
             UniswapV4Fees::new(zero2one_protocol_fee, one2zero_protocol_fee, lp_fee);
 
-        let tick_spacing: i32 = i32::from(
+        let tick_spacing: i32 = i32::try_from(
             snapshot
                 .component
                 .static_attributes
                 .get("tick_spacing")
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("tick_spacing".to_string()))?
                 .clone(),
-        );
+        )?;
 
         let tick = i24_be_bytes_to_i32(
             snapshot
@@ -133,7 +133,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                             .parse::<i32>()
                             .map_err(|err| InvalidSnapshotError::ValueError(err.to_string()))
                             .and_then(|tick_index| {
-                                TickInfo::new(tick_index, i128::from(value.clone())).map_err(
+                                TickInfo::new(tick_index, i128::try_from(value.clone())?).map_err(
                                     |err| InvalidSnapshotError::ValueError(err.to_string()),
                                 )
                             }),
@@ -962,6 +962,26 @@ mod tests {
             panic!("a 19-byte hooks attribute must not decode");
         };
         assert!(message.contains("hooks"), "{message}");
+    }
+
+    /// A `liquidity` attribute longer than a `u128` is a bad snapshot, not a panic: the stream
+    /// decoder logs the component and skips it, and every other pool keeps decoding.
+    #[tokio::test]
+    async fn oversized_liquidity_attribute_is_rejected_without_panicking() {
+        let mut snapshot = hookless_snapshot_with_hook(ZERO_HOOK);
+        let address_sized = Bytes::from(vec![0x11_u8; 20]);
+        snapshot
+            .state
+            .attributes
+            .insert("liquidity".to_string(), address_sized.clone());
+
+        let result = decode_with_chain(snapshot, Some(Chain::Ethereum)).await;
+
+        let Err(InvalidSnapshotError::ValueError(message)) = result else {
+            panic!("a 20-byte liquidity attribute must not decode");
+        };
+        assert!(message.contains(&address_sized.to_string()), "{message}");
+        assert!(message.contains("u128"), "{message}");
     }
 
     #[tokio::test]
