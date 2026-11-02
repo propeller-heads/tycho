@@ -1,3 +1,28 @@
+## [0.496.0](https://github.com/propeller-heads/tycho/compare/0.495.2...0.496.0) (2026-11-02)
+
+
+### Features
+
+* add Biconomy PropAMM venue on Base ([#1575](https://github.com/propeller-heads/tycho/issues/1575)) ([bc070d9](https://github.com/propeller-heads/tycho/commit/bc070d9aaa464936c1865ef3780f1eb5371c7835))
+* **execution:** route the Biconomy venue on Base through PropAMMExecutor ([b2c4aad](https://github.com/propeller-heads/tycho/commit/b2c4aad331b375890305a24ba0361aa82b7ed1b9))
+* **simulation:** add the Biconomy venue state ([066103f](https://github.com/propeller-heads/tycho/commit/066103f8574e79ecd8bd645793cbb2ac89b86f6d))
+* **simulation:** keep Biconomy boards dark when the provider stops serving ([8e027bc](https://github.com/propeller-heads/tycho/commit/8e027bc11ed1d5aa13ede6c4c588a76a82871e07))
+* **substreams:** index the Biconomy venue on Base ([15ca032](https://github.com/propeller-heads/tycho/commit/15ca0327bf47100aafaed63d97019c63d98b3d7e))
+* **substreams:** track 10 tokenized stocks through the B20 layout ([da885cd](https://github.com/propeller-heads/tycho/commit/da885cd3f30e8a5502ce7b793488c4bcfc0107d3))
+* **substreams:** track Biconomy provider state and inventory balances ([4fc67d6](https://github.com/propeller-heads/tycho/commit/4fc67d6281ac31253dca332b2eb41acc50ce947e))
+* **substreams:** track EURC, USDT, cbETH, wstETH and AERO ([52b3ee7](https://github.com/propeller-heads/tycho/commit/52b3ee7fa1ce2485ef289d58115724dd64b40d35))
+
+
+### Bug Fixes
+
+* **execution:** reject consecutive swaps on the same Biconomy venue ([97c1ce1](https://github.com/propeller-heads/tycho/commit/97c1ce12ada5ac1d19e08f72e560080beac16dce))
+* **simulation:** match the venue on limits, executor approval and spot price ([c6acc64](https://github.com/propeller-heads/tycho/commit/c6acc646701b4559973f55366ffa48ec0648c928))
+* **simulation:** price Biconomy pool swaps on the forward merge ([de421e4](https://github.com/propeller-heads/tycho/commit/de421e48cc13684d9122ae8a2f1bf10e141b2db9))
+* **substreams:** create the Biconomy component without contracts ([525b3ba](https://github.com/propeller-heads/tycho/commit/525b3baa31f996e0782496c8255459c8a2e9bef2))
+* **substreams:** one storage pass per tx, and fail on a missed creation ([1ba29f9](https://github.com/propeller-heads/tycho/commit/1ba29f9fa4ac1b6a0b570e613cd6ed78e8add42d))
+* **substreams:** track the new AERO through Solady's ERC20 slots ([f06b4d2](https://github.com/propeller-heads/tycho/commit/f06b4d2c00cbb9585795c550006eaa8c117f2e97))
+* **testing:** map the biconomy protocol to its runtime fixture ([1119bb2](https://github.com/propeller-heads/tycho/commit/1119bb2f6eb5d41e9e4fbca71988bc028cb9cc3c))
+
 ## [0.495.2](https://github.com/propeller-heads/tycho/compare/0.495.1...0.495.2) (2026-11-02)
 
 
