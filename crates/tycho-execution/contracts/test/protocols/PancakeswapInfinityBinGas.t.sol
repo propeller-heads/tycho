@@ -1,15 +1,11 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
-import "../TestUtils.sol";
+import "../TychoRouterTestSetup.sol";
 import "forge-std/console2.sol";
-import "@src/executors/PancakeswapInfinityExecutor.sol";
-import {Constants} from "../Constants.sol";
+import {InfinityPoolKey} from "@src/executors/PancakeswapInfinityExecutor.sol";
 import {
-    PancakeswapInfinityExecutorExposed,
     binSwapData,
-    INFINITY_VAULT,
-    INFINITY_CL_POOL_MANAGER,
     INFINITY_BIN_POOL_MANAGER,
     INFINITY_FORK_BLOCK,
     BASE_USDT
@@ -22,20 +18,32 @@ interface IBinSlot0 {
         returns (uint24 activeId, uint24 protocolFee, uint24 lpFee);
 }
 
-/// Measures the executor's gas per Bin swap against the bins it crossed, on the live USDC/USDT
-/// pool in both directions, to calibrate the simulation's `SWAP_BASE_GAS` and
-/// `GAS_PER_BIN_CROSSED` (`pancakeswap_infinity_bin/state.rs`). Logs only, run with `-vv`; the
-/// constants were fit by least squares to its output. Sizes past the pool's depth revert
-/// `BinPool__OutOfLiquidity` and are logged as such.
-contract PancakeswapInfinityBinGasTest is Constants, TestUtils {
-    PancakeswapInfinityExecutorExposed executor;
+/// Pins the simulation's Bin gas model, `SWAP_BASE_GAS + GAS_PER_BIN_CROSSED * bins crossed`
+/// (`pancakeswap_infinity_bin/state.rs`), against swaps through the TychoRouter on the live
+/// USDC/USDT pool in both directions, crossing 0 to 21 bins. The model prices a `singleSwap`
+/// paid by `transferFrom`: the executor is a callback protocol, so the gas estimator adds
+/// nothing for the user's transfer and the quote has to carry it. The constants are the least
+/// squares fit to this test's output; run with `-vv` to see the measurements.
+contract PancakeswapInfinityBinGasTest is TychoRouterTestSetup {
+    uint256 constant SWAP_BASE_GAS = 202_000;
+    uint256 constant GAS_PER_BIN_CROSSED = 12_100;
+    /// Residual the fit allows per swap. The USDC side costs about 6k more than the USDT side,
+    /// which the one base absorbs. The bins on this pool are contiguous, so the active id before
+    /// minus after is the number of bins crossed.
+    uint256 constant TOLERANCE = 6_000;
+
     bytes32 poolId;
 
-    function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("base"), INFINITY_FORK_BLOCK);
-        executor = new PancakeswapInfinityExecutorExposed(
-            INFINITY_VAULT, INFINITY_CL_POOL_MANAGER, INFINITY_BIN_POOL_MANAGER
-        );
+    function getChain() public pure override returns (string memory) {
+        return "base";
+    }
+
+    function getForkBlock() public pure override returns (uint256) {
+        return INFINITY_FORK_BLOCK;
+    }
+
+    function setUp() public override {
+        super.setUp();
         poolId = keccak256(
             abi.encode(
                 InfinityPoolKey({
@@ -48,12 +56,18 @@ contract PancakeswapInfinityBinGasTest is Constants, TestUtils {
                 })
             )
         );
+        // ALICE holds both tokens, as a trader would, so no balance slot goes between zero and
+        // non-zero inside the measured call.
+        deal(BASE_USDC, ALICE, 1_000e6);
+        deal(BASE_USDT, ALICE, 1_000e6);
     }
 
     function activeId() internal view returns (uint24 id) {
         (id,,) = IBinSlot0(INFINITY_BIN_POOL_MANAGER).getSlot0(poolId);
     }
 
+    /// Swaps `amount` through the router and checks the gas against the model when the pool
+    /// can fill it; past its depth the pool must revert BinPool__OutOfLiquidity.
     function measure(
         address tokenIn,
         address tokenOut,
@@ -62,31 +76,45 @@ contract PancakeswapInfinityBinGasTest is Constants, TestUtils {
     ) internal {
         uint256 snapshot = vm.snapshotState();
         uint24 before = activeId();
-        deal(tokenIn, address(executor), amount);
+        bytes memory swap = encodeSingleSwap(
+            address(pancakeswapInfinityExecutor),
+            binSwapData(tokenIn, tokenOut, zeroForOne, 7)
+        );
+
+        vm.startPrank(ALICE);
+        IERC20(tokenIn).approve(tychoRouterAddr, amount);
         uint256 g0 = gasleft();
-        try executor.swap(
-            amount, binSwapData(tokenIn, tokenOut, zeroForOne, 7), ALICE
+        try tychoRouter.singleSwap(
+            amount, tokenIn, tokenOut, 1, 1, ALICE, noClientFee(), swap
         ) {
             uint256 used = g0 - gasleft();
             uint24 after_ = activeId();
             uint256 crossed =
                 before > after_ ? before - after_ : after_ - before;
+            uint256 modelled = SWAP_BASE_GAS + GAS_PER_BIN_CROSSED * crossed;
             console2.log(
                 "%s amount %s gas %s",
                 zeroForOne ? "x->y" : "y->x",
                 amount,
                 used
             );
-            console2.log("  crossed %s", crossed);
-        } catch {
+            console2.log("  crossed %s modelled %s", crossed, modelled);
+            assertApproxEqAbs(used, modelled, TOLERANCE, "gas off the model");
+        } catch (bytes memory reason) {
             console2.log(
                 "%s amount %s reverted", zeroForOne ? "x->y" : "y->x", amount
             );
+            assertEq(
+                bytes4(reason),
+                bytes4(keccak256("BinPool__OutOfLiquidity()")),
+                "not an out-of-liquidity revert"
+            );
         }
+        vm.stopPrank();
         vm.revertToState(snapshot);
     }
 
-    function testMeasureBinSwapGas() public {
+    function testBinSwapGasFitsTheModel() public {
         uint256[10] memory amounts = [
             uint256(1e6),
             3e6,

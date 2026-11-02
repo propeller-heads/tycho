@@ -33,14 +33,15 @@ use crate::evm::protocol::{
     utils::add_fee_markup,
 };
 
-// Measured through the executor on a Base fork (`PancakeswapInfinityBinGas.t.sol`): twelve swaps
-// on the USDC/USDT pool in both directions, crossing 0 to 21 bins, fit by least squares to
-// 165.8k + 12.1k per bin crossed, residuals within 5k. Executor scope: the Vault lock, settle and
-// take are in, the router's own transfers and balance checks are not. A quote's gas becomes
-// `Swap::estimated_gas`, which the encoder sums into `EncodedSolution::estimated_gas`, so these
-// size the solution's gas as well as ranking routes.
-const SWAP_BASE_GAS: u64 = 165_000;
-const GAS_PER_BIN_CROSSED: u64 = 12_000;
+// Measured through the TychoRouter on a Base fork (`PancakeswapInfinityBinGas.t.sol`, which
+// pins them): `singleSwap` paid by `transferFrom` on the USDC/USDT pool in both directions,
+// crossing 0 to 21 bins, fit by least squares to 202.2k + 12.1k per bin crossed, residuals within
+// 6k. The router's work and the user's transfer are in scope on purpose: the executor is a
+// callback protocol, so the gas estimator adds nothing for the transfer and the quote has to carry
+// it. A quote's gas becomes `Swap::estimated_gas`, which the encoder sums into
+// `EncodedSolution::estimated_gas`, so these size the solution's gas as well as ranking routes.
+const SWAP_BASE_GAS: u64 = 202_000;
+const GAS_PER_BIN_CROSSED: u64 = 12_100;
 
 /// A PancakeSwap Infinity Bin pool.
 ///
@@ -947,7 +948,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(999_900u64));
-        assert_eq!(result.gas, BigUint::from(165_000u64));
+        assert_eq!(result.gas, BigUint::from(202_000u64));
     }
 
     /// On chain the amount is an `int128`, so anything above that is rejected, not truncated.
@@ -1006,7 +1007,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount, BigUint::from(1_997u64));
-        assert_eq!(result.gas, BigUint::from(177_000u64), "base plus one crossing");
+        assert_eq!(result.gas, BigUint::from(214_100u64), "base plus one crossing");
     }
 
     /// Priced at bin `2^23 + 100` rather than 1.0, so an inverted ratio is visible, and against an
