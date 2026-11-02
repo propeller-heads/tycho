@@ -107,25 +107,19 @@ impl PostgresGateway {
         let mut pc_entry_point_links = Vec::new();
 
         for (pc_ext_id, eps) in new_data.iter() {
-            let pc_id = match pc_ids.get(pc_ext_id) {
-                Some(_id) => _id,
-                None => {
-                    return Err(StorageError::NotFound(
-                        "ProtocolComponent".to_string(),
-                        pc_ext_id.to_string(),
-                    ));
-                }
+            let Some(pc_id) = pc_ids.get(pc_ext_id) else {
+                return Err(StorageError::NotFound(
+                    "ProtocolComponent".to_string(),
+                    pc_ext_id.to_string(),
+                ));
             };
 
             for ep in eps.iter() {
-                let ep_id = match entry_point_ids.get(&ep.external_id) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "EntryPoint".to_string(),
-                            ep.external_id.clone(),
-                        ));
-                    }
+                let Some(ep_id) = entry_point_ids.get(&ep.external_id) else {
+                    return Err(StorageError::NotFound(
+                        "EntryPoint".to_string(),
+                        ep.external_id.clone(),
+                    ));
                 };
 
                 pc_entry_point_links.push(NewProtocolComponentUsesEntryPoint {
@@ -244,24 +238,18 @@ impl PostgresGateway {
         let mut pc_tracing_params_links = Vec::new();
         for (ep_id, set) in new_data.iter() {
             for (params, pc_ext_id) in set.iter() {
-                let pc_id = match pc_ids.get(pc_ext_id.as_str()) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "ProtocolComponent".to_string(),
-                            pc_ext_id.to_string(),
-                        ));
-                    }
+                let Some(pc_id) = pc_ids.get(pc_ext_id.as_str()) else {
+                    return Err(StorageError::NotFound(
+                        "ProtocolComponent".to_string(),
+                        pc_ext_id.to_string(),
+                    ));
                 };
 
-                let params_id = match params_ids.get(&(ep_id.clone(), params.clone())) {
-                    Some(_id) => _id,
-                    None => {
-                        return Err(StorageError::NotFound(
-                            "EntryPointTracingParams".to_string(),
-                            format!("{ep_id:?}, {params:?}"),
-                        ));
-                    }
+                let Some(params_id) = params_ids.get(&(ep_id.clone(), params.clone())) else {
+                    return Err(StorageError::NotFound(
+                        "EntryPointTracingParams".to_string(),
+                        format!("{ep_id:?}, {params:?}"),
+                    ));
                 };
 
                 pc_tracing_params_links.push(NewProtocolComponentHasEntryPointTracingParams {

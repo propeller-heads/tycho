@@ -835,14 +835,8 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             .as_any()
             .downcast_ref::<AerodromeSlipstreamsState>()
         {
-            let self_fee = match self.get_fee() {
-                Ok(fee) => fee,
-                Err(_) => return false,
-            };
-            let other_fee = match other_state.get_fee() {
-                Ok(fee) => fee,
-                Err(_) => return false,
-            };
+            let Ok(self_fee) = self.get_fee() else { return false };
+            let Ok(other_fee) = other_state.get_fee() else { return false };
 
             self.liquidity == other_state.liquidity &&
                 self.sqrt_price == other_state.sqrt_price &&

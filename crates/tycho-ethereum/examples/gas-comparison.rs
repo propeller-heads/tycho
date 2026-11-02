@@ -176,12 +176,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            let gas_used = match receipt["gasUsed"]
+            let Some(gas_used) = receipt["gasUsed"]
                 .as_str()
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            {
-                Some(g) => g,
-                None => continue,
+            else {
+                continue
             };
 
             on_chain_gas.push(gas_used);

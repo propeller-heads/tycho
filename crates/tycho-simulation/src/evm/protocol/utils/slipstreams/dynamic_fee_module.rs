@@ -269,17 +269,15 @@ fn calculate_dynamic_fee(
     // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
     // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
     // component instead of failing the whole quote.
-    let observed = match observations.observe(
+    let Ok(observed) = observations.observe(
         blocktime,
         &[DEFAULT_SECONDS_AGO, 0],
         current_tick,
         observation_index,
         liquidity,
         observation_cardinality,
-    ) {
-        Ok(observed) => observed,
-        // The on-chain try/catch still paid for the attempted observe.
-        Err(_) => return Ok((0, true)),
+    ) else {
+        return Ok((0, true))
     };
     let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {

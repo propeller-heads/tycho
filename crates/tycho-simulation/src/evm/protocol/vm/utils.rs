@@ -89,9 +89,8 @@ pub(crate) fn coerce_error(
 fn parse_solidity_error_message(data: &str) -> String {
     // 10 for "0x" + 8 hex chars error signature
     if data.len() >= 10 {
-        let data_bytes = match Vec::from_hex(&data[2..]) {
-            Ok(bytes) => bytes,
-            Err(_) => return format!("Failed to decode: {data}"),
+        let Ok(data_bytes) = Vec::from_hex(&data[2..]) else {
+            return format!("Failed to decode: {data}")
         };
 
         // Check for specific error selectors:
@@ -231,13 +230,10 @@ pub(crate) async fn get_code_for_contract(
     // Get the connection string, defaulting to the RPC_URL environment variable
     let connection_string = connection_string.or_else(|| env::var("RPC_URL").ok());
 
-    let connection_string = match connection_string {
-        Some(url) => url,
-        None => {
-            return Err(SimulationError::FatalError(
-                "RPC_URL environment variable is not set".to_string(),
-            ))
-        }
+    let Some(connection_string) = connection_string else {
+        return Err(SimulationError::FatalError(
+            "RPC_URL environment variable is not set".to_string(),
+        ))
     };
 
     let addr = Address::from_str(address)

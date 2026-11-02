@@ -154,14 +154,11 @@ impl SwapEncoder for LiquoriceSwapEncoder {
                         ))
                     })
             })?;
-        let (allowance_token, allowance_spender) = match allowances[..] {
-            [(token, spender, _)] => (token, spender),
-            _ => {
-                return Err(EncodingError::InvalidInput(format!(
-                    "Liquorice quote requires {} approvals, but the router grants one",
-                    allowances.len()
-                )))
-            }
+        let [(allowance_token, allowance_spender, _)] = allowances[..] else {
+            return Err(EncodingError::InvalidInput(format!(
+                "Liquorice quote requires {} approvals, but the router grants one",
+                allowances.len()
+            )))
         };
         if allowance_spender != self.balance_manager_address {
             return Err(EncodingError::InvalidInput(format!(

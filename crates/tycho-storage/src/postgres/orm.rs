@@ -2091,13 +2091,10 @@ impl EntryPointTracingParams {
             .filter_map(|(ext_id, tracing_type, params, id)| {
                 let tracing_params = match tracing_type {
                     EntryPointTracingType::RpcTracer => {
-                        let params_value = match params {
-                            Some(params) => params,
-                            None => {
-                                return Some(Err(StorageError::Unexpected(
-                                    "Data should be Some for RpcTracer".to_string(),
-                                )));
-                            }
+                        let Some(params_value) = params else {
+                            return Some(Err(StorageError::Unexpected(
+                                "Data should be Some for RpcTracer".to_string(),
+                            )));
                         };
 
                         match serde_json::from_value(params_value) {

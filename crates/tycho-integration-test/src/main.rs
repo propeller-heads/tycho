@@ -918,7 +918,7 @@ async fn poll_rpc_for_block(
     poll_interval: Duration,
 ) -> miette::Result<BlockPollResult> {
     for attempt in 0..max_attempts {
-        let block = match rpc_tools
+        let Some(block) = rpc_tools
             .provider
             .get_block_by_number(block_tag)
             .await
@@ -926,19 +926,16 @@ async fn poll_rpc_for_block(
             .wrap_err("Failed to fetch block")
             .ok()
             .flatten()
-        {
-            Some(b) => b,
-            None => {
-                warn!(
-                    "Failed to retrieve {block_tag} block (attempt {}/{})",
-                    attempt + 1,
-                    max_attempts
-                );
-                if attempt < max_attempts - 1 {
-                    tokio::time::sleep(poll_interval).await;
-                }
-                continue;
+        else {
+            warn!(
+                "Failed to retrieve {block_tag} block (attempt {}/{})",
+                attempt + 1,
+                max_attempts
+            );
+            if attempt < max_attempts - 1 {
+                tokio::time::sleep(poll_interval).await;
             }
+            continue;
         };
 
         let rpc_block = block.header.number;
