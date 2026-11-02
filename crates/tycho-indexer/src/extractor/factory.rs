@@ -594,7 +594,7 @@ dci_plugin:
             DCIType::UniswapV4Hooks { pool_manager_address } => {
                 assert_eq!(pool_manager_address, "0x000000000004444c5dc75cB358380D2e3dE08A90");
             }
-            _ => panic!("Expected UniswapV4Hooks DCI plugin but got RPC"),
+            DCIType::RPC => panic!("Expected UniswapV4Hooks DCI plugin but got RPC"),
         }
     }
 }

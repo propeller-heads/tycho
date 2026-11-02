@@ -163,7 +163,7 @@ impl SignaturesIdentifier {
             .iter()
             .filter_map(|s| match s {
                 SelectorKind::Function(sel) => Some(*sel),
-                _ => None,
+                SelectorKind::Event(_) => None,
             })
             .collect();
 
@@ -171,7 +171,7 @@ impl SignaturesIdentifier {
             .iter()
             .filter_map(|s| match s {
                 SelectorKind::Event(topic) => Some(*topic),
-                _ => None,
+                SelectorKind::Function(_) => None,
             })
             .collect();
 

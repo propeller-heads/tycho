@@ -279,7 +279,7 @@ where
                         let no = *no as u64;
                         Box::new(move |b: &BlockAggregatedChanges| b.block.number == no)
                     }
-                    _ => return None,
+                    BlockIdentifier::Latest(_) => return None,
                 };
                 pending
                     .search_block(&predicate, protocol_system)

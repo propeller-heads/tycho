@@ -853,7 +853,7 @@ mod tests {
                         println!("Limits request failed: {:?}", result);
                     }
                 }
-                _ => {}
+                MetadataRequestType::Tvl => {}
             }
         }
 

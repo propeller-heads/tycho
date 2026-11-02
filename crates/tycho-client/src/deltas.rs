@@ -650,7 +650,7 @@ impl WsDeltasClient {
                                             )
                                             .await?;
                                         }
-                                        _ => {
+                                        WebSocketMessage::Response(_) => {
                                             error!(
                                                 "Received unsupported compressed WebSocketMessage variant. \nMessage: {ws_message:?}",
                                             );
