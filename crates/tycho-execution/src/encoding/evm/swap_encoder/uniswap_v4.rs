@@ -81,14 +81,11 @@ impl SwapEncoder for UniswapV4SwapEncoder {
 
         let fee = get_static_attribute(swap, "key_lp_fee")?;
 
-        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee)
-            .map_err(|_| EncodingError::FatalError("Failed to pad fee bytes".to_string()))?;
+        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee);
 
         let tick_spacing = get_static_attribute(swap, "tick_spacing")?;
 
-        let pool_tick_spacing_u24 = pad_or_truncate_to_size::<3>(&tick_spacing).map_err(|_| {
-            EncodingError::FatalError("Failed to pad tick spacing bytes".to_string())
-        })?;
+        let pool_tick_spacing_u24 = pad_or_truncate_to_size::<3>(&tick_spacing);
 
         let hook_address = match get_static_attribute(swap, "hooks") {
             Ok(hook) => Address::from_slice(&hook),

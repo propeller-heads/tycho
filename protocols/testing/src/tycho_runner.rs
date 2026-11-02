@@ -120,7 +120,7 @@ impl TychoRunner {
         Ok(())
     }
 
-    pub fn start_rpc_server(&self) -> miette::Result<TychoRpcServer> {
+    pub fn start_rpc_server(&self) -> TychoRpcServer {
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let db_url = self.db_url.clone();
         let server_port = self.server_port.to_string();
@@ -168,7 +168,7 @@ impl TychoRunner {
         // Give the RPC server time to start
         thread::sleep(Duration::from_secs(3));
 
-        Ok(TychoRpcServer { sender: tx, thread_handle })
+        TychoRpcServer { sender: tx, thread_handle }
     }
 
     pub fn stop_rpc_server(&self, server: TychoRpcServer) -> miette::Result<()> {
@@ -203,7 +203,7 @@ impl TychoRunner {
             protocol_type_names,
             protocol_system,
             module_name,
-        )?;
+        );
 
         let mut temp_file = NamedTempFile::new()
             .into_diagnostic()
@@ -276,7 +276,7 @@ impl TychoRunner {
         protocol_type_names: &[String],
         protocol_system: &str,
         module_name: Option<String>,
-    ) -> miette::Result<String> {
+    ) -> String {
         let protocol_types = protocol_type_names
             .iter()
             .map(|name| format!("    - name: \"{}\"\n      financial_type: Swap", name))
@@ -311,7 +311,7 @@ impl TychoRunner {
             initialized_accounts_section
         );
 
-        Ok(config)
+        config
     }
 
     // Helper method to handle process output in separate threads

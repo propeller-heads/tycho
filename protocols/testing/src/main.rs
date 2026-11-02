@@ -175,20 +175,19 @@ struct Version {
 }
 
 impl Version {
-    fn from_env() -> miette::Result<Self> {
+    fn from_env() -> Self {
         let version = option_env!("CARGO_PKG_VERSION")
             .unwrap_or("unknown")
             .to_string();
         let hash = option_env!("GIT_HASH")
             .unwrap_or("unknown")
             .to_string();
-        Ok(Self { version, hash })
+        Self { version, hash }
     }
 
     fn clap_long() -> &'static str {
         Box::leak(
             Self::from_env()
-                .expect("Failed to get binary version")
                 .to_string()
                 .into_boxed_str(),
         )

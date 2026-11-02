@@ -51,11 +51,9 @@ impl SwapEncoder for PancakeswapInfinitySwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let fee = get_static_attribute(swap, "key_lp_fee")?;
-        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee)
-            .map_err(|e| EncodingError::FatalError(format!("key_lp_fee is not a u24: {e}")))?;
+        let pool_fee_u24 = pad_or_truncate_to_size::<3>(&fee);
         let parameters = get_static_attribute(swap, "parameters")?;
-        let parameters = pad_or_truncate_to_size::<32>(&parameters)
-            .map_err(|e| EncodingError::FatalError(format!("parameters is not a bytes32: {e}")))?;
+        let parameters = pad_or_truncate_to_size::<32>(&parameters);
         let hook_address = match get_static_attribute(swap, "hook_address") {
             Ok(hook) => bytes_to_address(&Bytes::from(hook))?,
             Err(_) => Address::ZERO,

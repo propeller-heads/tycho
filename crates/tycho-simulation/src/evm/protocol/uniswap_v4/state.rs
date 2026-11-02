@@ -458,11 +458,7 @@ impl UniswapV4State {
         }
     }
 
-    fn find_limits_experimentally(
-        &self,
-        token_in: Bytes,
-        token_out: Bytes,
-    ) -> Result<(BigUint, BigUint), SimulationError> {
+    fn find_limits_experimentally(&self, token_in: Bytes, token_out: Bytes) -> (BigUint, BigUint) {
         // Create dummy token objects with proper addresses. This is fine since `get_amount_out`
         // only uses the token addresses.
         let token_in_obj =
@@ -485,11 +481,7 @@ impl UniswapV4State {
     /// # Returns
     ///
     /// Returns a tuple containing the max amount in and max amount out respectively.
-    fn find_max_amount(
-        &self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<(BigUint, BigUint), SimulationError> {
+    fn find_max_amount(&self, token_in: &Token, token_out: &Token) -> (BigUint, BigUint) {
         let mut low = BigUint::from(1u64);
 
         // The max you can swap on a USV4 is I256::MAX is 5.7e76, since input amount is I256.
@@ -510,7 +502,7 @@ impl UniswapV4State {
 
             // Stop if we're getting too large for I256 (about 10^75)
             if high > BigUint::from(10u64).pow(75) {
-                return Ok((last_successful_amount_in, last_successful_amount_out));
+                return (last_successful_amount_in, last_successful_amount_out);
             }
         }
 
@@ -530,7 +522,7 @@ impl UniswapV4State {
             }
         }
 
-        Ok((last_successful_amount_in, last_successful_amount_out))
+        (last_successful_amount_in, last_successful_amount_out)
     }
 
     /// Helper method to check if there are no initialized ticks in either direction
@@ -884,7 +876,7 @@ impl ProtocolSim for UniswapV4State {
                     {
                         // Hook manages liquidity but doesn't have get_amount_ranges
                         // Use binary search to find limits by calling swap with increasing amounts
-                        return self.find_limits_experimentally(token_in, token_out);
+                        return Ok(self.find_limits_experimentally(token_in, token_out));
                         // Otherwise fall back to default implementation
                     }
                     Err(e) => return Err(e),
@@ -2769,9 +2761,7 @@ mod tests {
         let token_in = usdc();
         let token_out = weth();
 
-        let (max_amount_in, _max_amount_out) = usv4_state
-            .find_max_amount(&token_in, &token_out)
-            .unwrap();
+        let (max_amount_in, _max_amount_out) = usv4_state.find_max_amount(&token_in, &token_out);
 
         let success = usv4_state
             .get_amount_out(max_amount_in.clone(), &token_in, &token_out)

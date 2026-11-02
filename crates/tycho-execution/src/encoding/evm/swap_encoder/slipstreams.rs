@@ -48,10 +48,7 @@ impl SwapEncoder for SlipstreamsSwapEncoder {
         })?;
         let tick_spacing_bytes = get_static_attribute(swap, "tick_spacing")?;
 
-        let tick_spacing_bytes_u24 =
-            pad_or_truncate_to_size::<3>(&tick_spacing_bytes).map_err(|_| {
-                EncodingError::FatalError("Failed to extract tick_spacing bytes".to_string())
-            })?;
+        let tick_spacing_bytes_u24 = pad_or_truncate_to_size::<3>(&tick_spacing_bytes);
 
         let args = (
             token_in_address,

@@ -406,7 +406,7 @@ impl TestRunner {
             &config.protocol_system,
             chain,
             decoder_context,
-        )?;
+        );
 
         let stream_builder = protocol_stream_builder
             .skip_state_decode_failures(true)
@@ -602,7 +602,7 @@ impl TestRunner {
                     )
                     .wrap_err("Failed to run Tycho")?;
             }
-            let rpc_server = tycho_runner.start_rpc_server()?;
+            let rpc_server = tycho_runner.start_rpc_server();
             let result = self
                 .runtime
                 .block_on(self.last_indexed_block(&config.protocol_system))
@@ -1046,7 +1046,7 @@ impl TestRunner {
             protocol_system,
             self.chain,
             decoder_context,
-        )?;
+        );
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;

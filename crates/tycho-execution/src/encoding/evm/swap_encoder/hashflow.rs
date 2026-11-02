@@ -140,11 +140,11 @@ mod test {
         models::{default_token, Swap},
     };
 
-    fn hashflow_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
+    fn hashflow_config() -> HashMap<String, String> {
+        HashMap::from([(
             "hashflow_router_address".to_string(),
             "0x55084eE0fEf03f14a305cd24286359A35D735151".to_string(),
-        )]))
+        )])
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod test {
         let encoder = HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
+            Some(hashflow_config()),
         )
         .unwrap();
         encoder
@@ -219,7 +219,7 @@ mod test {
         HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
+            Some(hashflow_config()),
         )
         .unwrap()
         .encode_swap(swap, &encoding_context)
@@ -356,7 +356,7 @@ mod test {
         let encoder = HashflowSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            hashflow_config(),
+            Some(hashflow_config()),
         )
         .unwrap();
 

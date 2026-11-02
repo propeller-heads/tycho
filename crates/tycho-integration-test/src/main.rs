@@ -471,7 +471,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let mut price_level_handle = None;
 
     if !cli.disable_onchain {
-        if let Ok(protocol_stream_processor) = ProtocolStreamProcessor::new(
+        let protocol_stream_processor = ProtocolStreamProcessor::new(
             chain,
             cli.tycho_url.clone(),
             cli.tycho_api_key.clone(),
@@ -480,14 +480,13 @@ async fn run(cli: Cli) -> miette::Result<()> {
             cli.protocols.clone(),
             cli.partial_blocks,
             cli.no_tls,
-        ) {
-            protocol_handle = Some(
-                protocol_stream_processor
-                    .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
-                    .run_stream(&all_tokens, protocol_tx)
-                    .await?,
-            );
-        }
+        );
+        protocol_handle = Some(
+            protocol_stream_processor
+                .with_protocol_tvl_thresholds(cli.protocol_tvl_thresholds.clone())
+                .run_stream(&all_tokens, protocol_tx)
+                .await?,
+        );
     }
     if !cli.disable_rfq || !cli.disable_pamm {
         let book_stream_processor = BookStreamProcessor::new(

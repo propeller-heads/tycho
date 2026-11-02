@@ -35,25 +35,22 @@ pub(crate) struct TychoRouterEncoder {
 }
 
 impl TychoRouterEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(TychoRouterEncoder {
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        TychoRouterEncoder {
             single_swap_strategy: SingleSwapStrategyEncoder::new(
                 swap_encoder_registry.clone(),
                 router_address.clone(),
-            )?,
+            ),
             sequential_swap_strategy: SequentialSwapStrategyEncoder::new(
                 swap_encoder_registry.clone(),
                 router_address.clone(),
-            )?,
+            ),
             split_swap_strategy: SplitSwapStrategyEncoder::new(
                 swap_encoder_registry.clone(),
                 router_address,
-            )?,
+            ),
             swap_encoder_registry,
-        })
+        }
     }
 
     /// Whether any swap in the solution encodes through an encoder that blocks on a quote
@@ -251,7 +248,7 @@ mod tests {
     }
 
     fn get_tycho_router_encoder() -> TychoRouterEncoder {
-        TychoRouterEncoder::new(get_swap_encoder_registry(), router_address()).unwrap()
+        TychoRouterEncoder::new(get_swap_encoder_registry(), router_address())
     }
 
     mod router_encoder {

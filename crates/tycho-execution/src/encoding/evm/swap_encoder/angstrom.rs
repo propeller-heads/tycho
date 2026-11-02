@@ -355,21 +355,21 @@ mod tests {
         encode_attestations(&attestation_response()).unwrap()
     }
 
-    fn window_fetched_ago(age: Duration) -> Option<CachedWindow> {
+    fn window_fetched_ago(age: Duration) -> CachedWindow {
         let fetched_at = Instant::now()
             .checked_sub(age)
             .expect("the monotonic clock is past the requested age");
-        Some(CachedWindow { encoded: vec![1, 2, 3], fetched_at })
+        CachedWindow { encoded: vec![1, 2, 3], fetched_at }
     }
 
-    fn stale() -> Option<CachedWindow> {
+    fn stale() -> CachedWindow {
         window_fetched_ago(ANGSTROM_ATTESTATION_MAX_AGE + Duration::from_secs(1))
     }
 
     #[test]
     fn test_fresh_window_is_served_without_a_fetch() {
         let (fetch, calls) = counted_fetch();
-        let cache = cache_with(fetch, window_fetched_ago(Duration::ZERO));
+        let cache = cache_with(fetch, Some(window_fetched_ago(Duration::ZERO)));
 
         assert_eq!(cache.hook_data().unwrap(), vec![1, 2, 3]);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_stale_window_is_replaced_by_a_fetch() {
         let (fetch, calls) = counted_fetch();
-        let cache = cache_with(fetch, stale());
+        let cache = cache_with(fetch, Some(stale()));
 
         assert_eq!(cache.hook_data().unwrap(), fetched_window());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_failed_refresh_keeps_the_previous_window() {
-        let cache = cache_with(failing_fetch(), window_fetched_ago(Duration::ZERO));
+        let cache = cache_with(failing_fetch(), Some(window_fetched_ago(Duration::ZERO)));
 
         let err = cache.refresh().unwrap_err();
 
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_failed_fetch_surfaces_on_a_stale_window() {
-        let cache = cache_with(failing_fetch(), stale());
+        let cache = cache_with(failing_fetch(), Some(stale()));
 
         let err = cache.hook_data().unwrap_err();
 

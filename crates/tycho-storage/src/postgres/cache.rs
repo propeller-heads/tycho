@@ -169,62 +169,62 @@ impl DBTransaction {
     /// transaction.
     ///
     /// PERF: Use an array instead of a vec since the order is static.
-    fn add_operation(&mut self, op: WriteOp) -> Result<(), StorageError> {
+    fn add_operation(&mut self, op: WriteOp) {
         for existing_op in self.operations.iter_mut() {
             match (existing_op, &op) {
                 (WriteOp::UpsertBlock(l), WriteOp::UpsertBlock(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTx(l), WriteOp::UpsertTx(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::SaveExtractionState(l), WriteOp::SaveExtractionState(r)) => {
                     l.clone_from(r);
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertContract(l), WriteOp::InsertContract(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateContracts(l), WriteOp::UpdateContracts(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertAccountBalances(l), WriteOp::InsertAccountBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertProtocolComponents(l), WriteOp::InsertProtocolComponents(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpdateTokens(l), WriteOp::InsertTokens(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertComponentBalances(l), WriteOp::InsertComponentBalances(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertProtocolState(l), WriteOp::UpsertProtocolState(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::InsertEntryPoints(l), WriteOp::InsertEntryPoints(r)) => {
                     for (component_id, entry_points) in r.iter() {
@@ -235,7 +235,7 @@ impl DBTransaction {
                         entry.extend(entry_points.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (
                     WriteOp::InsertEntryPointTracingParams(l),
@@ -249,12 +249,12 @@ impl DBTransaction {
                         entry.extend(params.iter().cloned());
                         self.size += entry.len() - len_before;
                     }
-                    return Ok(());
+                    return;
                 }
                 (WriteOp::UpsertTracedEntryPoints(l), WriteOp::UpsertTracedEntryPoints(r)) => {
                     self.size += r.len();
                     l.extend(r.iter().cloned());
-                    return Ok(());
+                    return;
                 }
                 _ => {}
             }
@@ -262,7 +262,6 @@ impl DBTransaction {
         // not quite accurate but currently all WriteOps are created with a single entry.
         self.size += 1;
         self.operations.push(op);
-        Ok(())
     }
 }
 
@@ -638,7 +637,7 @@ impl CachedGateway {
                 Err(StorageError::Unexpected("Usage error: No transaction started".to_string()))
             }
             Some((tx, _)) => {
-                tx.add_operation(op)?;
+                tx.add_operation(op);
                 Ok(())
             }
         }

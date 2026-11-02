@@ -121,7 +121,7 @@ pub fn encode_swap(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(encoded_solution, &solution, chain.native_token().address)?;
+        encoded_transaction(encoded_solution, &solution, chain.native_token().address);
     Ok((solution, transaction))
 }
 
@@ -167,7 +167,7 @@ fn encoded_transaction(
     encoded_solution: EncodedSolution,
     solution: &Solution,
     native_address: Bytes,
-) -> miette::Result<Transaction> {
+) -> Transaction {
     let amount_in = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
     let min_amount_out = biguint_to_u256(solution.min_amount_out());
@@ -203,14 +203,14 @@ fn encoded_transaction(
     } else {
         BigUint::ZERO
     };
-    Ok(Transaction::new(
+    Transaction::new(
         encoded_solution
             .interacting_with()
             .clone(),
         value,
         contract_interaction,
         encoded_solution.estimated_gas().clone(),
-    ))
+    )
 }
 
 /// Encodes the input data for a function call to the given function selector.

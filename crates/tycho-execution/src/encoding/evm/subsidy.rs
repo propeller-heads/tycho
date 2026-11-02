@@ -636,8 +636,8 @@ mod tests {
         );
     }
 
-    fn payer_config(payer: &str) -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())]))
+    fn payer_config(payer: &str) -> HashMap<String, String> {
+        HashMap::from([(PAYER_CONFIG_KEY.to_string(), payer.to_string())])
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod tests {
         let encoder = SubsidyEncoder::from_config(
             Bytes::from(EXECUTOR),
             Chain::Ethereum,
-            payer_config(PAYER),
+            Some(payer_config(PAYER)),
         )
         .unwrap();
 
@@ -655,8 +655,8 @@ mod tests {
 
     #[rstest]
     #[case::missing_config(None, "missing")]
-    #[case::not_hex(payer_config("not an address"), "Invalid subsidy payer_address")]
-    #[case::not_20_bytes(payer_config("0x1234"), "Invalid subsidy payer_address")]
+    #[case::not_hex(Some(payer_config("not an address")), "Invalid subsidy payer_address")]
+    #[case::not_20_bytes(Some(payer_config("0x1234")), "Invalid subsidy payer_address")]
     fn test_from_config_invalid_payer(
         #[case] config: Option<HashMap<String, String>>,
         #[case] message: &str,

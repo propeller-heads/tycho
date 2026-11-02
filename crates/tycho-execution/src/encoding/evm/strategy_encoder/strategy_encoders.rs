@@ -136,15 +136,8 @@ pub(crate) struct SingleSwapStrategyEncoder {
 }
 
 impl SingleSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self {
-            swap_encoder_registry,
-            router_address,
-            single_swap_validator: SingleSwapValidator,
-        })
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self { swap_encoder_registry, router_address, single_swap_validator: SingleSwapValidator }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
@@ -245,15 +238,12 @@ pub(crate) struct SequentialSwapStrategyEncoder {
 }
 
 impl SequentialSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self {
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self {
             swap_encoder_registry,
             router_address,
             sequential_swap_validator: SequentialSwapValidator,
-        })
+        }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
@@ -342,11 +332,8 @@ pub(crate) struct SplitSwapStrategyEncoder {
 }
 
 impl SplitSwapStrategyEncoder {
-    pub(crate) fn new(
-        swap_encoder_registry: SwapEncoderRegistry,
-        router_address: Bytes,
-    ) -> Result<Self, EncodingError> {
-        Ok(Self { swap_encoder_registry, split_swap_validator: SplitSwapValidator, router_address })
+    pub(crate) fn new(swap_encoder_registry: SwapEncoderRegistry, router_address: Bytes) -> Self {
+        Self { swap_encoder_registry, split_swap_validator: SplitSwapValidator, router_address }
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
@@ -546,8 +533,7 @@ mod tests {
             )
             .with_origin(origin.clone());
             let encoder =
-                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
+                SingleSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address());
 
             encoder
                 .encode_strategy(&solution)
@@ -575,8 +561,7 @@ mod tests {
                 BigUint::ZERO,
             );
             let swap_encoder_registry = get_swap_encoder_registry();
-            let encoder =
-                SingleSwapStrategyEncoder::new(swap_encoder_registry, router_address()).unwrap();
+            let encoder = SingleSwapStrategyEncoder::new(swap_encoder_registry, router_address());
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
@@ -652,8 +637,7 @@ mod tests {
             );
             let swap_encoder_registry = get_swap_encoder_registry();
             let encoder =
-                SequentialSwapStrategyEncoder::new(swap_encoder_registry, router_address())
-                    .unwrap();
+                SequentialSwapStrategyEncoder::new(swap_encoder_registry, router_address());
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
@@ -717,8 +701,7 @@ mod tests {
                 ],
             );
             let encoder =
-                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address())
-                    .unwrap();
+                SequentialSwapStrategyEncoder::new(get_swap_encoder_registry(), router_address());
 
             let start = Instant::now();
             let encoded_solution = encoder
@@ -822,8 +805,7 @@ mod tests {
             let encoder = SplitSwapStrategyEncoder::new(
                 swap_encoder_registry,
                 Bytes::from("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2"),
-            )
-            .unwrap();
+            );
 
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
@@ -960,8 +942,7 @@ mod tests {
             let encoder = SplitSwapStrategyEncoder::new(
                 swap_encoder_registry,
                 Bytes::from("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2"),
-            )
-            .unwrap();
+            );
 
             let solution = Solution::new(
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
@@ -1173,14 +1154,14 @@ mod tests {
         ) -> Result<EncodedSolution, EncodingError> {
             match kind {
                 StrategyKind::Single => {
-                    SingleSwapStrategyEncoder::new(registry(), router_address())?
+                    SingleSwapStrategyEncoder::new(registry(), router_address())
                         .encode_strategy(solution)
                 }
                 StrategyKind::Sequential => {
-                    SequentialSwapStrategyEncoder::new(registry(), router_address())?
+                    SequentialSwapStrategyEncoder::new(registry(), router_address())
                         .encode_strategy(solution)
                 }
-                StrategyKind::Split => SplitSwapStrategyEncoder::new(registry(), router_address())?
+                StrategyKind::Split => SplitSwapStrategyEncoder::new(registry(), router_address())
                     .encode_strategy(solution),
             }
         }

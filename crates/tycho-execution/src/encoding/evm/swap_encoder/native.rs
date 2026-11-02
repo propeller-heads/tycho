@@ -231,11 +231,11 @@ mod test {
         models::{default_token, Swap},
     };
 
-    fn native_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([(
+    fn native_config() -> HashMap<String, String> {
+        HashMap::from([(
             "router_v6".to_string(),
             "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be".to_string(),
-        )]))
+        )])
     }
 
     #[test]
@@ -267,7 +267,7 @@ mod test {
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
         let error = encoder
@@ -333,7 +333,7 @@ mod test {
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -400,7 +400,7 @@ mod test {
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -446,7 +446,7 @@ mod test {
         let encoder = NativeSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            native_config(),
+            Some(native_config()),
         )
         .unwrap();
 
@@ -468,14 +468,14 @@ mod test {
             Err(EncodingError::FatalError(message)) if message.contains("config is empty")
         ));
 
-        let mut config = native_config().unwrap();
+        let mut config = native_config();
         config.remove("router_v6");
         assert!(matches!(
             NativeSwapEncoder::new(executor.clone(), Chain::Ethereum, Some(config)),
             Err(EncodingError::FatalError(message)) if message.contains("Missing router_v6")
         ));
 
-        let mut config = native_config().unwrap();
+        let mut config = native_config();
         config.insert(
             "router_v6".to_string(),
             "0x0000000000000000000000000000000000000000".to_string(),

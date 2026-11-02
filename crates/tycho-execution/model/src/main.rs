@@ -11,7 +11,7 @@ use tycho_router_model::{
     worker::worker_thread,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() {
     let global_queue_of_main_thread: Arc<Injector<ParamsInner>> = Arc::new(Injector::new());
     global_queue_of_main_thread.push(ParamsInner::default());
 
@@ -138,5 +138,4 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     eprintln!();
     eprintln!("{telemetry}");
-    Ok(())
 }

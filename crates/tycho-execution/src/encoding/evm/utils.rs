@@ -81,9 +81,7 @@ pub(crate) fn get_token_position(tokens: &Vec<&Bytes>, token: &Bytes) -> Result<
 /// Pads or truncates a byte slice to a fixed size array of N bytes.
 /// If input is shorter than N, it pads with zeros at the start.
 /// If input is longer than N, it truncates from the start (keeps last N bytes).
-pub(crate) fn pad_or_truncate_to_size<const N: usize>(
-    input: &[u8],
-) -> Result<[u8; N], EncodingError> {
+pub(crate) fn pad_or_truncate_to_size<const N: usize>(input: &[u8]) -> [u8; N] {
     let mut result = [0u8; N];
 
     if input.len() <= N {
@@ -96,7 +94,7 @@ pub(crate) fn pad_or_truncate_to_size<const N: usize>(
         result.copy_from_slice(&input[start..]);
     }
 
-    Ok(result)
+    result
 }
 
 /// Extracts a static attribute from a swap.
@@ -554,12 +552,12 @@ mod tests {
     fn test_pad_or_truncate_to_size() {
         // Test padding
         let input = hex::decode("0110").unwrap();
-        let result = pad_or_truncate_to_size::<3>(&input).unwrap();
+        let result = pad_or_truncate_to_size::<3>(&input);
         assert_eq!(hex::encode(result), "000110");
 
         // Test truncation
         let input_long = hex::decode("00800000").unwrap();
-        let result_truncated = pad_or_truncate_to_size::<3>(&input_long).unwrap();
+        let result_truncated = pad_or_truncate_to_size::<3>(&input_long);
         assert_eq!(hex::encode(result_truncated), "800000");
     }
 }

@@ -133,8 +133,8 @@ impl ProtocolStreamProcessor {
         protocols: Option<Vec<String>>,
         partial_blocks: bool,
         no_tls: bool,
-    ) -> miette::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             chain,
             tycho_url,
             tycho_api_key,
@@ -144,7 +144,7 @@ impl ProtocolStreamProcessor {
             protocols,
             partial_blocks,
             no_tls,
-        })
+        }
     }
 
     /// Sets per-protocol TVL thresholds. Each one replaces the global threshold for its protocol
@@ -574,7 +574,6 @@ mod tests {
             false,
             false,
         )
-        .unwrap()
     }
 
     #[test]

@@ -300,8 +300,8 @@ mod tests {
         models::default_token,
     };
 
-    fn liquorice_config() -> Option<HashMap<String, String>> {
-        Some(HashMap::from([
+    fn liquorice_config() -> HashMap<String, String> {
+        HashMap::from([
             (
                 "settlement_address".to_string(),
                 "0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8".to_string(),
@@ -310,7 +310,7 @@ mod tests {
                 "balance_manager_address".to_string(),
                 "0x56B4720e40dF52C560E520238E34e9C33d57E593".to_string(),
             ),
-        ]))
+        ])
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
         let encoder = LiquoriceSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            liquorice_config(),
+            Some(liquorice_config()),
         )
         .unwrap();
 
@@ -471,7 +471,7 @@ mod tests {
         LiquoriceSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
-            liquorice_config(),
+            Some(liquorice_config()),
         )
         .unwrap()
     }

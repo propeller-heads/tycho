@@ -204,11 +204,11 @@ pub(crate) fn get_dynamic_fee(
             observation_cardinality,
             observations,
             execution_timestamp,
-        )?;
+        );
         return Ok(ResolvedFee { fee: initial.max(dynamic.fee), ..dynamic });
     }
 
-    resolve_dynamic_fee(
+    Ok(resolve_dynamic_fee(
         dfc,
         base_fee,
         current_tick,
@@ -217,7 +217,7 @@ pub(crate) fn get_dynamic_fee(
         observation_cardinality,
         observations,
         execution_timestamp,
-    )
+    ))
 }
 
 /// The dynamic branch of the module: base fee plus the TWAP-deviation component, capped.
@@ -231,7 +231,7 @@ fn resolve_dynamic_fee(
     observation_cardinality: u16,
     observations: &Observations,
     execution_timestamp: u32,
-) -> Result<ResolvedFee, SimulationError> {
+) -> ResolvedFee {
     let (scaling_factor, fee_cap) = if dfc.scaling_factor != 0 {
         (dfc.scaling_factor, dfc.fee_cap)
     } else {
@@ -249,8 +249,8 @@ fn resolve_dynamic_fee(
         observations,
         execution_timestamp,
         scaling_factor,
-    )?;
-    Ok(ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap })
+    );
+    ResolvedFee { fee: (base_fee + dynamic_component).min(fee_cap), observed_twap }
 }
 
 fn calculate_dynamic_fee(
@@ -261,10 +261,10 @@ fn calculate_dynamic_fee(
     observations: &Observations,
     blocktime: u32,
     scaling_factor: u64,
-) -> Result<(u32, bool), SimulationError> {
+) -> (u32, bool) {
     if observation_cardinality < (DEFAULT_SECONDS_AGO / MIN_SECONDS_AGO) as u16 {
         // The module returns before reaching the oracle: no observe gas.
-        return Ok((0, false));
+        return (0, false);
     };
     // Mirror the on-chain module's `try pool.observe(...) { ... } catch { return 0; }`: a failed
     // observation (e.g. a ring buffer Tycho only partially indexed) contributes no dynamic
@@ -277,19 +277,19 @@ fn calculate_dynamic_fee(
         liquidity,
         observation_cardinality,
     ) else {
-        return Ok((0, true))
+        return (0, true)
     };
     let tw_avg_tick = match observed {
         (tick_cumulatives, _) if tick_cumulatives.len() >= 2 => {
             ((tick_cumulatives[1] - tick_cumulatives[0]) / DEFAULT_SECONDS_AGO as i64) as i32
         }
-        _ => return Ok((0, true)),
+        _ => return (0, true),
     };
 
     let abs_tick_delta = (current_tick - tw_avg_tick).unsigned_abs();
 
     let dynamic_fee = (abs_tick_delta as u128 * scaling_factor as u128) / SCALING_PRECISION;
-    Ok((dynamic_fee as u32, true))
+    (dynamic_fee as u32, true)
 }
 
 #[cfg(test)]
