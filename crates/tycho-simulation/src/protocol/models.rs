@@ -177,7 +177,7 @@ impl ProtocolComponent {
     ) -> Self {
         let id = Bytes::from(core_model.id.as_str());
         ProtocolComponent::new(
-            id.clone(),
+            id,
             core_model.protocol_system,
             core_model.protocol_type_name,
             core_model.chain,

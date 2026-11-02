@@ -62,8 +62,7 @@ impl TokenAnalyzer for TraceCallDetector {
     ) -> Result<(TokenQuality, Option<TransferCost>, Option<TransferTax>), String> {
         let (quality, transfer_cost, tax) = self
             .detect_impl(Address::from_bytes(&token), block)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         tracing::debug!(?token, ?quality, "determined token quality");
         Ok((
             quality,
@@ -101,8 +100,7 @@ impl TraceCallDetector {
         let (take_from, amount) = match self
             .finder
             .find_owner(token.to_bytes(), MIN_AMOUNT.into())
-            .await
-            .map_err(|e| e.to_string())?
+            .await?
         {
             Some((address, balance)) => {
                 // Don't use the full balance, but instead a portion of it. This
@@ -177,7 +175,6 @@ impl TraceCallDetector {
             .await
             .map_err(|e| e.to_string())?;
         Self::handle_response(&double_transfer_traces, amount, middle_balance, take_from)
-            .map_err(|e| e.to_string())
     }
 
     fn create_trace_request(

@@ -866,7 +866,7 @@ mod tests {
         let orchestrator = create_test_orchestrator();
 
         let token1 = Address::from("0x1111111111111111111111111111111111111111");
-        let component1 = create_test_component("comp1", vec![token1.clone()]);
+        let component1 = create_test_component("comp1", vec![token1]);
         let components = vec![&component1];
 
         // Create block changes with no balance updates

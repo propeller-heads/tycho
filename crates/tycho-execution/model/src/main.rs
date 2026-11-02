@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let is_running_of_main_thread = Arc::new(AtomicBool::new(true));
 
     let is_running_of_progress_thread = Arc::clone(&is_running_of_main_thread);
-    let counters_of_progress_thread = counters_of_main_thread.clone();
+    let counters_of_progress_thread = counters_of_main_thread;
     let progress_thread_join_handle = std::thread::spawn(move || {
         progress_thread(counters_of_progress_thread, is_running_of_progress_thread);
     });

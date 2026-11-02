@@ -3394,7 +3394,7 @@ mod test {
             timestamp: 123456788,
             partial_block_index: None,
         };
-        state_sync.last_synced_block = Some(previous_header.clone());
+        state_sync.last_synced_block = Some(previous_header);
 
         assert!(
             state_sync.is_next_expected(&incoming_header),

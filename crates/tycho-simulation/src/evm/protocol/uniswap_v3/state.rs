@@ -1058,11 +1058,7 @@ mod tests {
 
         // Allow 1-unit rounding difference: get_limits uses ceiling/floor delta math
         // while get_amount_out uses the full swap path.
-        let diff = if res.1 > out.amount {
-            res.1.clone() - out.amount.clone()
-        } else {
-            out.amount.clone() - res.1.clone()
-        };
+        let diff = if res.1 > out.amount { res.1 - out.amount } else { out.amount - res.1 };
         assert!(diff <= BigUint::from(1u64), "limit_out and amount_out differ by {diff}");
     }
 
@@ -1674,7 +1670,7 @@ mod tests_forks {
         );
 
         let (limit_in, limit_out) = pool
-            .get_limits(usdc.address.clone(), weth.address.clone())
+            .get_limits(usdc.address, weth.address)
             .unwrap();
 
         // Should return some conservative limits

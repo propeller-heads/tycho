@@ -336,7 +336,7 @@ mod tests {
         ));
         assert!(is_invalid_pair(
             state
-                .get_limits(wbtc().address.clone(), state.quote_token.address.clone())
+                .get_limits(wbtc().address, state.quote_token.address.clone())
                 .map(|_| ())
         ));
     }

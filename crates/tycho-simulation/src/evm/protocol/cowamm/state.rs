@@ -1036,7 +1036,7 @@ mod tests {
         );
 
         let res = state
-            .get_amount_out(amount_in.clone(), token_a, token_b)
+            .get_amount_out(amount_in, token_a, token_b)
             .unwrap();
 
         assert_eq!(res.amount, expected_out);
@@ -1093,7 +1093,7 @@ mod tests {
         );
 
         let res = state
-            .get_amount_out(amount_in.clone(), token_a, token_b)
+            .get_amount_out(amount_in, token_a, token_b)
             .unwrap();
 
         assert_eq!(res.amount, expected_out);
@@ -1140,7 +1140,7 @@ mod tests {
             0,
         );
 
-        let res = state.get_amount_out(max, &t0.clone(), &t1.clone());
+        let res = state.get_amount_out(max, &t0, &t1);
         assert!(res.is_err());
         let err = res.err().unwrap();
         assert!(matches!(err, SimulationError::FatalError(_)));
@@ -1173,8 +1173,8 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("36925554990922").unwrap(),
             U256::from_str("30314846538607556521556").unwrap(),
             Bytes::from("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"),
@@ -1194,8 +1194,8 @@ mod tests {
 
         let mut state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("36925554990922").unwrap(),
             U256::from_str("30314846538607556521556").unwrap(),
             Bytes::from("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"),
@@ -1273,8 +1273,8 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
-            t0.address.clone(),
-            t1.address.clone(),
+            t0.address,
+            t1.address,
             U256::from_str("886800000000000000").unwrap(),
             U256::from_str("50000000000000000").unwrap(),
             Bytes::from("0x9bd702E05B9c97E4A4a3E47Df1e0fe7A0C26d2F1"),
@@ -1312,7 +1312,7 @@ mod tests {
         );
 
         let result = state
-            .get_amount_out(amount_in.clone(), &t0, &t1)
+            .get_amount_out(amount_in, &t0, &t1)
             .unwrap();
         let new_state = result
             .new_state
@@ -1361,7 +1361,7 @@ mod tests {
 
         let state = CowAMMState::new(
             Bytes::from_str("0x4359a8ea4c353d93245c0b6b8608a28bb48a05e2").unwrap(),
-            arb.address.clone(),
+            arb.address,
             weth.address.clone(),
             U256::from_str("286275852074040134274570").unwrap(), //ARB
             U256::from_str("61694306956323018369").unwrap(),     //WETH
@@ -1383,11 +1383,11 @@ mod tests {
         println!("  Max WETH out: {:.6} WETH", wei_to_eth(&max_weth_out));
 
         // Test with 10% of the SAFE max
-        let amount_in = max_lp_in.clone() / BigUint::from(10u64);
+        let amount_in = max_lp_in / BigUint::from(10u64);
         println!("\nTesting with 10% of safe max: {}", amount_in);
 
         let res = state
-            .get_amount_out(amount_in.clone(), &lp_token, &weth)
+            .get_amount_out(amount_in, &lp_token, &weth)
             .expect("Should succeed with safe limit");
         // Basic sanity assertions
         assert!(!res.amount.is_zero(), "Amount out should be non-zero for a valid LP redemption");

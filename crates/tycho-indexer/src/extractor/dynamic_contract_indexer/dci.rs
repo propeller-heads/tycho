@@ -2293,7 +2293,7 @@ mod tests {
                         token_address.clone(),
                         AccountDelta::new(
                             Chain::Ethereum,
-                            token_address.clone(),
+                            token_address,
                             HashMap::new(),
                             None,
                             None,
@@ -2532,7 +2532,7 @@ mod tests {
             .insert_permanent(token_address.clone(), tracked_slots.clone());
         dci.cache
             .tracked_contracts
-            .insert_permanent(normal_address.clone(), tracked_slots.clone());
+            .insert_permanent(normal_address.clone(), tracked_slots);
 
         // Create block changes with storage updates
         let block_changes = BlockChanges::new(
@@ -2881,7 +2881,7 @@ mod tests {
                         Bytes::zero(32),
                         // Account with empty slots - this is the key scenario
                         get_tracing_result_with_addresses_and_slots(vec![
-                            (new_account.clone(), vec![]), // No slots!
+                            (new_account, vec![]), // No slots!
                         ]),
                     ))]
                 }

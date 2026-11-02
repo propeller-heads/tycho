@@ -848,7 +848,7 @@ mod tests {
         let state = sample_state();
         let amount_in = BigUint::from(10u64).pow(18);
         let result = state
-            .get_amount_out(amount_in.clone(), &eth_token(), &steth_token())
+            .get_amount_out(amount_in, &eth_token(), &steth_token())
             .unwrap();
 
         assert!(result.amount > BigUint::ZERO);
@@ -1470,7 +1470,7 @@ mod tests {
         let weth = Token::new(&Bytes::from([0xc0u8; 20]), "WETH", 18, 0, &[], Chain::Ethereum, 100);
         assert!(
             state
-                .get_limits(weth.address.clone(), steth_token().address.clone())
+                .get_limits(weth.address.clone(), steth_token().address)
                 .is_err(),
             "an unknown token reported a limit instead of an error"
         );

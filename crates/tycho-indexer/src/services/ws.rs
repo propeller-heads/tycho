@@ -771,7 +771,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!("Connecting to test server at {}", &url);
 
@@ -942,7 +941,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!(url = %url, "Connecting to test server");
 
@@ -1090,7 +1088,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         debug!(url = %url, "Connecting to test server");
 
@@ -1264,7 +1261,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         // Create multiple connections to trigger concurrent subscriptions
@@ -1357,7 +1353,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1420,7 +1415,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1478,7 +1472,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1601,7 +1594,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _) = tokio_tungstenite::connect_async(&url)
@@ -1678,7 +1670,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
 
         let (mut connection, _response) = tokio_tungstenite::connect_async(url)
@@ -1780,7 +1771,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         let (mut connection, _) = tokio_tungstenite::connect_async(url)
             .await
@@ -1900,7 +1890,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         let (mut connection, _) = tokio_tungstenite::connect_async(url)
             .await
@@ -1964,7 +1953,6 @@ mod tests {
 
         let url = server
             .url("/ws/")
-            .to_string()
             .replacen("http://", "ws://", 1);
         let (mut connection, _) = tokio_tungstenite::connect_async(url)
             .await

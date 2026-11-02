@@ -109,8 +109,8 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             router_address: Some(Bytes::default()),
             origin: None,
         };
@@ -163,7 +163,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(group_token_in.clone()),
+            default_token(group_token_in),
             default_token(intermediary_token.clone()),
             BigUint::ZERO,
         );
@@ -178,8 +178,8 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(intermediary_token.clone()),
-            default_token(group_token_out.clone()),
+            default_token(intermediary_token),
+            default_token(group_token_out),
             BigUint::ZERO,
         );
 

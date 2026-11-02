@@ -236,7 +236,7 @@ where
                     .ok_or_else(|| {
                         SimulationError::FatalError("Adapter contract bytecode not set".to_string())
                     })?,
-                engine.clone(),
+                engine,
             )?)
         };
 
@@ -478,7 +478,7 @@ mod tests {
         let id = "pool_1".to_string();
         let token2 = TychoBytes::from_str("0000000000000000000000000000000000000002").unwrap();
         let token3 = TychoBytes::from_str("0000000000000000000000000000000000000003").unwrap();
-        let tokens = vec![token2.clone(), token3.clone()];
+        let tokens = vec![token2, token3];
         let balances = HashMap::new();
         let adapter_address =
             Address::from_str("0xA2C5C98A892fD6656a7F39A2f63228C0Bc846270").unwrap();

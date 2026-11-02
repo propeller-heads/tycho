@@ -1213,9 +1213,7 @@ mod test {
 
         let insert_eptp_data = &HashMap::from([
             (
-                rpc_tracer_entry_point(0)
-                    .external_id
-                    .clone(),
+                rpc_tracer_entry_point(0).external_id,
                 HashSet::from([
                     (tracing_params(0), "pc_0".to_string()),
                     (tracing_params(0), "unknown_pc".to_string()),
@@ -1223,9 +1221,7 @@ mod test {
                 ]),
             ),
             (
-                rpc_tracer_entry_point(1)
-                    .external_id
-                    .clone(),
+                rpc_tracer_entry_point(1).external_id,
                 HashSet::from([
                     (tracing_params(0), "pc_1".to_string()),
                     (tracing_params(1), "pc_2".to_string()),

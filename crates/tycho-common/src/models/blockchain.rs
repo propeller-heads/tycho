@@ -1154,8 +1154,8 @@ impl BlockChanges {
         let first_state = iter.next().unwrap_or_default();
 
         let aggregated_changes = iter.try_fold(first_state, |mut acc_state, new_state| {
-            acc_state.merge(new_state.clone())?;
-            Ok::<_, MergeError>(acc_state.clone())
+            acc_state.merge(new_state)?;
+            Ok::<_, MergeError>(acc_state)
         })?;
 
         // Aggregate trace_results
@@ -1256,8 +1256,8 @@ impl BlockChanges {
         if self.extractor != other.extractor {
             return Err(MergeError::IdMismatch(
                 "partial blocks (extractor)".to_string(),
-                self.extractor.clone(),
-                other.extractor.clone(),
+                self.extractor,
+                other.extractor,
             ));
         }
 
@@ -1272,8 +1272,8 @@ impl BlockChanges {
         if self.block.number != other.block.number {
             return Err(MergeError::BlockMismatch(
                 "partial blocks".to_string(),
-                self.block.hash.clone(),
-                other.block.hash.clone(),
+                self.block.hash,
+                other.block.hash,
             ));
         }
 
@@ -1437,7 +1437,7 @@ pub mod fixtures {
                             (
                                 token.clone(),
                                 AccountBalance {
-                                    token: token.clone(),
+                                    token,
                                     balance: Bytes::from(500_u64).lpad(32, 0),
                                     modify_tx: tx.hash.clone(),
                                     account: contract.clone(),
@@ -1522,7 +1522,7 @@ pub mod fixtures {
                         HashMap::from([(
                             token.clone(),
                             AccountBalance {
-                                token: token.clone(),
+                                token,
                                 balance: Bytes::from(700_u64).lpad(32, 0),
                                 modify_tx: tx.hash,
                                 account: contract,
@@ -1734,7 +1734,7 @@ pub mod fixtures {
                 .accessed_slots
                 .get(&address2)
                 .unwrap(),
-            &HashSet::from([store_key1.clone(), store_key2.clone()])
+            &HashSet::from([store_key1, store_key2])
         );
     }
 
@@ -1790,9 +1790,9 @@ pub mod fixtures {
                 (address2.clone(), AddressStorageLocation::new(store_key2.clone(), 12)),
             ]),
             HashMap::from([
-                (address1.clone(), HashSet::from([store_key1.clone()])),
-                (address2.clone(), HashSet::from([store_key2.clone()])),
-                (address3.clone(), HashSet::from([store_key1.clone()])),
+                (address1, HashSet::from([store_key1.clone()])),
+                (address2, HashSet::from([store_key2])),
+                (address3, HashSet::from([store_key1])),
             ]),
         );
 

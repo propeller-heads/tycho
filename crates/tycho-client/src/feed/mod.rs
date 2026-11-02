@@ -823,7 +823,7 @@ where
                         // initially default all synchronizers to Ready
                         synchronizer.mark_ready(&msg.header);
                         let header = msg.header.clone();
-                        ready_sync_msgs.insert(extractor_id.name.clone(), msg);
+                        ready_sync_msgs.insert(extractor_id.name, msg);
                         Some(header)
                     }
                     Ok(Some(Err(e))) => {

@@ -76,7 +76,7 @@ fn test_evm_sequential_swap_usx() {
         filler.clone(),
         filler.clone(),
         dai.clone(),
-        usdt.clone(),
+        usdt,
         BigUint::from_str("2000000000000000000000").unwrap(),
         BigUint::from_str("1990000000").unwrap(),
         BigUint::from_str("1950200000").unwrap(),

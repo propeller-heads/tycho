@@ -253,8 +253,8 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
 
@@ -293,8 +293,8 @@ mod test {
         let calldata_hex = format!("7083527c{:064x}{:064x}{:064x}", 0x60u8, 0u8, 0u8);
         let calldata_bytes = Bytes::from(hex::decode(&calldata_hex).unwrap());
         let native_quote_data = vec![
-            ("target".to_string(), target_bytes.clone()),
-            ("calldata".to_string(), calldata_bytes.clone()),
+            ("target".to_string(), target_bytes),
+            ("calldata".to_string(), calldata_bytes),
             ("deadline_timestamp".to_string(), Bytes::from(u64::MAX.to_be_bytes().to_vec())),
         ];
 
@@ -319,8 +319,8 @@ mod test {
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
 

@@ -287,8 +287,8 @@ mod tests {
         let encoding_context = EncodingContext {
             // Same as the executor address
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = UniswapV4SwapEncoder::new(
@@ -350,16 +350,16 @@ mod tests {
 
         let swap = Swap::new(
             usv4_pool,
-            default_token(token_in.clone()),
+            default_token(token_in),
             default_token(token_out.clone()),
             BigUint::ZERO,
         );
 
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::zero(20)),
-            group_token_in: group_token_in.clone(),
+            group_token_in,
             // Token out is the same as the group token out
-            group_token_out: token_out.clone(),
+            group_token_out: token_out,
             origin: None,
         };
 
@@ -401,7 +401,7 @@ mod tests {
 
         // The context is the same for both swaps, since the group token in and out are the same
         let context = EncodingContext {
-            router_address: Some(router_address.clone()),
+            router_address: Some(router_address),
             group_token_in: usde_address.clone(),
             group_token_out: wbtc_address.clone(),
             origin: None,
@@ -445,14 +445,14 @@ mod tests {
 
         let initial_swap = Swap::new(
             usde_usdt_component,
-            default_token(usde_address.clone()),
+            default_token(usde_address),
             default_token(usdt_address.clone()),
             BigUint::ZERO,
         );
         let second_swap = Swap::new(
             usdt_wbtc_component,
-            default_token(usdt_address.clone()),
-            default_token(wbtc_address.clone()),
+            default_token(usdt_address),
+            default_token(wbtc_address),
             BigUint::ZERO,
         );
 
@@ -555,7 +555,7 @@ mod tests {
             let mut weth_usdt_attributes: HashMap<String, Bytes> = HashMap::new();
             weth_usdt_attributes.insert("key_lp_fee".into(), Bytes::from("0x800000")); // 8388608
             weth_usdt_attributes.insert("tick_spacing".into(), Bytes::from("0x0a")); // 10
-            weth_usdt_attributes.insert("hooks".into(), angstrom_hook.clone());
+            weth_usdt_attributes.insert("hooks".into(), angstrom_hook);
 
             let weth_usdt_pool = ProtocolComponent {
                 id: String::from("0x000000000004444c5dc75cB358380D2e3dE08A90"),
@@ -565,14 +565,14 @@ mod tests {
 
             let first_swap = Swap::new(
                 usdc_weth_pool,
-                default_token(usdc_address.clone()),
+                default_token(usdc_address),
                 default_token(weth_address.clone()),
                 BigUint::ZERO,
             );
             let second_swap = Swap::new(
                 weth_usdt_pool,
-                default_token(weth_address.clone()),
-                default_token(usdt_address.clone()),
+                default_token(weth_address),
+                default_token(usdt_address),
                 BigUint::ZERO,
             );
 

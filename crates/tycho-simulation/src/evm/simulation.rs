@@ -180,7 +180,7 @@ where
                     "Starting simulation with tx parameters: {:#?} {:#?}",
                     vm.ctx.tx, vm.ctx.block
                 );
-                vm.inspect_tx(tx_env.clone())
+                vm.inspect_tx(tx_env)
             };
 
             Self::print_traces(tracer, res.as_ref().ok())?;

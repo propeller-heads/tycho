@@ -3250,7 +3250,7 @@ mod test {
         assert_eq!(error, deserialized);
 
         // Test SubscribeError serialization
-        let error = WebsocketError::SubscribeError(extractor_id.clone());
+        let error = WebsocketError::SubscribeError(extractor_id);
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: WebsocketError = serde_json::from_str(&json).unwrap();
         assert_eq!(error, deserialized);

@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(requests[0].component_id(), &component.id);
         assert_eq!(
             requests[0].request_type(),
-            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() }
+            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens }
         );
         assert_eq!(
             requests[0].request_id(),
@@ -872,7 +872,7 @@ mod tests {
         let different_id = "0x1111111111111111111111111111111111111111".to_string();
 
         let component = ProtocolComponent {
-            id: different_id.clone(), // Different from hooks address
+            id: different_id, // Different from hooks address
             protocol_system: "euler_swap".to_string(),
             protocol_type_name: "swap".to_string(),
             chain: Chain::Ethereum,

@@ -75,7 +75,7 @@ pub fn bytes_to_f64(data: &[u8]) -> Option<f64> {
             let sticky_bit =
                 x.clone() & ((BigInt::one() << max(n_shifts.abs() - 2, 0)) - BigInt::one());
 
-            let rounded_torwards_zero = (x.clone() >> n_shifts.abs())
+            let rounded_torwards_zero = (x >> n_shifts.abs())
                 .to_u64()
                 .expect("unable to convert to u64");
 

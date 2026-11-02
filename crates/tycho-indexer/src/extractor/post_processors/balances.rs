@@ -200,7 +200,7 @@ mod tests {
             block(1),
             0,
             false,
-            txs_with_update.clone(),
+            txs_with_update,
             Vec::new(),
         );
 

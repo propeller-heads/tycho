@@ -819,7 +819,7 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 let advance_tx = advance_tx.clone();
@@ -883,7 +883,7 @@ impl ProtocolStreamBuilder {
             };
 
         let stream = Box::pin(decode_stream.then({
-            let decoder = decoder.clone();
+            let decoder = decoder;
             move |msg| {
                 let decoder = decoder.clone();
                 async move {

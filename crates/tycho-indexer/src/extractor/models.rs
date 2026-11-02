@@ -386,7 +386,7 @@ pub mod fixtures {
                             (
                                 token.clone(),
                                 AccountBalance {
-                                    token: token.clone(),
+                                    token,
                                     balance: Bytes::from(500_u64).lpad(32, 0),
                                     modify_tx: tx.hash.clone(),
                                     account: contract.clone(),
@@ -471,7 +471,7 @@ pub mod fixtures {
                         HashMap::from([(
                             token.clone(),
                             AccountBalance {
-                                token: token.clone(),
+                                token,
                                 balance: Bytes::from(700_u64).lpad(32, 0),
                                 modify_tx: tx.hash,
                                 account: contract,
@@ -653,7 +653,7 @@ mod test {
                     (c_id.clone(), token.clone()),
                     // token in both txs: tx1 balance (1000) wins over tx0 balance (800)
                     ComponentBalance {
-                        token: token.clone(),
+                        token,
                         balance: Bytes::from(1000_u64).lpad(32, 0),
                         balance_float: 1000.0,
                         modify_tx: "0x02".parse().unwrap(),
@@ -668,7 +668,7 @@ mod test {
                         balance: Bytes::from(300_u64).lpad(32, 0),
                         balance_float: 300.0,
                         modify_tx: "0x01".parse().unwrap(),
-                        component_id: c_id.clone(),
+                        component_id: c_id,
                     }
                 ),
             ])
@@ -702,7 +702,7 @@ mod test {
                     (contract.clone(), token.clone()),
                     // token in both txs: tx1 balance (700) wins over tx0 balance (500)
                     AccountBalance {
-                        token: token.clone(),
+                        token,
                         balance: Bytes::from(700_u64).lpad(32, 0),
                         modify_tx: "0x02".parse().unwrap(),
                         account: contract.clone(),
@@ -715,7 +715,7 @@ mod test {
                         token: token2,
                         balance: Bytes::from(150_u64).lpad(32, 0),
                         modify_tx: "0x01".parse().unwrap(),
-                        account: contract.clone(),
+                        account: contract,
                     }
                 ),
             ])
@@ -1085,7 +1085,7 @@ mod test {
         let partial = partial_block_changes(0);
         let duplicate = partial_block_changes(0);
 
-        let result = partial.clone().merge_partial(duplicate);
+        let result = partial.merge_partial(duplicate);
         assert!(matches!(result, Err(MergeError::InvalidState(_))));
     }
 
@@ -1180,17 +1180,17 @@ mod test {
         if first_idx == 0 {
             first
                 .new_tokens
-                .insert(shared_token_addr.clone(), early_token.clone());
+                .insert(shared_token_addr.clone(), early_token);
             second
                 .new_tokens
-                .insert(shared_token_addr.clone(), late_token.clone());
+                .insert(shared_token_addr.clone(), late_token);
         } else {
             first
                 .new_tokens
-                .insert(shared_token_addr.clone(), late_token.clone());
+                .insert(shared_token_addr.clone(), late_token);
             second
                 .new_tokens
-                .insert(shared_token_addr.clone(), early_token.clone());
+                .insert(shared_token_addr.clone(), early_token);
         }
 
         let result = first.merge_partial(second).unwrap();

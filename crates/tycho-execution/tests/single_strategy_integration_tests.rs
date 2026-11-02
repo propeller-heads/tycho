@@ -102,7 +102,7 @@ fn test_evm_single_swap_strategy_encoder() {
 
     assert_eq!(hex_calldata[..456], expected_input);
     assert_eq!(hex_calldata[1608..], expected_swap);
-    write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata.to_string());
+    write_calldata_to_file("test_single_swap_strategy_encoder", &hex_calldata);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn test_single_swap_with_client_fees() {
 
     let hex_calldata = encode(&calldata);
 
-    write_calldata_to_file("test_single_swap_with_client_fees", &hex_calldata.to_string());
+    write_calldata_to_file("test_single_swap_with_client_fees", &hex_calldata);
 }
 
 #[test]
@@ -307,8 +307,5 @@ fn test_single_swap_with_fees_and_client_contribution() {
 
     let hex_calldata = encode(&calldata);
 
-    write_calldata_to_file(
-        "test_single_swap_with_fees_and_client_contribution",
-        &hex_calldata.to_string(),
-    );
+    write_calldata_to_file("test_single_swap_with_fees_and_client_contribution", &hex_calldata);
 }

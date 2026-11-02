@@ -486,7 +486,7 @@ where
                 vec![sell_amount_limit / U256::from(100)],
                 overwrites,
                 self.spot_price_caller,
-                block_overrides.clone(),
+                block_overrides,
             )?;
 
             if self
@@ -553,7 +553,7 @@ where
                     false,
                     x2,
                     overwrites,
-                    block_overrides.clone(),
+                    block_overrides,
                 )?
                 .0
                 .received_amount;
@@ -1445,21 +1445,20 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(capabilities_adapter_contract, expected_capabilities.clone());
+        assert_eq!(capabilities_adapter_contract, expected_capabilities);
 
         let capabilities_state = pool_state.clone().capabilities;
 
-        assert_eq!(capabilities_state, expected_capabilities.clone());
+        assert_eq!(capabilities_state, expected_capabilities);
 
         // Verify all tokens are initialized in the engine
         let engine_accounts = pool_state
             .adapter_contract
             .engine
             .state
-            .clone()
             .get_account_storage()
             .expect("Failed to get account storage");
-        for token in pool_state.tokens.clone() {
+        for token in pool_state.tokens {
             let account = engine_accounts
                 .get_account_info(&bytes_to_address(&token).unwrap())
                 .unwrap();
@@ -1872,15 +1871,15 @@ mod tests {
 
         // Create tokens mapping including the existing DAI and BAL
         let mut tokens = HashMap::new();
-        tokens.insert(dai().address.clone(), dai());
-        tokens.insert(bal().address.clone(), bal());
+        tokens.insert(dai().address, dai());
+        tokens.insert(bal().address, bal());
 
         // Simulate a delta transition with only DAI balance update (missing BAL and new_token)
         let mut component_balances = HashMap::new();
         let mut delta_balances = HashMap::new();
         // Only update DAI balance, leave others unchanged in delta
-        delta_balances.insert(dai().address.clone(), Bytes::from(vec![0x77, 0x35, 0x94, 0x00])); // 2000000000 (updated value)
-        component_balances.insert(pool_id.clone(), delta_balances);
+        delta_balances.insert(dai().address, Bytes::from(vec![0x77, 0x35, 0x94, 0x00])); // 2000000000 (updated value)
+        component_balances.insert(pool_id, delta_balances);
 
         let balances = Balances { component_balances, account_balances: HashMap::new() };
 
@@ -1941,8 +1940,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_pool_state_warms_caches() {
         let mut pool_state = setup_pool_state().await;
-        let tokens =
-            HashMap::from([(dai().address.clone(), dai()), (bal().address.clone(), bal())]);
+        let tokens = HashMap::from([(dai().address, dai()), (bal().address, bal())]);
         let balances =
             Balances { component_balances: HashMap::new(), account_balances: HashMap::new() };
 
@@ -2033,7 +2031,7 @@ mod tests {
             component_balances: HashMap::new(),
             account_balances: HashMap::from([(
                 Bytes::from(vault.as_slice()),
-                HashMap::from([(dai().address.clone(), Bytes::from(42u64).lpad(32, 0))]),
+                HashMap::from([(dai().address, Bytes::from(42u64).lpad(32, 0))]),
             )]),
         };
 
@@ -2337,7 +2335,7 @@ mod tests {
             .get_amount_out(BigUint::from_str("1000000000000000000").unwrap(), &dai(), &bal())
             .unwrap();
         let expected_limits = pool_state
-            .get_limits(dai().address.clone(), bal().address.clone())
+            .get_limits(dai().address, bal().address)
             .unwrap();
 
         let mut pool_state = pool_state;
@@ -2351,12 +2349,11 @@ mod tests {
         assert_eq!(result.amount, expected.amount);
 
         let limits = pool_state
-            .get_limits(dai().address.clone(), bal().address.clone())
+            .get_limits(dai().address, bal().address)
             .expect("limits must fall back to indexed state");
         assert_eq!(limits, expected_limits);
 
-        let tokens =
-            HashMap::from([(dai().address.clone(), dai()), (bal().address.clone(), bal())]);
+        let tokens = HashMap::from([(dai().address, dai()), (bal().address, bal())]);
         pool_state
             .set_spot_prices(&tokens)
             .expect("spot prices must fall back to indexed state");

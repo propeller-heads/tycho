@@ -321,8 +321,8 @@ mod tests {
 
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(
@@ -383,8 +383,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(
@@ -446,8 +446,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: None,
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = CurveSwapEncoder::new(

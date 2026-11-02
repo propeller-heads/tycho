@@ -99,7 +99,7 @@ where
         pool,
         caller,
         maxDepositCall { caller },
-        Some(token_overwrites.clone()),
+        Some(token_overwrites),
         "maxDeposit",
     )?;
 

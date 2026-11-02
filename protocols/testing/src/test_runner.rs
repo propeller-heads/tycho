@@ -1974,13 +1974,13 @@ mod tests {
                 .unwrap()
                 .to_be_bytes::<32>(),
         );
-        balances.insert(token_bytes.clone(), balance_bytes.clone());
+        balances.insert(token_bytes, balance_bytes);
         let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state);
+        protocol_states_by_id.insert(component_id, protocol_state);
 
         let result =
             runner.validate_token_balances(&component_tokens, &protocol_states_by_id, block_number);
@@ -2000,13 +2000,13 @@ mod tests {
         // Set expected balance to zero
         let mut balances = HashMap::new();
         let balance_bytes = Bytes::from(U256::from(0).to_be_bytes::<32>());
-        balances.insert(token_bytes.clone(), balance_bytes.clone());
+        balances.insert(token_bytes, balance_bytes);
         let protocol_state = ProtocolComponentState::new(&component_id, HashMap::new(), balances);
 
         let mut component_tokens = HashMap::new();
         component_tokens.insert(component_id.clone(), vec![token]);
         let mut protocol_states_by_id = HashMap::new();
-        protocol_states_by_id.insert(component_id.clone(), protocol_state);
+        protocol_states_by_id.insert(component_id, protocol_state);
 
         dotenv().ok();
         let result =

@@ -50,7 +50,7 @@ impl TychoRouterEncoder {
             )?,
             split_swap_strategy: SplitSwapStrategyEncoder::new(
                 swap_encoder_registry.clone(),
-                router_address.clone(),
+                router_address,
             )?,
             swap_encoder_registry,
         })
@@ -228,8 +228,8 @@ mod tests {
                 static_attributes: static_attributes_usdc_eth,
                 ..Default::default()
             },
-            default_token(usdc().clone()),
-            default_token(eth().clone()),
+            default_token(usdc()),
+            default_token(eth()),
             BigUint::ZERO,
         )
     }
@@ -604,8 +604,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(dai().clone()),
-                    default_token(weth().clone()),
+                    default_token(dai()),
+                    default_token(weth()),
                     BigUint::ZERO,
                 ),
                 Swap::new(
@@ -614,8 +614,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(dai().clone()),
-                    default_token(weth().clone()),
+                    default_token(dai()),
+                    default_token(weth()),
                     BigUint::ZERO,
                 ),
                 Swap::new(
@@ -624,8 +624,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(weth().clone()),
-                    default_token(dai().clone()),
+                    default_token(weth()),
+                    default_token(dai()),
                     BigUint::ZERO,
                 ),
             ];
@@ -659,8 +659,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(dai().clone()),
-                    default_token(weth().clone()),
+                    default_token(dai()),
+                    default_token(weth()),
                     BigUint::ZERO,
                 ),
                 Swap::new(
@@ -669,8 +669,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(weth().clone()),
-                    default_token(usdc().clone()),
+                    default_token(weth()),
+                    default_token(usdc()),
                     BigUint::ZERO,
                 ),
                 Swap::new(
@@ -679,8 +679,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(usdc().clone()),
-                    default_token(dai().clone()),
+                    default_token(usdc()),
+                    default_token(dai()),
                     BigUint::ZERO,
                 ),
                 Swap::new(
@@ -689,8 +689,8 @@ mod tests {
                         protocol_system: "uniswap_v2".to_string(),
                         ..Default::default()
                     },
-                    default_token(dai().clone()),
-                    default_token(wbtc().clone()),
+                    default_token(dai()),
+                    default_token(wbtc()),
                     BigUint::ZERO,
                 ),
             ];

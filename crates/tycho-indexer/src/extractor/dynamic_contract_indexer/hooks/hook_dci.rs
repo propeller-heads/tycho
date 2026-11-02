@@ -257,7 +257,7 @@ where
         let new_state = ComponentProcessingState {
             status: ProcessingStatus::Failed,
             retry_count,
-            last_error: Some(ProcessingError::MetadataError(error_msg.clone())),
+            last_error: Some(ProcessingError::MetadataError(error_msg)),
         };
 
         self.cache
@@ -368,7 +368,7 @@ where
 
         self.cache
             .component_states
-            .insert_pending(block.clone(), component.clone(), new_state)
+            .insert_pending(block.clone(), component, new_state)
             .map_err(|e| {
                 error!("Failed to update component state: {e}");
                 ExtractionError::Unknown(format!("Failed to update component state: {e}"))
@@ -723,7 +723,7 @@ where
         let metadata_by_component_id: HashMap<ComponentId, _> = {
             component_metadata_from_external_source
                 .into_iter()
-                .map(|(component, metadata)| (component.id.clone(), metadata))
+                .map(|(component, metadata)| (component.id, metadata))
                 .collect()
         };
 
@@ -1165,8 +1165,8 @@ mod tests {
             vec![TxWithChanges {
                 tx: get_test_transaction(1),
                 protocol_components: HashMap::from([
-                    ("comp1".to_string(), component1.clone()),
-                    ("comp2".to_string(), component2.clone()),
+                    ("comp1".to_string(), component1),
+                    ("comp2".to_string(), component2),
                 ]),
                 ..Default::default()
             }],
@@ -1230,7 +1230,7 @@ mod tests {
         hook_dci
             .cache
             .protocol_components
-            .insert_permanent("existing_comp".to_string(), existing_component.clone());
+            .insert_permanent("existing_comp".to_string(), existing_component);
 
         // Create block changes with only state_updates (no new components)
         let mut state_updates = HashMap::new();
@@ -1313,7 +1313,7 @@ mod tests {
         hook_dci
             .cache
             .protocol_components
-            .insert_permanent("balance_comp".to_string(), existing_component.clone());
+            .insert_permanent("balance_comp".to_string(), existing_component);
 
         // Create block changes with only balance_changes (no new components)
         let mut balance_changes = HashMap::new();
@@ -1405,7 +1405,7 @@ mod tests {
 
         // Test component not in cache (needs full processing)
         let mut components_map = HashMap::new();
-        components_map.insert("comp1".to_string(), (tx_hash.clone(), component.clone()));
+        components_map.insert("comp1".to_string(), (tx_hash, component));
 
         let (full_processing, balance_only) = hook_dci
             .categorize_components(&components_map)
@@ -1608,9 +1608,9 @@ mod tests {
                 "Simulation failed: insufficient gas".to_string(),
             )));
 
-        let component_metadata = vec![(component.clone(), tracing_metadata)];
+        let component_metadata = vec![(component, tracing_metadata)];
 
-        let component_id_to_tx_map = HashMap::from([(component_id.clone(), Some(tx.clone()))]);
+        let component_id_to_tx_map = HashMap::from([(component_id.clone(), Some(tx))]);
 
         // Process metadata errors - this should trigger pausing logic
         let result = hook_dci.process_metadata_errors(
@@ -1940,7 +1940,7 @@ mod tests {
             let config = HookEntrypointConfig::new(
                 Some(4),
                 1,
-                Some(router_address.clone()),
+                Some(router_address),
                 None,
                 None,
                 pool_manager.clone(),
@@ -1951,7 +1951,7 @@ mod tests {
 
             let mut entrypoint_generator = UniswapV4DefaultHookEntrypointGenerator::new(
                 DefaultSwapAmountEstimator::with_limits(),
-                pool_manager.clone(),
+                pool_manager,
                 balance_slot_detector,
             );
             entrypoint_generator.set_config(config);
@@ -2263,7 +2263,7 @@ mod tests {
                     });
 
                     ep_set.insert(EntryPointWithTracingParams { entry_point, params });
-                    entrypoints.insert(component_id.clone(), ep_set);
+                    entrypoints.insert(component_id, ep_set);
 
                     Box::pin(async move { Ok(WithTotal { entity: entrypoints, total: None }) })
                 });

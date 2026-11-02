@@ -2059,7 +2059,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90")
@@ -2578,7 +2578,7 @@ mod tests {
             .get_limits(token_in.address.clone(), token_out.address.clone())
             .expect("a pool with liquidity has limits");
         let (limit_in, limit_out) = hooked
-            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .get_limits(token_in.address, token_out.address)
             .expect("a pool with liquidity has limits");
 
         assert!(hookless_out > BigUint::zero(), "the reference pool must move some output");
@@ -2607,7 +2607,7 @@ mod tests {
             .get_limits(token_in.address.clone(), token_out.address.clone())
             .expect("a pool with liquidity has limits");
         let limits = hooked
-            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .get_limits(token_in.address, token_out.address)
             .expect("a pool with liquidity has limits");
 
         assert_eq!(limits, hookless);
@@ -2694,7 +2694,7 @@ mod tests {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create client"),
             get_runtime().expect("Failed to get runtime"),
-            Some(block.clone()),
+            Some(block),
         );
         let engine = create_engine(db, true).expect("Failed to create simulation engine");
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90")
@@ -2838,7 +2838,7 @@ mod tests {
         let weth = weth();
 
         let (limit_in, limit_out) = usv4_state
-            .get_limits(usdc.address.clone(), weth.address.clone())
+            .get_limits(usdc.address, weth.address)
             .unwrap();
 
         // Should return some conservative limits

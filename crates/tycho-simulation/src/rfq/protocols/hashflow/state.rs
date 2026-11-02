@@ -469,7 +469,7 @@ mod tests {
                 .get_amount_out(amount, &wbtc(), &usdc())
                 .map(|_| ()),
             state
-                .get_limits(wbtc().address.clone(), usdc().address.clone())
+                .get_limits(wbtc().address, usdc().address)
                 .map(|_| ()),
         ];
 
@@ -498,7 +498,7 @@ mod tests {
         );
         assert!(matches!(swap, Err(SimulationError::InvalidInput(_, None))), "{swap:?}");
         assert!(matches!(
-            state.get_limits(weth().address.clone(), usdc().address.clone()),
+            state.get_limits(weth().address, usdc().address),
             Err(SimulationError::RecoverableError(_))
         ));
     }

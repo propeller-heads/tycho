@@ -1191,7 +1191,7 @@ mod tests {
         assert!(limit > u256_to_biguint(one_eth() * U256::from(999)));
         assert!(limit < u256_to_biguint(one_eth() * U256::from(1000)));
         let quote = state
-            .get_amount_out(limit.clone(), &eeth_token(), &eth_token())
+            .get_amount_out(limit, &eeth_token(), &eth_token())
             .expect("limit quotes");
         assert_eq!(quote.amount, output);
     }
@@ -1374,7 +1374,7 @@ mod tests {
         assert_eq!(wrapper_of(&after_wrap).weeth_shares, shares_before + weeth);
 
         let unwrapped = after_wrap
-            .get_amount_out(wrapped.amount.clone(), &weeth_token(), &eeth_token())
+            .get_amount_out(wrapped.amount, &weeth_token(), &eeth_token())
             .expect("unwrap");
         let eeth = biguint_to_u256(&unwrapped.amount);
         assert_eq!(

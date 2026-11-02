@@ -176,7 +176,7 @@ mod tests {
         let swap = Swap::new(
             component(&token0, &token1),
             default_token(token0.clone()),
-            default_token(other.clone()),
+            default_token(other),
             BigUint::ZERO,
         );
         let encoder = encoder();

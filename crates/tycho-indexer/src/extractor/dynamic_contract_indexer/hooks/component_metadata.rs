@@ -1024,7 +1024,7 @@ mod tests {
         assert!(provider.is_none()); // Should be none since transport has different routing key
 
         // Set the routing key to the correct one
-        transport.set_routing_key(routing_key.clone());
+        transport.set_routing_key(routing_key);
         let provider = registry.get_provider(&transport);
         assert!(provider.is_some());
     }

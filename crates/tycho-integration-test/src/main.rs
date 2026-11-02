@@ -1993,13 +1993,13 @@ fn process_execution_result(
             // expected
             let slippage = if amount_out >= &simulated_amount_out_without_fee {
                 let diff = amount_out - &simulated_amount_out_without_fee;
-                ((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                ((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0
             } else {
                 let diff = &simulated_amount_out_without_fee - amount_out;
-                -((diff.clone() * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
+                -((diff * BigUint::from(10000u32)) / &simulated_amount_out_without_fee)
                     .to_f64()
                     .unwrap_or(0.0) /
                     100.0

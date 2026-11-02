@@ -188,7 +188,7 @@ mod tests {
 
         let swap_wbtc_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::from(220_000u64),
         );
@@ -264,7 +264,7 @@ mod tests {
 
         let swap_dai_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(dai.clone()),
+            default_token(dai),
             default_token(usdc.clone()),
             BigUint::from(250_000u64),
         );
@@ -281,7 +281,7 @@ mod tests {
             vec![
                 SwapGroup {
                     swaps: vec![swap_wbtc_weth],
-                    token_in: wbtc.clone(),
+                    token_in: wbtc,
                     token_out: weth.clone(),
                     protocol_system: "uniswap_v4".to_string(),
                     split: 0f64,
@@ -337,7 +337,7 @@ mod tests {
                 protocol_system: "vm:balancer_v3".to_string(),
                 ..Default::default()
             },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::from(220_000u64),
         );
@@ -349,7 +349,7 @@ mod tests {
         );
         let swap_dai_usdc = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(dai.clone()),
+            default_token(dai),
             default_token(usdc.clone()),
             BigUint::from(250_000u64),
         );
@@ -513,7 +513,7 @@ mod tests {
         );
         let swap_weth_dai = Swap::new(
             ProtocolComponent { protocol_system: "uniswap_v4".to_string(), ..Default::default() },
-            default_token(weth.clone()),
+            default_token(weth),
             default_token(dai.clone()),
             BigUint::from(250_000u64),
         );
@@ -574,7 +574,7 @@ mod tests {
                 protocol_system: "uniswap_v4_hooks".to_string(),
                 ..Default::default()
             },
-            default_token(wbtc.clone()),
+            default_token(wbtc),
             default_token(usdc.clone()),
             BigUint::ZERO,
         );
@@ -585,14 +585,14 @@ mod tests {
             default_token(dai.clone()),
             BigUint::ZERO,
         );
-        let swaps = vec![swap_weth_wbtc.clone(), swap_wbtc_usdc.clone(), swap_usdc_dai.clone()];
+        let swaps = vec![swap_weth_wbtc, swap_wbtc_usdc, swap_usdc_dai];
         let grouped_swaps = group_swaps(&swaps);
 
         assert_eq!(grouped_swaps.len(), 2);
         // First group should contain both uniswap_v4 and uniswap_v4_hooks swaps
         assert_eq!(grouped_swaps[0].swaps.len(), 2);
         assert_eq!(grouped_swaps[0].token_in, weth);
-        assert_eq!(grouped_swaps[0].token_out, usdc.clone());
+        assert_eq!(grouped_swaps[0].token_out, usdc);
         // The protocol_system should be from the first swap in the group
         assert_eq!(grouped_swaps[0].protocol_system, "uniswap_v4");
 

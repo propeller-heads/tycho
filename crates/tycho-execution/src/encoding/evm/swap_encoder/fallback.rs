@@ -741,7 +741,7 @@ mod tests {
                 "020001f400000a0000000000000000000000000000000000000000".to_string(),
             ),
             (
-                FallbackSwapData::Curve { pool: pool.clone(), pool_type: 1, i: 0, j: 2 },
+                FallbackSwapData::Curve { pool, pool_type: 1, i: 0, j: 2 },
                 format!("03{USDC_WETH_USV3}010002"),
             ),
         ];

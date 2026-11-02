@@ -1589,7 +1589,7 @@ mod refresh_task_topology_test {
 
         // Out-of-process write while the setup block_on has already returned.
         let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
-        let db_url_clone = db_url.clone();
+        let db_url_clone = db_url;
         let cache_clone = Arc::clone(&cache);
         main_runtime.spawn(async move {
             let mut conn = AsyncPgConnection::establish(&db_url_clone)

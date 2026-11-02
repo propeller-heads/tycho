@@ -292,7 +292,7 @@ where
         gauge!(
             "extractor_sync_block_rate",
             "chain" => extractor_id.chain.to_string(),
-            "extractor" => extractor_id.name.to_string(),
+            "extractor" => extractor_id.name,
         )
         .set(blocks_per_minute);
 
@@ -655,7 +655,7 @@ where
         let new_token_addresses = msg
             .protocol_components()
             .into_iter()
-            .flat_map(|pc| pc.tokens.clone().into_iter())
+            .flat_map(|pc| pc.tokens.into_iter())
             .collect::<Vec<_>>();
 
         // Separate between known and unkown tokens
@@ -1636,7 +1636,7 @@ where
                         created_attributes: HashSet::new(),
                     })
                     .updated_attributes
-                    .insert(key.clone(), value);
+                    .insert(key, value);
                 acc
             });
 
@@ -5714,7 +5714,7 @@ mod test_serial_db {
                                 balance: Bytes::from(&[0u8]),
                                 balance_float: 10.0,
                                 modify_tx: VM_TX_HASH_1.parse().unwrap(),
-                                component_id: component_id.clone(),
+                                component_id,
                             },
                         )]),
                     )]),
@@ -6210,7 +6210,7 @@ mod test_serial_db {
                         token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000064"),
                         modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000007532").unwrap(),
-                        account: account1.clone(),
+                        account: account1,
                         }),
                     ])),
                     (account2.clone(), HashMap::from([
@@ -6218,7 +6218,7 @@ mod test_serial_db {
                         token: Bytes::from_str(USDC_ADDRESS).unwrap(),
                         balance: Bytes::from("0x00000001"),
                         modify_tx:Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000007531").unwrap(),
-                        account: account2.clone(),
+                        account: account2,
                         }),
                     ]))
                 ]),

@@ -846,8 +846,8 @@ mod tests {
         let tx_hash2 = TxHash::from([2u8; 32]);
 
         let mut all_components = HashMap::new();
-        all_components.insert(component1.id.clone(), (tx_hash1.clone(), component1.clone()));
-        all_components.insert(component2.id.clone(), (tx_hash2.clone(), component2.clone()));
+        all_components.insert(component1.id.clone(), (tx_hash1, component1));
+        all_components.insert(component2.id.clone(), (tx_hash2, component2));
 
         let result1 = MetadataResult::new(
             "test_request_1".to_string(),
@@ -917,7 +917,7 @@ mod tests {
         let tx_hash = TxHash::from([1u8; 32]);
 
         let mut all_components = HashMap::new();
-        all_components.insert(component.id.clone(), (tx_hash.clone(), component.clone()));
+        all_components.insert(component.id.clone(), (tx_hash, component));
 
         let results = vec![MetadataResult::new(
             "test_request_1".to_string(),

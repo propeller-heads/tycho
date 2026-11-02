@@ -1012,9 +1012,9 @@ mod tests {
         // slot_b and slot_c are at the token address with farther values.
         // Token-address slots must come before foreign-address slots regardless of distance.
         let mut slots: SlotValues = vec![
-            ((foreign.clone(), slot_a.clone()), U256::from(999u64)), // distance 1, but foreign
-            ((token.clone(), slot_b.clone()), U256::from(1500u64)),  // distance 500, token
-            ((token.clone(), slot_c.clone()), U256::from(5000u64)),  // distance 4000, token
+            ((foreign, slot_a.clone()), U256::from(999u64)), // distance 1, but foreign
+            ((token.clone(), slot_b.clone()), U256::from(1500u64)), // distance 500, token
+            ((token.clone(), slot_c.clone()), U256::from(5000u64)), // distance 4000, token
         ];
 
         SlotDetector::<TestFixtureStrategy>::sort_slots_by_priority(
@@ -1042,8 +1042,8 @@ mod tests {
             original_value: U256::from(1000u64),
             test_value: U256::from(2000u64),
             all_slots: vec![
-                ((token.clone(), slot_a.clone()), U256::from(1000u64)),
-                ((token.clone(), slot_b.clone()), U256::from(900u64)),
+                ((token.clone(), slot_a), U256::from(1000u64)),
+                ((token, slot_b.clone()), U256::from(900u64)),
             ],
         }];
 
@@ -1078,8 +1078,8 @@ mod tests {
             original_value: U256::ZERO,
             test_value: U256::from(1_000_000_000_000_000_000u64),
             all_slots: vec![
-                ((token.clone(), slot_a.clone()), U256::ZERO),
-                ((token.clone(), slot_b.clone()), U256::ZERO),
+                ((token.clone(), slot_a), U256::ZERO),
+                ((token, slot_b.clone()), U256::ZERO),
             ],
         }];
 
@@ -1109,7 +1109,7 @@ mod tests {
             token: token.clone(),
             original_value: U256::ZERO,
             test_value: U256::from(1_000_000_000_000_000_000u64),
-            all_slots: vec![((token.clone(), slot_a.clone()), U256::ZERO)],
+            all_slots: vec![((token.clone(), slot_a), U256::ZERO)],
         }];
 
         let responses: Vec<TransportResult<Value>> =

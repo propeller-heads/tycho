@@ -731,7 +731,7 @@ mod test {
                         [(
                             Bytes::from_str("0x6B175474E89094C44Da98b954EedeAC495271d0F").unwrap(),
                             ComponentBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 component_id: "Balance2".to_string(),
@@ -795,7 +795,7 @@ mod test {
                                 token: token_addr.clone(),
                                 balance: Bytes::from(2_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
-                                account: account1_addr.clone(),
+                                account: account1_addr,
                             },
                         )]
                         .into_iter()
@@ -806,7 +806,7 @@ mod test {
                         [(
                             token_addr.clone(),
                             AccountBalance {
-                                token: token_addr.clone(),
+                                token: token_addr,
                                 balance: Bytes::from(30_i32.to_be_bytes()),
                                 modify_tx: tx.hash.clone(),
                                 account: account2_addr,
@@ -954,16 +954,13 @@ mod test {
 
         // Need to sort because collecting a HashSet is unstable.
         missing_keys.sort();
-        assert_eq!(
-            missing_keys,
-            vec![(c_ids[0].clone(), missing.clone()), (missing.clone(), new.clone())]
-        );
+        assert_eq!(missing_keys, vec![(c_ids[0].clone(), missing.clone()), (missing, new.clone())]);
         assert_eq!(
             res,
             HashMap::from([
-                ((c_ids[0].clone(), new.clone()), Bytes::from(2_u64.to_be_bytes().to_vec())),
+                ((c_ids[0].clone(), new), Bytes::from(2_u64.to_be_bytes().to_vec())),
                 ((c_ids[0].clone(), reserve.clone()), Bytes::from(10_u64.to_be_bytes().to_vec())),
-                ((c_ids[1].clone(), reserve.clone()), Bytes::from(30_u64.to_be_bytes().to_vec()))
+                ((c_ids[1].clone(), reserve), Bytes::from(30_u64.to_be_bytes().to_vec()))
             ])
         );
     }
@@ -999,10 +996,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (c_ids[1].clone(), missing_token.clone()),
-                (missing_component.clone(), token_key.clone())
-            ]
+            vec![(c_ids[1].clone(), missing_token), (missing_component, token_key.clone())]
         );
         assert_eq!(
             res,
@@ -1025,7 +1019,7 @@ mod test {
                     HashMap::from([(
                         token_key.clone(),
                         tycho_common::models::protocol::ComponentBalance {
-                            token: token_key.clone(),
+                            token: token_key,
                             balance: Bytes::from(30_i32.to_be_bytes()),
                             modify_tx: transaction().hash,
                             component_id: c_ids[1].clone(),
@@ -1070,10 +1064,7 @@ mod test {
         missing_keys.sort();
         assert_eq!(
             missing_keys,
-            vec![
-                (missing_account.clone(), token_key.clone()),
-                (accounts[1].clone(), missing_token.clone())
-            ]
+            vec![(missing_account, token_key.clone()), (accounts[1].clone(), missing_token)]
         );
         assert_eq!(
             res,
@@ -1220,7 +1211,7 @@ mod test {
         let c1 = "c1".to_string();
         let c3 = "c3".to_string();
         let ghost = "ghost".to_string();
-        let ids = HashSet::from([c1.clone(), c3.clone(), ghost.clone()]);
+        let ids = HashSet::from([c1.clone(), c3, ghost.clone()]);
 
         let missing = reorg_buffer.missing_components(ids.clone());
         assert_eq!(missing, HashSet::from([ghost.clone()]));

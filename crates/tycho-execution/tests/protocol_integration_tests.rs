@@ -567,7 +567,7 @@ fn test_evm_single_encoding_strategy_usv4_and_hooks_grouped_swap() {
             static_attributes: static_attributes_usdc_eth,
             ..Default::default()
         },
-        default_token(usdc.clone()),
+        default_token(usdc),
         default_token(eth.clone()),
         BigUint::ZERO,
     );
@@ -656,7 +656,7 @@ fn test_single_encoding_strategy_ekubo_grouped_swap() {
             ]),
             ..Default::default()
         },
-        default_token(usdc.clone()),
+        default_token(usdc),
         default_token(usdt.clone()),
         BigUint::ZERO,
     );
@@ -1409,7 +1409,7 @@ fn test_sequential_encoding_strategy_fluid() {
     );
     let swap_2 = Swap::new(
         fluid_dex_2,
-        default_token(usdt.clone()),
+        default_token(usdt),
         default_token(token_out.clone()),
         BigUint::ZERO,
     );
@@ -2119,7 +2119,7 @@ fn test_sequential_encoding_strategy_aero_cl() {
     );
     let swap2 = Swap::new(
         usdc_cbbtc_pool,
-        default_token(usdc.clone()),
+        default_token(usdc),
         default_token(cbbtc.clone()),
         BigUint::ZERO,
     );
@@ -2190,7 +2190,7 @@ fn test_sequential_encoding_strategy_slipstreams() {
     let btc = Bytes::from("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf");
     let swap2 = Swap::new(
         slipstreams_cbbtc_usdc_pool,
-        default_token(usdc.clone()),
+        default_token(usdc),
         default_token(btc.clone()),
         BigUint::ZERO,
     );
@@ -2200,8 +2200,8 @@ fn test_sequential_encoding_strategy_slipstreams() {
     let solution = Solution::new(
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-        weth.clone(),
-        btc.clone(),
+        weth,
+        btc,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000").unwrap(),
         BigUint::from_str("980").unwrap(),
@@ -2304,7 +2304,7 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
     );
     let swap2 = Swap::new(
         aerodrome_v1_volatile_pool,
-        default_token(usdbc.clone()),
+        default_token(usdbc),
         default_token(tbtc.clone()),
         BigUint::ZERO,
     );
@@ -2416,12 +2416,8 @@ fn test_sequential_encoding_strategy_aero_basic() {
         default_token(usdc.clone()),
         BigUint::ZERO,
     );
-    let swap2 = Swap::new(
-        weth_usdc_pool,
-        default_token(usdc.clone()),
-        default_token(weth.clone()),
-        BigUint::ZERO,
-    );
+    let swap2 =
+        Swap::new(weth_usdc_pool, default_token(usdc), default_token(weth.clone()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Base);
 
@@ -2530,20 +2526,16 @@ fn test_sequential_encoding_strategy_erc4626() {
         ..Default::default()
     };
     let susdc = Bytes::from("0xbc65ad17c5c0a2a4d159fa5a503f4992c7b545fe");
-    let swap2 = Swap::new(
-        susdc_pool,
-        default_token(usdc.clone()),
-        default_token(susdc.clone()),
-        BigUint::ZERO,
-    );
+    let swap2 =
+        Swap::new(susdc_pool, default_token(usdc), default_token(susdc.clone()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
 
     let solution = Solution::new(
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-        sp_usdc.clone(),
-        susdc.clone(),
+        sp_usdc,
+        susdc,
         BigUint::from_str("100_000_000").unwrap(),
         BigUint::from_str("90_000000000000000000").unwrap(),
         BigUint::from_str("88200000000000000000").unwrap(),
@@ -2588,7 +2580,7 @@ fn test_single_encoding_strategy_lido_v4_submit() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         eth(),
-        steth.clone(),
+        steth,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("900000000000000000").unwrap(),
@@ -2633,7 +2625,7 @@ fn test_single_encoding_strategy_lido_v4_submit_and_wrap() {
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         eth(),
-        wsteth.clone(),
+        wsteth,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("800000000000000000").unwrap(),
         BigUint::from_str("700000000000000000").unwrap(),
@@ -2685,8 +2677,8 @@ fn test_single_encoding_strategy_lido_v4_wrap() {
     let solution = Solution::new(
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-        steth.clone(),
-        wsteth.clone(),
+        steth,
+        wsteth,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("900000000000000000").unwrap(),
         BigUint::from_str("800000000000000000").unwrap(),
@@ -2735,8 +2727,8 @@ fn test_single_encoding_strategy_lido_v4_unwrap() {
     let solution = Solution::new(
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
-        wsteth.clone(),
-        steth.clone(),
+        wsteth,
+        steth,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("1100000000000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
@@ -2781,19 +2773,15 @@ fn test_sequential_encoding_strategy_lido_v4_submit_then_wrap() {
     };
     let swap1 =
         Swap::new(submit_pool, default_token(eth()), default_token(steth.clone()), BigUint::ZERO);
-    let swap2 = Swap::new(
-        wrap_pool,
-        default_token(steth.clone()),
-        default_token(wsteth.clone()),
-        BigUint::ZERO,
-    );
+    let swap2 =
+        Swap::new(wrap_pool, default_token(steth), default_token(wsteth.clone()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
     let solution = Solution::new(
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
         eth(),
-        wsteth.clone(),
+        wsteth,
         BigUint::from_str("1_000000000000000000").unwrap(),
         BigUint::from_str("900000000000000000").unwrap(),
         BigUint::from_str("800000000000000000").unwrap(),
@@ -2839,7 +2827,7 @@ fn test_single_swap_with_univ4_angstrom() {
     let mut usdc_weth_attributes: HashMap<String, Bytes> = HashMap::new();
     usdc_weth_attributes.insert("key_lp_fee".into(), Bytes::from("0x800000")); // 8388608
     usdc_weth_attributes.insert("tick_spacing".into(), Bytes::from("0x0a")); // 10
-    usdc_weth_attributes.insert("hooks".into(), angstrom_hook.clone());
+    usdc_weth_attributes.insert("hooks".into(), angstrom_hook);
     let swap = Swap::new(
         ProtocolComponent {
             id: "0x000000000004444c5dc75cB358380D2e3dE08A90".to_string(),
@@ -2857,8 +2845,8 @@ fn test_single_swap_with_univ4_angstrom() {
     let solution = Solution::new(
         alice_address(),
         alice_address(),
-        usdc.clone(),
-        weth.clone(),
+        usdc,
+        weth,
         BigUint::from_str("100000000").unwrap(), // 100 USDC (6 decimals)
         BigUint::from_str("99574171").unwrap(),
         BigUint::from_str("97582687").unwrap(),
@@ -3148,8 +3136,7 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
         protocol_system: String::from("etherfi"),
         ..Default::default()
     };
-    let swap2 =
-        Swap::new(eeth_pool, default_token(eeth.clone()), default_token(eth()), BigUint::ZERO);
+    let swap2 = Swap::new(eeth_pool, default_token(eeth), default_token(eth()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
 
@@ -3159,7 +3146,7 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
         // it's an EIP-7702 address and RedemptionManager only forwards 10k gas for ETH sends.
         Bytes::from_str("0x9964bFf29BAa37B47604F3F3F51F3B3C5149d6DE").unwrap(),
         Bytes::from_str("0x9964bFf29BAa37B47604F3F3F51F3B3C5149d6DE").unwrap(),
-        weeth.clone(),
+        weeth,
         eth(),
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("1000000000000000000").unwrap(),
@@ -3209,12 +3196,8 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
         ..Default::default()
     };
     let weeth = Bytes::from("0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee");
-    let swap2 = Swap::new(
-        weeth_pool,
-        default_token(eeth.clone()),
-        default_token(weeth.clone()),
-        BigUint::ZERO,
-    );
+    let swap2 =
+        Swap::new(weeth_pool, default_token(eeth), default_token(weeth.clone()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
 
@@ -3222,7 +3205,7 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
         Bytes::from_str("0x9964bFf29BAa37B47604F3F3F51F3B3C5149d6DE").unwrap(),
         Bytes::from_str("0x9964bFf29BAa37B47604F3F3F51F3B3C5149d6DE").unwrap(),
         eth(),
-        weeth.clone(),
+        weeth,
         BigUint::from_str("1000000000000000000").unwrap(),
         BigUint::from_str("900000000000000000").unwrap(),
         BigUint::from_str("882000000000000000").unwrap(),
@@ -4248,8 +4231,7 @@ fn test_sequential_encoding_strategy_sky() {
         default_token(usds.clone()),
         BigUint::ZERO,
     );
-    let swap2 =
-        Swap::new(wrapper, default_token(usds.clone()), default_token(usdc.clone()), BigUint::ZERO);
+    let swap2 = Swap::new(wrapper, default_token(usds), default_token(usdc.clone()), BigUint::ZERO);
 
     let encoder = get_tycho_router_encoder(Chain::Ethereum);
 

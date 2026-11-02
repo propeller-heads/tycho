@@ -60,8 +60,7 @@ impl TokenAnalyzer for EthCallDetector {
     ) -> Result<(TokenQuality, Option<TransferCost>, Option<TransferTax>), String> {
         let (quality, transfer_cost, tax) = self
             .detect_impl(Address::from_bytes(&token), block)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         tracing::debug!(?token, ?quality, "ethcall detector: determined token quality");
         Ok((
             quality,
@@ -85,8 +84,7 @@ impl EthCallDetector {
         let (holder, amount) = match self
             .finder
             .find_owner(token.to_bytes(), MIN_AMOUNT.into())
-            .await
-            .map_err(|e| e.to_string())?
+            .await?
         {
             Some((address, balance)) => {
                 // Use half the balance to reduce races between find_owner and the eth_call.

@@ -1257,7 +1257,7 @@ mod test {
             HashMap::from([(
                 usdc.clone(),
                 AccountBalance {
-                    token: usdc.clone(),
+                    token: usdc,
                     balance: Bytes::from("0x02"),
                     modify_tx: Bytes::zero(32),
                     account: address0.clone(),
@@ -1282,7 +1282,7 @@ mod test {
             HashMap::from([(
                 weth.clone(),
                 AccountBalance {
-                    token: weth.clone(),
+                    token: weth,
                     balance: Bytes::from("0x2a"),
                     modify_tx: Bytes::zero(32),
                     account: address1.clone(),

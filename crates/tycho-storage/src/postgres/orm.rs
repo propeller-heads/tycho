@@ -1907,7 +1907,7 @@ impl From<EntryPoint> for models::blockchain::EntryPoint {
         Self {
             external_id: value.external_id.clone(),
             target: value.target.clone(),
-            signature: value.signature.clone(),
+            signature: value.signature,
         }
     }
 }

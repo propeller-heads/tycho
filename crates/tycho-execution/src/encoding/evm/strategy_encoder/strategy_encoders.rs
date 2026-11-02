@@ -142,7 +142,7 @@ impl SingleSwapStrategyEncoder {
     ) -> Result<Self, EncodingError> {
         Ok(Self {
             swap_encoder_registry,
-            router_address: router_address.clone(),
+            router_address,
             single_swap_validator: SingleSwapValidator,
         })
     }
@@ -251,7 +251,7 @@ impl SequentialSwapStrategyEncoder {
     ) -> Result<Self, EncodingError> {
         Ok(Self {
             swap_encoder_registry,
-            router_address: router_address.clone(),
+            router_address,
             sequential_swap_validator: SequentialSwapValidator,
         })
     }
@@ -346,11 +346,7 @@ impl SplitSwapStrategyEncoder {
         swap_encoder_registry: SwapEncoderRegistry,
         router_address: Bytes,
     ) -> Result<Self, EncodingError> {
-        Ok(Self {
-            swap_encoder_registry,
-            split_swap_validator: SplitSwapValidator,
-            router_address: router_address.clone(),
-        })
+        Ok(Self { swap_encoder_registry, split_swap_validator: SplitSwapValidator, router_address })
     }
 
     /// Encodes information necessary for performing a single hop against a given executor for
@@ -650,7 +646,7 @@ mod tests {
                     protocol_system: "uniswap_v2".to_string(),
                     ..Default::default()
                 },
-                default_token(wbtc.clone()),
+                default_token(wbtc),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
@@ -717,7 +713,7 @@ mod tests {
                 BigUint::from(900u64),
                 vec![
                     delayed_bebop_swap(usdc.clone(), weth.clone(), delay),
-                    delayed_bebop_swap(weth.clone(), dai.clone(), delay),
+                    delayed_bebop_swap(weth, dai.clone(), delay),
                 ],
             );
             let encoder =
@@ -818,7 +814,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                default_token(weth.clone()),
+                default_token(weth),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
@@ -833,7 +829,7 @@ mod tests {
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
                 usdc.clone(),
-                usdc.clone(),
+                usdc,
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99574171").unwrap(),
                 BigUint::from_str("97582687").unwrap(),
@@ -955,7 +951,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                default_token(weth.clone()),
+                default_token(weth),
                 default_token(usdc.clone()),
                 BigUint::ZERO,
             );
@@ -971,7 +967,7 @@ mod tests {
                 Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
                 Bytes::default(),
                 usdc.clone(),
-                usdc.clone(),
+                usdc,
                 BigUint::from_str("100000000").unwrap(),
                 BigUint::from_str("99025908").unwrap(),
                 BigUint::from_str("97045389").unwrap(),

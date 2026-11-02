@@ -97,8 +97,8 @@ pub fn encode_swap(
         state,
         sell_token.clone(),
         buy_token.clone(),
-        amount_in.clone(),
-        gas_usage.clone(),
+        amount_in,
+        gas_usage,
         expected_amount_out,
     )?;
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
@@ -121,7 +121,7 @@ pub fn encode_swap(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(encoded_solution.clone(), &solution, chain.native_token().address)?;
+        encoded_transaction(encoded_solution, &solution, chain.native_token().address)?;
     Ok((solution, transaction))
 }
 

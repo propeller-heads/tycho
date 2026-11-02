@@ -592,7 +592,7 @@ mod test_serial_db {
             HashMap::from([(
                 usdc.clone(),
                 AccountBalance::new(
-                    address.clone(),
+                    address,
                     usdc.clone(),
                     Bytes::from(1000u64).lpad(32, 0),
                     Bytes::zero(32),

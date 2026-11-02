@@ -177,7 +177,7 @@ fn search(
     let mut high = max_in.clone();
     let mut price_points: Vec<PricePoint> = vec![
         PricePoint::new(BigUint::zero(), BigUint::zero(), spot),
-        PricePoint::new(max_in, limit_result.amount.clone(), limit_price),
+        PricePoint::new(max_in, limit_result.amount, limit_price),
     ];
 
     let mut best: Option<PoolSwap> = Some(PoolSwap::new(

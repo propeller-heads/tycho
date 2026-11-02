@@ -946,7 +946,7 @@ fn unknown_tokens_are_rejected() {
         .spot_price(&stranger, &known)
         .is_err());
     assert!(pool
-        .get_limits(stranger.address.clone(), known.address)
+        .get_limits(stranger.address, known.address)
         .is_err());
 }
 

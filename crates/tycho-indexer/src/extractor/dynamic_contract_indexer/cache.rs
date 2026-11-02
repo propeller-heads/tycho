@@ -1023,17 +1023,13 @@ mod tests {
             .entrypoint_results
             .insert_pending(
                 block1.clone(),
-                (entrypoint.external_id.clone(), tracing_params.clone()),
-                Some(tracing_result.clone()),
+                (entrypoint.external_id.clone(), tracing_params),
+                Some(tracing_result),
             )
             .unwrap();
         cache
             .retriggers
-            .insert_pending(
-                block1.clone(),
-                (address.clone(), store_key.clone()),
-                (retrigger_set.clone(), 0),
-            )
+            .insert_pending(block1.clone(), (address, store_key), (retrigger_set.clone(), 0))
             .unwrap();
 
         // Insert different data in block2
@@ -1385,7 +1381,7 @@ mod tests {
 
         // Insert data in block2 - same address, more keys
         cache
-            .insert_pending(block2.clone(), address1.clone(), Some(HashSet::from([key3.clone()])))
+            .insert_pending(block2.clone(), address1.clone(), Some(HashSet::from([key3])))
             .unwrap();
 
         // Insert different address in block1
@@ -1418,10 +1414,10 @@ mod tests {
 
         // address1 should have keys merged from permanent layer and block1 only
         // (block2 remains in pending, so key3 is not included in permanent yet)
-        let expected_keys = HashSet::from([key1.clone(), key2.clone()]);
+        let expected_keys = HashSet::from([key1.clone(), key2]);
         assert_eq!(permanent_state.get(&address1), Some(&Some(expected_keys)));
 
         // address2 should have key1 from block1
-        assert_eq!(permanent_state.get(&address2), Some(&Some(HashSet::from([key1.clone()]))));
+        assert_eq!(permanent_state.get(&address2), Some(&Some(HashSet::from([key1]))));
     }
 }

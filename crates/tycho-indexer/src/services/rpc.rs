@@ -3069,7 +3069,7 @@ mod tests {
             },
             TracedEntryPoint {
                 entry_point_with_params: entry_points_with_tracing_params[1].clone().into(),
-                detection_block_hash: block_hash.clone(),
+                detection_block_hash: block_hash,
                 tracing_result: TracingResult::new(
                     HashSet::from([
                         (
@@ -3114,7 +3114,7 @@ mod tests {
             ),
             (
                 entry_point_ids[1].clone(),
-                HashSet::from([(tracing_params[1].clone().into(), component_id.clone())]),
+                HashSet::from([(tracing_params[1].clone().into(), component_id)]),
             ),
         ]);
 
@@ -3221,7 +3221,6 @@ mod tests {
             )
             .return_once(move |_, _| {
                 tracing_results
-                    .clone()
                     .into_iter()
                     .map(Ok)
                     .collect()
@@ -3247,7 +3246,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -3321,7 +3320,7 @@ mod tests {
             .unwrap();
 
         // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points.clone();
+        let mut traced_entry_points_response = response.traced_entry_points;
         let traced_entry_points_for_component = traced_entry_points_response
             .get_mut(&component_id)
             .unwrap();
@@ -4111,14 +4110,8 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free = RpcHandler::new(
-            gw_free,
-            None,
-            MockEntryPointTracer::new(),
-            config.clone(),
-            vec![],
-            vec![],
-        );
+        let handler_free =
+            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
 
         let restrictions = handler_free
             .resolve_plan_restrictions(
