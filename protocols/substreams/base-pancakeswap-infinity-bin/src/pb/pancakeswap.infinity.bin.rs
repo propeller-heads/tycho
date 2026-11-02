@@ -109,6 +109,22 @@ pub struct LeftBin {
     #[prost(message, optional, tag="4")]
     pub transaction: ::core::option::Option<Transaction>,
 }
+/// The bin a swap ended on without writing it. The swap's deltas carry `active_in_tree` only for
+/// bins it wrote, so this says whether the new active bin is in the tree.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LandedBin {
+    #[prost(bytes="vec", tag="1")]
+    pub pool_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="2")]
+    pub bin_id: u32,
+    #[prost(bool, tag="3")]
+    pub in_tree: bool,
+    #[prost(uint64, tag="4")]
+    pub ordinal: u64,
+    #[prost(message, optional, tag="5")]
+    pub transaction: ::core::option::Option<Transaction>,
+}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BinDeltas {
@@ -116,6 +132,8 @@ pub struct BinDeltas {
     pub deltas: ::prost::alloc::vec::Vec<BinDelta>,
     #[prost(message, repeated, tag="2")]
     pub left_bins: ::prost::alloc::vec::Vec<LeftBin>,
+    #[prost(message, repeated, tag="3")]
+    pub landed_bins: ::prost::alloc::vec::Vec<LandedBin>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

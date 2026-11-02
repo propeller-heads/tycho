@@ -111,6 +111,7 @@ mod tests {
                 ..Default::default()
             }],
             left_bins: vec![],
+            landed_bins: vec![],
         })
     }
 
@@ -174,6 +175,7 @@ mod tests {
         let out = balance_deltas(BinDeltas {
             deltas: vec![bin(6, 1, 10), bin(7, 2, 20), bin(8, 4, 0)],
             left_bins: vec![],
+            landed_bins: vec![],
         })
         .unwrap();
 

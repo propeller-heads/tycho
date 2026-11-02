@@ -80,9 +80,20 @@ message LeftBin {
   Transaction transaction = 4;
 }
 
+// The bin a swap ended on without writing it. The swap's deltas carry `active_in_tree` only for
+// bins it wrote, so this says whether the new active bin is in the tree.
+message LandedBin {
+  bytes pool_id = 1;
+  uint32 bin_id = 2;
+  bool in_tree = 3;
+  uint64 ordinal = 4;
+  Transaction transaction = 5;
+}
+
 message BinDeltas {
   repeated BinDelta deltas = 1;
   repeated LeftBin left_bins = 2;
+  repeated LandedBin landed_bins = 3;
 }
 
 message Events {

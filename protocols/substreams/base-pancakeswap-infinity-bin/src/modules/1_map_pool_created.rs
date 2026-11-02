@@ -51,28 +51,44 @@ pub fn map_pools_created(
     let pool_manager = decode_address("pool_manager", &params.pool_manager)?;
     let vault = decode_address("vault", &params.vault)?;
 
-    get_new_pools(&block, &mut new_pools, &pool_manager, &vault);
+    get_new_pools(&block, &mut new_pools, &pool_manager, &vault)?;
 
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
 
-/// Collects the pools worth indexing from this block's `Initialize` logs.
+/// Collects the pools worth indexing from this block's `Initialize` logs. Errors on the first
+/// pool whose slot0 write is missing or malformed: the handler's callback cannot return, so the
+/// error is carried out of it.
 fn get_new_pools(
     block: &eth::Block,
     new_pools: &mut Vec<TransactionEntityChanges>,
     pool_manager: &[u8],
     vault: &[u8],
-) {
-    let mut on_pool_created = |event: Initialize, tx: &eth::TransactionTrace, log: &eth::Log| {
-        if let Some(changes) = pool_created(event, tx, log, pool_manager, vault) {
-            new_pools.push(changes);
-        }
-    };
+) -> Result<(), substreams::errors::Error> {
+    let mut failure = None;
+    {
+        let mut on_pool_created = |event: Initialize,
+                                   tx: &eth::TransactionTrace,
+                                   log: &eth::Log| {
+            match pool_created(event, tx, log, pool_manager, vault) {
+                Ok(Some(changes)) => new_pools.push(changes),
+                Ok(None) => {}
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
+            }
+        };
 
-    let mut eh = EventHandler::new(block);
-    eh.filter_by_address(vec![Address::from_slice(pool_manager)]);
-    eh.on::<Initialize, _>(&mut on_pool_created);
-    eh.handle_events();
+        let mut eh = EventHandler::new(block);
+        eh.filter_by_address(vec![Address::from_slice(pool_manager)]);
+        eh.on::<Initialize, _>(&mut on_pool_created);
+        eh.handle_events();
+    }
+
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// One component per pool, or `None` for a pool with a swap hook or a dynamic fee: both make the
@@ -83,14 +99,14 @@ fn pool_created(
     log: &eth::Log,
     pool_manager: &[u8],
     vault: &[u8],
-) -> Option<TransactionEntityChanges> {
+) -> Result<Option<TransactionEntityChanges>, substreams::errors::Error> {
     let fee: u32 = event.fee.clone().into();
     if parameters::has_swap_hooks(&event.parameters) || parameters::is_dynamic_fee(fee) {
-        return None;
+        return Ok(None);
     }
 
     let component_id = event.id.to_vec().to_hex();
-    let (fee_zero2one, fee_one2zero) = initial_protocol_fees(&event, tx, log, pool_manager);
+    let (fee_zero2one, fee_one2zero) = initial_protocol_fees(&event, tx, log, pool_manager)?;
 
     let mut static_att = vec![
         attribute(
@@ -115,7 +131,7 @@ fn pool_created(
         static_att.push(attribute("hook_address", event.hooks.to_vec()));
     }
 
-    Some(TransactionEntityChanges {
+    Ok(Some(TransactionEntityChanges {
         tx: Some(tx.into()),
         entity_changes: vec![EntityChanges {
             component_id: component_id.clone(),
@@ -123,6 +139,9 @@ fn pool_created(
                 attribute("balance_owner", vault.to_vec()),
                 // Mutable, so state rather than static: every Swap moves it.
                 attribute("active_id", event.active_id.to_signed_bytes_be()),
+                // A new pool has no liquidity, so its active bin is not in the tree. Created here
+                // so the later writes are updates to a known value, which a reorg can restore.
+                attribute("active_in_tree", vec![0]),
                 attribute(
                     "protocol_fees/zero2one",
                     BigInt::from(fee_zero2one).to_signed_bytes_be(),
@@ -154,18 +173,19 @@ fn pool_created(
                 component_id: component_id.as_bytes().to_vec(),
             })
             .collect(),
-    })
+    }))
 }
 
 /// Protocol fee halves from the slot0 write `initialize` makes just before emitting the log, since
 /// `Initialize` does not carry them. The last non-reverted write below the log's ordinal is the
-/// pool's initial state.
+/// pool's initial state. A pool without one, or with a write that is not a 32-byte word, is an
+/// error: the storage layout this package reads no longer holds.
 fn initial_protocol_fees(
     event: &Initialize,
     tx: &eth::TransactionTrace,
     log: &eth::Log,
     pool_manager: &[u8],
-) -> (u32, u32) {
+) -> Result<(u32, u32), substreams::errors::Error> {
     let slot0_key = parameters::pool_base_slot(&event.id);
     let slot0_write = tx
         .calls
@@ -178,20 +198,27 @@ fn initial_protocol_fees(
                 change.ordinal < log.ordinal
         })
         .max_by_key(|change| change.ordinal)
-        .unwrap_or_else(|| {
-            panic!(
+        .ok_or_else(|| {
+            anyhow::anyhow!(
                 "no slot0 storage write for pool {} in tx {}",
                 event.id.to_vec().to_hex(),
                 tx.hash.to_hex()
             )
-        });
+        })?;
     let slot0: [u8; 32] = slot0_write
         .new_value
-        .clone()
+        .as_slice()
         .try_into()
-        .expect("slot0 is 32 bytes");
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "slot0 write for pool {} in tx {} is {} bytes, not 32",
+                event.id.to_vec().to_hex(),
+                tx.hash.to_hex(),
+                slot0_write.new_value.len()
+            )
+        })?;
 
-    parameters::split_protocol_fee(parameters::protocol_fee_from_slot0(&slot0))
+    Ok(parameters::split_protocol_fee(parameters::protocol_fee_from_slot0(&slot0)))
 }
 
 /// Every attribute this module emits is a creation.
@@ -332,14 +359,18 @@ mod tests {
     }
 
     fn run(block: &Block) -> Vec<TransactionEntityChanges> {
+        try_run(block).expect("block has no malformed pool")
+    }
+
+    fn try_run(block: &Block) -> Result<Vec<TransactionEntityChanges>, substreams::errors::Error> {
         let mut new_pools = vec![];
         get_new_pools(
             block,
             &mut new_pools,
             &hex::decode(POOL_MANAGER).unwrap(),
             &hex::decode(VAULT).unwrap(),
-        );
-        new_pools
+        )?;
+        Ok(new_pools)
     }
 
     fn attribute<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribute> {
@@ -434,6 +465,7 @@ mod tests {
         let state = &change.entity_changes[0].attributes;
         assert_attr(state, "balance_owner", hex::decode(VAULT).unwrap());
         assert_attr(state, "active_id", BigInt::from(ACTIVE_ID).to_signed_bytes_be());
+        assert_attr(state, "active_in_tree", vec![0u8]);
         assert_attr(state, "protocol_fees/zero2one", BigInt::from(200).to_signed_bytes_be());
         assert_attr(state, "protocol_fees/one2zero", BigInt::from(300).to_signed_bytes_be());
     }
@@ -498,13 +530,20 @@ mod tests {
     }
 
     /// The protocol fee is read from a storage write, not the event, so a pool whose slot0 write
-    /// is missing is a broken assumption rather than a pool to skip.
-    #[test]
-    #[should_panic(expected = "no slot0 storage write")]
-    fn missing_slot0_write_panics() {
+    /// is missing or malformed is a broken assumption rather than a pool to skip.
+    #[rstest::rstest]
+    #[case::missing(vec![], "no slot0 storage write")]
+    #[case::short(vec![StorageChange { new_value: vec![1, 2, 3], ..slot0_write([0u8; 32]) }], "is 3 bytes, not 32")]
+    fn malformed_slot0_write_is_an_error(
+        #[case] writes: Vec<StorageChange>,
+        #[case] expected: &str,
+    ) {
         let block =
-            block_with(initialize_log(&[0u8; 20], 500, &parameters(0, 60), ACTIVE_ID), vec![]);
-        run(&block);
+            block_with(initialize_log(&[0u8; 20], 500, &parameters(0, 60), ACTIVE_ID), writes);
+
+        let err = try_run(&block).unwrap_err().to_string();
+
+        assert!(err.contains(expected), "{err}");
     }
 
     /// A real `initialize` writes many slots, and one tx can create several pools. Only

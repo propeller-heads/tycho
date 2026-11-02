@@ -31,7 +31,8 @@ still in `reserveOfBin`, so the attributes are deleted even though reserves are 
 the bin is still active. A swap can move off an active dust bin without writing it;
 `store_bin_reserves` tells whether it held dust, and so was published and must be deleted.
 `active_in_tree` says whether the active bin is in the tree, since the simulation cannot tell an
-active dust bin from a tree bin otherwise.
+active dust bin from a tree bin otherwise. It is created with the pool as `0` and updated with
+every write to the active bin and every swap that lands on a bin it did not write.
 
 Not tracked: pausing. The owner can [pause](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/Owner.sol#L10-L19) `BinPoolManager`: [`swap`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L138-L141), [`mint`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L185-L188) and [`donate`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L260-L263) then revert with `EnforcedPause`, while [`burn`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/pool-bin/BinPoolManager.sol#L229) still allows removals. [`Paused`/`Unpaused`](https://github.com/pancakeswap/infinity-core/blob/7c04695f/src/base/Pausable.sol#L20-L25) fire once on the pool manager, not per pool. Marking every component paused on each event means iterating the whole pool store, which this package does not do. Simulation keeps quoting through a pause and execution reverts.
 

@@ -4,7 +4,7 @@ use crate::{
     parameters,
     pb::pancakeswap::infinity::bin::{
         events::{pool_event, PoolEvent},
-        BinDelta, BinDeltas, Events, LeftBin,
+        BinDelta, BinDeltas, Events, LandedBin, LeftBin,
     },
     storage::{in_window, storage_writes_by_tx, tx_index, with_floors, WritesBySlot},
 };
@@ -42,6 +42,7 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
     let no_writes = HashMap::new();
     let mut deltas: Vec<BinDelta> = Vec::new();
     let mut left_bins: Vec<LeftBin> = Vec::new();
+    let mut landed_bins: Vec<LandedBin> = Vec::new();
     for (event, floor) in with_floors(&events.pool_events) {
         // Not an error: events that touch no bins never look one up.
         let writes = writes_by_tx
@@ -86,18 +87,29 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
             delta.was_active = active.is_some_and(|(pre, _)| pre == delta.bin_id);
             delta.is_active = active.is_some_and(|(_, post)| post == delta.bin_id);
         }
-        // A swap off an active bin outside the tree that it did not write: no delta says the bin
-        // stopped being reachable, so record it for the reserves lookup downstream.
-        if let Some((pre, post)) = active {
-            if pre != post &&
-                !bin_in_tree(bin_trees_store, pool, pre, event.log_ordinal - 1) &&
-                !event_deltas
+        if let Some((pre, post)) = active.filter(|(pre, post)| pre != post) {
+            let written = |bin_id: u32| {
+                event_deltas
                     .iter()
-                    .any(|delta| delta.bin_id == pre)
-            {
+                    .any(|delta| delta.bin_id == bin_id)
+            };
+            // A swap off an active bin outside the tree that it did not write: no delta says the
+            // bin stopped being reachable, so record it for the reserves lookup downstream.
+            if !bin_in_tree(bin_trees_store, pool, pre, event.log_ordinal - 1) && !written(pre) {
                 left_bins.push(LeftBin {
                     pool_id: pool.to_vec(),
                     bin_id: pre,
+                    ordinal: event.log_ordinal,
+                    transaction: event.transaction.clone(),
+                });
+            }
+            // A swap that ends on a bin it did not write: no delta carries `active_in_tree` for
+            // the new active bin, so record where it landed.
+            if !written(post) {
+                landed_bins.push(LandedBin {
+                    pool_id: pool.to_vec(),
+                    bin_id: post,
+                    in_tree: bin_in_tree(bin_trees_store, pool, post, event.log_ordinal),
                     ordinal: event.log_ordinal,
                     transaction: event.transaction.clone(),
                 });
@@ -107,7 +119,7 @@ fn bin_changes<A: StoreGet<i64>, T: StoreGet<Vec<u8>>>(
     }
 
     // Events arrive in ordinal order and each event's bins are sorted, so the deltas are too.
-    Ok(BinDeltas { deltas, left_bins })
+    Ok(BinDeltas { deltas, left_bins, landed_bins })
 }
 
 fn missing_active_id(event: &PoolEvent) -> substreams::errors::Error {
@@ -783,6 +795,31 @@ mod tests {
             .collect();
         assert_eq!(seen, vec![(98, true, true, false, true), (100, false, false, true, false)]);
         assert!(deltas.left_bins.is_empty(), "bin 100 was written, its delta covers it");
+        assert!(deltas.landed_bins.is_empty(), "bin 98 was written, its delta covers it");
+    }
+
+    /// A swap can end on a bin it did not write, which leaves no delta to carry the new active
+    /// bin's tree membership, so the landing is recorded with it.
+    #[rstest::rstest]
+    #[case::tree_bin(vec![(1, 0, tree_word(98))], true)]
+    #[case::dust_bin(vec![], false)]
+    fn swap_onto_an_unwritten_bin_records_where_it_landed(
+        #[case] tree: Vec<(u64, u32, Vec<u8>)>,
+        #[case] in_tree: bool,
+    ) {
+        let deltas = run_block(
+            vec![write(100, packed(0, 5), packed(6, 0), 5)],
+            vec![event(swap(98), 10)],
+            vec![(1, 100), (10, 98)],
+            tree,
+        );
+
+        let landed: Vec<_> = deltas
+            .landed_bins
+            .iter()
+            .map(|landed| (landed.bin_id, landed.in_tree, landed.ordinal))
+            .collect();
+        assert_eq!(landed, vec![(98, in_tree, 10)]);
     }
 
     /// Dust only on the input side: the swap skips the dust bin it starts in without writing it.
