@@ -273,6 +273,10 @@ impl AccountDelta {
         self.change
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn code(&self) -> &Option<Code> {
         &self.code
     }

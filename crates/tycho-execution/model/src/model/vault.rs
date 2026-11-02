@@ -38,6 +38,10 @@ impl Vault {
     }
 
     /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/Vault.sol#L61>
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn _update(
         &mut self,
         from: Address,
@@ -141,6 +145,10 @@ impl Vault {
     }
 
     /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/Vault.sol#L332>
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn _finalize_balances(
         &mut self,
         state: &mut State,

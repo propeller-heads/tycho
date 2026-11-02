@@ -194,6 +194,10 @@ impl PoolSwap {
         self.new_state.as_ref()
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn price_points(&self) -> &Option<Vec<PricePoint>> {
         &self.price_points
     }

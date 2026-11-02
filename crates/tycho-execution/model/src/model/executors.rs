@@ -723,6 +723,10 @@ impl Executor {
         }
     }
 
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn handle_callback(&self, _params: &Params, state: &mut State) -> Result<(), Error> {
         match self {
             Self::Curve => unimplemented!("Curve doesn't use callbacks"),

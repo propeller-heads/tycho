@@ -68,6 +68,10 @@ pub struct PreCachedDB {
 
 impl PreCachedDB {
     /// Create a new PreCachedDB instance
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn new() -> Result<Self, PreCachedDBError> {
         Ok(PreCachedDB {
             inner: Arc::new(RwLock::new(PreCachedDBInner {
@@ -215,6 +219,10 @@ impl PreCachedDB {
     /// # Arguments
     ///
     /// * `new_state`: A struct containing all the state changes for a particular block.
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn update_state(
         &mut self,
         updates: &HashMap<Address, StateUpdate>,

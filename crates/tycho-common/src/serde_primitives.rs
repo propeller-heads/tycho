@@ -161,6 +161,7 @@ pub mod hex_bytes_option {
     use super::{HexBuffer, HexValue};
 
     /// Serialize a byte vec as a Some hex string with 0x prefix
+    #[expect(clippy::ref_option, reason = "serde's serialize_with passes the field by reference")]
     pub fn serialize<S, T>(x: &Option<T>, s: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

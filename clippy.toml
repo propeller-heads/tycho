@@ -9,3 +9,8 @@ disallowed-methods = [
     { path = "reqwest::Client::builder", reason = "build one client and share it; expect this lint at the one construction site" },
     { path = "tokio::time::interval", reason = "panics on a zero period; reject a zero configured duration when building the config" },
 ]
+
+# Lints such as unnecessary_wraps, ref_option and unused_self also check items reachable from
+# outside the crate, so new public API is held to them. Existing public items that violate them
+# carry an #[expect] naming the breaking change a fix would be.
+avoid-breaking-exported-api = false

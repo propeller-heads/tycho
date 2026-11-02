@@ -56,6 +56,7 @@ impl ProtocolTypeConfig {
 pub enum DCIType {
     /// RPC DCI plugin — uses the RPC endpoint to fetch account data.
     #[serde(rename = "rpc")]
+    #[expect(clippy::upper_case_acronyms, reason = "public API; renaming is a breaking change")]
     RPC,
     /// UniswapV4Hooks DCI plugin — wraps RPC DCI and generates hook entry points for tracing.
     UniswapV4Hooks { pool_manager_address: String },

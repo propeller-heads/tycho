@@ -101,6 +101,10 @@ impl State {
     }
 
     /// Simulate `IERC20(token).balanceOf(owner)`
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn erc20_balance_of(&mut self, token: Address, owner: Address) -> Result<i64, Error> {
         if token.is_never_erc20() {
             return Err(Error::revert("erc20_balance_of: token is never erc20"));
@@ -251,6 +255,10 @@ impl State {
     }
 
     /// Simulate `owner.balance`
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn eth_balance(&mut self, owner: Address) -> i64 {
         self.owner_to_eth_balance
             .get(&owner)

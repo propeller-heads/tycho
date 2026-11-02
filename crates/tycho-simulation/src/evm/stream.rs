@@ -616,6 +616,10 @@ impl ProtocolStreamBuilder {
     /// re-reads pool state from the VM database — an indexer registered for one still gets its
     /// balance and block-environment attributes applied, but every storage-derived value stays at
     /// the confirmed block, with no error.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn with_pending_indexer(
         mut self,
         extractor: &str,

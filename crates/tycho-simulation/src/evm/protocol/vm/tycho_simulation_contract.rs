@@ -63,6 +63,10 @@ where
     <D as DatabaseRef>::Error: Debug,
     <D as EngineDatabaseInterface>::Error: Debug,
 {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn new(address: Address, engine: SimulationEngine<D>) -> Result<Self, SimulationError> {
         Ok(Self { address, engine })
     }

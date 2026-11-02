@@ -364,6 +364,10 @@ impl<S: SlotDetectionStrategy> SlotDetector<S> {
         });
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn extract_u256_from_call_response(
         &self,
         response: &Value,

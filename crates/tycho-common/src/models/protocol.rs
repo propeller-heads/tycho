@@ -145,6 +145,10 @@ impl ProtocolComponentState {
     /// Applies balance deltas to this state.
     ///
     /// This method assumes that the passed delta is "newer" than the current state.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn apply_balance_delta(
         &mut self,
         delta: &HashMap<Bytes, ComponentBalance>,

@@ -150,6 +150,10 @@ impl CowAMMState {
 
     //https://github.com/balancer/cow-amm/blob/main/src/contracts/BPool.sol#L174
     /// joinPool
+    #[expect(
+        clippy::unused_self,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn join_pool(
         &self,
         new_state: &mut CowAMMState,

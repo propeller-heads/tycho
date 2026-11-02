@@ -33,6 +33,7 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
+#[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
 pub enum StreamError {
     #[error("Error during stream set up: {0}")]
     SetUpError(String),

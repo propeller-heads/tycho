@@ -376,14 +376,26 @@ impl Swap {
         self.split
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn user_data(&self) -> &Option<Bytes> {
         &self.user_data
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn protocol_state(&self) -> &Option<Arc<dyn ProtocolSim>> {
         &self.protocol_state
     }
 
+    #[expect(
+        clippy::ref_option,
+        reason = "public API; changing the signature is a breaking change"
+    )]
     pub fn estimated_amount_in(&self) -> &Option<BigUint> {
         &self.estimated_amount_in
     }
