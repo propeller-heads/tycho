@@ -138,7 +138,7 @@ pub struct StakingState {
 impl LidoV4State {
     #[expect(
         clippy::too_many_arguments,
-        reason = "one parameter per field of the on-chain Lido state"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         execution_block_number: u64,

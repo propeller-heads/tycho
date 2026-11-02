@@ -82,7 +82,10 @@ pub struct SkyState {
 }
 
 impl SkyState {
-    #[expect(clippy::too_many_arguments, reason = "one parameter per field of the pool state")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         component_id: String,
         kind: SkyComponentKind,

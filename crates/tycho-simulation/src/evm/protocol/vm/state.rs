@@ -237,7 +237,10 @@ where
     /// simulate a protocol-agnostic transaction.
     ///
     /// See struct definition of `EVMPoolState` for attribute explanations.
-    #[expect(clippy::too_many_arguments, reason = "one parameter per field of the pool state")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn new(
         id: String,
         tokens: Vec<Bytes>,

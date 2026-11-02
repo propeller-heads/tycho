@@ -143,7 +143,7 @@ impl AerodromeSlipstreamsState {
     /// - `dfc`: The dynamic fee configuration for the pool.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one parameter per field of the on-chain pool state"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         id: String,

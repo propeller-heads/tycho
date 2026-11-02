@@ -43,7 +43,7 @@ impl ComponentFilter {
     ///   native token of the chain.
     #[expect(
         non_snake_case,
-        reason = "constructor-style name mirrors the enum variant it replaces in the public API"
+        reason = "named after the enum variant it stands for; renaming the public constructor is a breaking change"
     )]
     #[deprecated(since = "0.9.2", note = "Please use with_tvl_range instead")]
     pub fn MinimumTVL(min_tvl: f64) -> ComponentFilter {
@@ -87,7 +87,7 @@ impl ComponentFilter {
     ///   will be tracked.
     #[expect(
         non_snake_case,
-        reason = "constructor-style name mirrors the enum variant it replaces in the public API"
+        reason = "named after the enum variant it stands for; renaming the public constructor is a breaking change"
     )]
     pub fn Ids(ids: Vec<ComponentId>) -> ComponentFilter {
         ComponentFilter {

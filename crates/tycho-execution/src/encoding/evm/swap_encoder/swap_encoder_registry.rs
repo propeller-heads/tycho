@@ -151,7 +151,7 @@ impl SwapEncoderRegistry {
     /// way: one Infinity executor serves hooked and hookless CL pools alike.
     #[expect(
         clippy::borrowed_box,
-        reason = "public API returns the registry's `Box<dyn SwapEncoder>` entries by reference"
+        reason = "public API; returning Option<&dyn SwapEncoder> is a breaking change"
     )]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {

@@ -447,7 +447,7 @@ where
     /// Creates a new state synchronizer.
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking each synchronizer setting individually"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         extractor_id: ExtractorIdentity,

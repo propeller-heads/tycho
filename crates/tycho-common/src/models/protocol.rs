@@ -48,7 +48,7 @@ where
 {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         id: &str,
@@ -273,7 +273,10 @@ impl QualityRange {
         Self { min: Some(min), max: None }
     }
 
-    #[expect(non_snake_case, reason = "constructor named after the Option::None it stands for")]
+    #[expect(
+        non_snake_case,
+        reason = "named after the Option::None it stands for; renaming the public constructor is a breaking change"
+    )]
     pub fn None() -> Self {
         Self { min: None, max: None }
     }

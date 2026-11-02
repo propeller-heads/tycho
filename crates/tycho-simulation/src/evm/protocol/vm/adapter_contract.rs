@@ -59,7 +59,7 @@ where
     /// `EXTERNAL_ACCOUNT`.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one parameter per argument of the adapter contract call"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn price(
         &self,
@@ -97,7 +97,7 @@ where
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "one parameter per argument of the adapter contract call"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn swap(
         &self,

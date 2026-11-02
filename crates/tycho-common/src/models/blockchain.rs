@@ -225,7 +225,7 @@ pub struct BlockAggregatedChanges {
 impl BlockAggregatedChanges {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         extractor: &str,
@@ -609,7 +609,7 @@ pub struct TxWithChanges {
 impl TxWithChanges {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         tx: Transaction,

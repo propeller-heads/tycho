@@ -45,7 +45,7 @@ pub struct HookCreationParams<'a> {
     all_tokens: &'a HashMap<Bytes, Token>,
     #[expect(
         dead_code,
-        reason = "carried in the params for hook handlers; no registered handler reads the decoded state"
+        reason = "no hook handler reads it; removing it changes the public HookCreationParams::new, a breaking change"
     )]
     state: UniswapV4State,
     /// Attributes of the component. If an attribute's value is a `bigint`,
@@ -54,7 +54,7 @@ pub struct HookCreationParams<'a> {
     pub(crate) attributes: &'a HashMap<String, Bytes>,
     #[expect(
         dead_code,
-        reason = "carried in the params for hook handlers; no registered handler reads the component balances"
+        reason = "no hook handler reads it; removing it changes the public HookCreationParams::new, a breaking change"
     )]
     /// Mapping from token address to big-endian encoded balance for this component.
     balances: &'a HashMap<Bytes, Bytes>,

@@ -125,7 +125,10 @@ where
         call_data
     }
 
-    #[expect(clippy::too_many_arguments, reason = "one parameter per simulation input")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
+    )]
     pub fn call(
         &self,
         selector: &str,

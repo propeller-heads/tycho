@@ -267,7 +267,7 @@ pub enum Response {
 /// A message sent from the server to the client
 #[expect(
     clippy::large_enum_variant,
-    reason = "untagged wire type; boxing the variant would change the public enum"
+    reason = "public API; boxing the large variant is a breaking change"
 )]
 #[derive(Serialize, Deserialize, Debug, Display, Clone)]
 #[serde(untagged)]
@@ -365,7 +365,7 @@ pub struct BlockAggregatedChanges {
 impl BlockAggregatedChanges {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         extractor: &str,
@@ -1044,7 +1044,7 @@ pub struct ResponseAccount {
 impl ResponseAccount {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         chain: Chain,

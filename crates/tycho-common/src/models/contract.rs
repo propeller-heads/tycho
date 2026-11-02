@@ -31,7 +31,7 @@ pub struct Account {
 impl Account {
     #[expect(
         clippy::too_many_arguments,
-        reason = "public constructor taking one argument per field"
+        reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
     pub fn new(
         chain: Chain,
