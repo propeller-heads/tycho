@@ -1,3 +1,13 @@
+## [0.495.1](https://github.com/propeller-heads/tycho/compare/0.495.0...0.495.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **client:** keep stale synchronizers stale while replaying old blocks ([d081be1](https://github.com/propeller-heads/tycho/commit/d081be15cc22d80d908c321f445e4c4491365e81))
+* **client:** lower fast-chain stale threshold and honour startup_timeout ([c2b69e8](https://github.com/propeller-heads/tycho/commit/c2b69e8e69a719a5724857166e5d7cf461c33fe9))
+* **client:** stop stale synchronizers holding each round ([939afe9](https://github.com/propeller-heads/tycho/commit/939afe9423116e2707054ff09f0f1dad4e32a1b8))
+* **client:** stop stale synchronizers holding each round ([#1708](https://github.com/propeller-heads/tycho/issues/1708)) ([568de76](https://github.com/propeller-heads/tycho/commit/568de76f43496c5a1f9367a5c3e5882a6fe70071))
+
 ## [0.495.0](https://github.com/propeller-heads/tycho/compare/0.494.0...0.495.0) (2026-10-31)
 
 
