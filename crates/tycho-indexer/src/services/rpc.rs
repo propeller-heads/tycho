@@ -1730,46 +1730,55 @@ mod tests {
     const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    mock! {
-        pub PendingDeltas {}
+    #[expect(
+        clippy::ref_option_ref,
+        reason = "mockall's expectation API takes each argument by reference, so an Option<&T> parameter becomes &Option<&T>"
+    )]
+    mod pending_deltas_mock {
+        use super::*;
 
-        impl PendingDeltasBuffer for PendingDeltas {
-            fn merge_native_states<'a>(
-                &self,
-                protocol_ids: Option<&'a [&'a str]>,
-                db_states: &mut Vec<ProtocolComponentState>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+        mock! {
+            pub PendingDeltas {}
 
-            fn update_vm_states<'a>(
-                &self,
-                addresses: Option<&'a [Bytes]>,
-                db_states: &mut Vec<Account>,
-                version: Option<BlockNumberOrTimestamp>,
-                protocol_system: &'a str,
-            ) -> Result<(), PendingDeltasError>;
+            impl PendingDeltasBuffer for PendingDeltas {
+                fn merge_native_states<'a>(
+                    &self,
+                    protocol_ids: Option<&'a [&'a str]>,
+                    db_states: &mut Vec<ProtocolComponentState>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_new_components<'a>(
-                &self,
-                ids: Option<&'a [&'a str]>,
-                protocol_system: &'a str,
-                min_tvl: Option<f64>,
-            ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
+                fn update_vm_states<'a>(
+                    &self,
+                    addresses: Option<&'a [Bytes]>,
+                    db_states: &mut Vec<Account>,
+                    version: Option<BlockNumberOrTimestamp>,
+                    protocol_system: &'a str,
+                ) -> Result<(), PendingDeltasError>;
 
-            fn get_block_commit_status<'a>(
-                &self,
-                version: BlockNumberOrTimestamp,
-                protocol_system: &'a str,
-            ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+                fn get_new_components<'a>(
+                    &self,
+                    ids: Option<&'a [&'a str]>,
+                    protocol_system: &'a str,
+                    min_tvl: Option<f64>,
+                ) -> Result<Vec<ProtocolComponent>, PendingDeltasError>;
 
-            fn search_block<'a>(
-                &self,
-                f: &dyn Fn(&BlockAggregatedChanges) -> bool,
-                protocol_system: &'a str,
-            ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+                fn get_block_commit_status<'a>(
+                    &self,
+                    version: BlockNumberOrTimestamp,
+                    protocol_system: &'a str,
+                ) -> Result<Option<CommitStatus>, PendingDeltasError>;
+
+                fn search_block<'a>(
+                    &self,
+                    f: &dyn Fn(&BlockAggregatedChanges) -> bool,
+                    protocol_system: &'a str,
+                ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+            }
         }
     }
+    use pending_deltas_mock::MockPendingDeltas;
 
     #[test]
     async fn test_validate_version_priority() {

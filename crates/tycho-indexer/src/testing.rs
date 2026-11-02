@@ -29,645 +29,654 @@ use tycho_common::{
     Bytes,
 };
 
-mock! {
-    pub Gateway {}
-    #[async_trait]
-    impl ExtractionStateGateway for Gateway {
-        async fn get_state(&self, name: &str, chain: &Chain) -> Result<ExtractionState, StorageError>;
-        async fn save_state(&self, state: &ExtractionState) -> Result<(), StorageError>;
-    }
+#[expect(
+    clippy::ref_option_ref,
+    reason = "mockall's expectation API takes each argument by reference, so an Option<&T> parameter becomes &Option<&T>"
+)]
+mod gateway_mock {
+    use super::*;
 
-    #[async_trait]
-    impl ChainGateway for Gateway {
-        async fn upsert_block(&self, new: &[Block]) -> Result<(), StorageError>;
-        async fn get_block(&self, id: &BlockIdentifier) -> Result<Block, StorageError>;
-        async fn upsert_tx(&self, new: &[Transaction]) -> Result<(), StorageError>;
-        async fn get_tx(&self, hash: &TxHash) -> Result<Transaction, StorageError>;
-        async fn revert_state(&self, to: &BlockIdentifier) -> Result<(), StorageError>;
-    }
+    mock! {
+        pub Gateway {}
+        #[async_trait]
+        impl ExtractionStateGateway for Gateway {
+            async fn get_state(&self, name: &str, chain: &Chain) -> Result<ExtractionState, StorageError>;
+            async fn save_state(&self, state: &ExtractionState) -> Result<(), StorageError>;
+        }
 
-    impl EntryPointGateway for Gateway {
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn insert_entry_points<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            entry_points: &'life1 HashMap<ComponentId, HashSet<EntryPoint>>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<Output = Result<(), StorageError>>
-                    + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+        #[async_trait]
+        impl ChainGateway for Gateway {
+            async fn upsert_block(&self, new: &[Block]) -> Result<(), StorageError>;
+            async fn get_block(&self, id: &BlockIdentifier) -> Result<Block, StorageError>;
+            async fn upsert_tx(&self, new: &[Transaction]) -> Result<(), StorageError>;
+            async fn get_tx(&self, hash: &TxHash) -> Result<Transaction, StorageError>;
+            async fn revert_state(&self, to: &BlockIdentifier) -> Result<(), StorageError>;
+        }
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn insert_entry_point_tracing_params<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            entry_points_params: &'life1 HashMap<
-                EntryPointId,
-                HashSet<(TracingParams, ComponentId)>,
-            >,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<Output = Result<(), StorageError>>
-                    + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+        impl EntryPointGateway for Gateway {
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn insert_entry_points<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                entry_points: &'life1 HashMap<ComponentId, HashSet<EntryPoint>>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<Output = Result<(), StorageError>>
+                        + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn get_entry_points<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            filter: EntryPointFilter,
-            pagination_params: Option<&'life1 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = Result<
-                            WithTotal<HashMap<ComponentId, HashSet<EntryPoint>>>,
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn insert_entry_point_tracing_params<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                entry_points_params: &'life1 HashMap<
+                    EntryPointId,
+                    HashSet<(TracingParams, ComponentId)>,
+                >,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<Output = Result<(), StorageError>>
+                        + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn get_entry_points<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                filter: EntryPointFilter,
+                pagination_params: Option<&'life1 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                            Output = Result<
+                                WithTotal<HashMap<ComponentId, HashSet<EntryPoint>>>,
+                                StorageError,
+                            >,
+                        > + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn get_entry_points_tracing_params<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                filter: EntryPointFilter,
+                pagination_params: Option<&'life1 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                            Output = Result<
+                                WithTotal<HashMap<ComponentId, HashSet<EntryPointWithTracingParams>>>,
+                                StorageError,
+                            >,
+                        > + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn upsert_traced_entry_points<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                traced_entry_points: &'life1 [TracedEntryPoint],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<Output = Result<(), StorageError>>
+                        + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn get_traced_entry_points<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                entry_points: &'life1 HashSet<EntryPointId>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                            Output = Result<
+                                HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>,
+                                StorageError,
+                            >,
+                        > + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            fn get_traced_entry_points_by_component<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                filter: EntryPointFilter,
+                pagination_params: Option<&'life1 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                            Output = Result<WithTotal<TracedEntryPoints>, StorageError>,
+                        > + ::core::marker::Send
+                        + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+        }
+
+        impl ContractStateGateway for Gateway {
+            fn get_contract<'life0, 'life1, 'life2, 'async_trait>(
+                &'life0 self,
+                id: &'life1 ContractId,
+                version: Option<&'life2 Version>,
+                include_slots: bool,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<Account, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_contracts<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                addresses: Option<&'life2 [Address]>,
+                version: Option<&'life3 Version>,
+                include_slots: bool,
+                pagination_params: Option<&'life4 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<Vec<Account>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
+
+            fn insert_contract<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                new: &'life1 Account,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn update_contracts<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                new: &'life1 [(TxHash, AccountDelta)],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn delete_contract<'life0, 'life1, 'life2, 'async_trait>(
+                &'life0 self,
+                id: &'life1 ContractId,
+                at_tx: &'life2 TxHash,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                Self: 'async_trait;
+
+            fn get_accounts_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                start_version: Option<&'life2 BlockOrTimestamp>,
+                end_version: &'life3 BlockOrTimestamp,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<Vec<AccountDelta>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+
+            fn add_account_balances<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                account_balances: &'life1 [AccountBalance],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_account_balances<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                accounts: Option<&'life2 [Address]>,
+                version: Option<&'life3 Version>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+        }
+
+        impl ProtocolGateway for Gateway {
+            #[allow(clippy::type_complexity)]
+            fn get_protocol_components<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                system: Option<String>,
+                ids: Option<&'life2 [&'life3 str]>,
+                min_tvl: Option<f64>,
+                pagination_params: Option<&'life4 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<Vec<ProtocolComponent>>,
                             StorageError,
                         >,
-                    > + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn get_entry_points_tracing_params<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            filter: EntryPointFilter,
-            pagination_params: Option<&'life1 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
+            #[allow(clippy::type_complexity)]
+            fn get_token_owners<'life0, 'life1, 'life2, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                tokens: &'life2 [Address],
+                min_balance: Option<f64>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
                         Output = Result<
-                            WithTotal<HashMap<ComponentId, HashSet<EntryPointWithTracingParams>>>,
+                            HashMap<Address, (ComponentId, Bytes)>,
                             StorageError,
                         >,
-                    > + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                Self: 'async_trait;
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn upsert_traced_entry_points<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            traced_entry_points: &'life1 [TracedEntryPoint],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<Output = Result<(), StorageError>>
-                    + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+            fn add_protocol_components<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                new: &'life1 [ProtocolComponent],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn get_traced_entry_points<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            entry_points: &'life1 HashSet<EntryPointId>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = Result<
-                            HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>,
+            fn delete_protocol_components<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                to_delete: &'life1 [ProtocolComponent],
+                block_ts: NaiveDateTime,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn add_protocol_types<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                new_protocol_types: &'life1 [ProtocolType],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_protocol_states<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                at: Option<Version>,
+                system: Option<String>,
+                ids: Option<&'life2 [&'life3 str]>,
+                retrieve_balances: bool,
+                pagination_params: Option<&'life4 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<Vec<ProtocolComponentState>>,
                             StorageError,
                         >,
-                    > + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
 
-        #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-        fn get_traced_entry_points_by_component<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            filter: EntryPointFilter,
-            pagination_params: Option<&'life1 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                        Output = Result<WithTotal<TracedEntryPoints>, StorageError>,
-                    > + ::core::marker::Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
+            fn update_protocol_states<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                new: &'life1 [(TxHash, ProtocolComponentStateDelta)],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_tokens<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: Chain,
+                address: Option<&'life1 [&'life2 Address]>,
+                quality: QualityRange,
+                traded_n_days_ago: Option<NaiveDateTime>,
+                pagination_params: Option<&'life3 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<Vec<Token>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+            fn add_component_balances<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                component_balances: &'life1 [ComponentBalance],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn add_tokens<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                tokens: &'life1 [Token],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn update_tokens<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                tokens: &'life1 [Token],
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn get_protocol_states_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                start_version: Option<&'life2 BlockOrTimestamp>,
+                end_version: &'life3 BlockOrTimestamp,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<
+                            Vec<ProtocolComponentStateDelta>,
+                            StorageError,
+                        >,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+            fn get_balance_deltas<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                start_version: Option<&'life2 BlockOrTimestamp>,
+                target_version: &'life3 BlockOrTimestamp,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<
+                            Vec<ComponentBalance>,
+                            StorageError,
+                        >,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_component_balances<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                ids: Option<&'life2 [&'life3 str]>,
+                version: Option<&'life4 Version>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_token_prices<'life0, 'life1, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<HashMap<Bytes, f64>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                Self: 'async_trait;
+
+            fn upsert_component_tvl<'life0, 'life1, 'life2, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                tvl_values: &'life2 HashMap<String, f64>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<(), StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_protocol_systems<'life0, 'life1, 'life2, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                pagination_params: Option<&'life2 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<Vec<String>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                Self: 'async_trait;
+
+            #[allow(clippy::type_complexity)]
+            fn get_component_tvls<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+                &'life0 self,
+                chain: &'life1 Chain,
+                system: Option<String>,
+                ids: Option<&'life2 [&'life3 str]>,
+                pagination_params: Option<&'life4 PaginationParams>,
+            ) -> ::core::pin::Pin<
+                Box<
+                    dyn ::core::future::Future<
+                        Output = Result<WithTotal<HashMap<String, f64>>, StorageError>,
+                    > + ::core::marker::Send + 'async_trait,
+                >,
+            >
+            where
+                'life0: 'async_trait,
+                'life1: 'async_trait,
+                'life2: 'async_trait,
+                'life3: 'async_trait,
+                'life4: 'async_trait,
+                Self: 'async_trait;
+        }
+
+        impl Gateway for Gateway {}
     }
-
-    impl ContractStateGateway for Gateway {
-        fn get_contract<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            id: &'life1 ContractId,
-            version: Option<&'life2 Version>,
-            include_slots: bool,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<Account, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_contracts<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            addresses: Option<&'life2 [Address]>,
-            version: Option<&'life3 Version>,
-            include_slots: bool,
-            pagination_params: Option<&'life4 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<Vec<Account>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            'life4: 'async_trait,
-            Self: 'async_trait;
-
-        fn insert_contract<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            new: &'life1 Account,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn update_contracts<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            new: &'life1 [(TxHash, AccountDelta)],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn delete_contract<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            id: &'life1 ContractId,
-            at_tx: &'life2 TxHash,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait;
-
-        fn get_accounts_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            start_version: Option<&'life2 BlockOrTimestamp>,
-            end_version: &'life3 BlockOrTimestamp,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<Vec<AccountDelta>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            Self: 'async_trait;
-
-
-        fn add_account_balances<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            account_balances: &'life1 [AccountBalance],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_account_balances<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            accounts: Option<&'life2 [Address]>,
-            version: Option<&'life3 Version>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            Self: 'async_trait;
-
-    }
-
-    impl ProtocolGateway for Gateway {
-        #[allow(clippy::type_complexity)]
-        fn get_protocol_components<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            system: Option<String>,
-            ids: Option<&'life2 [&'life3 str]>,
-            min_tvl: Option<f64>,
-            pagination_params: Option<&'life4 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<Vec<ProtocolComponent>>,
-                        StorageError,
-                    >,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            'life4: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_token_owners<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            tokens: &'life2 [Address],
-            min_balance: Option<f64>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<
-                        HashMap<Address, (ComponentId, Bytes)>,
-                        StorageError,
-                    >,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait;
-
-        fn add_protocol_components<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            new: &'life1 [ProtocolComponent],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn delete_protocol_components<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            to_delete: &'life1 [ProtocolComponent],
-            block_ts: NaiveDateTime,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn add_protocol_types<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            new_protocol_types: &'life1 [ProtocolType],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_protocol_states<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            at: Option<Version>,
-            system: Option<String>,
-            ids: Option<&'life2 [&'life3 str]>,
-            retrieve_balances: bool,
-            pagination_params: Option<&'life4 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<Vec<ProtocolComponentState>>,
-                        StorageError,
-                    >,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            'life4: 'async_trait,
-            Self: 'async_trait;
-
-        fn update_protocol_states<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            new: &'life1 [(TxHash, ProtocolComponentStateDelta)],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_tokens<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-            &'life0 self,
-            chain: Chain,
-            address: Option<&'life1 [&'life2 Address]>,
-            quality: QualityRange,
-            traded_n_days_ago: Option<NaiveDateTime>,
-            pagination_params: Option<&'life3 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<Vec<Token>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            Self: 'async_trait;
-
-        fn add_component_balances<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            component_balances: &'life1 [ComponentBalance],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn add_tokens<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            tokens: &'life1 [Token],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn update_tokens<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            tokens: &'life1 [Token],
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn get_protocol_states_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            start_version: Option<&'life2 BlockOrTimestamp>,
-            end_version: &'life3 BlockOrTimestamp,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<
-                        Vec<ProtocolComponentStateDelta>,
-                        StorageError,
-                    >,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            Self: 'async_trait;
-
-        fn get_balance_deltas<'life0, 'life1, 'life2, 'life3, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            start_version: Option<&'life2 BlockOrTimestamp>,
-            target_version: &'life3 BlockOrTimestamp,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<
-                        Vec<ComponentBalance>,
-                        StorageError,
-                    >,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_component_balances<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            ids: Option<&'life2 [&'life3 str]>,
-            version: Option<&'life4 Version>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            'life4: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_token_prices<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<HashMap<Bytes, f64>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait;
-
-        fn upsert_component_tvl<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            tvl_values: &'life2 HashMap<String, f64>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<(), StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_protocol_systems<'life0, 'life1, 'life2, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            pagination_params: Option<&'life2 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<Vec<String>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            Self: 'async_trait;
-
-        #[allow(clippy::type_complexity)]
-        fn get_component_tvls<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
-            &'life0 self,
-            chain: &'life1 Chain,
-            system: Option<String>,
-            ids: Option<&'life2 [&'life3 str]>,
-            pagination_params: Option<&'life4 PaginationParams>,
-        ) -> ::core::pin::Pin<
-            Box<
-                dyn ::core::future::Future<
-                    Output = Result<WithTotal<HashMap<String, f64>>, StorageError>,
-                > + ::core::marker::Send + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            'life2: 'async_trait,
-            'life3: 'async_trait,
-            'life4: 'async_trait,
-            Self: 'async_trait;
-    }
-
-    impl Gateway for Gateway {}
 }
+pub use gateway_mock::MockGateway;
 
 #[cfg(test)]
 pub fn evm_contract_slots(data: impl IntoIterator<Item = (i32, i32)>) -> HashMap<Bytes, Bytes> {
