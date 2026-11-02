@@ -1,5 +1,7 @@
 [advisories]
-# rustls-webpki 0.101.7 is locked by tonic 0.9; fix requires tonic 0.11+ (prost 0.11 -> 0.12).
+# RUSTSEC-2026-0098, RUSTSEC-2026-0099, RUSTSEC-2026-0104: rustls-webpki 0.101.7, pulled in by
+# rustls 0.21 (tonic 0.9 and aws-sdk-s3's legacy rustls feature). Only patched in
+# rustls-webpki >= 0.103.12; tonic 0.11 still uses 0.102, so the fix needs tonic 0.12+ (prost 0.13).
 # RUSTSEC-2025-0055: tracing-subscriber ^0.2 log poisoning via ANSI escapes
 # Dep chain: tycho-simulation <- revm <- ark-bn254 <- ark-r1cs-std <- ark-relations <- tracing-subscriber ^0.2
 # We need ark to update their dependencies to fix this.
@@ -22,7 +24,6 @@
 # The 0.4.x and 0.5.x lines have no fix and are pulled in by aws-sigv4 (aws-sdk-s3, aws-config)
 # and elliptic-curve 0.12/0.13 (alloy-signer). The latest aws-sigv4 still requires ^0.5.
 ignore = [
-    "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
