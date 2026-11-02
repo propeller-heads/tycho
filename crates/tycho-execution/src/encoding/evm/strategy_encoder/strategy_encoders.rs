@@ -279,6 +279,7 @@ impl SequentialSwapStrategyEncoder {
         .to_string();
         self.sequential_swap_validator
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
+        SequentialSwapValidator::validate_no_back_to_back_venue_hops(solution.swaps())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
         let subsidized_group =
