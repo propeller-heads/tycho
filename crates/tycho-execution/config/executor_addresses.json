@@ -35,7 +35,8 @@
     "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28",
     "aero_basic": "0x9929EE6e01C0d599C4b791c6D6093293b05Ea91C",
     "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
-    "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458"
+    "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458",
+    "subsidy": "0x60F80bFF5D50a71BF93327Fb46e6cc45a9da5Ff1"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -57,7 +58,8 @@
     "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B",
     "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
     "aero_basic": "0xf6F8fb2321FB8431400ae546037cD2AE969a2c22",
-    "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c"
+    "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c",
+    "subsidy": "0xC6eb4ca615EE611A36FB57a34676822cc88d3Dbe"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -65,7 +67,8 @@
     "uniswap_v4": "0x3AE67e7DCFa6c5aB36DA9dE3B67B7496956E0874",
     "velodrome_slipstreams": "0xd9Ee40C6895De968b41b96253970B48Fe852e5eF",
     "vm:curve": "0x685733eDB7654e540aB537eabC28b554646b69d0",
-    "native_wrapper": "0x32Ed490Fb53cc66C3cBDdC74aB8B7088F11d6289"
+    "native_wrapper": "0x32Ed490Fb53cc66C3cBDdC74aB8B7088F11d6289",
+    "subsidy": "0x093E39083E8aeA70ED65563449d3b24F7335528b"
   },
   "arbitrum": {
     "uniswap_v2": "0xd0a1f74d4d77834feca0efa01ca6e0161dbf1f57",
@@ -78,7 +81,8 @@
     "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF",
     "fallback:rfq:metric": "0x918335AF35DdDFad0C6E0d3beF95A6F9a0F02C3c",
     "aero_basic": "0xf122B4408662172260Dd60DDFD45e4f9d15B38ce",
-    "fallback:rfq:native": "0x9BAC15444f4ec473f045D47C03701469B59D7F9e"
+    "fallback:rfq:native": "0x9BAC15444f4ec473f045D47C03701469B59D7F9e",
+    "subsidy": "0x3a8189D0efd2f8fDda640F4560C261D5068ac853"
   },
   "bsc": {
     "uniswap_v2": "0x450B4a643553912C9aF98dc8b9dB2eF989Fb1444",
@@ -93,7 +97,8 @@
     "fallback:rfq:metric": "0x78FddACdd167d25efb81d5a45a9A3003Fd8c0643",
     "lunarbase": "0x99576B7C64Fe225785bd69E91fc9dC857Dd7AaA5",
     "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d",
-    "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79"
+    "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79",
+    "subsidy": "0x35F1290a5703bD8C11eB697f694feA1013189C99"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -103,13 +108,15 @@
     "uniswap_v4": "0x32bB33AfB193e16df121cdc2D87c44f015D325DA",
     "native_wrapper": "0xc8f2a896D6d98B325889CE9c998F62779d17FeE3",
     "rfq:metric": "0x43434DE43d53bA6D9D8437fd1fb2Ac7be3c70CCf",
-    "fallback:rfq:metric": "0x5c001b91691aF146b9D220C9425827e19690DCE0"
+    "fallback:rfq:metric": "0x5c001b91691aF146b9D220C9425827e19690DCE0",
+    "subsidy": "0xec1C06c1D342Af6B00e0f74b82b2b341BE8889aC"
   },
   "plasma": {
     "uniswap_v3": "0xA6D43EFEc7870ac6e27c81232C2B5E11b17d40d4",
     "fluid_v1": "0x5020a5012cDC3545d2E98B6fb3EA4b9dc90552a6",
     "vm:curve": "0xC015Bc2f482b6CF31D6C30e663a57417A6761949",
-    "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505"
+    "native_wrapper": "0x1D9220eA65cA79997C532ba8fbC79b1c463Bd505",
+    "subsidy": "0x5Da7691721d3ba6d57197e764F64c6170412BbeC"
   },
   "robinhood": {
     "uniswap_v2": "0x81aFB56E21AB0744330ACf400E2A65e6B64D495E",
@@ -128,13 +135,15 @@
     "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C",
     "aero_basic": "0xCdBfd7f55Df4B60f34d8774c650feBB1baF5E34f",
     "fallback:rfq:native": "0xcfa779974cCDaDD36A0D5dF6Ca61020C74aa038D",
-    "pancakeswap_infinity_cl": "0x4e80394e1cAF5cDeE6D57aEBa2dCE9B333b33E45"
+    "pancakeswap_infinity_cl": "0x4e80394e1cAF5cDeE6D57aEBa2dCE9B333b33E45",
+    "subsidy": "0x3ce107dCC737f4bEaDeB506E129ee0b152727CD8"
   },
   "arc": {
     "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
     "uniswap_v3": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
     "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D",
     "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
-    "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
+    "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
+    "subsidy": "0x0374B35f40290f00c054B780065A22b17d962Ed1"
   }
 }

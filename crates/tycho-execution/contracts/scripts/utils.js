@@ -69,9 +69,10 @@ function encodeConstructorArgs(contractsDir, contractFqn, constructorArgs) {
     const constructor = artifact.abi.find(
         (entry) => entry.type === "constructor"
     );
-    const types = (constructor?.inputs || []).map((input) => input.type);
+    // Pass the full input fragments: a bare type string drops a struct's
+    // components.
     return ethers.utils.defaultAbiCoder
-        .encode(types, constructorArgs)
+        .encode(constructor?.inputs || [], constructorArgs)
         .replace(/^0x/, "");
 }
 
