@@ -81,6 +81,9 @@ pub enum Outcome {
 pub struct CheckResult {
     pub test: String,
     pub check: CheckId,
+    /// The component the result is about, when it is about one only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -130,6 +133,16 @@ impl Checks {
         self.record(id, Outcome::Skipped { reason: reason.to_string() });
     }
 
+    /// Records a check the package's configuration turned off for one component.
+    pub fn skip_component(&mut self, id: CheckId, component: &str, reason: &str) {
+        self.results.push(CheckResult {
+            test: self.test.clone(),
+            check: id,
+            component: Some(component.to_string()),
+            outcome: Outcome::Skipped { reason: reason.to_string() },
+        });
+    }
+
     /// Records a check that could not run because `prerequisite` failed.
     pub fn not_run(&mut self, id: CheckId, prerequisite: CheckId) {
         self.record(id, Outcome::NotRun { reason: format!("{prerequisite} failed") });
@@ -159,7 +172,7 @@ impl Checks {
 
     fn record(&mut self, check: CheckId, outcome: Outcome) {
         self.results
-            .push(CheckResult { test: self.test.clone(), check, outcome });
+            .push(CheckResult { test: self.test.clone(), check, component: None, outcome });
     }
 }
 
@@ -260,11 +273,13 @@ mod tests {
                 CheckResult {
                     test: "t".to_string(),
                     check: CheckId::SimLadder,
+                    component: None,
                     outcome: Outcome::Fail { detail: "boom".to_string() },
                 },
                 CheckResult {
                     test: "t".to_string(),
-                    check: CheckId::Balances,
+                    check: CheckId::ExecLadder,
+                    component: Some("0x01".to_string()),
                     outcome: Outcome::Skipped { reason: "off".to_string() },
                 },
             ],
@@ -274,6 +289,10 @@ mod tests {
         assert_eq!(json["results"][0]["check"], "sim.ladder");
         assert_eq!(json["results"][0]["outcome"], "fail");
         assert_eq!(json["results"][0]["detail"], "boom");
+        assert!(json["results"][0]
+            .get("component")
+            .is_none());
+        assert_eq!(json["results"][1]["component"], "0x01");
         assert_eq!(json["results"][1]["outcome"], "skipped");
         assert_eq!(json["results"][1]["reason"], "off");
     }
