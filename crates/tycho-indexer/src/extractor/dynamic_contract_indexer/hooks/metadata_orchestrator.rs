@@ -320,7 +320,6 @@ impl BlockMetadataOrchestrator {
                     };
 
                     let metadata_result = MetadataResult::new(
-                        request.request_id().clone(),
                         component.1.id.clone(),
                         request.request_type().clone(),
                         metadata_value,
@@ -434,7 +433,7 @@ mod tests {
     use super::{
         super::component_metadata::{
             MetadataRequestType, MetadataValue, MockMetadataRequestGenerator,
-            MockMetadataResponseParser, MockRequestProvider, RequestTransport, RpcTransport,
+            MockMetadataResponseParser, MockRequestProvider, RpcTransport,
         },
         *,
     };
@@ -511,9 +510,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -526,17 +523,11 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component2",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([3u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
             });
-
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
 
         // Mock parser
         let mut mock_parser = MockMetadataResponseParser::new();
@@ -611,10 +602,6 @@ mod tests {
             .expect_generate_requests()
             .returning(|_, _| Err(MetadataError::GenerationFailed("Generator failed".to_string())));
 
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
-
         // Setup registries
         let mut generator_registry = MetadataGeneratorRegistry::new();
         generator_registry.set_default_generator(Some(Box::new(mock_generator)));
@@ -656,17 +643,11 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
             });
-
-        mock_generator
-            .expect_supported_metadata_types()
-            .returning(|| vec![MetadataRequestType::ComponentBalance { token_addresses: vec![] }]);
 
         // Mock provider that returns error
         let mut mock_provider = MockRequestProvider::new();
@@ -730,22 +711,21 @@ mod tests {
         // Create test requests with different routing keys
         let request1 = create_test_metadata_request(
             "component1",
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             "rpc_mainnet",
         );
 
         let request2 = create_test_metadata_request(
             "component2",
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([3u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             "rpc_mainnet",
         );
 
-        let request3 =
-            create_test_metadata_request("component3", MetadataRequestType::Tvl, "api_defillama");
+        let request3 = create_test_metadata_request(
+            "component3",
+            MetadataRequestType::Limits { token_pair: vec![] },
+            "rpc_archive",
+        );
 
         let requests = vec![request1, request2, request3];
 
@@ -755,9 +735,9 @@ mod tests {
         // Assert
         assert_eq!(grouped.len(), 2);
         assert!(grouped.contains_key("rpc_mainnet"));
-        assert!(grouped.contains_key("api_defillama"));
+        assert!(grouped.contains_key("rpc_archive"));
         assert_eq!(grouped["rpc_mainnet"].len(), 2);
-        assert_eq!(grouped["api_defillama"].len(), 1);
+        assert_eq!(grouped["rpc_archive"].len(), 1);
     }
 
     #[test]
@@ -774,9 +754,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -815,9 +793,7 @@ mod tests {
             .returning(|_, _| {
                 let request = create_test_metadata_request(
                     "component1",
-                    MetadataRequestType::ComponentBalance {
-                        token_addresses: vec![Address::from([2u8; 20])],
-                    },
+                    MetadataRequestType::ComponentBalance,
                     "rpc_mainnet",
                 );
                 Ok(vec![request])
@@ -856,18 +832,14 @@ mod tests {
         all_components.insert(component2.id.clone(), (tx_hash2, component2));
 
         let result1 = MetadataResult::new(
-            "test_request_1".to_string(),
             "component1".to_string(),
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             Ok(MetadataValue::Balances(HashMap::new())),
         );
         let result2 = MetadataResult::new(
-            "test_request_2".to_string(),
             "component2".to_string(),
-            MetadataRequestType::Tvl,
-            Ok(MetadataValue::Tvl(1000.0)),
+            MetadataRequestType::Limits { token_pair: vec![] },
+            Ok(MetadataValue::Limits(vec![])),
         );
 
         let results = vec![result1, result2];
@@ -907,10 +879,10 @@ mod tests {
             .iter()
             .find(|(component, _)| component.id == "component2")
             .unwrap();
-        assert!(component2_metadata.1.tvl().is_some());
+        assert!(component2_metadata.1.limits().is_some());
         assert!(component2_metadata
             .1
-            .tvl()
+            .limits()
             .unwrap()
             .is_ok());
     }
@@ -926,11 +898,8 @@ mod tests {
         all_components.insert(component.id.clone(), (tx_hash, component));
 
         let results = vec![MetadataResult::new(
-            "test_request_1".to_string(),
             "component1".to_string(),
-            MetadataRequestType::ComponentBalance {
-                token_addresses: vec![Address::from([2u8; 20])],
-            },
+            MetadataRequestType::ComponentBalance,
             Err(MetadataError::GenerationFailed("Test error".to_string())),
         )];
 

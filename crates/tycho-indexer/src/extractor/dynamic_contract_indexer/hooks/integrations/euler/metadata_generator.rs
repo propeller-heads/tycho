@@ -155,17 +155,10 @@ impl MetadataRequestGenerator for EulerMetadataGenerator {
             "euler".to_string(),
             format!("euler_balance_{target}"),
             component.id.clone(),
-            MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() },
+            MetadataRequestType::ComponentBalance,
             Box::new(balance_transport),
         ));
         Ok(requests)
-    }
-
-    fn supported_metadata_types(&self) -> Vec<MetadataRequestType> {
-        vec![
-            MetadataRequestType::ComponentBalance { token_addresses: vec![] },
-            MetadataRequestType::Limits { token_pair: vec![] },
-        ]
     }
 }
 
@@ -179,7 +172,7 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
         response: &Value,
     ) -> Result<MetadataValue, MetadataError> {
         match &request.request_type() {
-            MetadataRequestType::ComponentBalance { .. } => {
+            MetadataRequestType::ComponentBalance => {
                 if component.tokens.len() < 2 {
                     return Err(MetadataError::MissingData(
                         "component must have at least 2 tokens".to_string(),
@@ -214,9 +207,6 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
 
                 let res = MetadataValue::Balances(balances);
                 Ok(res)
-            }
-            MetadataRequestType::Tvl => {
-                Err(MetadataError::GenerationFailed("Tvl is not supported for Euler".to_string()))
             }
             MetadataRequestType::Limits { token_pair } => {
                 let res_string = serde_json::from_value::<String>(response.clone()).unwrap();
@@ -341,10 +331,7 @@ mod tests {
 
         // Balance request
         assert_eq!(requests[0].component_id(), &component.id);
-        assert_eq!(
-            requests[0].request_type(),
-            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens.clone() }
-        );
+        assert_eq!(requests[0].request_type(), &MetadataRequestType::ComponentBalance);
         assert_eq!(
             requests[0].request_id(),
             "euler_balance_0x000000000000000000000000000000000000beef"
@@ -433,10 +420,7 @@ mod tests {
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].component_id(), &component.id);
-        assert_eq!(
-            requests[0].request_type(),
-            &MetadataRequestType::ComponentBalance { token_addresses: component.tokens }
-        );
+        assert_eq!(requests[0].request_type(), &MetadataRequestType::ComponentBalance);
         assert_eq!(
             requests[0].request_id(),
             &"euler_balance_0x000000000000000000000000000000000000beef".to_string()
@@ -446,20 +430,6 @@ mod tests {
             requests[0].transport().deduplication_id(),
             "eth_call_[{\"data\":\"0x0902f1ac\",\"to\":\"0x000000000000000000000000000000000000beef\"},\"0x3039\"]".to_string()
         );
-    }
-
-    #[test]
-    fn test_supported_metadata_types() {
-        let generator =
-            EulerMetadataGenerator::new("https://eth-mainnet.alchemyapi.io/v2/test".to_string());
-        let supported_types = generator.supported_metadata_types();
-
-        let expected_types = vec![
-            MetadataRequestType::ComponentBalance { token_addresses: vec![] },
-            MetadataRequestType::Limits { token_pair: vec![] },
-        ];
-
-        assert_eq!(supported_types, expected_types);
     }
 
     #[tokio::test]
@@ -829,7 +799,7 @@ mod tests {
                 .expect("Request ID should be present in the request map");
 
             match &request.request_type() {
-                MetadataRequestType::ComponentBalance { .. } => {
+                MetadataRequestType::ComponentBalance => {
                     if let Ok(result_value) = result {
                         let parsed_result =
                             parser.parse_response(&component, request, &result_value);
@@ -853,7 +823,6 @@ mod tests {
                         println!("Limits request failed: {:?}", result);
                     }
                 }
-                MetadataRequestType::Tvl => {}
             }
         }
 

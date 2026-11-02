@@ -305,11 +305,6 @@ where
                 errors.push(format!("Limits error: {limits_error:?}"));
             }
 
-            // Check for TVL errors
-            if let Some(Err(tvl_error)) = &metadata.tvl() {
-                errors.push(format!("TVL error: {tvl_error:?}"));
-            }
-
             // If there are errors, mark component as failed
             if !errors.is_empty() {
                 failed_components += 1;
@@ -1578,7 +1573,7 @@ mod tests {
             .unwrap();
 
         let tracing_metadata = ComponentTracingMetadata::new(tx.hash.clone())
-            .with_balances(Err(MetadataError::RequestFailed(
+            .with_balances(Err(MetadataError::GenerationFailed(
                 "RPC timeout during tracing".to_string(),
             )))
             .with_limits(Err(MetadataError::ProviderFailed(
