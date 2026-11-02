@@ -23,7 +23,7 @@ pub struct LiquidityPartySwapEncoder {
 }
 
 impl LiquidityPartySwapEncoder {
-    fn get_token_indexes(&self, swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
+    fn get_token_indexes(swap: &Swap) -> Result<(Bytes, Bytes, u8, u8), EncodingError> {
         let token_addresses: &Vec<Address> = &swap.component().tokens;
         let token_in = &swap.token_in().address;
         let token_out = &swap.token_out().address;
@@ -69,7 +69,7 @@ impl SwapEncoder for LiquidityPartySwapEncoder {
             EncodingError::FatalError(format!("LiqP swap encoder: invalid component id: {e}"))
         })?;
 
-        let (token_in, token_out, token_in_idx, token_out_idx) = self.get_token_indexes(swap)?;
+        let (token_in, token_out, token_in_idx, token_out_idx) = Self::get_token_indexes(swap)?;
 
         let args = (
             bytes_to_address(&pool_addr)?,

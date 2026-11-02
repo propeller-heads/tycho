@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, LazyLock, RwLock},
 };
@@ -218,7 +218,7 @@ impl TestRunner {
         };
         let config_file_path = substreams_path.join(&config_file_name);
 
-        let rpc_provider = RPCProvider::new(rpc_url);
+        let rpc_provider = RPCProvider::new(&rpc_url);
         let runtime = Runtime::new().into_diagnostic()?;
 
         Ok(Self {
@@ -274,7 +274,7 @@ impl TestRunner {
                 })?;
             }
             TestType::Range(test_type) => {
-                self.run_tests_in_range(config, &substreams_yaml_path, test_type, terminal_width)?;
+                self.run_tests_in_range(&config, &substreams_yaml_path, test_type, terminal_width)?;
             }
         }
 
@@ -339,7 +339,7 @@ impl TestRunner {
                 start_block,
                 &protocol_type_names,
                 &protocol_system,
-                module_name,
+                module_name.as_deref(),
             ) {
                 error!("Tycho Index command failed: {:#}", e);
             }
@@ -391,9 +391,11 @@ impl TestRunner {
                 .skip_state_decode_failures(true);
 
         let adapter_contract_path = self.get_adapter_contract_path(
-            &config.adapter_contract,
-            &config.adapter_build_signature,
-            &config.adapter_build_args,
+            config.adapter_contract.as_deref(),
+            config
+                .adapter_build_signature
+                .as_deref(),
+            config.adapter_build_args.as_deref(),
         )?;
         let adapter_contract_path_str = adapter_contract_path
             .as_ref()
@@ -550,7 +552,7 @@ impl TestRunner {
 
     fn run_tests_in_range(
         &self,
-        config: IntegrationTestsConfig,
+        config: &IntegrationTestsConfig,
         substreams_yaml_path: &PathBuf,
         test_type: &TestTypeRange,
         terminal_width: usize,
@@ -600,7 +602,7 @@ impl TestRunner {
                         test.stop_block,
                         &config.protocol_type_names,
                         &config.protocol_system,
-                        config.module_name.clone(),
+                        config.module_name.as_deref(),
                     )
                     .wrap_err("Failed to run Tycho")?;
             }
@@ -615,7 +617,7 @@ impl TestRunner {
                          (stop block {})",
                         test.stop_block
                     );
-                    self.run_test(test, &config, block)
+                    self.run_test(test, config, block)
                 });
             match result {
                 Ok(_) => {
@@ -626,7 +628,7 @@ impl TestRunner {
                     error!("❗️{} failed: {:#}\n", test.name, e);
                 }
             }
-            tycho_runner.stop_rpc_server(rpc_server)?;
+            TychoRunner::stop_rpc_server(rpc_server)?;
             info!("{}\n", "-".repeat(terminal_width));
         }
 
@@ -684,9 +686,9 @@ impl TestRunner {
             .collect();
 
         // Step 1: Validate that all expected components are present on Tycho after indexing
-        self.validate_state(&test.expected_components, protocol_components.clone())?;
+        Self::validate_state(&test.expected_components, &protocol_components)?;
 
-        self.validate_excluded_components(&test.excluded_components, &protocol_components)?;
+        Self::validate_excluded_components(&test.excluded_components, &protocol_components)?;
 
         // Step 2: Validate Token Balances
         match config.skip_balance_check {
@@ -703,9 +705,11 @@ impl TestRunner {
 
         // Step 3: Decode Snapshot with Decoder from tycho simulation
         let adapter_contract_path_str = self.get_adapter_contract_path(
-            &config.adapter_contract,
-            &config.adapter_build_signature,
-            &config.adapter_build_args,
+            config.adapter_contract.as_deref(),
+            config
+                .adapter_build_signature
+                .as_deref(),
+            config.adapter_build_args.as_deref(),
         )?;
 
         let update = self.decode_snapshot(
@@ -713,7 +717,7 @@ impl TestRunner {
             &header,
             snapshot,
             all_tokens,
-            adapter_contract_path_str,
+            adapter_contract_path_str.as_deref(),
             self.vm_simulation_traces,
         )?;
 
@@ -1028,7 +1032,7 @@ impl TestRunner {
         block: &Block,
         snapshot: Snapshot,
         all_tokens: HashMap<Bytes, Token>,
-        adapter_contract_path: Option<PathBuf>,
+        adapter_contract_path: Option<&Path>,
         vm_simulation_traces: bool,
     ) -> miette::Result<Update> {
         // Clear the shared database state to ensure test isolation
@@ -1041,7 +1045,7 @@ impl TestRunner {
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
 
         let mut decoder_context = DecoderContext::new().vm_traces(vm_simulation_traces);
-        if let Some(vm_adapter_path) = adapter_contract_path.as_ref() {
+        if let Some(vm_adapter_path) = adapter_contract_path {
             if let Some(path_str) = vm_adapter_path.to_str() {
                 decoder_context = decoder_context.vm_adapter_path(path_str);
             }
@@ -1111,9 +1115,8 @@ impl TestRunner {
     /// - Any expected component is missing from the Tycho state
     /// - Any component's properties don't match the expected values (shows detailed diff)
     fn validate_state(
-        &self,
         expected_components: &Vec<ProtocolComponentWithTestConfig>,
-        protocol_components: Vec<ProtocolComponent>,
+        protocol_components: &[ProtocolComponent],
     ) -> miette::Result<()> {
         if expected_components.is_empty() {
             debug!("No expected components defined for this test. Skipping state validation.");
@@ -1158,7 +1161,6 @@ impl TestRunner {
     }
 
     fn validate_excluded_components(
-        &self,
         excluded_components: &[String],
         protocol_components: &[ProtocolComponent],
     ) -> miette::Result<()> {
@@ -1606,9 +1608,9 @@ impl TestRunner {
     /// Gets the adapter contract path if needed, building it if not found
     fn get_adapter_contract_path(
         &self,
-        adapter_contract: &Option<String>,
-        adapter_build_signature: &Option<String>,
-        adapter_build_args: &Option<String>,
+        adapter_contract: Option<&str>,
+        adapter_build_signature: Option<&str>,
+        adapter_build_args: Option<&str>,
     ) -> miette::Result<Option<PathBuf>> {
         // Adapter contract will only be configured for VM protocols, not natively implemented
         // protocols.
@@ -1623,8 +1625,8 @@ impl TestRunner {
                     self.adapter_contract_builder
                         .build_target(
                             adapter_contract_name,
-                            adapter_build_signature.as_deref(),
-                            adapter_build_args.as_deref(),
+                            adapter_build_signature,
+                            adapter_build_args,
                         )
                         .wrap_err("Failed to build adapter contract")?
                 }

@@ -288,7 +288,7 @@ mod tests {
     fn sign_permit(
         chain_id: u64,
         permit_single: &models::PermitSingle,
-        signer: PrivateKeySigner,
+        signer: &PrivateKeySigner,
     ) -> Result<Signature, EncodingError> {
         let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
             .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
@@ -368,7 +368,7 @@ mod tests {
         let sol_permit: PermitSingle =
             PermitSingle::try_from(&permit).expect("Failed to convert to PermitSingle");
 
-        let signature = sign_permit(eth_chain().id(), &permit, signer).unwrap();
+        let signature = sign_permit(eth_chain().id(), &permit, &signer).unwrap();
         let encoded =
             (bytes_to_address(&anvil_account).unwrap(), sol_permit, signature.as_bytes().to_vec())
                 .abi_encode();

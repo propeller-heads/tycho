@@ -943,6 +943,7 @@ fn whole_minutes(minutes: f64) -> Option<i64> {
 }
 
 /// One event on a (component, attribute) pair, in chronological order.
+#[derive(Clone, Copy)]
 enum AttrEvent {
     Created,
     Updated,
@@ -2380,7 +2381,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -2394,7 +2395,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(2)),
                     ..Default::default()
                 },
@@ -2442,7 +2443,7 @@ mod test {
 
         let scoped = |n: u64, fin: u64| {
             pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(n)),
                     ..Default::default()
                 },
@@ -2592,7 +2593,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(gw, 2).await;
         let scoped = |n: u64| {
             pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(n)),
                     ..Default::default()
                 },
@@ -2709,7 +2710,7 @@ mod test {
 
         let extractor = create_extractor(gw).await;
 
-        let inp = pb_fixtures::pb_block_scoped_data((), None, None);
+        let inp = pb_fixtures::pb_block_scoped_data(&(), None, None);
         let res = extractor
             .handle_tick_scoped_data(inp)
             .await;
@@ -2754,7 +2755,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_1), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_1), ..Default::default() },
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1),
             ))
@@ -2765,7 +2766,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_2), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_2), ..Default::default() },
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(2),
             ))
@@ -2788,7 +2789,7 @@ mod test {
 
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges { block: Some(block_3), ..Default::default() },
+                &tycho_pb::BlockChanges { block: Some(block_3), ..Default::default() },
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(2),
             ))
@@ -2845,7 +2846,7 @@ mod test {
             block.ts = timestamp;
             let message = extractor
                 .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                    tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
+                    &tycho_pb::BlockChanges { block: Some(block), ..Default::default() },
                     Some(format!("cursor@{number}").as_str()),
                     Some(number),
                 ))
@@ -3230,7 +3231,7 @@ mod test {
             }
         }
         let mut bsd = pb_fixtures::pb_block_scoped_data(
-            msg,
+            &msg,
             Some(&format!("cursor@{block_num}_p{partial_index}")),
             Some(block_num),
         );
@@ -3260,7 +3261,7 @@ mod test {
             }
         }
         pb_fixtures::pb_block_scoped_data(
-            msg,
+            &msg,
             Some(&format!("cursor@{block_num}")),
             Some(final_block_height),
         )
@@ -3440,7 +3441,7 @@ mod test {
         // Block 1
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3498,7 +3499,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3612,7 +3613,7 @@ mod test {
         // ── Block 1: empty anchor ──
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3712,7 +3713,7 @@ mod test {
         let cursor = format!("cursor@{block}");
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                PbBlockChanges {
+                &PbBlockChanges {
                     block: Some(pb_fixtures::pb_blocks(block)),
                     changes: txs,
                     ..Default::default()
@@ -3734,7 +3735,7 @@ mod test {
     ) {
         let cursor = format!("cursor@{block}_p{partial_index}");
         let mut partial = pb_fixtures::pb_block_scoped_data(
-            PbBlockChanges {
+            &PbBlockChanges {
                 block: Some(pb_fixtures::pb_blocks(block)),
                 changes: txs,
                 ..Default::default()
@@ -3867,7 +3868,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3926,7 +3927,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -3983,7 +3984,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4060,7 +4061,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4092,7 +4093,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4136,7 +4137,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4181,7 +4182,7 @@ mod test {
         let extractor = create_extractor_with_batch_size(revert_test_gateway(), 1).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -4236,7 +4237,7 @@ mod test {
         let extractor = create_extractor(no_lookup_gateway()).await;
         extractor
             .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                tycho_pb::BlockChanges {
+                &tycho_pb::BlockChanges {
                     block: Some(pb_fixtures::pb_blocks(1)),
                     ..Default::default()
                 },
@@ -6330,7 +6331,7 @@ mod test_serial_db {
                 .into_iter()
                 .map(|version| {
                     pb_fixtures::pb_block_scoped_data(
-                        tycho_pb::BlockChanges {
+                        &tycho_pb::BlockChanges {
                             block: Some(tycho_pb::Block {
                                 number: version,
                                 hash: Bytes::from(version)
@@ -6391,7 +6392,7 @@ mod test_serial_db {
             // New block #4 should have the same timestamp as block #3.
             extractor
                 .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
-                    tycho_pb::BlockChanges {
+                    &tycho_pb::BlockChanges {
                         block: Some(tycho_pb::Block {
                             number: 4,
                             hash: Bytes::from(4_u64).lpad(32, 0).to_vec(),
@@ -6427,27 +6428,27 @@ mod test_serial_db {
     ) -> impl Iterator<Item = crate::pb::sf::substreams::rpc::v2::BlockScopedData> {
         vec![
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(1),
+                &pb_fixtures::pb_native_block_changes(1),
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1), // Syncing (buffered)
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(2),
+                &pb_fixtures::pb_native_block_changes(2),
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(3),
+                &pb_fixtures::pb_native_block_changes(3),
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(4),
+                &pb_fixtures::pb_native_block_changes(4),
                 Some(format!("cursor@{}", 4).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_native_block_changes(5),
+                &pb_fixtures::pb_native_block_changes(5),
                 Some(format!("cursor@{}", 5).as_str()),
                 Some(3), // Buffered + flush 1 + 2
             ),
@@ -6459,27 +6460,27 @@ mod test_serial_db {
     ) -> impl Iterator<Item = crate::pb::sf::substreams::rpc::v2::BlockScopedData> {
         vec![
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(1),
+                &pb_fixtures::pb_vm_block_changes(1),
                 Some(format!("cursor@{}", 1).as_str()),
                 Some(1), // Syncing (buffered)
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(2),
+                &pb_fixtures::pb_vm_block_changes(2),
                 Some(format!("cursor@{}", 2).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(3),
+                &pb_fixtures::pb_vm_block_changes(3),
                 Some(format!("cursor@{}", 3).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(4),
+                &pb_fixtures::pb_vm_block_changes(4),
                 Some(format!("cursor@{}", 4).as_str()),
                 Some(1), // Buffered
             ),
             pb_fixtures::pb_block_scoped_data(
-                pb_fixtures::pb_vm_block_changes(5),
+                &pb_fixtures::pb_vm_block_changes(5),
                 Some(format!("cursor@{}", 5).as_str()),
                 Some(3), // Buffered + flush 1 + 2
             ),

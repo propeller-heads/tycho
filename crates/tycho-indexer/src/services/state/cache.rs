@@ -173,7 +173,7 @@ pub struct CachedAccount {
 impl CachedAccount {
     /// Builds an entry from the startup snapshot. Every slot and token balance of `account` must
     /// have a timestamp in `timestamps`; a missing one is a snapshot bug and panics.
-    pub(crate) fn from_snapshot(account: Account, timestamps: AccountWriteTimestamps) -> Self {
+    pub(crate) fn from_snapshot(account: Account, timestamps: &AccountWriteTimestamps) -> Self {
         let updated_at = timestamps
             .slots
             .values()
@@ -237,7 +237,7 @@ impl CachedAccount {
     ) -> Self {
         let account = delta.clone().into_account_without_tx();
         let timestamps = AccountWriteTimestamps::uniform(&account, at);
-        let mut entry = Self::from_snapshot(account, timestamps);
+        let mut entry = Self::from_snapshot(account, &timestamps);
         entry.apply_block(None, balances, at);
         entry
     }
@@ -566,7 +566,7 @@ impl EntityCache {
         for AccountSnapshot { account, written_at } in accounts {
             account_entries.insert(
                 account.address.clone(),
-                Arc::new(CachedAccount::from_snapshot(account, written_at)),
+                Arc::new(CachedAccount::from_snapshot(account, &written_at)),
             );
         }
         let mut component_entries: HashMap<
@@ -993,7 +993,7 @@ mod test {
 
         let cached = CachedAccount::from_snapshot(
             loaded.clone(),
-            AccountWriteTimestamps::uniform(&loaded, at(1)),
+            &AccountWriteTimestamps::uniform(&loaded, at(1)),
         );
 
         assert_eq!(Account::from(cached.clone()), loaded);
@@ -1016,7 +1016,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(
@@ -1039,7 +1039,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(
@@ -1118,7 +1118,7 @@ mod test {
         let mut timestamps = AccountWriteTimestamps::uniform(&account(&address), at(5));
         make_newest(&mut timestamps);
 
-        let cached = CachedAccount::from_snapshot(account(&address), timestamps);
+        let cached = CachedAccount::from_snapshot(account(&address), &timestamps);
 
         assert_eq!(cached.updated_at(), at(9));
     }
@@ -1128,7 +1128,7 @@ mod test {
         let address = addr(1);
         let mut cached = CachedAccount::from_snapshot(
             account(&address),
-            AccountWriteTimestamps::uniform(&account(&address), at(5)),
+            &AccountWriteTimestamps::uniform(&account(&address), at(5)),
         );
 
         cached.apply_block(

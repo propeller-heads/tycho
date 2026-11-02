@@ -95,6 +95,10 @@ impl Account {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, DeepSizeOf)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; `code` and `change` are kept consistent by `new`, and making the other fields private is a breaking change"
+)]
 pub struct AccountDelta {
     pub chain: Chain,
     pub address: Address,

@@ -65,6 +65,10 @@ use crate::{
 };
 
 #[derive(Parser, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches, not mutually exclusive states"
+)]
 struct Cli {
     /// The TVL threshold in native token units to filter the graph by.
     /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
@@ -1532,13 +1536,13 @@ async fn process_update(
         process_execution_result(
             simulation_id,
             result,
-            execution_info.clone(),
-            state_str,
-            (*block).clone(),
+            &execution_info,
+            &state_str,
+            &block,
             chain.id().to_string(),
             &mut n_reverts,
             &mut n_failures,
-            statistics.clone(),
+            statistics.as_ref(),
             router_fee,
         );
 
@@ -1968,13 +1972,13 @@ async fn process_state(
 fn process_execution_result(
     simulation_id: &String,
     result: &TychoExecutionResult,
-    execution_info: TychoExecutionInput,
-    state_str: String,
-    block: Block,
+    execution_info: &TychoExecutionInput,
+    state_str: &str,
+    block: &Block,
     chain_id: String,
     n_reverts: &mut i32,
     n_failures: &mut i32,
-    statistics: Option<Arc<RwLock<TestStatistics>>>,
+    statistics: Option<&Arc<RwLock<TestStatistics>>>,
     router_fee: RouterFeeOnOutput,
 ) {
     match result {
@@ -2020,13 +2024,13 @@ fn process_execution_result(
             // Generate Tenderly URL for debugging with state overrides
             let overrides = tenderly::TenderlySimParams {
                 network: Some(chain_id),
-                block: tenderly_block(&execution_info, &block),
+                block: tenderly_block(execution_info, block),
                 ..Default::default()
             };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 
@@ -2084,7 +2088,7 @@ fn process_execution_result(
             }
 
             // Record slippage in statistics
-            if let Some(ref stats) = statistics {
+            if let Some(stats) = statistics {
                 let mut stats = stats
                     .write()
                     .expect("Failed to get write lock for statistics (record slippage)");
@@ -2110,13 +2114,13 @@ fn process_execution_result(
             // Generate Tenderly URL for debugging without state overrides
             let overrides = tenderly::TenderlySimParams {
                 network: Some(chain_id),
-                block: tenderly_block(&execution_info, &block),
+                block: tenderly_block(execution_info, block),
                 ..Default::default()
             };
             let tenderly_url = tenderly::build_tenderly_url(
                 &overrides,
                 Some(&execution_info.transaction),
-                Some(&block),
+                Some(block),
                 Address::from_slice(&execution_info.solution.sender()[..20]),
             );
 

@@ -71,13 +71,13 @@ fn test_evm_sequential_swap_strategy_encoder() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -136,13 +136,13 @@ fn test_sequential_swap_strategy_encoder_transfer_from_integration() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -265,13 +265,13 @@ fn test_evm_sequential_strategy_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -386,13 +386,13 @@ fn test_evm_sequential_strategy_cyclic_swap_and_vault() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -490,13 +490,13 @@ fn test_evm_sequential_swap_strategy_encoder_with_fees() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         1_000_000,
-        client_fee_receiver(),
-        BigUint::ZERO,
+        &client_fee_receiver(),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

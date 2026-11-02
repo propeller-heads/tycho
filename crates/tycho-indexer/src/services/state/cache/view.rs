@@ -543,7 +543,7 @@ mod test {
             code: at(1),
             token_balances: HashMap::from([(addr(9), at(1))]),
         };
-        Arc::new(CachedAccount::from_snapshot(account, timestamps))
+        Arc::new(CachedAccount::from_snapshot(account, &timestamps))
     }
 
     /// The view must write the JSON of the owned answer: copy the entry, apply every block with

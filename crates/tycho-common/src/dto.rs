@@ -716,21 +716,24 @@ pub struct ProtocolComponent {
 
 // Manual impl as `NaiveDateTime` structure referenced in `created_at` does not implement DeepSizeOf
 impl DeepSizeOf for ProtocolComponent {
-    fn deep_size_of_children(&self, ctx: &mut Context) -> usize {
-        self.id.deep_size_of_children(ctx) +
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
+        self.id.deep_size_of_children(context) +
             self.protocol_system
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.protocol_type_name
-                .deep_size_of_children(ctx) +
-            self.chain.deep_size_of_children(ctx) +
-            self.tokens.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.chain
+                .deep_size_of_children(context) +
+            self.tokens
+                .deep_size_of_children(context) +
             self.contract_ids
-                .deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
             self.static_attributes
-                .deep_size_of_children(ctx) +
-            self.change.deep_size_of_children(ctx) +
+                .deep_size_of_children(context) +
+            self.change
+                .deep_size_of_children(context) +
             self.creation_tx
-                .deep_size_of_children(ctx)
+                .deep_size_of_children(context)
     }
 }
 
@@ -957,6 +960,10 @@ impl StateRequestBody {
         Self { contract_ids, protocol_system, version, chain, pagination }
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&BlockParam` is a breaking change"
+    )]
     pub fn from_block(protocol_system: &str, block: BlockParam) -> Self {
         Self {
             contract_ids: None,
@@ -1146,9 +1153,9 @@ pub struct VersionParam {
 }
 
 impl DeepSizeOf for VersionParam {
-    fn deep_size_of_children(&self, ctx: &mut Context) -> usize {
+    fn deep_size_of_children(&self, context: &mut Context) -> usize {
         if let Some(block) = &self.block {
-            return block.deep_size_of_children(ctx);
+            return block.deep_size_of_children(context);
         }
 
         0
@@ -2280,10 +2287,10 @@ mod test {
 
     #[rstest]
     #[case::legacy_format(None, None)]
-    #[case::full_block(Some(None), None)]
-    #[case::partial_block(Some(Some(1)), Some(1))]
+    #[case::full_block(Some(serde_json::Value::Null), None)]
+    #[case::partial_block(Some(serde_json::json!(1)), Some(1))]
     fn test_block_changes_is_partial_backward_compatibility(
-        #[case] has_partial_value: Option<Option<u32>>,
+        #[case] has_partial_value: Option<serde_json::Value>,
         #[case] expected: Option<u32>,
     ) {
         use serde_json::json;
@@ -2317,7 +2324,7 @@ mod test {
 
         // Add is_partial field only if specified
         if let Some(partial_value) = has_partial_value {
-            json_value["partial_block_index"] = json!(partial_value);
+            json_value["partial_block_index"] = partial_value;
         }
 
         let block_changes: BlockAggregatedChanges = serde_json::from_value(json_value)

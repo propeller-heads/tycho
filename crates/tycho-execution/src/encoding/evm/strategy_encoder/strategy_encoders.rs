@@ -142,9 +142,9 @@ impl SingleSwapStrategyEncoder {
 
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol.
-    fn encode_swap_header(&self, executor_address: Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
+    fn encode_swap_header(executor_address: &Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
         let mut encoded = Vec::new();
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -205,7 +205,7 @@ impl SingleSwapStrategyEncoder {
             std::slice::from_mut(&mut encoded_group),
         )?;
         let swap_data =
-            self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
+            Self::encode_swap_header(&encoded_group.executor_address, encoded_group.protocol_data);
         let subsidy_signing_data = subsidized_group_signature
             .map(|signature| signature.build_signing_data(swap_data.len()));
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
@@ -248,9 +248,9 @@ impl SequentialSwapStrategyEncoder {
 
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol.
-    fn encode_swap_header(&self, executor_address: Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
+    fn encode_swap_header(executor_address: &Bytes, protocol_data: Vec<u8>) -> Vec<u8> {
         let mut encoded = Vec::new();
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -294,8 +294,10 @@ impl SequentialSwapStrategyEncoder {
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
-            let swap_data = self
-                .encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
+            let swap_data = Self::encode_swap_header(
+                &encoded_group.executor_address,
+                encoded_group.protocol_data,
+            );
             swaps.push(swap_data);
         }
 
@@ -339,18 +341,17 @@ impl SplitSwapStrategyEncoder {
     /// Encodes information necessary for performing a single hop against a given executor for
     /// a protocol as part of a split swap solution.
     fn encode_swap_header(
-        &self,
         token_in: U8,
         token_out: U8,
         split: U24,
-        executor_address: Bytes,
+        executor_address: &Bytes,
         protocol_data: Vec<u8>,
     ) -> Vec<u8> {
         let mut encoded = Vec::new();
         encoded.push(token_in.to_be_bytes_vec()[0]);
         encoded.push(token_out.to_be_bytes_vec()[0]);
         encoded.extend_from_slice(&split.to_be_bytes_vec());
-        encoded.extend(executor_address.to_vec());
+        encoded.extend_from_slice(executor_address);
         encoded.extend(protocol_data);
         encoded
     }
@@ -377,8 +378,7 @@ impl SplitSwapStrategyEncoder {
             }
         }
         .to_string();
-        self.split_swap_validator
-            .validate_split_percentages(solution.swaps())?;
+        SplitSwapValidator::validate_split_percentages(solution.swaps())?;
         self.split_swap_validator
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
@@ -431,11 +431,11 @@ impl SplitSwapStrategyEncoder {
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
             let (token_in_index, token_out_index) = token_indices[index];
-            let swap_data = self.encode_swap_header(
+            let swap_data = Self::encode_swap_header(
                 token_in_index,
                 token_out_index,
                 percentage_to_uint24(grouped_swaps[index].split),
-                encoded_group.executor_address,
+                &encoded_group.executor_address,
                 encoded_group.protocol_data,
             );
             swaps.push(swap_data);

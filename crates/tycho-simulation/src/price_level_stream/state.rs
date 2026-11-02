@@ -72,6 +72,10 @@ struct StreamFill {
 /// nothing about its price after a fill. So the caller merges all swaps on one direction into
 /// one swap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making every field public or private is a breaking change"
+)]
 pub struct PriceLevelStreamState {
     pub token0: Bytes,
     pub token1: Bytes,
@@ -368,7 +372,7 @@ fn whole_unit_price(
 }
 
 /// `amount` less `taken`, or zero when `taken` is larger.
-fn saturating_sub(amount: BigUint, taken: &BigUint) -> BigUint {
+fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
     amount
         .checked_sub(taken)
         .unwrap_or_default()
@@ -419,9 +423,7 @@ impl ProtocolSim for PriceLevelStreamState {
             PricedAmount::Partial { amount, message } => (amount, Some(message)),
         };
         let (amount, gas) = match previous {
-            Some(previous) => {
-                (saturating_sub(merged_out.clone(), &previous.amount_out), BigUint::ZERO)
-            }
+            Some(previous) => (saturating_sub(&merged_out, &previous.amount_out), BigUint::ZERO),
             None => (merged_out.clone(), self.gas_cost.clone()),
         };
         let new_state = self.with_fill(StreamFill {
@@ -452,9 +454,10 @@ impl ProtocolSim for PriceLevelStreamState {
             None => (BigUint::ZERO, BigUint::ZERO),
         };
         Ok(match fill {
-            Some(fill) => {
-                (saturating_sub(max_in, &fill.amount_in), saturating_sub(max_out, &fill.amount_out))
-            }
+            Some(fill) => (
+                saturating_sub(&max_in, &fill.amount_in),
+                saturating_sub(&max_out, &fill.amount_out),
+            ),
             None => (max_in, max_out),
         })
     }

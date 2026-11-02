@@ -98,6 +98,10 @@ impl<DB: DatabaseRef> DatabaseRef for OverriddenSimulationDB<'_, DB> {
 
 /// A wrapper over an Alloy Provider with local storage cache and overrides.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making every field public or private is a breaking change"
+)]
 pub struct SimulationDB<P: Provider + Debug> {
     /// Client to connect to the RPC
     client: Arc<P>,

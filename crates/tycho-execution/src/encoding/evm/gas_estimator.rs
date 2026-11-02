@@ -135,6 +135,10 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   pay nothing extra. Non-callback protocols add the full user transfer cost. For split swaps,
 ///   funds always go through the router first, so the full user input transfer is always added
 ///   regardless of protocol type.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking `&Strategy` is a breaking change"
+)]
 pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
     let mut total_gas = BigUint::ZERO;
     let swap_groups = group_swaps(solution.swaps());

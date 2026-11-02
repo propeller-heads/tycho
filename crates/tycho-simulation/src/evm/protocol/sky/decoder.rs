@@ -208,7 +208,7 @@ mod tests {
         id: &str,
         component_type: &str,
         gem: &str,
-        tokens: Vec<&str>,
+        tokens: &[&str],
         with_fees: bool,
     ) -> ComponentWithState {
         let attributes = if with_fees {
@@ -256,7 +256,7 @@ mod tests {
     #[case::gem_first(vec![USDC, DAI])]
     #[tokio::test]
     async fn decodes_psm_regardless_of_token_order(#[case] tokens: Vec<&str>) {
-        let snap = snapshot(PSM_ID, "psm", USDC, tokens, true);
+        let snap = snapshot(PSM_ID, "psm", USDC, &tokens, true);
         let state = decode(snap, &all_tokens())
             .await
             .unwrap();
@@ -269,7 +269,7 @@ mod tests {
             "0x3225737a9bbb6473cb4a45b7244aca2befdb276a",
             "converter",
             USDS,
-            vec![DAI, USDS],
+            &[DAI, USDS],
             false,
         );
         let state = decode(snap, &all_tokens())
@@ -283,7 +283,7 @@ mod tests {
             "0xa188eec8f81263234da3622a406892f3d630f98c",
             "psm_wrapper",
             USDC,
-            vec![USDS, USDC],
+            &[USDS, USDC],
             true,
         );
         snap.state.attributes.extend([
@@ -314,14 +314,14 @@ mod tests {
 
     #[tokio::test]
     async fn missing_fee_attribute_errors_for_psm() {
-        let snap = snapshot(PSM_ID, "psm", USDC, vec![DAI, USDC], false);
+        let snap = snapshot(PSM_ID, "psm", USDC, &[DAI, USDC], false);
         let result = decode(snap, &all_tokens()).await;
         assert!(matches!(result, Err(InvalidSnapshotError::MissingAttribute(_))));
     }
 
     #[tokio::test]
     async fn unknown_component_type_errors() {
-        let snap = snapshot(PSM_ID, "mystery", USDC, vec![DAI, USDC], true);
+        let snap = snapshot(PSM_ID, "mystery", USDC, &[DAI, USDC], true);
         let result = decode(snap, &all_tokens()).await;
         assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
     }
@@ -334,14 +334,14 @@ mod tests {
             .into_iter()
             .map(|t| (t.address.clone(), t))
             .collect();
-        let snap = snapshot(PSM_ID, "psm", USDC, vec![DAI, USDC], true);
+        let snap = snapshot(PSM_ID, "psm", USDC, &[DAI, USDC], true);
         let result = decode(snap, &tokens).await;
         assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
     }
 
     #[tokio::test]
     async fn missing_gem_attribute_errors() {
-        let mut snap = snapshot(PSM_ID, "psm", USDC, vec![DAI, USDC], true);
+        let mut snap = snapshot(PSM_ID, "psm", USDC, &[DAI, USDC], true);
         snap.component
             .static_attributes
             .remove("gem");
@@ -351,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_balance_errors() {
-        let mut snap = snapshot(PSM_ID, "psm", USDC, vec![DAI, USDC], true);
+        let mut snap = snapshot(PSM_ID, "psm", USDC, &[DAI, USDC], true);
         snap.state
             .balances
             .remove(&Bytes::from_str(DAI).unwrap());

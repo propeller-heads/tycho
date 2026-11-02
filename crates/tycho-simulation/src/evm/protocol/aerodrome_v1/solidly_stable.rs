@@ -89,8 +89,8 @@ impl StablePool {
 
     pub fn get_limits(
         &self,
-        sell_token: Bytes,
-        buy_token: Bytes,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if self.reserve0.is_zero() || self.reserve1.is_zero() {
             return Ok((BigUint::zero(), BigUint::zero()));
@@ -302,7 +302,7 @@ mod tests {
         let buy = Bytes::from(buy_addr);
 
         let (amount_in, amount_out) = pool(U256::ZERO, U256::from(1_000_000u64), 18, 18)
-            .get_limits(sell, buy)
+            .get_limits(&sell, &buy)
             .expect("zero-liquidity limits should succeed");
 
         assert_eq!(amount_in, BigUint::ZERO);
@@ -320,7 +320,7 @@ mod tests {
         let reserve1 = U256::from_str("3320301880379841502303").unwrap();
 
         let (amount_in, amount_out) = pool(reserve0, reserve1, 18, 18)
-            .get_limits(sell, buy)
+            .get_limits(&sell, &buy)
             .expect("limits should succeed");
 
         assert!(amount_in > BigUint::ZERO);
@@ -338,10 +338,10 @@ mod tests {
         let reserve1 = U256::from_str("3320301880379841502303").unwrap();
 
         let (zero_to_one_in, zero_to_one_out) = pool(reserve0, reserve1, 18, 18)
-            .get_limits(sell0.clone(), sell1.clone())
+            .get_limits(&sell0, &sell1)
             .unwrap();
         let (one_to_zero_in, one_to_zero_out) = pool(reserve0, reserve1, 18, 18)
-            .get_limits(sell1, sell0)
+            .get_limits(&sell1, &sell0)
             .unwrap();
 
         assert!(zero_to_one_in > BigUint::ZERO);

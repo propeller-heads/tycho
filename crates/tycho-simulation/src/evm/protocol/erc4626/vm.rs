@@ -32,6 +32,10 @@ sol! {
     function totalSupply() external view returns (uint256);
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking the engine by reference is a breaking change"
+)]
 pub fn decode_from_vm<D: EngineDatabaseInterface + Clone + Debug>(
     pool: &Address,
     asset_token: &Token,
@@ -46,7 +50,7 @@ where
         &vm_engine,
         pool,
         AlloyAddress::ZERO,
-        totalSupplyCall {},
+        &totalSupplyCall {},
         None,
         "totalSupply",
     )?;
@@ -55,7 +59,7 @@ where
         &vm_engine,
         pool,
         AlloyAddress::ZERO,
-        convertToAssetsCall { shares: U256::from(10).pow(U256::from(share_token.decimals)) },
+        &convertToAssetsCall { shares: U256::from(10).pow(U256::from(share_token.decimals)) },
         None,
         "convertToAssets",
     )?;
@@ -64,7 +68,7 @@ where
         &vm_engine,
         pool,
         AlloyAddress::ZERO,
-        convertToSharesCall { assets: U256::from(10).pow(U256::from(asset_token.decimals)) },
+        &convertToSharesCall { assets: U256::from(10).pow(U256::from(asset_token.decimals)) },
         None,
         "convertToShares",
     )?;
@@ -98,7 +102,7 @@ where
         &vm_engine,
         pool,
         caller,
-        maxDepositCall { caller },
+        &maxDepositCall { caller },
         Some(token_overwrites),
         "maxDeposit",
     )?;
@@ -121,7 +125,7 @@ fn simulate_and_decode_call<D, Call, Ret>(
     vm_engine: &SimulationEngine<D>,
     pool: &Address,
     caller: AlloyAddress,
-    call: Call,
+    call: &Call,
     overrides: Option<HashMap<AlloyAddress, Overwrites>>,
     method: &str,
 ) -> Result<Ret, SimulationError>

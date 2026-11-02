@@ -24,7 +24,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for RingSwapV2State {
         _all_tokens: &HashMap<Bytes, Token>,
         _decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let (reserve0, reserve1) = cpmm_try_from_with_header(snapshot.clone())?;
+        let (reserve0, reserve1) = cpmm_try_from_with_header(&snapshot)?;
         let component_tokens = &snapshot.component.tokens;
         if component_tokens.len() != 2 {
             return Err(InvalidSnapshotError::ValueError(format!(

@@ -66,6 +66,10 @@ pub struct JoinEscrows {
 /// The wrapper is additionally bounded by both join escrows, which its in-flight
 /// DAI <-> USDS conversion burns through.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `component_id` and `kind` private or the rest public is a breaking change"
+)]
 pub struct SkyState {
     pub component_id: String,
     pub kind: SkyComponentKind,

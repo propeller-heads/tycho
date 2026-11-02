@@ -163,8 +163,8 @@ mod tests {
         Bytes::from(hex!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").to_vec())
     }
 
-    fn token_with_gas(address: Bytes, gas: u64) -> Token {
-        Token::new(&address, "", 0, 0, &[Some(gas)], Default::default(), 100)
+    fn token_with_gas(address: &Bytes, gas: u64) -> Token {
+        Token::new(address, "", 0, 0, &[Some(gas)], Default::default(), 100)
     }
 
     #[test]
@@ -607,17 +607,17 @@ mod tests {
     fn test_group_swaps_estimated_gas() {
         //   WETH ──(USV4)──> WBTC ──(USV4)──> USDC ──(USV4)──> DAI
 
-        let weth = token_with_gas(weth(), 10);
+        let weth = token_with_gas(&weth(), 10);
         let wbtc = token_with_gas(
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
+            &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
             20,
         );
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             30,
         );
         let dai = token_with_gas(
-            Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
+            &Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
             40,
         );
 
@@ -654,9 +654,9 @@ mod tests {
     fn test_group_swaps_estimated_gas_single_swap_group() {
         // A single-swap group has no batching benefit, so its estimated_gas equals the
         // swap's own estimated_gas with no subtraction.
-        let weth = token_with_gas(weth(), 10);
+        let weth = token_with_gas(&weth(), 10);
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             30,
         );
 
@@ -678,13 +678,13 @@ mod tests {
         // If the per-swap gas estimates are smaller than the transfer costs we need to
         // subtract, the result should saturate to zero rather than underflow.
         // This should never happen though!!
-        let weth = token_with_gas(weth(), 10_000);
+        let weth = token_with_gas(&weth(), 10_000);
         let wbtc = token_with_gas(
-            Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
+            &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
             10_000,
         );
         let usdc = token_with_gas(
-            Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
+            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
             10_000,
         );
 

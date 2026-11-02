@@ -129,7 +129,7 @@ impl ProtocolSim for LunarBaseState {
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         self.pool_params()
             .validate()
-            .map_err(|err| map_quote_error(QuoteError::Math(err)))?;
+            .map_err(|err| map_quote_error(&QuoteError::Math(err)))?;
         let token_in = address_from_bytes(base.address.as_ref())?;
         let token_out = address_from_bytes(quote.address.as_ref())?;
         if token_in == self.token_x && token_out == self.token_y {
@@ -170,7 +170,7 @@ impl ProtocolSim for LunarBaseState {
                 address_from_bytes(token_out.address.as_ref())?,
                 biguint_to_u256(&amount_in)?,
             )
-            .map_err(map_quote_error)?;
+            .map_err(|err| map_quote_error(&err))?;
 
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
@@ -269,7 +269,7 @@ impl ProtocolSim for LunarBaseState {
                 address_from_bytes(token_out.address.as_ref())?,
                 biguint_to_u256(&maximum)?,
             )
-            .map_err(map_quote_error)?;
+            .map_err(|err| map_quote_error(&err))?;
         let amount_out = u256_to_biguint(amount_out);
         let full_fill_allowed = if trade_price {
             // Compare actual rounded output in raw token units, without f64/decimal loss.
@@ -396,7 +396,7 @@ fn quote_limit(
     state
         .pool_params()
         .validate()
-        .map_err(|err| map_quote_error(QuoteError::Math(err)))?;
+        .map_err(|err| map_quote_error(&QuoteError::Math(err)))?;
     let (mut low, mut high) = quote_input_bounds(state, direction);
     if high == BigUint::ZERO || low > high {
         return Ok((BigUint::ZERO, BigUint::ZERO));
@@ -404,14 +404,14 @@ fn quote_limit(
     match state.quote_exact_in(token_in, token_out, biguint_to_u256(&high)?) {
         Ok((output, _)) => return Ok((high, u256_to_biguint(output))),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {}
-        Err(err) => return Err(map_quote_error(err)),
+        Err(err) => return Err(map_quote_error(&err)),
     }
     let mut low_output = match state.quote_exact_in(token_in, token_out, biguint_to_u256(&low)?) {
         Ok((output, _)) => u256_to_biguint(output),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
-        Err(err) => return Err(map_quote_error(err)),
+        Err(err) => return Err(map_quote_error(&err)),
     };
     // Gross output and punishment are nondecreasing. Between the positive-output
     // minimum and the reserve bounds, only fee saturation can stop execution.
@@ -424,7 +424,7 @@ fn quote_limit(
                 low_output = u256_to_biguint(output);
             }
             Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => high = middle,
-            Err(err) => return Err(map_quote_error(err)),
+            Err(err) => return Err(map_quote_error(&err)),
         }
     }
     Ok((low, low_output))
@@ -453,7 +453,7 @@ fn u256_to_biguint(value: U256) -> BigUint {
     BigUint::from_bytes_be(&value.to_be_bytes::<32>())
 }
 
-fn map_quote_error(err: QuoteError) -> SimulationError {
+fn map_quote_error(err: &QuoteError) -> SimulationError {
     SimulationError::InvalidInput(format!("LunarBase quote rejected: {err:?}"), None)
 }
 

@@ -64,16 +64,16 @@ pub enum DCIType {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ExtractorConfig {
-    name: String,
+    pub name: String,
     #[serde(deserialize_with = "deserialize_chain")]
-    chain: Chain,
-    implementation_type: ImplementationType,
-    sync_batch_size: usize,
-    start_block: i64,
-    stop_block: Option<i64>,
-    protocol_types: Vec<ProtocolTypeConfig>,
-    spkg: String,
-    module_name: String,
+    pub chain: Chain,
+    pub implementation_type: ImplementationType,
+    pub sync_batch_size: usize,
+    pub start_block: i64,
+    pub stop_block: Option<i64>,
+    pub protocol_types: Vec<ProtocolTypeConfig>,
+    pub spkg: String,
+    pub module_name: String,
     #[serde(default)]
     pub initialized_accounts: Vec<Bytes>,
     #[serde(default)]
@@ -81,9 +81,9 @@ pub struct ExtractorConfig {
     #[serde(default)]
     pub dci_plugin: Option<DCIType>,
     #[serde(default)]
-    post_processor: Option<String>,
+    pub post_processor: Option<String>,
     #[serde(default)]
-    pub(super) max_restarts: Option<u32>,
+    pub max_restarts: Option<u32>,
 }
 
 impl ExtractorConfig {

@@ -123,18 +123,18 @@ type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>; //TODO: introdu
 fn main() -> Result<(), anyhow::Error> {
     let cli: Cli = Cli::parse();
     let global_args = cli.args();
-    match cli.command() {
+    match cli.subcommand() {
         Command::Index(indexer_args) => {
-            run_indexer(global_args, indexer_args).map_err(|e| anyhow!(e))?;
+            run_indexer(&global_args, &indexer_args).map_err(|e| anyhow!(e))?;
         }
         Command::Run(run_args) => {
-            run_spkg(global_args, run_args).map_err(|e| anyhow!(e))?;
+            run_spkg(&global_args, run_args).map_err(|e| anyhow!(e))?;
         }
         Command::AnalyzeTokens(analyze_args) => {
-            run_analyze_tokens(global_args, analyze_args).map_err(|e| anyhow!(e))?;
+            run_analyze_tokens(&global_args, analyze_args).map_err(|e| anyhow!(e))?;
         }
         Command::Rpc(rpc_args) => {
-            run_rpc(global_args, rpc_args).map_err(|e| anyhow!(e))?;
+            run_rpc(&global_args, &rpc_args).map_err(|e| anyhow!(e))?;
         }
     };
     Ok(())
@@ -311,7 +311,7 @@ fn heap_profiling_active() -> bool {
 /// By using separate runtimes, extraction processes in Tycho can run independently, ensuring
 /// that server-related tasks do not interfere with the extraction workflow, and overall
 /// system performance is maintained.
-fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), ExtractionError> {
+fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), ExtractionError> {
     let extraction_threads = std::env::var("EXTRACTION_WORKER_THREADS")
         .unwrap_or_else(|_| "2".to_string())
         .parse()
@@ -381,7 +381,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
             .collect::<Result<Vec<_>, _>>()?;
 
         let (extraction_tasks, other_tasks) = create_indexing_tasks(
-            &global_args,
+            global_args,
             &index_args.substreams_args,
             &chains,
             retention_horizon,
@@ -459,7 +459,7 @@ fn run_indexer(global_args: GlobalArgs, index_args: IndexArgs) -> Result<(), Ext
     clippy::unwrap_in_result,
     reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
 )]
-async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
+async fn run_spkg(global_args: &GlobalArgs, run_args: RunSpkgArgs) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
     info!("Starting Tycho");
 
@@ -504,7 +504,7 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     )]));
 
     let (supervisor_tasks, mut other_tasks) = create_indexing_tasks(
-        &global_args,
+        global_args,
         &run_args.substreams_args,
         &[chain],
         Utc::now().naive_utc(),
@@ -527,7 +527,10 @@ async fn run_spkg(global_args: GlobalArgs, run_args: RunSpkgArgs) -> Result<(), 
     clippy::unwrap_in_result,
     reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
 )]
-async fn run_rpc(global_args: GlobalArgs, rpc_args: RpcServerArgs) -> Result<(), ExtractionError> {
+async fn run_rpc(
+    global_args: &GlobalArgs,
+    rpc_args: &RpcServerArgs,
+) -> Result<(), ExtractionError> {
     create_tracing_subscriber();
 
     init_chains(&rpc_args.chain_config)?;
@@ -926,7 +929,7 @@ async fn shutdown_handler(
     reason = "`#[tokio::main]` from tokio-macros below 2.7 expands to an `expect` on building the runtime; 2.7 (tokio 1.52) allows the lint in its expansion"
 )]
 async fn run_analyze_tokens(
-    global_args: GlobalArgs,
+    global_args: &GlobalArgs,
     analyzer_args: AnalyzeTokenArgs,
 ) -> Result<(), anyhow::Error> {
     let rpc_client = global_args.rpc.build_client()?;

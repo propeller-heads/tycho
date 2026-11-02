@@ -135,6 +135,7 @@ impl From<DeltasError> for SynchronizerError {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     extractor_id: ExtractorIdentity,
     retrieve_balances: bool,
@@ -449,6 +450,11 @@ where
         clippy::too_many_arguments,
         reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::fn_params_excessive_bools,
+        reason = "public API; taking `&ExtractorIdentity` and replacing the bool flags with an options type are breaking changes"
+    )]
     pub fn new(
         extractor_id: ExtractorIdentity,
         retrieve_balances: bool,
@@ -539,7 +545,7 @@ where
     #[instrument(skip(self, block_tx, end_rx), fields(extractor_id = %self.extractor_id))]
     async fn state_sync(
         &mut self,
-        block_tx: &mut Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
+        block_tx: &Sender<SyncResult<StateSyncMessage<BlockHeader>>>,
         mut end_rx: oneshot::Receiver<()>,
         snapshot_delay: Duration,
     ) -> Result<(), Box<SyncError>> {
@@ -880,7 +886,7 @@ where
                                         );
                                         self.spawn_snapshot_task(
                                             to_fire,
-                                            snapshot_header,
+                                            &snapshot_header,
                                             &deltas,
                                         );
                                     }
@@ -902,7 +908,7 @@ where
                                     );
                                     let snapshot_header =
                                         BlockHeader { revert: false, ..header.clone() };
-                                    self.spawn_snapshot_task(truly_new, snapshot_header, &deltas);
+                                    self.spawn_snapshot_task(truly_new, &snapshot_header, &deltas);
                                 }
 
                                 let snapshots = background_snapshots;
@@ -1063,7 +1069,7 @@ where
     fn spawn_snapshot_task(
         &mut self,
         component_ids: Vec<String>,
-        snapshot_header: BlockHeader,
+        snapshot_header: &BlockHeader,
         current_delta: &BlockAggregatedChanges,
     ) {
         if self.in_snapshot_backoff() {
@@ -1254,7 +1260,7 @@ where
     async fn start(
         mut self,
     ) -> (SynchronizerTaskHandle, Receiver<SyncResult<StateSyncMessage<BlockHeader>>>) {
-        let (mut tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
+        let (tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         let jh = tokio::spawn(async move {
@@ -1283,7 +1289,7 @@ where
                     Duration::ZERO
                 };
                 let res = self
-                    .state_sync(&mut tx, current_end_rx, snapshot_delay)
+                    .state_sync(&tx, current_end_rx, snapshot_delay)
                     .await;
                 let made_progress = self
                     .last_synced_block
@@ -3048,12 +3054,12 @@ mod test {
         });
 
         // Create a channel for state_sync to send messages to
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
 
         // Call state_sync directly - this should error during processing
         let (_end_tx, end_rx) = oneshot::channel::<()>();
         let result = state_sync
-            .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+            .state_sync(&block_tx, end_rx, Duration::ZERO)
             .await;
         // Verify that state_sync returned an error
         assert!(result.is_err(), "state_sync should have errored during processing");
@@ -3102,13 +3108,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, _block_rx) = channel(10);
+        let (block_tx, _block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3218,13 +3224,13 @@ mod test {
             .await
             .expect("Init should succeed");
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync in a task
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3551,13 +3557,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3767,13 +3773,13 @@ mod test {
             partial_block_index: None,
         });
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         // Start state_sync
         let state_sync_handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::ZERO)
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
                 .await
         });
 
@@ -3898,11 +3904,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 
@@ -3963,11 +3969,11 @@ mod test {
             .expect("Init should succeed");
         state_sync.last_synced_block = Some(header_of(&make_block_changes(9, None)));
 
-        let (mut block_tx, mut block_rx) = channel(10);
+        let (block_tx, mut block_rx) = channel(10);
         let (end_tx, end_rx) = oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             state_sync
-                .state_sync(&mut block_tx, end_rx, Duration::from_millis(300))
+                .state_sync(&block_tx, end_rx, Duration::from_millis(300))
                 .await
         });
 

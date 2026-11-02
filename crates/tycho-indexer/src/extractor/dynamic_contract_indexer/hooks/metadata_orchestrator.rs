@@ -63,7 +63,7 @@ impl BlockMetadataOrchestrator {
 
         info!(total_requests = all_requests.len(), "Generated metadata requests");
 
-        let requests_by_provider = self.group_requests_by_routing_key(&all_requests);
+        let requests_by_provider = Self::group_requests_by_routing_key(&all_requests);
 
         info!(provider_count = requests_by_provider.len(), "Grouped requests by provider");
 
@@ -73,7 +73,7 @@ impl BlockMetadataOrchestrator {
 
         info!(result_count = all_results.len(), "Executed provider batches");
 
-        let final_metadata = self.assemble_component_metadata(&all_components, all_results)?;
+        let final_metadata = Self::assemble_component_metadata(&all_components, all_results)?;
 
         info!(metadata_count = final_metadata.len(), "Completed metadata collection");
 
@@ -161,11 +161,10 @@ impl BlockMetadataOrchestrator {
         Ok(all_requests)
     }
 
-    #[instrument(skip(self, requests), fields(
+    #[instrument(skip(requests), fields(
         request_count = requests.len()
     ))]
     fn group_requests_by_routing_key(
-        &self,
         requests: &[MetadataRequest],
     ) -> HashMap<String, Vec<MetadataRequest>> {
         debug!("Grouping requests by routing key");
@@ -341,12 +340,11 @@ impl BlockMetadataOrchestrator {
         Ok(all_results)
     }
 
-    #[instrument(skip(self, all_components, results), fields(
+    #[instrument(skip(all_components, results), fields(
         component_count = all_components.len(),
         result_count = results.len()
     ))]
     fn assemble_component_metadata(
-        &self,
         all_components: &HashMap<String, (TxHash, ProtocolComponent)>,
         results: Vec<MetadataResult>,
     ) -> Result<Vec<(ProtocolComponent, ComponentTracingMetadata)>, MetadataError> {
@@ -411,6 +409,7 @@ impl BlockMetadataOrchestrator {
     }
 }
 
+#[derive(Clone, Copy)]
 enum RequestMode {
     Full,
     BalanceOnly,
@@ -700,14 +699,6 @@ mod tests {
 
     #[test]
     fn test_group_requests_by_routing_key() {
-        // Setup
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Create test requests with different routing keys
         let request1 = create_test_metadata_request(
             "component1",
@@ -730,7 +721,7 @@ mod tests {
         let requests = vec![request1, request2, request3];
 
         // Execute
-        let grouped = orchestrator.group_requests_by_routing_key(&requests);
+        let grouped = BlockMetadataOrchestrator::group_requests_by_routing_key(&requests);
 
         // Assert
         assert_eq!(grouped.len(), 2);
@@ -844,15 +835,9 @@ mod tests {
 
         let results = vec![result1, result2];
 
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Execute
-        let result = orchestrator.assemble_component_metadata(&all_components, results);
+        let result =
+            BlockMetadataOrchestrator::assemble_component_metadata(&all_components, results);
 
         // Assert
         assert!(result.is_ok());
@@ -903,15 +888,9 @@ mod tests {
             Err(MetadataError::GenerationFailed("Test error".to_string())),
         )];
 
-        let generator_registry = MetadataGeneratorRegistry::new();
-        let parser_registry = MetadataResponseParserRegistry::new();
-        let provider_registry = ProviderRegistry::new();
-
-        let orchestrator =
-            BlockMetadataOrchestrator::new(generator_registry, parser_registry, provider_registry);
-
         // Execute
-        let result = orchestrator.assemble_component_metadata(&all_components, results);
+        let result =
+            BlockMetadataOrchestrator::assemble_component_metadata(&all_components, results);
 
         // Assert
         assert!(result.is_ok());

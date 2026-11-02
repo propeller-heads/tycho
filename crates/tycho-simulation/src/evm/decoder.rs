@@ -1170,7 +1170,7 @@ where
             if !deltas.account_deltas.is_empty() {
                 Self::apply_pending_overrides(
                     deltas,
-                    &current_block,
+                    current_block.as_ref(),
                     &mut updated_states,
                     &state_guard,
                     &all_balances,
@@ -1203,7 +1203,7 @@ where
     /// against confirmed state.
     fn apply_pending_overrides(
         deltas: &BlockAggregatedChanges,
-        current_block: &Option<BlockHeader>,
+        current_block: Option<&BlockHeader>,
         updated_states: &mut HashMap<String, Box<dyn ProtocolSim>>,
         state_guard: &RwLockReadGuard<'_, DecoderState>,
         all_balances: &Balances,
@@ -1216,7 +1216,6 @@ where
         }
 
         let block = current_block
-            .as_ref()
             .map(|h| BlockEnvOverrides { number: Some(h.number), timestamp: Some(h.timestamp) });
         let overrides: Arc<dyn Any + Send + Sync> =
             Arc::new(PendingOverrides::from_account_deltas(&deltas.account_deltas, block));
@@ -1227,7 +1226,7 @@ where
             if !updated_states.contains_key(id) {
                 let empty_delta = Self::add_block_info_to_delta(
                     ProtocolStateDelta { component_id: id.clone(), ..Default::default() },
-                    current_block.clone(),
+                    current_block.cloned(),
                 );
                 if let Err(e) =
                     Self::apply_update(id, empty_delta, updated_states, state_guard, all_balances)
@@ -1355,35 +1354,46 @@ fn create_proxy_token_account(
 }
 
 #[cfg(test)]
-mock! {
-    #[derive(Debug)]
-    pub ProtocolSim {
-        pub fn fee(&self) -> f64;
-        pub fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
-        pub fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError>;
-        pub fn get_limits(
-            &self,
-            sell_token: Bytes,
-            buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError>;
-        pub fn delta_transition(
-            &mut self,
-            delta: ProtocolStateDelta,
-            tokens: &HashMap<Bytes, Token>,
-            balances: &Balances,
-        ) -> Result<(), TransitionError>;
-        pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
-        pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
-        pub fn base_token(&self) -> &Token;
-        pub fn quote_token(&self) -> &Token;
-        pub fn directions(&self) -> Vec<(Bytes, Bytes)>;
+#[expect(
+    clippy::same_name_method,
+    reason = "mockall generates the inherent methods the ProtocolSim impl forwards to"
+)]
+mod protocol_sim_mock {
+    use super::*;
+
+    mock! {
+        #[derive(Debug)]
+        pub ProtocolSim {
+            pub fn fee(&self) -> f64;
+            pub fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError>;
+            pub fn get_amount_out(
+                &self,
+                amount_in: BigUint,
+                token_in: &Token,
+                token_out: &Token,
+            ) -> Result<GetAmountOutResult, SimulationError>;
+            pub fn get_limits(
+                &self,
+                sell_token: Bytes,
+                buy_token: Bytes,
+            ) -> Result<(BigUint, BigUint), SimulationError>;
+            pub fn delta_transition(
+                &mut self,
+                delta: ProtocolStateDelta,
+                tokens: &HashMap<Bytes, Token>,
+                balances: &Balances,
+            ) -> Result<(), TransitionError>;
+            pub fn clone_box(&self) -> Box<dyn ProtocolSim>;
+            pub fn eq(&self, other: &dyn ProtocolSim) -> bool;
+            pub fn base_token(&self) -> &Token;
+            pub fn quote_token(&self) -> &Token;
+            pub fn directions(&self) -> Vec<(Bytes, Bytes)>;
+        }
     }
 }
+
+#[cfg(test)]
+pub use protocol_sim_mock::MockProtocolSim;
 
 #[cfg(test)]
 crate::impl_non_serializable_protocol!(MockProtocolSim, "test protocol");

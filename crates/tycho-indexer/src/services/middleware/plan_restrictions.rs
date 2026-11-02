@@ -136,9 +136,8 @@ impl PlanRestrictions {
     }
 
     pub fn check_numeric(
-        &self,
         param_name: &str,
-        restriction: &Option<NumericRestriction>,
+        restriction: Option<&NumericRestriction>,
         actual: Option<f64>,
     ) -> Result<(), RpcError> {
         if let Some(restriction) = restriction {
@@ -222,7 +221,11 @@ impl ValidateRestrictions for dto::ProtocolComponentsRequestBody {
         restrictions.check_protocol_system(&self.protocol_system)?;
         // Skip numeric checks when targeting specific components by ID
         if self.component_ids.is_none() {
-            restrictions.check_numeric("tvl_gt", &restrictions.component_tvl, self.tvl_gt)?;
+            PlanRestrictions::check_numeric(
+                "tvl_gt",
+                restrictions.component_tvl.as_ref(),
+                self.tvl_gt,
+            )?;
         }
         Ok(())
     }
@@ -232,14 +235,14 @@ impl ValidateRestrictions for dto::TokensRequestBody {
     fn validate_restrictions(&self, restrictions: &PlanRestrictions) -> Result<(), RpcError> {
         // Skip numeric checks when targeting specific token addresses
         if self.token_addresses.is_none() {
-            restrictions.check_numeric(
+            PlanRestrictions::check_numeric(
                 "min_quality",
-                &restrictions.token_quality,
+                restrictions.token_quality.as_ref(),
                 self.min_quality.map(f64::from),
             )?;
-            restrictions.check_numeric(
+            PlanRestrictions::check_numeric(
                 "traded_n_days_ago",
-                &restrictions.traded_n_days_ago,
+                restrictions.traded_n_days_ago.as_ref(),
                 self.traded_n_days_ago.map(|v| v as f64),
             )?;
         }
@@ -440,8 +443,11 @@ plans:
             component_tvl: Some(NumericRestriction { op, value: threshold }),
             ..Default::default()
         };
-        let result =
-            restrictions.check_numeric("component_tvl", &restrictions.component_tvl, actual);
+        let result = PlanRestrictions::check_numeric(
+            "component_tvl",
+            restrictions.component_tvl.as_ref(),
+            actual,
+        );
         assert_eq!(result.is_ok(), should_pass);
     }
 
@@ -464,12 +470,18 @@ plans:
     #[test]
     fn test_check_numeric_no_restriction() {
         let restrictions = PlanRestrictions::default();
-        assert!(restrictions
-            .check_numeric("component_tvl", &restrictions.component_tvl, None)
-            .is_ok());
-        assert!(restrictions
-            .check_numeric("component_tvl", &restrictions.component_tvl, Some(1.0))
-            .is_ok());
+        assert!(PlanRestrictions::check_numeric(
+            "component_tvl",
+            restrictions.component_tvl.as_ref(),
+            None
+        )
+        .is_ok());
+        assert!(PlanRestrictions::check_numeric(
+            "component_tvl",
+            restrictions.component_tvl.as_ref(),
+            Some(1.0)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -478,8 +490,11 @@ plans:
             component_tvl: Some(NumericRestriction { op: Operator::Gte, value: 10000.0 }),
             ..Default::default()
         };
-        let result =
-            restrictions.check_numeric("component_tvl", &restrictions.component_tvl, Some(500.0));
+        let result = PlanRestrictions::check_numeric(
+            "component_tvl",
+            restrictions.component_tvl.as_ref(),
+            Some(500.0),
+        );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("component_tvl"));
         assert!(err.contains(">="));

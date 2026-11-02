@@ -669,13 +669,13 @@ impl PostgresGateway {
             .map_err(PostgresError::from)?
             .into_iter()
             .collect::<HashMap<i64, Bytes>>();
-        Self::construct_account_to_contract_store(slots.into_iter(), accounts)
+        Self::construct_account_to_contract_store(slots.into_iter(), &accounts)
     }
 
     /// Constructs a mapping from address to contract slots
     fn construct_account_to_contract_store(
         slot_values: impl Iterator<Item = (i64, Bytes, Option<Bytes>)>,
-        addresses: HashMap<i64, Bytes>,
+        addresses: &HashMap<i64, Bytes>,
     ) -> Result<AccountToContractStoreDeltas, StorageError> {
         let mut result: AccountToContractStoreDeltas = HashMap::with_capacity(addresses.len());
         for (cid, raw_key, raw_val) in slot_values.into_iter() {

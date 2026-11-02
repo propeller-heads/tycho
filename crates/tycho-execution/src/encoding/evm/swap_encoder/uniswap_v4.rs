@@ -77,7 +77,7 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let v4_user_data = UniswapV4UserData::from_swap_user_data(swap.user_data())?;
+        let v4_user_data = UniswapV4UserData::from_swap_user_data(swap.user_data().as_ref())?;
 
         let fee = get_static_attribute(swap, "key_lp_fee")?;
 
@@ -192,8 +192,8 @@ pub(super) struct UniswapV4UserData {
 }
 
 impl UniswapV4UserData {
-    fn from_swap_user_data(user_data: &Option<Bytes>) -> Result<Self, EncodingError> {
-        match user_data.as_ref() {
+    fn from_swap_user_data(user_data: Option<&Bytes>) -> Result<Self, EncodingError> {
+        match user_data {
             Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
                 EncodingError::FatalError(format!("Invalid UniswapV4 user_data JSON: {}", e))
             }),
@@ -221,11 +221,11 @@ mod tests {
 
     #[test]
     fn test_user_data_defaults_when_absent_or_empty() {
-        let from_none = UniswapV4UserData::from_swap_user_data(&None).unwrap();
+        let from_none = UniswapV4UserData::from_swap_user_data(None).unwrap();
         assert!(!from_none.skip_unlock);
         assert!(from_none.hook_data.is_empty());
 
-        let from_empty = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(""))).unwrap();
+        let from_empty = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(""))).unwrap();
         assert!(!from_empty.skip_unlock);
         assert!(from_empty.hook_data.is_empty());
     }
@@ -234,21 +234,21 @@ mod tests {
     fn test_user_data_parses_both_fields() {
         let raw = br#"{"skip_unlock":true,"hook_data":"0xdeadbeef"}"#;
         let parsed =
-            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(raw.as_slice()))).unwrap();
+            UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(raw.as_slice()))).unwrap();
         assert!(parsed.skip_unlock);
         assert_eq!(parsed.hook_data, Bytes::from("0xdeadbeef"));
     }
 
     #[test]
     fn test_user_data_partial_fields_use_defaults() {
-        let only_skip = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+        let only_skip = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(
             br#"{"skip_unlock":true}"#.as_slice(),
         )))
         .unwrap();
         assert!(only_skip.skip_unlock);
         assert!(only_skip.hook_data.is_empty());
 
-        let only_hook = UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(
+        let only_hook = UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(
             br#"{"hook_data":"0x1234"}"#.as_slice(),
         )))
         .unwrap();
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_user_data_invalid_json_errors() {
         let err =
-            UniswapV4UserData::from_swap_user_data(&Some(Bytes::from(b"not json".as_slice())))
+            UniswapV4UserData::from_swap_user_data(Some(&Bytes::from(b"not json".as_slice())))
                 .unwrap_err();
         assert!(format!("{:?}", err).contains("Invalid UniswapV4 user_data JSON"));
     }

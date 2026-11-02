@@ -273,8 +273,8 @@ impl Inner {
     /// Transitions a pending subscription to active.
     ///
     /// Will ignore any request to do so for subscriptions that are not pending.
-    fn mark_active(&mut self, extractor_id: ExtractorIdentity, subscription_id: Uuid) {
-        if let Some(info) = self.pending.remove(&extractor_id) {
+    fn mark_active(&mut self, extractor_id: &ExtractorIdentity, subscription_id: Uuid) {
+        if let Some(info) = self.pending.remove(extractor_id) {
             if let SubscriptionInfo::RequestedSubscription(ready_tx) = info {
                 let (tx, rx) = mpsc::channel(self.buffer_size);
                 self.sender.insert(subscription_id, tx);
@@ -379,8 +379,8 @@ impl Inner {
         Ok(())
     }
 
-    fn cancel_pending(&mut self, extractor_id: ExtractorIdentity, error: &WebsocketError) {
-        if let Some(sub_info) = self.pending.remove(&extractor_id) {
+    fn cancel_pending(&mut self, extractor_id: &ExtractorIdentity, error: &WebsocketError) {
+        if let Some(sub_info) = self.pending.remove(extractor_id) {
             match sub_info {
                 SubscriptionInfo::RequestedSubscription(tx) => {
                     if tx
@@ -576,7 +576,7 @@ impl WsDeltasClient {
                             let inner = guard
                                 .as_mut()
                                 .ok_or_else(|| DeltasError::NotConnected)?;
-                            inner.mark_active(extractor_id.into(), subscription_id);
+                            inner.mark_active(&extractor_id.into(), subscription_id);
                         }
                         WebSocketMessage::Response(Response::SubscriptionEnded {
                             subscription_id,
@@ -592,7 +592,7 @@ impl WsDeltasClient {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id.clone().into(), &error);
+                                inner.cancel_pending(&extractor_id.clone().into(), &error);
                             }
                             WebsocketError::SubscriptionNotFound(subscription_id) => {
                                 debug!("Received subscription not found, removing subscription");
@@ -616,7 +616,7 @@ impl WsDeltasClient {
                                 let inner = guard
                                     .as_mut()
                                     .ok_or_else(|| DeltasError::NotConnected)?;
-                                inner.cancel_pending(extractor_id.clone().into(), &error);
+                                inner.cancel_pending(&extractor_id.clone().into(), &error);
                             }
                         },
                     },

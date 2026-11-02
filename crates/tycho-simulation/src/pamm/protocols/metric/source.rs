@@ -269,7 +269,7 @@ mod tests {
             {
                 return Some(("200 OK", page.clone()));
             }
-            Some(("200 OK", batch_body(vec![quote_entry(POOL, &bid_ask_json(SERVER_TS, false))])))
+            Some(("200 OK", batch_body(&[quote_entry(POOL, &bid_ask_json(SERVER_TS, false))])))
         })
         .await;
         let mut source = source(Chain::Ethereum, &server.url(), "test_key");
@@ -324,7 +324,7 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .extend(requested.clone());
-            let entries = requested
+            let entries: Vec<_> = requested
                 .into_iter()
                 .filter_map(|pool| match pool.as_str() {
                     FAILING => Some(error_entry(&pool, 500, "boom")),
@@ -333,7 +333,7 @@ mod tests {
                     _ => Some(quote_entry(&pool, &bid_ask_json(SERVER_TS, false))),
                 })
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let endpoint = server.url();
@@ -402,14 +402,14 @@ mod tests {
                 Ok(errors) => errors,
                 Err((status, body)) => return Some((status, body.to_string())),
             };
-            let entries = requested_pools(request)
+            let entries: Vec<_> = requested_pools(request)
                 .iter()
                 .map(|pool| {
                     let error = if pool == FIRST_POOL { errors[0] } else { errors[1] };
                     error_entry(pool, 404, error)
                 })
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let endpoint = server.url();
@@ -457,11 +457,11 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .push(requested.len());
-            let entries = requested
+            let entries: Vec<_> = requested
                 .iter()
                 .map(|pool| quote_entry(pool, &bid_ask_json(SERVER_TS, false)))
                 .collect();
-            Some(("200 OK", batch_body(entries)))
+            Some(("200 OK", batch_body(&entries)))
         })
         .await;
         let mut source = source(Chain::Ethereum, &server.url(), "key");
@@ -490,7 +490,7 @@ mod tests {
             }
             Some(MockResponse {
                 status: "200 OK",
-                body: batch_body(vec![]),
+                body: batch_body(&[]),
                 delay: Duration::from_secs(3600),
             })
         })
@@ -593,7 +593,7 @@ mod tests {
             {
                 return Some(("200 OK", page.clone()));
             }
-            Some(("200 OK", batch_body(vec![error_entry(FIRST_POOL, 500, "boom")])))
+            Some(("200 OK", batch_body(&[error_entry(FIRST_POOL, 500, "boom")])))
         })
         .await;
 

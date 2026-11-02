@@ -39,7 +39,7 @@ impl TychoRunner {
         end_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
+        module_name: Option<&str>,
     ) -> miette::Result<()> {
         info!("Running Tycho indexer from block {start_block} to {end_block}...");
 
@@ -67,9 +67,7 @@ impl TychoRunner {
             "--spkg",
             spkg_path,
             "--module",
-            module_name
-                .as_deref()
-                .unwrap_or("map_protocol_changes"),
+            module_name.unwrap_or("map_protocol_changes"),
             "--protocol-type-names",
             &protocol_type_names.join(","),
             "--protocol-system",
@@ -177,7 +175,7 @@ impl TychoRunner {
         TychoRpcServer { sender: tx, thread_handle }
     }
 
-    pub fn stop_rpc_server(&self, server: TychoRpcServer) -> miette::Result<()> {
+    pub fn stop_rpc_server(server: TychoRpcServer) -> miette::Result<()> {
         server
             .sender
             .send(true)
@@ -198,7 +196,7 @@ impl TychoRunner {
         start_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
+        module_name: Option<&str>,
     ) -> miette::Result<()> {
         info!("Running Tycho indexer with Index command (continuous syncing + RPC server) from block {start_block}...");
 
@@ -281,7 +279,7 @@ impl TychoRunner {
         start_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
+        module_name: Option<&str>,
     ) -> String {
         let protocol_types = protocol_type_names
             .iter()
@@ -311,9 +309,7 @@ impl TychoRunner {
             start_block,
             protocol_types,
             spkg_path,
-            module_name
-                .as_deref()
-                .unwrap_or("map_protocol_changes"),
+            module_name.unwrap_or("map_protocol_changes"),
             initialized_accounts_section
         );
 

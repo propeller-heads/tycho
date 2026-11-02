@@ -726,9 +726,7 @@ impl EthereumRpcClient {
                 }
             })
             .await
-            .map_err(|e| {
-                RPCError::from_alloy("eth_call with state overrides failed".to_string(), e)
-            })
+            .map_err(|e| RPCError::from_alloy("eth_call with state overrides failed", e))
     }
 
     #[instrument(level = "debug", skip(self, access_list_params, trace_call_params))]
@@ -1796,7 +1794,7 @@ mod tests {
     }
 
     async fn mock_batch_slot_detector_tests_call(
-        server: &mut ServerGuard,
+        server: &ServerGuard,
     ) -> Result<Vec<TransportResult<Value>>, RPCError> {
         let policy = retry::tests::mock_retry_policy();
 
@@ -1865,7 +1863,7 @@ mod tests {
         // At this point the id counter should be 2 as it increments per request starting from 0
         let m_success = mock_success_at(&mut server, MOCK_RETRY_POLICY_MAX_ATTEMPTS).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
 
@@ -1890,7 +1888,7 @@ mod tests {
         }
         let m_failure = mock_retryable_failure(&mut server).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_err());
         // The error can be either RequestError (if the request itself fails) or
@@ -1929,7 +1927,7 @@ mod tests {
         // Second attempt: success
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         assert!(result.is_ok());
         let responses = result.unwrap();
@@ -1967,7 +1965,7 @@ mod tests {
         // Second attempt: success (after retry for safety)
         let m2 = mock_success_at(&mut server, 1).await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should succeed after retry (safety measure)
         assert!(result.is_ok());
@@ -1999,7 +1997,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = mock_batch_slot_detector_tests_call(&mut server).await;
+        let result = mock_batch_slot_detector_tests_call(&server).await;
 
         // Should return mixed results without retrying (not all failed)
         assert!(result.is_ok());

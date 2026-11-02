@@ -72,6 +72,7 @@ impl Data {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent UI toggles that can be on together")]
 pub struct App {
     state: TableState,
     show_popup: bool,
@@ -175,7 +176,7 @@ impl App {
     pub fn update_data(&mut self, update: Update) {
         info!("Got {} new pairs", update.new_pairs.len());
         info!("Total pairs: {}", self.items.len());
-        for (id, comp) in update.new_pairs.iter() {
+        for (id, comp) in update.new_pairs {
             let name = format!("{comp_id:#042x}", comp_id = comp.id);
             let tokens = comp
                 .tokens
@@ -183,13 +184,13 @@ impl App {
                 .map(|a| a.symbol.clone())
                 .join("/");
 
-            match update.states.get(id) {
+            match update.states.get(&id) {
                 Some(state) => {
                     // Check if spot_price calculation is successful
                     match state.spot_price(&comp.tokens[0], &comp.tokens[1]) {
                         Ok(price) => {
                             self.items.push(Data {
-                                component: comp.clone(),
+                                component: comp,
                                 state: state.clone(),
                                 name,
                                 tokens,
@@ -401,7 +402,7 @@ impl App {
         self.render_scrollbar(frame, rects[0]);
         self.render_footer(frame, rects[1]);
         if self.items.is_empty() {
-            self.render_loading(frame);
+            Self::render_loading(frame);
         }
         if self.show_popup {
             self.render_quote_popup(frame);
@@ -522,7 +523,7 @@ impl App {
         frame.render_widget(pool_count, count_area);
     }
 
-    fn render_loading(&self, frame: &mut Frame) {
+    fn render_loading(frame: &mut Frame) {
         let area = frame.area();
 
         let block = Block::bordered();

@@ -94,7 +94,7 @@ impl SplitSwapValidator {
     ///   to the router to send the remainder of the token to the designated protocol
     /// * The sum of all non-remainder splits for each token is < 1 (100%)
     /// * There are no negative split amounts
-    pub fn validate_split_percentages(&self, swaps: &[Swap]) -> Result<(), EncodingError> {
+    pub fn validate_split_percentages(swaps: &[Swap]) -> Result<(), EncodingError> {
         let mut swaps_by_token: HashMap<&Bytes, Vec<&Swap>> = HashMap::new();
         for swap in swaps {
             if swap.split() >= 1.0 {
@@ -343,7 +343,6 @@ mod tests {
 
     #[test]
     fn test_validate_swap_single() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
         let swaps = vec![Swap::new(
@@ -356,13 +355,12 @@ mod tests {
             default_token(dai),
             BigUint::ZERO,
         )];
-        let result = validator.validate_split_percentages(&swaps);
+        let result = SplitSwapValidator::validate_split_percentages(&swaps);
         assert_eq!(result, Ok(()));
     }
 
     #[test]
     fn test_validate_swaps_multiple() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -401,14 +399,11 @@ mod tests {
                 BigUint::ZERO,
             ),
         ];
-        assert!(validator
-            .validate_split_percentages(&valid_swaps)
-            .is_ok());
+        assert!(SplitSwapValidator::validate_split_percentages(&valid_swaps).is_ok());
     }
 
     #[test]
     fn test_validate_swaps_no_remainder_split() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -437,14 +432,13 @@ mod tests {
             .with_split(0.3),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_total_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_total_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must have exactly one 0% split")
         ));
     }
 
     #[test]
     fn test_validate_swaps_zero_split_not_at_end() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -472,14 +466,13 @@ mod tests {
             .with_split(0.5),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_zero_position_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_zero_position_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must be the last swap")
         ));
     }
 
     #[test]
     fn test_validate_swaps_splits_exceed_hundred_percent() {
-        let validator = SplitSwapValidator;
         let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
         let dai = Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap();
 
@@ -518,7 +511,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            validator.validate_split_percentages(&invalid_overflow_swaps),
+            SplitSwapValidator::validate_split_percentages(&invalid_overflow_swaps),
             Err(EncodingError::InvalidInput(msg)) if msg.contains("must be <100%")
         ));
     }

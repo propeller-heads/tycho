@@ -22,8 +22,8 @@ use crate::pb::sf::substreams::rpc::{
 
 #[derive(Clone, Debug)]
 pub struct SubstreamsEndpoint {
-    pub uri: String,
-    pub token: Option<String>,
+    uri: String,
+    token: Option<String>,
     channel: Channel,
 }
 

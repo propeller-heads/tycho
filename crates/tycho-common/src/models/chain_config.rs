@@ -122,6 +122,10 @@ impl std::hash::Hash for TvlThresholds {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; the private fields are validated by `try_new`, and making `block_time_secs` private is a breaking change"
+)]
 pub struct CustomChainConfig {
     #[schema(value_type = String)]
     pub(crate) name: ArrayString<32>,

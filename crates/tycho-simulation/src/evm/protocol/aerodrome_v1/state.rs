@@ -191,11 +191,11 @@ impl ProtocolSim for AerodromeV1State {
                 decimals1: self.decimals1,
                 math: StableMath::Checked,
             }
-            .get_limits(sell_token, buy_token)
+            .get_limits(&sell_token, &buy_token)
         } else {
             cpmm_get_limits(
-                sell_token,
-                buy_token,
+                &sell_token,
+                &buy_token,
                 self.reserve0,
                 self.reserve1,
                 self.resolved_fee_bps(),

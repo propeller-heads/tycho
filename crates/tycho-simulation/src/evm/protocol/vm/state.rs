@@ -150,6 +150,10 @@ impl Clone for DerivedCaches {
 }
 
 #[derive(Clone)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `tokens` private or the rest public is a breaking change"
+)]
 pub struct EVMPoolState<D: EngineDatabaseInterface + Clone + Debug>
 where
     <D as DatabaseRef>::Error: Debug,
@@ -478,13 +482,13 @@ where
             .contains(&Capability::PriceFunction)
         {
             let overwrites = Some(self.get_overwrites(
-                vec![sell_token_address, buy_token_address],
+                &[sell_token_address, buy_token_address],
                 *MAX_BALANCE / U256::from(100),
                 live_snapshot,
             )?);
 
             let (sell_amount_limit, _) = self.get_amount_limits(
-                vec![sell_token_address, buy_token_address],
+                &[sell_token_address, buy_token_address],
                 overwrites.clone(),
                 block_overrides.clone(),
             )?;
@@ -518,7 +522,7 @@ where
             // If the pool does not support price function, we need to calculate spot prices by
             // swapping two amounts and use the approximation to get the derivative.
             let overwrites = Some(self.get_overwrites(
-                vec![sell_token_address, buy_token_address],
+                &[sell_token_address, buy_token_address],
                 *MAX_BALANCE / U256::from(100),
                 live_snapshot,
             )?);
@@ -526,7 +530,7 @@ where
             // Calculate the first sell amount (x1) as 1% of the maximum limit.
             let x1 =
                 self.get_amount_limits(
-                    vec![sell_token_address, buy_token_address],
+                    &[sell_token_address, buy_token_address],
                     overwrites.clone(),
                     block_overrides.clone(),
                 )?
@@ -659,7 +663,7 @@ where
     ///   if successful, or a `SimulationError` on failure.
     fn get_amount_limits(
         &self,
-        tokens: Vec<Address>,
+        tokens: &[Address],
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         block_overrides: Option<BlockEnvOverrides>,
     ) -> Result<(U256, U256), SimulationError> {
@@ -768,7 +772,7 @@ where
 
     fn get_overwrites(
         &self,
-        tokens: Vec<Address>,
+        tokens: &[Address],
         max_amount: U256,
         live: Option<&OverrideSnapshot>,
     ) -> Result<HashMap<Address, Overwrites>, SimulationError> {
@@ -776,12 +780,12 @@ where
 
         // Merge `block_lasting_overwrites` with `token_overwrites`
         let mut merged_overwrites =
-            self.merge(self.block_lasting_overwrites.clone(), token_overwrites);
+            Self::merge(self.block_lasting_overwrites.clone(), token_overwrites);
 
         // Live overrides (e.g. Titan pAMM oracle state) take precedence on conflict.
         if let Some(live) = live {
             if !live.storage.is_empty() {
-                merged_overwrites = self.merge(merged_overwrites, live.storage.as_ref().clone());
+                merged_overwrites = Self::merge(merged_overwrites, live.storage.as_ref().clone());
             }
         }
 
@@ -790,7 +794,7 @@ where
 
     fn get_token_overwrites(
         &self,
-        tokens: Vec<Address>,
+        tokens: &[Address],
         max_amount: U256,
     ) -> Result<HashMap<Address, Overwrites>, SimulationError> {
         let sell_token = &tokens[0].clone(); //TODO: need to make it clearer from the interface
@@ -831,7 +835,7 @@ where
         // Merge all overwrites into a single HashMap
         Ok(res
             .into_iter()
-            .fold(HashMap::new(), |acc, overwrite| self.merge(acc, overwrite)))
+            .fold(HashMap::new(), |acc, overwrite| Self::merge(acc, overwrite)))
     }
 
     /// Gets all balance overwrites for the pool's tokens.
@@ -904,7 +908,6 @@ where
 
     /// Merges `source` into `target` and returns the result. On a per-slot conflict, `source` wins.
     fn merge(
-        &self,
         mut target: HashMap<Address, Overwrites>,
         source: HashMap<Address, Overwrites>,
     ) -> HashMap<Address, Overwrites> {
@@ -947,12 +950,12 @@ where
         let sell_amount = U256::from_be_slice(&amount_in.to_bytes_be());
         let block_overrides = self.block_env(live_snapshot);
         let overwrites = self.get_overwrites(
-            vec![sell_token_address, buy_token_address],
+            &[sell_token_address, buy_token_address],
             *MAX_BALANCE / U256::from(100),
             live_snapshot,
         )?;
         let (sell_amount_limit, _) = self.get_amount_limits(
-            vec![sell_token_address, buy_token_address],
+            &[sell_token_address, buy_token_address],
             Some(overwrites.clone()),
             block_overrides.clone(),
         )?;
@@ -967,11 +970,11 @@ where
         };
 
         let overwrites_with_sell_limit = self.get_overwrites(
-            vec![sell_token_address, buy_token_address],
+            &[sell_token_address, buy_token_address],
             sell_amount_limit,
             live_snapshot,
         )?;
-        let complete_overwrites = self.merge(overwrites, overwrites_with_sell_limit);
+        let complete_overwrites = Self::merge(overwrites, overwrites_with_sell_limit);
 
         let (trade, state_changes) = self.adapter_contract.swap(
             &self.id,
@@ -1048,12 +1051,12 @@ where
         let sell_token = bytes_to_address(sell_token)?;
         let buy_token = bytes_to_address(buy_token)?;
         let overwrites = self.get_overwrites(
-            vec![sell_token, buy_token],
+            &[sell_token, buy_token],
             *MAX_BALANCE / U256::from(100),
             live_snapshot,
         )?;
         let limits = self.get_amount_limits(
-            vec![sell_token, buy_token],
+            &[sell_token, buy_token],
             Some(overwrites),
             self.block_env(live_snapshot),
         )?;
@@ -1601,7 +1604,7 @@ mod tests {
 
         let overwrites = pool_state
             .get_overwrites(
-                vec![
+                &[
                     bytes_to_address(&pool_state.tokens[0]).unwrap(),
                     bytes_to_address(&pool_state.tokens[1]).unwrap(),
                 ],
@@ -1611,7 +1614,7 @@ mod tests {
             .unwrap();
         let (dai_limit, _) = pool_state
             .get_amount_limits(
-                vec![dai_addr(), bal_addr()],
+                &[dai_addr(), bal_addr()],
                 Some(overwrites.clone()),
                 pool_state.block_env(None),
             )
@@ -1620,7 +1623,7 @@ mod tests {
 
         let (bal_limit, _) = pool_state
             .get_amount_limits(
-                vec![
+                &[
                     bytes_to_address(&pool_state.tokens[1]).unwrap(),
                     bytes_to_address(&pool_state.tokens[0]).unwrap(),
                 ],
@@ -1635,12 +1638,12 @@ mod tests {
     async fn test_get_limits_cached_matches_fresh() {
         let pool_state = setup_pool_state().await;
         let overwrites = pool_state
-            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+            .get_overwrites(&[dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
             .unwrap();
 
         // First call populates the cache.
         let fresh = pool_state
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites.clone()), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(overwrites.clone()), None)
             .unwrap();
         assert_eq!(
             pool_state
@@ -1654,7 +1657,7 @@ mod tests {
 
         // Second call returns the cached value, identical to the first.
         let cached = pool_state
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(overwrites), None)
             .unwrap();
         assert_eq!(fresh, cached);
 
@@ -1663,10 +1666,10 @@ mod tests {
         // overwrites derived from a different amount, and comparing byte-for-byte.
         let cold = setup_pool_state().await;
         let different_overwrites = cold
-            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(50), None)
+            .get_overwrites(&[dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(50), None)
             .unwrap();
         let independent = cold
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(different_overwrites), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(different_overwrites), None)
             .unwrap();
         assert_eq!(independent, fresh);
     }
@@ -1678,10 +1681,10 @@ mod tests {
     async fn test_engine_block_advance_invalidates_cached_limits() {
         let pool_state = setup_pool_state().await;
         let overwrites = pool_state
-            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+            .get_overwrites(&[dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
             .unwrap();
         let real = pool_state
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites.clone()), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(overwrites.clone()), None)
             .unwrap();
         let sentinel = (U256::from(1u64), U256::from(1u64));
         assert_ne!(real, sentinel);
@@ -1693,7 +1696,7 @@ mod tests {
 
         // Sanity: the sentinel is served while the engine block is unchanged.
         let served = pool_state
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites.clone()), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(overwrites.clone()), None)
             .unwrap();
         assert_eq!(served, sentinel);
 
@@ -1709,7 +1712,7 @@ mod tests {
 
         // The stamp mismatch turns the read into a miss: the sentinel is dead.
         let after = pool_state
-            .get_amount_limits(vec![dai_addr(), bal_addr()], Some(overwrites), None)
+            .get_amount_limits(&[dai_addr(), bal_addr()], Some(overwrites), None)
             .unwrap();
         assert_ne!(after, sentinel);
         assert_eq!(after, real);
@@ -2076,11 +2079,11 @@ mod tests {
         // Populate the limit cache, then poison the entry with a sentinel so a served cache hit
         // is distinguishable from a fresh computation.
         let overwrites = pool_state
-            .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+            .get_overwrites(&[dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
             .unwrap();
         let real = pool_state
             .get_amount_limits(
-                vec![dai_addr(), bal_addr()],
+                &[dai_addr(), bal_addr()],
                 Some(overwrites.clone()),
                 pool_state.block_env(None),
             )
@@ -2109,7 +2112,7 @@ mod tests {
         // The changed block env must invalidate the sentinel: the read recomputes fresh.
         let after = pool_state
             .get_amount_limits(
-                vec![dai_addr(), bal_addr()],
+                &[dai_addr(), bal_addr()],
                 Some(overwrites),
                 pool_state.block_env(None),
             )
@@ -2181,14 +2184,14 @@ mod tests {
         let max = *MAX_BALANCE / U256::from(100);
 
         let baseline = pool_state
-            .get_overwrites(tokens.clone(), max, None)
+            .get_overwrites(&tokens, max, None)
             .unwrap();
 
         // An empty live snapshot leaves the overwrites unchanged.
         let empty = OverrideSnapshot::default();
         assert_eq!(
             pool_state
-                .get_overwrites(tokens.clone(), max, Some(&empty))
+                .get_overwrites(&tokens, max, Some(&empty))
                 .unwrap(),
             baseline
         );
@@ -2220,7 +2223,7 @@ mod tests {
             ..Default::default()
         };
         let with_live = pool_state
-            .get_overwrites(tokens, max, Some(&live))
+            .get_overwrites(&tokens, max, Some(&live))
             .unwrap();
 
         assert_eq!(

@@ -91,7 +91,7 @@ where
             SimulationError::FatalError(format!("Failed to decode price return value: {e:?}"))
         })?;
 
-        let price = self.calculate_price(decoded)?;
+        let price = Self::calculate_price(decoded)?;
         Ok(price)
     }
 
@@ -132,8 +132,7 @@ where
 
         let (received_amount, gas_used, price_elements) = decoded;
 
-        let price = self
-            .calculate_price(vec![price_elements])?
+        let price = Self::calculate_price(vec![price_elements])?
             .first()
             .cloned()
             .ok_or_else(|| {
@@ -213,7 +212,7 @@ where
         })
     }
 
-    fn calculate_price(&self, fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
+    fn calculate_price(fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {
         fractions
             .into_iter()
             .map(|(numerator, denominator)| {

@@ -163,11 +163,11 @@ impl EthCallDetector {
         let returns = analyzeCall::abi_decode_returns(raw.as_ref())
             .map_err(|e| format!("Failed to decode Analyzer return value: {e}"))?;
 
-        Self::handle_response(returns, amount, holder)
+        Self::handle_response(&returns, amount, holder)
     }
 
     fn handle_response(
-        r: <analyzeCall as SolCall>::Return,
+        r: &<analyzeCall as SolCall>::Return,
         amount: U256,
         holder: Address,
     ) -> Result<(TokenQuality, Option<U256>, Option<U256>), String> {
@@ -207,12 +207,12 @@ impl EthCallDetector {
         // A U256 overflow in the fee maths is token state (a balance near U256::MAX), not an RPC
         // fault. Both transfers ran, so gas is known; the fee is not.
         let fees = match calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: amount,
                 balance_before: r.balanceBeforeIn,
                 balance_after: r.balanceAfterIn,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: middle_amount,
                 balance_before: r.recipientBefore,
                 balance_after: r.recipientAfter,
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn handle_response_good_token() {
         let amount = U256::from(1_000_000_u64);
-        let result = EthCallDetector::handle_response(good_return(amount), amount, Address::ZERO);
+        let result = EthCallDetector::handle_response(&good_return(amount), amount, Address::ZERO);
         let (quality, gas, tax) = result.unwrap();
         assert_eq!(quality, TokenQuality::Good);
         assert_eq!(gas, Some(U256::from(27_500_u64))); // (30_000 + 25_000) / 2
@@ -327,7 +327,7 @@ mod tests {
         let mut r = good_return(amount);
         r.transferInOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_none());
         assert!(tax.is_none());
@@ -339,7 +339,7 @@ mod tests {
         let mut r = good_return(amount);
         r.transferOutOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_none());
         assert!(tax.is_none());
@@ -351,7 +351,7 @@ mod tests {
         let mut r = good_return(amount);
         r.approvalOk = false;
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         assert!(tax.is_some());
@@ -366,7 +366,7 @@ mod tests {
         r.balanceAfterIn = received;
         r.recipientAfter = received; // recipient gets what settlement received
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         // Fee should be ~100 bps (1%)
@@ -383,7 +383,7 @@ mod tests {
         r.balanceAfterOut = U256::from(50_000_u64);
         r.recipientAfter = U256::from(990_000_u64);
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert!(gas.is_some());
         assert_eq!(tax, Some(U256::from(100_u64)));
@@ -395,7 +395,7 @@ mod tests {
         let mut r = good_return(amount);
         r.balanceBeforeIn = U256::MAX;
         r.balanceAfterIn = U256::MAX;
-        let (quality, gas, tax) = EthCallDetector::handle_response(r, amount, Address::ZERO)
+        let (quality, gas, tax) = EthCallDetector::handle_response(&r, amount, Address::ZERO)
             .expect("a balance near U256::MAX must yield a Bad verdict, not an error");
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert_eq!(gas, Some(U256::from(27_500_u64)));
@@ -409,7 +409,7 @@ mod tests {
         r.balanceAfterIn = amount + U256::from(1_u64);
         r.recipientAfter = amount + U256::from(1_u64);
         let (quality, gas, tax) =
-            EthCallDetector::handle_response(r, amount, Address::ZERO).unwrap();
+            EthCallDetector::handle_response(&r, amount, Address::ZERO).unwrap();
         assert!(matches!(quality, TokenQuality::Bad { .. }));
         assert_eq!(gas, Some(U256::from(27_500_u64)));
         assert_eq!(tax, Some(U256::ZERO));

@@ -92,15 +92,13 @@ impl SwapEncoderRegistry {
                     protocol
                 ))
             })?;
-            let config = protocol_specific_config
-                .get(protocol)
-                .cloned();
+            let config = protocol_specific_config.get(protocol);
             if protocol == SUBSIDY_KEY {
                 self.subsidy_encoder =
                     Some(SubsidyEncoder::from_config(executor_address, self.chain, config)?);
                 continue;
             }
-            let encoder = self.create_encoder(protocol, executor_address, config)?;
+            let encoder = self.create_encoder(protocol, executor_address, config.cloned())?;
             self.encoders
                 .insert(protocol.to_string(), encoder);
         }

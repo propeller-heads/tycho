@@ -55,10 +55,9 @@ impl SubsidyEncoder {
     pub(crate) fn from_config(
         executor_address: Bytes,
         chain: Chain,
-        config: Option<HashMap<String, String>>,
+        config: Option<&HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         let payer = config
-            .as_ref()
             .and_then(|config| config.get(PAYER_CONFIG_KEY))
             .ok_or_else(|| {
                 EncodingError::FatalError(format!(
@@ -648,7 +647,7 @@ mod tests {
         let encoder = SubsidyEncoder::from_config(
             Bytes::from(EXECUTOR),
             Chain::Ethereum,
-            Some(payer_config(PAYER)),
+            Some(&payer_config(PAYER)),
         )
         .unwrap();
 
@@ -664,7 +663,8 @@ mod tests {
         #[case] config: Option<HashMap<String, String>>,
         #[case] message: &str,
     ) {
-        let result = SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config);
+        let result =
+            SubsidyEncoder::from_config(Bytes::from(EXECUTOR), Chain::Ethereum, config.as_ref());
 
         assert!(
             matches!(result, Err(EncodingError::FatalError(ref error)) if error.contains(message)),

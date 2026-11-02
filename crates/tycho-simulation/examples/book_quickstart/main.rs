@@ -557,10 +557,10 @@ async fn main() {
 
                                 let tx = encode_tycho_router_call(
                                     chain.id(),
-                                    encoded_solution.clone(),
+                                    &encoded_solution,
                                     &solution,
-                                    chain.native_token().address,
-                                    signer.clone(),
+                                    &chain.native_token().address,
+                                    &signer,
                                 )
                                 .expect("Failed to encode router call");
 
@@ -729,10 +729,10 @@ async fn main() {
 
                                 let swap_tx = encode_tycho_router_call(
                                     chain.id(),
-                                    encoded_solution.clone(),
+                                    &encoded_solution,
                                     &solution,
-                                    chain.native_token().address,
-                                    signer.clone(),
+                                    &chain.native_token().address,
+                                    &signer,
                                 )
                                 .expect("Failed to encode router call");
 
@@ -891,10 +891,10 @@ fn create_solution(
 ///   `minAmountOut`.
 fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
-    signer: PrivateKeySigner,
+    native_address: &Bytes,
+    signer: &PrivateKeySigner,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -933,7 +933,7 @@ fn encode_tycho_router_call(
         .abi_encode();
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if solution.token_in() == &native_address {
+    let value = if solution.token_in() == native_address {
         solution.amount_in().clone()
     } else {
         BigUint::ZERO
@@ -959,7 +959,7 @@ fn encode_tycho_router_call(
 fn sign_permit(
     chain_id: u64,
     permit_single: &models::PermitSingle,
-    signer: PrivateKeySigner,
+    signer: &PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
         .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;

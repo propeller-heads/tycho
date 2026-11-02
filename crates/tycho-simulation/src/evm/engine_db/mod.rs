@@ -63,6 +63,10 @@ where
     Ok(engine)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking &PreCachedDB and &HashMap is a breaking change"
+)]
 pub fn update_engine(
     db: PreCachedDB,
     block: Option<BlockHeader>,

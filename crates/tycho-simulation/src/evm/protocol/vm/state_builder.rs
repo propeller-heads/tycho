@@ -299,9 +299,7 @@ where
                 let mut addr_str = address.clone();
                 let (code, code_hash) = if bytecode.is_none() {
                     if addr_str.starts_with("call") {
-                        addr_str = self
-                            .get_address_from_call(&engine, &addr_str)?
-                            .to_string();
+                        addr_str = Self::get_address_from_call(&engine, &addr_str)?.to_string();
                     }
                     let code = get_code_for_contract(&addr_str, None).await?;
                     (Some(code.clone()), code.hash_slow())
@@ -334,7 +332,7 @@ where
         Ok(engine)
     }
 
-    fn get_default_capabilities(&mut self) -> Result<HashSet<Capability>, SimulationError> {
+    fn get_default_capabilities(&self) -> Result<HashSet<Capability>, SimulationError> {
         let mut capabilities = Vec::new();
 
         // Generate all permutations of tokens and retrieve capabilities
@@ -387,7 +385,6 @@ where
     /// # See Also
     /// [Dynamic Address Resolution Example](https://github.com/propeller-heads/propeller-protocol-lib/blob/main/docs/indexing/reserved-attributes.md#description-2)
     fn get_address_from_call(
-        &self,
         engine: &SimulationEngine<D>,
         decoded: &str,
     ) -> Result<Address, SimulationError> {

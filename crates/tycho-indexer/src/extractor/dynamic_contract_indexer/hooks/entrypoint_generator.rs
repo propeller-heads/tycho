@@ -269,7 +269,7 @@ impl Default for ERC6909Overwrites {
 }
 
 impl ERC6909Overwrites {
-    fn balance_slot(&self, owner: Address, token: Address) -> SlotId {
+    fn balance_slot(&self, owner: &Address, token: &Address) -> SlotId {
         let balance_mapping_slot = get_storage_slot_index_at_key(
             U256::from_be_slice(owner.as_ref()),
             self.balance_of_slot,
@@ -341,19 +341,19 @@ impl SwapAmountEstimator for DefaultSwapAmountEstimator {
         let result = match self.preferred_method {
             EstimationMethod::Balances => {
                 // Try balances first
-                let mut result = self.try_estimate_from_balances(metadata, tokens);
+                let mut result = Self::try_estimate_from_balances(metadata, tokens);
                 if result.is_empty() {
                     // Fallback to limits
-                    result = self.try_estimate_from_limits(metadata);
+                    result = Self::try_estimate_from_limits(metadata);
                 }
                 result
             }
             EstimationMethod::Limits => {
                 // Try limits first
-                let mut result = self.try_estimate_from_limits(metadata);
+                let mut result = Self::try_estimate_from_limits(metadata);
                 if result.is_empty() {
                     // Fallback to balances
-                    result = self.try_estimate_from_balances(metadata, tokens);
+                    result = Self::try_estimate_from_balances(metadata, tokens);
                 }
                 result
             }
@@ -373,7 +373,6 @@ impl SwapAmountEstimator for DefaultSwapAmountEstimator {
 
 impl DefaultSwapAmountEstimator {
     fn try_estimate_from_limits(
-        &self,
         metadata: &ComponentTracingMetadata,
     ) -> HashMap<(Address, Address), Vec<Bytes>> {
         let mut result = HashMap::new();
@@ -452,7 +451,6 @@ impl DefaultSwapAmountEstimator {
     }
 
     fn try_estimate_from_balances(
-        &self,
         metadata: &ComponentTracingMetadata,
         tokens: &[Address],
     ) -> HashMap<(Address, Address), Vec<Bytes>> {
@@ -853,8 +851,7 @@ where
 
                 // Always use ERC6909 overwrites for the router
                 let overwrites = ERC6909Overwrites::default();
-                let erc6909_balance_slot =
-                    overwrites.balance_slot(router_address.clone(), token_in.clone());
+                let erc6909_balance_slot = overwrites.balance_slot(&router_address, token_in);
 
                 debug!(
                     token_in = %token_in,

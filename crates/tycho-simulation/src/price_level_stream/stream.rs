@@ -44,6 +44,10 @@ pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
 /// `fallback:{pamm}` — or `pricelevelstream:{pamm}` after
 /// [`without_fallback_router`](Self::without_fallback_router). The venue address is exposed
 /// through the [`PAMM_ADDRESS_ATTRIBUTE`] static attribute for downstream encoding.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "public API; the independent builder switches replaced by enums are a breaking change"
+)]
 pub struct PriceLevelStreamBuilder {
     /// The venues to serve, keyed by canonical public identity.
     registry: HashMap<Bytes, PriceLevelStreamConfig>,
@@ -209,6 +213,10 @@ impl PriceLevelStreamBuilder {
     /// [`with_known_pamms`](Self::with_known_pamms) never override either, in any call order —
     /// so denying a venue from the default set works whether the denial comes before or after
     /// [`with_known_pamms`](Self::with_known_pamms).
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking &Bytes is a breaking change"
+    )]
     pub fn deny_pamm(mut self, address: Bytes) -> Self {
         let address = canonical_pamm_address(&address);
         self.registry.remove(&address);

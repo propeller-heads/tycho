@@ -103,13 +103,13 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 )]
 pub fn encode_tycho_router_call(
     chain_id: u64,
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
     native_address: &Bytes,
     signer: Option<PrivateKeySigner>,
     client_fee_bps: u32,
-    client_fee_receiver: Bytes,
-    max_client_contribution: BigUint,
+    client_fee_receiver: &Bytes,
+    max_client_contribution: &BigUint,
 ) -> Result<Transaction, EncodingError> {
     let given_amount = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -122,13 +122,13 @@ pub fn encode_tycho_router_call(
     let checked_token = if checked_token == native_addr { router_eth } else { checked_token };
     let receiver = bytes_to_address(solution.receiver())?;
     let n_tokens = U256::from(encoded_solution.n_tokens());
-    let max_client_contribution = biguint_to_u256(&max_client_contribution);
+    let max_client_contribution = biguint_to_u256(max_client_contribution);
     let deadline = U256::MAX;
-    let (client_fee_receiver, client_signature) = if client_fee_receiver == Bytes::zero(20) {
+    let (client_fee_receiver, client_signature) = if *client_fee_receiver == Bytes::zero(20) {
         (Address::ZERO, vec![])
     } else {
         let router_address = bytes_to_address(encoded_solution.interacting_with())?;
-        let client_fee_receiver = bytes_to_address(&client_fee_receiver)?;
+        let client_fee_receiver = bytes_to_address(client_fee_receiver)?;
         let sig = sign_client_fee(
             chain_id,
             router_address,
@@ -166,7 +166,7 @@ pub fn encode_tycho_router_call(
             let signer = signer.ok_or_else(|| {
                 EncodingError::FatalError("Signer must be set to use permit2".to_string())
             })?;
-            let signature = sign_permit(chain_id, &permit_single, signer)?;
+            let signature = sign_permit(chain_id, &permit_single, &signer)?;
             (permit, signature.as_bytes().to_vec())
         } else {
             (None, vec![])
@@ -360,7 +360,7 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
 fn sign_permit(
     chain_id: u64,
     permit_single: &models::PermitSingle,
-    signer: PrivateKeySigner,
+    signer: &PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
         .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;

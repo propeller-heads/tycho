@@ -465,7 +465,7 @@ impl DBCacheWriteExecutor {
     /// upserts, updates, and reverts, ensuring data consistency in the database.
     #[instrument(skip_all, fields(op=operation.variant_name()))]
     async fn execute_write_op(
-        &mut self,
+        &self,
         operation: &WriteOp,
         conn: &mut AsyncPgConnection,
     ) -> Result<(), PostgresError> {

@@ -103,7 +103,7 @@ where
         Ok(Self { address, engine })
     }
 
-    fn encode_input(&self, selector: &str, args: impl SolValue) -> Vec<u8> {
+    fn encode_input(selector: &str, args: &impl SolValue) -> Vec<u8> {
         let mut hasher = Keccak256::new();
         hasher.update(selector.as_bytes());
         let selector_bytes = &hasher.finalize()[..4];
@@ -129,6 +129,10 @@ where
         clippy::too_many_arguments,
         reason = "public API; grouping the arguments into a params struct or builder is a breaking change"
     )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking the arguments by reference is a breaking change"
+    )]
     pub fn call(
         &self,
         selector: &str,
@@ -140,7 +144,7 @@ where
         block_overrides: Option<BlockEnvOverrides>,
         native_balance_overrides: Option<HashMap<Address, U256>>,
     ) -> Result<TychoSimulationResponse, SimulationError> {
-        let call_data = self.encode_input(selector, args);
+        let call_data = Self::encode_input(selector, &args);
         let params = SimulationParameters {
             data: call_data,
             to: self.address,
@@ -153,7 +157,7 @@ where
             ..Default::default()
         };
 
-        let sim_result = self.simulate(params)?;
+        let sim_result = self.simulate(&params)?;
 
         Ok(TychoSimulationResponse {
             return_value: sim_result.result.to_vec(),
@@ -161,9 +165,9 @@ where
         })
     }
 
-    fn simulate(&self, params: SimulationParameters) -> Result<SimulationResult, SimulationError> {
+    fn simulate(&self, params: &SimulationParameters) -> Result<SimulationResult, SimulationError> {
         self.engine
-            .simulate(&params)
+            .simulate(params)
             .map_err(|e| coerce_error(&e, "pool_state", params.gas_limit))
     }
 }
@@ -184,7 +188,7 @@ mod tests {
             tycho_db::PreCachedDBError,
             utils::{get_client, get_runtime},
         },
-        protocol::vm::{constants::BALANCER_V2, utils::string_to_bytes32},
+        protocol::vm::utils::string_to_bytes32,
     };
 
     #[derive(Debug, Clone)]
@@ -234,34 +238,17 @@ mod tests {
         }
     }
 
-    fn create_mock_engine() -> SimulationEngine<MockDatabase> {
-        SimulationEngine::new(MockDatabase, false)
-    }
-
-    fn create_contract() -> TychoSimulationContract<MockDatabase> {
-        let address = Address::ZERO;
-        let engine = create_mock_engine();
-        TychoSimulationContract::new_contract(
-            address,
-            Bytecode::new_raw(BALANCER_V2.into()),
-            engine,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn test_encode_input_get_capabilities() {
-        let contract = create_contract();
-
         // Arguments for the 'getCapabilities' function
         let pool_id =
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string();
         let sell_token = Address::from_str("0000000000000000000000000000000000000002").unwrap();
         let buy_token = Address::from_str("0000000000000000000000000000000000000003").unwrap();
 
-        let encoded = contract.encode_input(
+        let encoded = TychoSimulationContract::<MockDatabase>::encode_input(
             "getCapabilities(bytes32,address,address)",
-            (string_to_bytes32(&pool_id).unwrap(), sell_token, buy_token),
+            &(string_to_bytes32(&pool_id).unwrap(), sell_token, buy_token),
         );
 
         // The expected selector for "getCapabilities(bytes32,address,address)"

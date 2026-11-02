@@ -519,9 +519,9 @@ mod tests {
         (server, request_log)
     }
 
-    fn create_test_client(base_url: String, quote_timeout: Duration) -> HashflowClient {
+    fn create_test_client(base_url: &str, quote_timeout: Duration) -> HashflowClient {
         HashflowClient::new(
-            Some(&base_url),
+            Some(base_url),
             Chain::Ethereum.id(),
             "test_user".to_string(),
             "test_key".to_string(),
@@ -531,8 +531,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let client =
-            create_test_client("https://hashflow.example".to_string(), Duration::from_secs(1));
+        let client = create_test_client("https://hashflow.example", Duration::from_secs(1));
         let rendered = format!("{client:?}");
 
         assert!(!rendered.contains("test_user"));
@@ -547,7 +546,7 @@ mod tests {
     async fn a_refused_status_leaves_the_component_quotable() {
         let server =
             spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -580,7 +579,7 @@ mod tests {
         // trader's shared nonce scope, so the client rejects it.
         let (server, _) =
             quote_server(Duration::ZERO, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let err = client
@@ -623,7 +622,7 @@ mod tests {
         #[case] says: &str,
     ) {
         let (server, _) = quote_server(Duration::ZERO, body).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "mm1".to_string())
@@ -646,7 +645,7 @@ mod tests {
         // The wire request carries the receiver as Hashflow's trader, a fresh random address as
         // the effectiveTrader — a new one per quote request — and the one maker it goes to.
         let (server, request_log) = quote_server(Duration::ZERO, QUOTE_RESPONSE).await;
-        let client = create_test_client(server.url(), Duration::from_secs(1));
+        let client = create_test_client(&server.url(), Duration::from_secs(1));
         let params = create_test_quote_params();
 
         let first_quote = client
@@ -693,7 +692,7 @@ mod tests {
         let (server, _) = quote_server(Duration::from_millis(500), QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
-        let client_short_timeout = create_test_client(server.url(), Duration::from_millis(200));
+        let client_short_timeout = create_test_client(&server.url(), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         // This should timeout after 200ms
@@ -722,7 +721,7 @@ mod tests {
         // Test 2: Client with long timeout (1 second) - should wait and receive response
         // Note: With retry logic, we may need multiple attempts if the response is malformed,
         // so we need a longer timeout to account for retries
-        let client_long_timeout = create_test_client(server.url(), Duration::from_secs(1));
+        let client_long_timeout = create_test_client(&server.url(), Duration::from_secs(1));
 
         // This should wait for the response (500ms)
         let result = client_long_timeout
@@ -752,7 +751,7 @@ mod tests {
         })
         .await;
 
-        let client = create_test_client(server.url(), Duration::from_secs(5));
+        let client = create_test_client(&server.url(), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params, "mm1".to_string())

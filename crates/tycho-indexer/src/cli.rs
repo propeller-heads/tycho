@@ -28,7 +28,7 @@ impl Cli {
         self.global_args.clone()
     }
 
-    pub fn command(&self) -> Command {
+    pub fn subcommand(&self) -> Command {
         self.command.clone()
     }
 }
@@ -282,6 +282,10 @@ pub struct IndexArgs {
 }
 
 #[derive(Args, Debug, Clone, PartialEq)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the raw `stop_block` may carry a `+` increment prefix, so it is read through the parsing `stop_block()` accessor"
+)]
 pub struct RunSpkgArgs {
     /// The blockchain to index on
     #[clap(long, default_value = "ethereum")]

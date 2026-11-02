@@ -318,11 +318,11 @@ impl ProtocolSim for RamsesV3State {
         self.fee as f64 / 1_000_000.0
     }
 
-    fn spot_price(&self, a: &Token, b: &Token) -> Result<f64, SimulationError> {
-        let price = if a < b {
-            sqrt_price_q96_to_f64(self.sqrt_price, a.decimals, b.decimals)?
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let price = if base < quote {
+            sqrt_price_q96_to_f64(self.sqrt_price, base.decimals, quote.decimals)?
         } else {
-            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, b.decimals, a.decimals)?
+            1.0f64 / sqrt_price_q96_to_f64(self.sqrt_price, quote.decimals, base.decimals)?
         };
         Ok(add_fee_markup(price, self.fee()))
     }
@@ -330,10 +330,10 @@ impl ProtocolSim for RamsesV3State {
     fn get_amount_out(
         &self,
         amount_in: BigUint,
-        token_a: &Token,
-        token_b: &Token,
+        token_in: &Token,
+        token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let zero_for_one = token_a < token_b;
+        let zero_for_one = token_in < token_out;
         let amount_specified = U256::try_from_be_slice(&amount_in.to_bytes_be())
             .and_then(|unsigned_amount_in| {
                 I256::checked_from_sign_and_abs(Sign::Positive, unsigned_amount_in)
@@ -344,7 +344,7 @@ impl ProtocolSim for RamsesV3State {
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
-        trace!(?amount_in, ?token_a, ?token_b, ?zero_for_one, ?result, "RAMSES V3 SWAP");
+        trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "RAMSES V3 SWAP");
         let new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
 
         Ok(GetAmountOutResult::new(
@@ -361,14 +361,14 @@ impl ProtocolSim for RamsesV3State {
 
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if !self.ticks.has_initialized_ticks() {
             return Ok((BigUint::ZERO, BigUint::ZERO));
         }
 
-        let zero_for_one = token_in < token_out;
+        let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;

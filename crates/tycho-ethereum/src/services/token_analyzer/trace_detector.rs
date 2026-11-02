@@ -72,6 +72,7 @@ impl TokenAnalyzer for TraceCallDetector {
     }
 }
 
+#[derive(Clone, Copy)]
 enum TraceRequestType {
     SimpleTransfer,
     DoubleTransfer(U256),
@@ -288,12 +289,12 @@ impl TraceCallDetector {
         };
 
         let fees = calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: amount,
                 balance_before: balance_before_in,
                 balance_after: balance_after_in,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: middle_amount,
                 balance_before: balance_recipient_before,
                 balance_after: balance_recipient_after,

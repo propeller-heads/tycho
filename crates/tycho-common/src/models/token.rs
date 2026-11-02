@@ -138,6 +138,10 @@ impl TokenQuality {
         matches!(self, Self::Good { .. })
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&impl ToString` is a breaking change"
+    )]
     pub fn bad(reason: impl ToString) -> Self {
         Self::Bad { reason: reason.to_string() }
     }

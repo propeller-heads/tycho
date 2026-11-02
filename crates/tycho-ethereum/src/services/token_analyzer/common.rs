@@ -52,8 +52,8 @@ impl ObservedTransfer {
 /// the amount sent has no fee. The result exceeds 10_000 when a receiver ends with less than it
 /// started. Errors if `balance_before + sent` or `shortfall * 10_000` overflows U256.
 pub fn calculate_fee_bps(
-    inbound: ObservedTransfer,
-    outbound: ObservedTransfer,
+    inbound: &ObservedTransfer,
+    outbound: &ObservedTransfer,
 ) -> Result<U256, String> {
     Ok(inbound
         .fee_bps()?
@@ -104,12 +104,12 @@ mod tests {
         let before_in = U256::from(before_in);
         let after_in = U256::from(after_in);
         calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::from(amount),
                 balance_before: before_in,
                 balance_after: after_in,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: after_in - before_in,
                 balance_before: U256::from(recipient_before),
                 balance_after: U256::from(recipient_after),
@@ -157,12 +157,12 @@ mod tests {
     #[test]
     fn calculate_fee_bps_balance_near_max_errors() {
         let result = calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::from(1_000_000),
                 balance_before: U256::MAX,
                 balance_after: U256::MAX,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::ZERO,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,
@@ -176,12 +176,12 @@ mod tests {
     #[test]
     fn calculate_fee_bps_shortfall_near_max_errors() {
         let result = calculate_fee_bps(
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::MAX,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,
             },
-            ObservedTransfer {
+            &ObservedTransfer {
                 sent: U256::ZERO,
                 balance_before: U256::ZERO,
                 balance_after: U256::ZERO,

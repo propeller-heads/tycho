@@ -127,6 +127,10 @@ pub fn biguint_to_u256(value: &BigUint) -> U256 {
     U256::from_limbs(limbs)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking the bytes by reference is a breaking change"
+)]
 pub fn bytes_to_u256(bytes: Bytes) -> U256 {
     // Ensure the input is exactly 32 bytes
     let mut padded_bytes = [0u8; 32];

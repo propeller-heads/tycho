@@ -157,7 +157,7 @@ impl WsActor {
     /// Helper method that sends heartbeat ping to client every 5 seconds (HEARTBEAT_INTERVAL)
     /// Also this method checks heartbeats from client
     #[instrument(level = "TRACE", skip_all, fields(WsActor.id = %self.id))]
-    fn heartbeat(&mut self, ctx: &mut <Self as Actor>::Context) {
+    fn heartbeat(&self, ctx: &mut <Self as Actor>::Context) {
         ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
             // Check client heartbeats
             if Instant::now().duration_since(act.heartbeat) > CLIENT_TIMEOUT {
@@ -215,7 +215,7 @@ impl WsActor {
     /// 4. If the future fails, an error response is sent instead
     #[instrument(skip(self, ctx), fields(WsActor.id = %self.id, subscription_id))]
     fn subscribe(
-        &mut self,
+        &self,
         ctx: &mut ws::WebsocketContext<Self>,
         extractor_id: &ExtractorIdentity,
         include_state: bool,
@@ -482,8 +482,8 @@ impl StreamHandler<ExtractorEvent> for WsActor {
     // Debug level: the actor mailbox separates this from the block that produced the message,
     // so at info it exports one parentless single-span trace per message per subscriber.
     #[instrument(level = "debug", skip_all, fields(WsActor.id = %self.id))]
-    fn handle(&mut self, msg: ExtractorEvent, ctx: &mut Self::Context) {
-        match msg {
+    fn handle(&mut self, item: ExtractorEvent, ctx: &mut Self::Context) {
+        match item {
             ExtractorEvent::Message(subscription_id, deltas) => {
                 trace!("Forwarding message to client");
                 let msg =
@@ -572,9 +572,9 @@ impl StreamHandler<ExtractorEvent> for WsActor {
 
 /// Handle incoming messages from the WS connection
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsActor {
-    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+    fn handle(&mut self, item: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         trace!("WsActor {}: StreamHandler::handle called", self.id);
-        match msg {
+        match item {
             Ok(ws::Message::Ping(msg)) => {
                 trace!("Websocket ping message received");
                 self.heartbeat = Instant::now();

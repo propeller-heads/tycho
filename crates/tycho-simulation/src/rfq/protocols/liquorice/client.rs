@@ -418,9 +418,9 @@ mod tests {
     /// A binding quote as Liquorice answers one, recorded from its API.
     const BINDING_QUOTE: &str = r#"{"rfqId":"test-rfq-id","liquidityAvailable":true,"levels":[{"makerRfqId":"maker-rfq-1","maker":"test-maker","nonce":"0x0000000000000000000000000000000000000000000000000000000000000001","expiry":1707847360,"tx":{"to":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","data":"0xdeadbeef"},"baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","baseTokenAmount":"1000000000000000000","quoteTokenAmount":"3329502","partialFill":null,"allowances":[]}]}"#;
 
-    fn create_test_client(base_url: String, quote_timeout: Duration) -> LiquoriceClient {
+    fn create_test_client(base_url: &str, quote_timeout: Duration) -> LiquoriceClient {
         LiquoriceClient::new(
-            Some(&base_url),
+            Some(base_url),
             Chain::Ethereum.id(),
             "test_solver".to_string(),
             "test_key".to_string(),
@@ -473,8 +473,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let client =
-            create_test_client("https://liquorice.example".to_string(), Duration::from_secs(1));
+        let client = create_test_client("https://liquorice.example", Duration::from_secs(1));
         let rendered = format!("{client:?}");
 
         assert!(!rendered.contains("test_solver"));
@@ -657,7 +656,7 @@ mod tests {
     async fn a_refused_status_leaves_the_component_quotable() {
         let server =
             spawn_http_server(|_| Some(("429 Too Many Requests", "slow down".to_string()))).await;
-        let client = create_test_client(format!("{}/quote", server.url()), Duration::from_secs(1));
+        let client = create_test_client(&format!("{}/quote", server.url()), Duration::from_secs(1));
 
         let error = client
             .request_binding_quote(&create_test_quote_params(), "test-maker")
@@ -695,7 +694,7 @@ mod tests {
         .await;
 
         let client_short_timeout =
-            create_test_client(format!("{}/rfq", server.url()), Duration::from_millis(200));
+            create_test_client(&format!("{}/rfq", server.url()), Duration::from_millis(200));
         let params = create_test_quote_params();
 
         let start = std::time::Instant::now();
@@ -719,7 +718,7 @@ mod tests {
         );
 
         let client_long_timeout =
-            create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(1));
+            create_test_client(&format!("{}/rfq", server.url()), Duration::from_secs(1));
 
         let result = client_long_timeout
             .request_binding_quote(&params, "test-maker")
@@ -742,7 +741,7 @@ mod tests {
         })
         .await;
 
-        let client = create_test_client(format!("{}/rfq", server.url()), Duration::from_secs(5));
+        let client = create_test_client(&format!("{}/rfq", server.url()), Duration::from_secs(5));
         let params = create_test_quote_params();
         let result = client
             .request_binding_quote(&params, "test-maker")

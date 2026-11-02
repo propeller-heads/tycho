@@ -63,7 +63,7 @@ impl SwapEncoder for BebopFallbackSwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let fallback = FallbackSwap::from_user_data(swap.user_data())?;
+        let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         if !fallback
             .protocol
             .supported_on(self.chain)

@@ -1513,17 +1513,17 @@ mod tests {
             (&pool, WEETH_ADDRESS, ETH_ADDRESS),
             (&wrapper, WEETH_ADDRESS, ETH_ADDRESS),
         ] {
-            assert!(matches_fatal(state.get_limits(Bytes::from(sell), Bytes::from(buy))));
-            assert!(matches_fatal(state.get_amount_out(
+            assert!(matches_fatal(&state.get_limits(Bytes::from(sell), Bytes::from(buy))));
+            assert!(matches_fatal(&state.get_amount_out(
                 BigUint::from(1u64),
                 &token(sell, "in"),
                 &token(buy, "out")
             )));
-            assert!(matches_fatal(state.spot_price(&token(sell, "in"), &token(buy, "out"))));
+            assert!(matches_fatal(&state.spot_price(&token(sell, "in"), &token(buy, "out"))));
         }
     }
 
-    fn matches_fatal<T>(result: Result<T, SimulationError>) -> bool {
+    fn matches_fatal<T>(result: &Result<T, SimulationError>) -> bool {
         match result {
             Err(SimulationError::FatalError(_)) => true,
             Err(_) | Ok(_) => false,
@@ -1944,14 +1944,14 @@ mod tests {
                 if supported.contains(&(id, sell_bytes, buy_bytes)) {
                     continue;
                 }
-                assert!(matches_fatal(state.get_limits(sell.clone(), buy.clone())));
-                assert!(matches_fatal(state.get_amount_out(
+                assert!(matches_fatal(&state.get_limits(sell.clone(), buy.clone())));
+                assert!(matches_fatal(&state.get_amount_out(
                     BigUint::from(1u64),
                     &token(sell_bytes, "in"),
                     &token(buy_bytes, "out")
                 )));
                 assert!(matches_fatal(
-                    state.spot_price(&token(sell_bytes, "in"), &token(buy_bytes, "out"))
+                    &state.spot_price(&token(sell_bytes, "in"), &token(buy_bytes, "out"))
                 ));
             }
         }

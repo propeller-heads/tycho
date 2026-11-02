@@ -97,13 +97,13 @@ fn test_evm_split_swap_strategy_encoder() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -206,13 +206,13 @@ fn test_evm_split_input_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -360,13 +360,13 @@ fn test_evm_split_output_cyclic_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -503,13 +503,13 @@ fn test_evm_split_swap_strategy_with_fees() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         1_000_000,
-        client_fee_receiver(),
-        BigUint::ZERO,
+        &client_fee_receiver(),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -596,13 +596,13 @@ fn test_evm_split_swap_native_and_wrapped_branches() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

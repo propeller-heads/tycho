@@ -239,8 +239,7 @@ impl ProtocolStreamProcessor {
                 .unwrap_or(self.tvl_threshold);
             let tvl_filter =
                 ComponentFilter::with_tvl_range(threshold / self.tvl_buffer_ratio, threshold);
-            protocol_stream =
-                self.add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
+            protocol_stream = Self::add_protocol_to_stream(protocol_stream, protocol, &tvl_filter)?;
         }
         if self.partial_blocks {
             protocol_stream = protocol_stream.enable_partial_blocks();
@@ -370,7 +369,6 @@ impl ProtocolStreamProcessor {
 
     /// Add a specific protocol to the stream builder
     fn add_protocol_to_stream(
-        &self,
         mut stream: ProtocolStreamBuilder,
         protocol: &str,
         tvl_filter: &ComponentFilter,

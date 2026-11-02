@@ -668,6 +668,10 @@ pub enum Strategy {
 /// Creates a minimal `Token` from just an address, with zero-value defaults for other fields.
 /// Only available in tests and when the `test-utils` feature is enabled.
 #[cfg(any(test, feature = "test-utils"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public API; taking `&Bytes` is a breaking change"
+)]
 pub fn default_token(address: Bytes) -> Token {
     Token::new(&address, "", 0, 0, &[Some(60_000u64)], Default::default(), 100)
 }

@@ -107,7 +107,7 @@ pub async fn load_all_tokens(
         .with_compression(compression);
 
     let rpc_client = HttpRPCClient::new(rpc_url.as_str(), rpc_options)
-        .map_err(|err| map_rpc_error(err, "Failed to create Tycho RPC client"))?;
+        .map_err(|err| map_rpc_error(&err, "Failed to create Tycho RPC client"))?;
 
     // Chain specific defaults for special case chains. Otherwise defaults to 14 days.
     let default_min_days = HashMap::from([(Chain::Base, 7_u64), (Chain::Ethereum, 30_u64)]);
@@ -129,7 +129,7 @@ pub async fn load_all_tokens(
     let tokens = rpc_client
         .get_all_tokens(token_params)
         .await
-        .map_err(|err| map_rpc_error(err, "Unable to load tokens"))?;
+        .map_err(|err| map_rpc_error(&err, "Unable to load tokens"))?;
 
     tokens
         .into_iter()
@@ -190,7 +190,7 @@ fn parse_blocklist(contents: &str) -> Result<HashSet<String>, toml::de::Error> {
     Ok(config.blocklist.components)
 }
 
-fn map_rpc_error(err: RPCError, context: &str) -> SimulationError {
+fn map_rpc_error(err: &RPCError, context: &str) -> SimulationError {
     let message = format!("{context}: {err}", err = err,);
     match err {
         RPCError::UrlParsing(_, _) | RPCError::FormatRequest(_) => {

@@ -49,9 +49,8 @@ impl PostgresGateway {
     ///
     /// ## Returns:
     /// - A Result containing a vector of `ProtocolState`, otherwise, it will return a StorageError.
-    #[instrument(level = Level::DEBUG, skip(self, balances, states_result))]
+    #[instrument(level = Level::DEBUG, skip(balances, states_result))]
     fn _decode_protocol_states(
-        &self,
         mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>>,
         states_result: Result<Vec<(orm::ProtocolState, ComponentId)>, diesel::result::Error>,
         context: &str,
@@ -807,7 +806,7 @@ impl PostgresGateway {
                     conn,
                 )
                 .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     system.to_string().as_str(),
@@ -823,7 +822,7 @@ impl PostgresGateway {
                     conn,
                 )
                 .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     ids.join(",").as_str(),
@@ -834,7 +833,7 @@ impl PostgresGateway {
                 let state_data =
                     orm::ProtocolState::by_chain(&chain_db_id, version_ts, pagination_params, conn)
                         .await;
-                let protocol_states = self._decode_protocol_states(
+                let protocol_states = Self::_decode_protocol_states(
                     balances,
                     state_data.entity,
                     chain.to_string().as_str(),

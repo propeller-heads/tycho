@@ -99,6 +99,7 @@ fn validate_subscription_buffer_size(subscription_buffer_size: usize) -> Result<
     Ok(())
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,

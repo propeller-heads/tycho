@@ -913,7 +913,7 @@ pub mod fixtures {
     }
 
     pub fn pb_block_scoped_data(
-        msg: impl prost::Message,
+        msg: &impl prost::Message,
         cursor: Option<&str>,
         final_block_height: Option<u64>,
     ) -> crate::pb::sf::substreams::rpc::v2::BlockScopedData {

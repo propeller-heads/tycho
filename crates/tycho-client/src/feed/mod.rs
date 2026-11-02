@@ -536,44 +536,42 @@ impl SynchronizerStream {
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
-        latest_retrieved: BlockHeader,
+        block: BlockHeader,
         block_history: &BlockHistory,
         stale: StaleLimits,
     ) -> Result<(), BlockSynchronizerError> {
         let extractor_id = self.extractor_id.clone();
         let last_message_at = self.modify_ts;
-        let block = &latest_retrieved;
 
-        match block_history.determine_block_position(&latest_retrieved)? {
+        match block_history.determine_block_position(&block)? {
             BlockPosition::NextExpected | BlockPosition::NextPartial => {
-                self.state = SynchronizerState::Ready(latest_retrieved.clone());
                 trace!(
-                    next = %latest_retrieved,
+                    next = %block,
                     extractor = %extractor_id,
                     "SynchronizerStream transition to next expected"
-                )
+                );
+                self.state = SynchronizerState::Ready(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed
                 if self.is_stale() &&
-                    blocks_behind_tip(block_history, block) > stale.max_missed_blocks =>
+                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
             {
                 // A stream replaying blocks this old would hold every round while Delayed, so it
                 // catches up in the stale pass instead.
                 debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
-                self.state = SynchronizerState::Stale(latest_retrieved.clone());
+                self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
-                if !self.check_and_transition_to_stale_if_needed(
-                    stale.threshold,
-                    Some(latest_retrieved.clone()),
-                )? {
+                if !self
+                    .check_and_transition_to_stale_if_needed(stale.threshold, Some(block.clone()))?
+                {
                     warn!(
                         %extractor_id,
                         ?last_message_at,
                         %block,
                         "SynchronizerStream transition transition to delayed."
                     );
-                    self.state = SynchronizerState::Delayed(latest_retrieved.clone());
+                    self.state = SynchronizerState::Delayed(block);
                 }
             }
             BlockPosition::Advanced => {
@@ -584,7 +582,7 @@ impl SynchronizerStream {
                     %block,
                     "SynchronizerStream transition to advanced."
                 );
-                self.state = SynchronizerState::Advanced(latest_retrieved.clone());
+                self.state = SynchronizerState::Advanced(block);
             }
         }
         self.modify_ts = Local::now().naive_utc();
@@ -1071,7 +1069,7 @@ where
     /// Delayed state, it will return an error in case this is not the case.
     fn reinit_block_history(
         sync_streams: &mut [SynchronizerStream],
-        block_history: &mut BlockHistory,
+        block_history: &BlockHistory,
     ) -> Result<BlockHistory, BlockSynchronizerError> {
         let previous = block_history
             .latest()
@@ -1651,7 +1649,7 @@ mod tests {
             full_header(324, 324, 323),
             full_header(325, 325, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, 15).unwrap();
+        let old_history = BlockHistory::new(old_blocks, 15).unwrap();
 
         // One stream raced ahead to 326 (connected to 325) -> Advanced, triggering reinit.
         // Another stream is still at 325 (Delayed).
@@ -1660,11 +1658,9 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(325, 325, 324))),
         ];
 
-        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let mut new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         // A revert to block 325 must still find its fork point (324) in the retained history.
         let revert = BlockHeader {
@@ -1691,7 +1687,7 @@ mod tests {
             full_header(324, 324, 323),
             full_header(325, 325, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         // Advanced block is far ahead and its parent is unknown to the retained history.
         let mut streams = vec![stream_in_state(
@@ -1699,11 +1695,9 @@ mod tests {
             SynchronizerState::Advanced(full_header(400, 400, 399)),
         )];
 
-        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1734,7 +1728,7 @@ mod tests {
             full_header(324, 324, 323),
             partial_header(325, 2, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         // A stream races ahead by one partial: first partial of 326, parented on the sealed
         // hash of 325, which the history never saw. This is what classifies it Advanced.
@@ -1751,11 +1745,9 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1775,18 +1767,16 @@ mod tests {
             full_header(324, 324, 323),
             partial_header(325, 2, 324),
         ];
-        let mut old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
+        let old_history = BlockHistory::new(old_blocks, BLOCK_HISTORY_SIZE).unwrap();
 
         let mut streams = vec![
             stream_in_state("aerodrome", SynchronizerState::Advanced(partial_header(326, 0, 325))),
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
-            &mut streams,
-            &mut old_history,
-        )
-        .expect("reinit failed");
+        let mut new_history =
+            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
+                .expect("reinit failed");
 
         // The stream proceeds normally: the last partial seals 326 with the correct hash, then
         // the first partial of 327 arrives on top of it.

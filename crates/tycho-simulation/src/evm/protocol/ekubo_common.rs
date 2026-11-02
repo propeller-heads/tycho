@@ -63,7 +63,7 @@ pub fn swap_to_target_price<S: EkuboSwapToPrice>(
     if limit == current {
         return Ok(zero_swap(&start_state));
     }
-    if !lies_ahead(limit, current, zero_for_one) {
+    if !lies_ahead(&limit, &current, zero_for_one) {
         let target = price_to_f64_with_decimals(target, token_in.decimals, token_out.decimals)?;
         let spot = start_state.spot_price(token_in, token_out)?;
         return Err(SimulationError::InvalidInput(
@@ -101,7 +101,7 @@ fn quantize_sqrt_ratio(ratio: &BigUint, round_up: bool) -> Option<BigUint> {
     None
 }
 
-fn lies_ahead<R: Ord>(to: R, from: R, zero_for_one: bool) -> bool {
+fn lies_ahead<R: Ord>(to: &R, from: &R, zero_for_one: bool) -> bool {
     if zero_for_one {
         to < from
     } else {

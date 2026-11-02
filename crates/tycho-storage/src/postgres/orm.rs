@@ -1845,13 +1845,9 @@ impl From<NewSlot> for NewSlotLatest {
 #[diesel(table_name = protocol_component_holds_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProtocolHoldsToken {
-    protocol_component_id: i64,
-    token_id: i64,
-    #[expect(
-        dead_code,
-        reason = "Queryable maps columns by position, so the struct lists every column of the table"
-    )]
-    token_index: i16,
+    pub protocol_component_id: i64,
+    pub token_id: i64,
+    pub token_index: i16,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
 }
@@ -1869,8 +1865,8 @@ pub struct NewProtocolComponentHoldsToken {
 #[diesel(table_name = component_tvl)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ComponentTVL {
-    id: i64,
-    protocol_component_id: i64,
+    pub id: i64,
+    pub protocol_component_id: i64,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
 }

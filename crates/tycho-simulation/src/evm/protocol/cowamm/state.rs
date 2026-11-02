@@ -262,14 +262,14 @@ impl CowAMMState {
     fn get_lp_swap_limits(
         &self,
         is_lp_buy: bool,
-        sell_token: Bytes,
-        buy_token: Bytes,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         // LP swaps are modeled as: swap part of the input to the other leg, then join/exit.
         // Limits cap the intermediate swap via MAX_IN_RATIO; dust is allowed.
         if is_lp_buy {
             // Buy LP: swap part of the sell token into the other leg, then join.
-            let is_token_a_in = sell_token == *self.token_a_addr();
+            let is_token_a_in = *sell_token == *self.token_a_addr();
 
             let (bal_in, weight_in, bal_out, weight_out) = if is_token_a_in {
                 (self.liquidity_a(), self.weight_a(), self.liquidity_b(), self.weight_b())
@@ -344,7 +344,7 @@ impl CowAMMState {
             Ok((u256_to_biguint(max_token_in), u256_to_biguint(max_lp_out)))
         } else {
             // Sell LP: exit to both tokens, then swap the unwanted leg into the desired token.
-            let is_token_a_out = buy_token == *self.token_a_addr();
+            let is_token_a_out = *buy_token == *self.token_a_addr();
 
             let (unwanted_liquidity, unwanted_weight, wanted_liquidity, wanted_weight) =
                 if is_token_a_out {
@@ -732,7 +732,7 @@ impl ProtocolSim for CowAMMState {
 
         // Use special LP swap limits that account for intermediate swaps
         if is_lp_sell || is_lp_buy {
-            return self.get_lp_swap_limits(is_lp_buy, sell_token, buy_token);
+            return self.get_lp_swap_limits(is_lp_buy, &sell_token, &buy_token);
         }
 
         if sell_token == *self.token_a_addr() {

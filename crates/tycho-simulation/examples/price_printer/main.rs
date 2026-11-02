@@ -42,7 +42,7 @@ struct Cli {
     tvl_threshold: Option<f64>,
     /// The target blockchain
     #[clap(long, default_value = "ethereum")]
-    pub chain: String,
+    chain: String,
     /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
     /// dev instance (e.g. http://127.0.0.1:4242).
     #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]

@@ -760,7 +760,7 @@ impl RPCError {
     /// NOTE: The string matching below is coupled to the server's error message text. If those
     /// messages change server-side this silently regresses to `ParseResponse`. Replace with a
     /// structured error code if the server ever returns typed error responses.
-    fn from_parse_error(err: serde_json::Error, body: &str) -> Self {
+    fn from_parse_error(err: &serde_json::Error, body: &str) -> Self {
         if body.contains("version is older than") || body.contains("Could not find Block") {
             RPCError::StaleBlock(body.to_string())
         } else if body.starts_with("Unknown extractor:") {
@@ -1283,6 +1283,10 @@ pub struct HttpRPCClient {
 }
 
 impl HttpRPCClient {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "public API; taking `&HttpRPCClientOptions` is a breaking change"
+    )]
     pub fn new(base_uri: &str, options: HttpRPCClientOptions) -> Result<Self, RPCError> {
         let uri = base_uri
             .parse::<Url>()
@@ -1563,7 +1567,7 @@ impl RPCClient for HttpRPCClient {
         // runtime stays responsive and concurrent requests decode in parallel.
         let (data, pagination) = tokio::task::spawn_blocking(move || {
             let dto_response = serde_json::from_str::<StateRequestResponse>(&body)
-                .map_err(|err| RPCError::from_parse_error(err, &body))?;
+                .map_err(|err| RPCError::from_parse_error(&err, &body))?;
             trace!(?dto_response, "Received contract_state response from Tycho server");
 
             let data: Vec<Account> = dto_response
@@ -1611,7 +1615,7 @@ impl RPCClient for HttpRPCClient {
             .await
             .map_err(|e| RPCError::ParseResponse(e.to_string()))?;
         let dto_response = serde_json::from_str::<ProtocolComponentRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            .map_err(|err| RPCError::from_parse_error(&err, &body))?;
         trace!(?dto_response, "Received protocol_components response from Tycho server");
 
         let data: Vec<ProtocolComponent> = dto_response
@@ -1674,7 +1678,7 @@ impl RPCClient for HttpRPCClient {
         }
 
         let dto_response = serde_json::from_str::<ProtocolStateRequestResponse>(&body)
-            .map_err(|err| RPCError::from_parse_error(err, &body))?;
+            .map_err(|err| RPCError::from_parse_error(&err, &body))?;
         trace!(?dto_response, "Received protocol_states response from Tycho server");
 
         let data: Vec<ProtocolComponentState> = dto_response

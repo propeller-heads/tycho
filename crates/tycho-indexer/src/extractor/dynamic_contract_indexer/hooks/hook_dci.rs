@@ -224,7 +224,7 @@ where
     #[instrument(skip(self, block_changes, tx), fields(component_id = %component_id, block_number = block_changes.block.number))]
     fn handle_component_failure(
         &mut self,
-        component_id: ComponentId,
+        component_id: &ComponentId,
         error_msg: String,
         tx: &Transaction,
         block_changes: &mut BlockChanges,
@@ -241,7 +241,7 @@ where
         if let Some(current_state) = self
             .cache
             .component_states
-            .get(&component_id)
+            .get(component_id)
         {
             retry_count = current_state.retry_count + 1;
             debug!(
@@ -259,7 +259,7 @@ where
 
         self.cache
             .component_states
-            .insert_pending(block_changes.block.clone(), component_id.clone(), new_state)
+            .insert_pending(&block_changes.block, component_id.clone(), new_state)
             .map_err(|e| {
                 error!("Failed to update component state: {e}");
                 ExtractionError::Unknown(format!("Failed to update component state: {e}"))
@@ -269,7 +269,7 @@ where
         // This indicates the component processing has been paused due to metatdata failures.
         insert_state_attribute_update(
             &mut block_changes.txs_with_update,
-            &component_id,
+            component_id,
             tx,
             &"paused".to_string(),
             &PausingReason::MetadataError.into(),
@@ -327,7 +327,7 @@ where
                         ))
                     })?;
 
-                self.handle_component_failure(component.id.clone(), error_msg, tx, block_changes)?;
+                self.handle_component_failure(&component.id, error_msg, tx, block_changes)?;
             }
         }
 
@@ -355,7 +355,7 @@ where
 
         self.cache
             .component_states
-            .insert_pending(block.clone(), component, new_state)
+            .insert_pending(block, component, new_state)
             .map_err(|e| {
                 error!("Failed to update component state: {e}");
                 ExtractionError::Unknown(format!("Failed to update component state: {e}"))
@@ -371,7 +371,7 @@ where
     ))]
     fn extract_components_with_swap_hooks(
         &mut self,
-        block_changes: &mut BlockChanges,
+        block_changes: &BlockChanges,
     ) -> Result<HashMap<ComponentId, ComponentWithTxHash>, ExtractionError> {
         debug!("Extracting components with swap hooks");
 
@@ -426,7 +426,7 @@ where
                         self.cache
                             .protocol_components
                             .insert_pending(
-                                block_changes.block.clone(),
+                                &block_changes.block,
                                 component.id.clone(),
                                 component.clone(),
                             )
@@ -803,7 +803,7 @@ where
                             })?;
 
                         self.handle_component_failure(
-                            component.id.clone(),
+                            &component.id,
                             format!("Hook orchestrator error: {e:?}"),
                             tx,
                             block_changes,
@@ -827,7 +827,7 @@ where
                     })?;
 
                 self.handle_component_failure(
-                    component.id.clone(),
+                    &component.id,
                     format!("No hook orchestrator available for component {}", component.id),
                     tx,
                     block_changes,
@@ -1142,7 +1142,7 @@ mod tests {
         let component1 = create_hook_component("comp1", hook_with_swap);
         let component2 = create_hook_component("comp2", hook_without_swap);
 
-        let mut block_changes = BlockChanges::new(
+        let block_changes = BlockChanges::new(
             "test".to_string(),
             Chain::Ethereum,
             get_test_block(1),
@@ -1167,7 +1167,7 @@ mod tests {
             .unwrap();
 
         let components = hook_dci
-            .extract_components_with_swap_hooks(&mut block_changes)
+            .extract_components_with_swap_hooks(&block_changes)
             .unwrap();
 
         // Should only extract component with swap hooks
@@ -1227,7 +1227,7 @@ mod tests {
         );
         state_updates.insert("existing_comp".to_string(), state_delta);
 
-        let mut block_changes = BlockChanges::new(
+        let block_changes = BlockChanges::new(
             "test".to_string(),
             Chain::Ethereum,
             get_test_block(1),
@@ -1250,7 +1250,7 @@ mod tests {
             .unwrap();
 
         let components = hook_dci
-            .extract_components_with_swap_hooks(&mut block_changes)
+            .extract_components_with_swap_hooks(&block_changes)
             .unwrap();
 
         // Should extract the mutated component with swap hooks
@@ -1305,7 +1305,7 @@ mod tests {
         let mut balance_changes = HashMap::new();
         balance_changes.insert("balance_comp".to_string(), HashMap::new()); // Dummy balance update
 
-        let mut block_changes = BlockChanges::new(
+        let block_changes = BlockChanges::new(
             "test".to_string(),
             Chain::Ethereum,
             get_test_block(1),
@@ -1328,7 +1328,7 @@ mod tests {
             .unwrap();
 
         let components = hook_dci
-            .extract_components_with_swap_hooks(&mut block_changes)
+            .extract_components_with_swap_hooks(&block_changes)
             .unwrap();
 
         // Should extract the component with balance changes that has swap hooks

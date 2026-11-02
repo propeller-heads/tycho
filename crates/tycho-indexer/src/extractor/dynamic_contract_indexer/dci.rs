@@ -627,7 +627,7 @@ where
         self.cache
             .ep_id_to_entrypoint
             .extend_pending(
-                block_changes.block.clone(),
+                &block_changes.block,
                 new_entrypoints
                     .into_values()
                     .map(|ep| (ep.external_id.clone(), ep)),
@@ -1122,7 +1122,7 @@ where
             self.cache
                 .entrypoint_results
                 .insert_pending(
-                    block.clone(),
+                    block,
                     (
                         traced_entry_point
                             .entry_point_with_params
@@ -1155,7 +1155,7 @@ where
             // Store the failed trace result
             self.cache
                 .entrypoint_results
-                .insert_pending(block.clone(), key.clone(), None)?;
+                .insert_pending(block, key.clone(), None)?;
 
             // Increment retry counter: read across all layers, then write to current layer
             let current_count = self
@@ -1166,7 +1166,7 @@ where
                 .unwrap_or(0);
             self.cache
                 .tracing_retry_counts
-                .insert_pending(block.clone(), key, current_count + 1)?;
+                .insert_pending(block, key, current_count + 1)?;
         }
 
         Ok(())

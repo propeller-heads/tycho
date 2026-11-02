@@ -124,7 +124,7 @@ pub fn encode_swap(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(encoded_solution, &solution, chain.native_token().address);
+        encoded_transaction(&encoded_solution, &solution, &chain.native_token().address);
     Ok((solution, transaction))
 }
 
@@ -167,9 +167,9 @@ pub fn create_solution(
 }
 
 fn encoded_transaction(
-    encoded_solution: EncodedSolution,
+    encoded_solution: &EncodedSolution,
     solution: &Solution,
-    native_address: Bytes,
+    native_address: &Bytes,
 ) -> Transaction {
     let amount_in = biguint_to_u256(solution.amount_in());
     let amount_out = biguint_to_u256(solution.expected_amount_out());
@@ -201,7 +201,7 @@ fn encoded_transaction(
         .abi_encode();
 
     let contract_interaction = encode_input(encoded_solution.function_signature(), method_calldata);
-    let value = if *solution.token_in() == native_address {
+    let value = if solution.token_in() == native_address {
         solution.amount_in().clone()
     } else {
         BigUint::ZERO

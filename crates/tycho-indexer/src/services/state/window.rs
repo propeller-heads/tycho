@@ -247,8 +247,7 @@ impl DeltaWindow {
                 irreversible.unwrap_or_default()
             )));
         }
-        self.buffer
-            .purge(message.block.hash.clone())?;
+        self.buffer.purge(&message.block.hash)?;
         Ok(())
     }
 

@@ -87,6 +87,10 @@ const HOOK_FEE_PROBE_EXP: u64 = 30;
 /// Only hookless pools serialize. Deserializing sets `hook: None` and checks the tick list.
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "UniswapV4StateData<'static>")]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `hook` private or the rest public is a breaking change"
+)]
 pub struct UniswapV4State {
     liquidity: u128,
     sqrt_price: U256,
@@ -475,13 +479,17 @@ impl UniswapV4State {
         }
     }
 
-    fn find_limits_experimentally(&self, token_in: Bytes, token_out: Bytes) -> (BigUint, BigUint) {
+    fn find_limits_experimentally(
+        &self,
+        token_in: &Bytes,
+        token_out: &Bytes,
+    ) -> (BigUint, BigUint) {
         // Create dummy token objects with proper addresses. This is fine since `get_amount_out`
         // only uses the token addresses.
         let token_in_obj =
-            Token::new(&token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100);
+            Token::new(token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100);
         let token_out_obj =
-            Token::new(&token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100);
+            Token::new(token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100);
 
         self.find_max_amount(&token_in_obj, &token_out_obj)
     }
@@ -874,8 +882,8 @@ impl ProtocolSim for UniswapV4State {
 
     fn get_limits(
         &self,
-        token_in: Bytes,
-        token_out: Bytes,
+        sell_token: Bytes,
+        buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if let Some(hook) = &self.hook {
             if !hook.swaps_enabled() {
@@ -884,7 +892,7 @@ impl ProtocolSim for UniswapV4State {
             // Check if pool has no liquidity & ticks -> hook manages liquidity
             if self.liquidity == 0 && self.has_no_initialized_ticks() {
                 // If the hook has a get_amount_ranges entrypoint, call it and return (0, limits[1])
-                match hook.get_amount_ranges(token_in.clone(), token_out.clone()) {
+                match hook.get_amount_ranges(sell_token.clone(), buy_token.clone()) {
                     Ok(amount_ranges) => {
                         return Ok((
                             u256_to_biguint(amount_ranges.amount_in_range.1),
@@ -898,7 +906,7 @@ impl ProtocolSim for UniswapV4State {
                     {
                         // Hook manages liquidity but doesn't have get_amount_ranges
                         // Use binary search to find limits by calling swap with increasing amounts
-                        return Ok(self.find_limits_experimentally(token_in, token_out));
+                        return Ok(self.find_limits_experimentally(&sell_token, &buy_token));
                         // Otherwise fall back to default implementation
                     }
                     Err(e) => return Err(e),
@@ -911,7 +919,7 @@ impl ProtocolSim for UniswapV4State {
             return Ok((BigUint::zero(), BigUint::zero()));
         }
 
-        let zero_for_one = token_in < token_out;
+        let zero_for_one = sell_token < buy_token;
         let mut current_tick = self.tick.value();
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;

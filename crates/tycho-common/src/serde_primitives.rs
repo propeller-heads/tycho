@@ -29,7 +29,7 @@ fn decode_hex_with_prefix(val: &str) -> Result<Vec<u8>, FromHexError> {
 struct HexValue(Vec<u8>);
 
 impl<'de> Deserialize<'de> for HexValue {
-    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -38,18 +38,18 @@ impl<'de> Deserialize<'de> for HexValue {
         impl de::Visitor<'_> for HexVisitor {
             type Value = HexValue;
 
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a hex string")
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a hex string")
             }
 
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<HexValue, E> {
-                decode_hex_with_prefix(value)
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<HexValue, E> {
+                decode_hex_with_prefix(v)
                     .map(HexValue)
                     .map_err(|e| E::custom(e.to_string()))
             }
         }
 
-        d.deserialize_str(HexVisitor)
+        deserializer.deserialize_str(HexVisitor)
     }
 }
 
@@ -78,16 +78,16 @@ where
     {
         type Value = HashMap<K, V>;
 
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a map")
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a map")
         }
 
-        fn visit_map<A: de::MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-            let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
-            while let Some((key, value)) = access.next_entry::<KR, VR>()? {
-                map.insert(key.into(), value.into());
+        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut entries = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some((key, value)) = map.next_entry::<KR, VR>()? {
+                entries.insert(key.into(), value.into());
             }
-            Ok(map)
+            Ok(entries)
         }
     }
 
@@ -465,6 +465,7 @@ mod tests {
             s.serialize_str(&hex(x))
         }
 
+        #[expect(clippy::ref_option, reason = "serde's `serialize_with` passes `&Option<Vec<u8>>`")]
         pub fn hex_bytes_option<S: Serializer>(
             x: &Option<Vec<u8>>,
             s: S,

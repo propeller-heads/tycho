@@ -33,19 +33,19 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
     /// VM getters (`balances(i)`, `price_scale(i)`, …) are indexed in on-chain order. Decimals and
     /// the swap-token→index mapping therefore also follow the `coins` order.
     async fn try_from_with_header(
-        value: ComponentWithState,
+        snapshot: ComponentWithState,
         _block: BlockHeader,
         _account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
     ) -> Result<Self, Self::Error> {
-        let pool_address = Bytes::from_str(value.component.id.as_str()).map_err(|e| {
+        let pool_address = Bytes::from_str(snapshot.component.id.as_str()).map_err(|e| {
             InvalidSnapshotError::ValueError(format!(
                 "Expected curve component id to be the pool address: {e}"
             ))
         })?;
 
-        let coins = parse_coins(&value.component.static_attributes)?;
+        let coins = parse_coins(&snapshot.component.static_attributes)?;
         if coins.len() < 2 {
             return Err(InvalidSnapshotError::ValueError(format!(
                 "Curve pool {pool_address} has fewer than 2 coins"
@@ -66,7 +66,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
 
         // Load proxy/implementation contracts so getter delegatecalls resolve (persists into the
         // shared DB for later delta_transition rebuilds).
-        load_stateless_contracts(&engine, &value.state.attributes).await?;
+        load_stateless_contracts(&engine, &snapshot.state.attributes).await?;
 
         let pool_alloy = AlloyAddress::from_slice(pool_address.as_ref());
         // Ensure the pool's actual MATH() contract is loaded — the indexed math address can be
@@ -75,7 +75,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for CurveState {
         vm::load_math_contract(&engine, &pool_alloy).await?;
 
         let resolved = variant::resolve_variant(
-            &value.component.static_attributes,
+            &snapshot.component.static_attributes,
             &pool_alloy,
             coins.len(),
             &engine,

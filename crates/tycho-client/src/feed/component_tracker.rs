@@ -144,6 +144,10 @@ struct EntrypointRelations {
 }
 
 /// Helper struct to determine which components and contracts are being tracked atm.
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public API; making `components` and `contracts` private or the rest public is a breaking change"
+)]
 pub struct ComponentTracker<R: RPCClient> {
     chain: Chain,
     protocol_system: ProtocolSystem,

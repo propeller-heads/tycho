@@ -68,13 +68,13 @@ fn test_single_encoding_strategy_ekubo() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -130,13 +130,13 @@ fn test_single_encoding_strategy_ekubo_erc20() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -192,13 +192,13 @@ fn test_single_encoding_strategy_ekubo_mev_resist() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -243,13 +243,13 @@ fn test_single_encoding_strategy_maverick() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -305,13 +305,13 @@ fn test_evm_single_encoding_strategy_usv4_eth_in() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -373,13 +373,13 @@ fn test_evm_single_encoding_strategy_usv4_eth_out() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -459,13 +459,13 @@ fn test_evm_single_encoding_strategy_usv4_grouped_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -593,13 +593,13 @@ fn test_evm_single_encoding_strategy_usv4_and_hooks_grouped_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth,
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -681,13 +681,13 @@ fn test_single_encoding_strategy_ekubo_grouped_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -748,13 +748,13 @@ fn test_single_encoding_strategy_curve() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -815,13 +815,13 @@ fn test_single_encoding_strategy_curve_st_eth() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -892,13 +892,13 @@ fn test_single_encoding_strategy_curve_protocol_will_debit_from_vault() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -947,13 +947,13 @@ fn test_single_encoding_strategy_balancer_v3() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1033,13 +1033,13 @@ fn test_single_encoding_strategy_bebop() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1119,13 +1119,13 @@ fn test_single_encoding_strategy_bebop_aggregate() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1201,13 +1201,13 @@ fn test_single_encoding_strategy_bebop_partial_fill() {
         .clone();
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1319,13 +1319,13 @@ fn test_single_encoding_strategy_hashflow() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1371,13 +1371,13 @@ fn test_single_encoding_strategy_fluid() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1434,13 +1434,13 @@ fn test_sequential_encoding_strategy_fluid() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1487,13 +1487,13 @@ fn test_single_encoding_strategy_rocketpool_deposit() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1544,13 +1544,13 @@ fn test_single_encoding_strategy_rocketpool_burn() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1596,13 +1596,13 @@ fn test_single_encoding_strategy_bopamm_weth_usdc() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1667,13 +1667,13 @@ fn test_single_encoding_strategy_ring_swap_v2() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1723,13 +1723,13 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1776,13 +1776,13 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1839,13 +1839,13 @@ fn test_single_encoding_strategy_propamm_weth_usdc() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1899,13 +1899,13 @@ fn test_single_encoding_strategy_fallback_usdc_weth() {
         .clone();
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -1962,13 +1962,13 @@ fn test_single_encoding_strategy_fallback_sushiswap_v2_alias() {
         .clone();
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2022,13 +2022,13 @@ fn test_single_encoding_strategy_slipstreams() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2073,13 +2073,13 @@ fn test_single_encoding_strategy_aero_cl() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2144,13 +2144,13 @@ fn test_sequential_encoding_strategy_aero_cl() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2215,13 +2215,13 @@ fn test_sequential_encoding_strategy_slipstreams() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2266,13 +2266,13 @@ fn test_single_encoding_strategy_aerodrome_v1() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2329,13 +2329,13 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2380,13 +2380,13 @@ fn test_single_encoding_strategy_aero_basic() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2439,13 +2439,13 @@ fn test_sequential_encoding_strategy_aero_basic() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2490,13 +2490,13 @@ fn test_single_encoding_strategy_erc4626() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2549,13 +2549,13 @@ fn test_sequential_encoding_strategy_erc4626() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2594,13 +2594,13 @@ fn test_single_encoding_strategy_lido_v4_submit() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2639,13 +2639,13 @@ fn test_single_encoding_strategy_lido_v4_submit_and_wrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2692,13 +2692,13 @@ fn test_single_encoding_strategy_lido_v4_wrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2742,13 +2742,13 @@ fn test_single_encoding_strategy_lido_v4_unwrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2795,13 +2795,13 @@ fn test_sequential_encoding_strategy_lido_v4_submit_then_wrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2864,13 +2864,13 @@ fn test_single_swap_with_univ4_angstrom() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2915,13 +2915,13 @@ fn test_single_encoding_strategy_weth_wrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -2962,13 +2962,13 @@ fn test_single_encoding_strategy_weth_unwrap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3024,13 +3024,13 @@ fn test_single_encoding_strategy_ekubo_v3() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3104,13 +3104,13 @@ fn test_single_ekubo_v3_grouped_swap() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3165,13 +3165,13 @@ fn test_sequential_encoding_strategy_etherfi_unwrap_weeth() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3223,13 +3223,13 @@ fn test_sequential_encoding_strategy_etherfi_wrap_eeth() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3297,13 +3297,13 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF fee token")
     .data;
@@ -3375,13 +3375,13 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .expect("calldata generation failed for TWIF output fee token")
     .data;
@@ -3516,13 +3516,13 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3580,13 +3580,13 @@ fn test_single_encoding_strategy_metric() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3671,13 +3671,13 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         Some(get_signer()),
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .expect("calldata generation failed for grouped TWIF intermediary swap")
     .data;
@@ -3829,13 +3829,13 @@ fn test_single_encoding_strategy_liquorice_settle() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3885,13 +3885,13 @@ fn test_single_encoding_strategy_uniswap_v3_arbitrum() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -3943,13 +3943,13 @@ fn test_single_encoding_strategy_uniswap_v3_polygon() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4001,13 +4001,13 @@ fn test_single_encoding_strategy_uniswap_v3_bsc() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4071,13 +4071,13 @@ fn test_single_encoding_strategy_native() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4137,13 +4137,13 @@ fn test_single_encoding_strategy_native_eth_input() {
         .clone();
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4199,13 +4199,13 @@ fn test_single_encoding_strategy_sky() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;
@@ -4257,13 +4257,13 @@ fn test_sequential_encoding_strategy_sky() {
 
     let calldata = encode_tycho_router_call(
         eth_chain().id(),
-        encoded_solution,
+        &encoded_solution,
         &solution,
         &eth(),
         None,
         0,
-        Bytes::zero(20),
-        BigUint::ZERO,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
     )
     .unwrap()
     .data;

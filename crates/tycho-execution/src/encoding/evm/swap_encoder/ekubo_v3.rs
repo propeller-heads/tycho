@@ -27,9 +27,9 @@ struct SignedSwapTail {
 ///
 /// Expected byte layout: `fee(8) | meta(32) | minBalanceUpdate(32) | signature(N)`.
 fn parse_signed_user_data(
-    user_data: &Option<Bytes>,
+    user_data: Option<&Bytes>,
 ) -> Result<Option<SignedSwapTail>, EncodingError> {
-    let Some(data) = user_data.as_ref() else {
+    let Some(data) = user_data else {
         return Ok(None);
     };
     if data.len() <= SIGNED_USER_DATA_MIN_LEN {
@@ -73,7 +73,7 @@ impl SwapEncoder for EkuboV3SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let signed_tail = parse_signed_user_data(swap.user_data())?;
+        let signed_tail = parse_signed_user_data(swap.user_data().as_ref())?;
 
         let fee = if let Some(ref tail) = signed_tail {
             tail.fee
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn test_parse_signed_user_data_too_short() {
         let data = Some(Bytes::from(vec![0u8; 71]));
-        let err = parse_signed_user_data(&data).unwrap_err();
+        let err = parse_signed_user_data(data.as_ref()).unwrap_err();
         assert!(matches!(err, EncodingError::InvalidInput(_)));
     }
 
@@ -165,7 +165,7 @@ mod tests {
         buf[8..40].fill(0x11);
         buf[40..72].fill(0x22);
 
-        let err = parse_signed_user_data(&Some(buf.into())).unwrap_err();
+        let err = parse_signed_user_data(Some(&buf.into())).unwrap_err();
         assert!(matches!(err, EncodingError::InvalidInput(_)));
     }
 
@@ -178,7 +178,7 @@ mod tests {
         buf[40..72].fill(0xBB);
         buf[72..].copy_from_slice(&sig);
 
-        let tail = parse_signed_user_data(&Some(buf.into()))
+        let tail = parse_signed_user_data(Some(&buf.into()))
             .unwrap()
             .expect("should parse");
         assert_eq!(tail.fee, 100);

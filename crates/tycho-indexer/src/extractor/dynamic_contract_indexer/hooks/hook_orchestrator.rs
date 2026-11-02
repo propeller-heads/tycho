@@ -145,13 +145,12 @@ where
         Self { entrypoint_generator }
     }
 
-    #[instrument(skip(self, block_changes, metadata, component_entrypoints), fields(
+    #[instrument(skip(block_changes, metadata, component_entrypoints), fields(
         component_count = metadata.len(),
         entrypoint_count = component_entrypoints.len(),
         tx_count = block_changes.txs_with_update.len()
     ))]
     fn prepare_components(
-        &self,
         block_changes: &mut BlockChanges,
         metadata: &HashMap<String, ComponentTracingMetadata>,
         component_entrypoints: HashMap<ComponentId, Vec<(TxHash, EntryPointWithTracingParams)>>,
@@ -362,7 +361,6 @@ where
         transactions_count = block_changes.txs_with_update.len()
     ))]
     pub(crate) fn enrich_metadata_from_block_balances(
-        &self,
         components: &[&ProtocolComponent],
         block_changes: &BlockChanges,
     ) -> HashMap<ComponentId, ComponentTracingMetadata> {
@@ -525,7 +523,7 @@ where
                 components_without_metadata = components_without_metadata.len(),
                 "Enriching metadata from block balances for components without external metadata"
             );
-            self.enrich_metadata_from_block_balances(&components_without_metadata, block_changes)
+            Self::enrich_metadata_from_block_balances(&components_without_metadata, block_changes)
         } else {
             HashMap::new()
         };
@@ -655,7 +653,7 @@ where
             false => HashMap::new(),
         };
 
-        self.prepare_components(block_changes, metadata, component_entrypoints)?;
+        Self::prepare_components(block_changes, metadata, component_entrypoints)?;
 
         info!("Component update process completed successfully");
         Ok(())
@@ -677,26 +675,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::extractor::{
-        dynamic_contract_indexer::hooks::entrypoint_generator::{
-            DefaultSwapAmountEstimator, UniswapV4DefaultHookEntrypointGenerator,
-        },
-        models::BlockChanges,
-    };
+    use crate::extractor::models::BlockChanges;
+
+    type TestOrchestrator = DefaultUniswapV4HookOrchestrator<MockBalanceSlotDetector>;
 
     // Helper functions for creating test data
-    fn create_test_orchestrator() -> DefaultUniswapV4HookOrchestrator<MockBalanceSlotDetector> {
-        let balance_detector = MockBalanceSlotDetector::new();
-        let swap_estimator = DefaultSwapAmountEstimator::with_balances();
-        let pool_manager = Address::from("0x1234567890123456789012345678901234567890");
-        let entrypoint_generator = UniswapV4DefaultHookEntrypointGenerator::new(
-            swap_estimator,
-            pool_manager,
-            balance_detector,
-        );
-        DefaultUniswapV4HookOrchestrator::new(entrypoint_generator)
-    }
-
     fn create_test_component(id: &str, tokens: Vec<Address>) -> ProtocolComponent {
         let mut static_attributes = HashMap::new();
         static_attributes
@@ -731,7 +714,7 @@ mod tests {
     fn create_test_block_changes(
         block_number: u64,
         tx_count: u64,
-        balance_updates: HashMap<String, HashMap<Address, ComponentBalance>>,
+        balance_updates: &HashMap<String, HashMap<Address, ComponentBalance>>,
     ) -> BlockChanges {
         let block = Block::new(
             block_number,
@@ -777,8 +760,6 @@ mod tests {
 
     #[test]
     fn test_enrich_metadata_from_block_balances() {
-        let orchestrator = create_test_orchestrator();
-
         // Create test components with specific tokens
         let token1 = Address::from("0x1111111111111111111111111111111111111111");
         let token2 = Address::from("0x2222222222222222222222222222222222222222");
@@ -803,10 +784,11 @@ mod tests {
             balances
         });
 
-        let block_changes = create_test_block_changes(1, 2, balance_updates);
+        let block_changes = create_test_block_changes(1, 2, &balance_updates);
 
         // Test the enrichment
-        let result = orchestrator.enrich_metadata_from_block_balances(&components, &block_changes);
+        let result =
+            TestOrchestrator::enrich_metadata_from_block_balances(&components, &block_changes);
 
         // Verify results
         assert_eq!(result.len(), 2, "Should enrich metadata for both components");
@@ -834,8 +816,6 @@ mod tests {
 
     #[test]
     fn test_enrich_metadata_reverse_order_processing() {
-        let orchestrator = create_test_orchestrator();
-
         let token1 = Address::from("0x1111111111111111111111111111111111111111");
         let component1 = create_test_component("comp1", vec![token1.clone()]);
         let components = vec![&component1];
@@ -849,9 +829,10 @@ mod tests {
             balances
         });
 
-        let block_changes = create_test_block_changes(1, 3, balance_updates);
+        let block_changes = create_test_block_changes(1, 3, &balance_updates);
 
-        let result = orchestrator.enrich_metadata_from_block_balances(&components, &block_changes);
+        let result =
+            TestOrchestrator::enrich_metadata_from_block_balances(&components, &block_changes);
 
         // Verify that the latest balance value is used
         let comp1_metadata = result.get("comp1").unwrap();
@@ -868,17 +849,16 @@ mod tests {
 
     #[test]
     fn test_enrich_metadata_handles_empty_balances() {
-        let orchestrator = create_test_orchestrator();
-
         let token1 = Address::from("0x1111111111111111111111111111111111111111");
         let component1 = create_test_component("comp1", vec![token1]);
         let components = vec![&component1];
 
         // Create block changes with no balance updates
         let balance_updates = HashMap::new();
-        let block_changes = create_test_block_changes(1, 1, balance_updates);
+        let block_changes = create_test_block_changes(1, 1, &balance_updates);
 
-        let result = orchestrator.enrich_metadata_from_block_balances(&components, &block_changes);
+        let result =
+            TestOrchestrator::enrich_metadata_from_block_balances(&components, &block_changes);
 
         // Should return empty results since no balance data is available
         assert_eq!(
@@ -890,8 +870,6 @@ mod tests {
 
     #[test]
     fn test_enrich_metadata_filters_zero_balances() {
-        let orchestrator = create_test_orchestrator();
-
         let token1 = Address::from("0x1111111111111111111111111111111111111111");
         let token2 = Address::from("0x2222222222222222222222222222222222222222");
         let component1 = create_test_component("comp1", vec![token1.clone(), token2.clone()]);
@@ -906,9 +884,10 @@ mod tests {
             balances
         });
 
-        let block_changes = create_test_block_changes(1, 1, balance_updates);
+        let block_changes = create_test_block_changes(1, 1, &balance_updates);
 
-        let result = orchestrator.enrich_metadata_from_block_balances(&components, &block_changes);
+        let result =
+            TestOrchestrator::enrich_metadata_from_block_balances(&components, &block_changes);
 
         // Should still include the component because not ALL balances are zero
         assert_eq!(result.len(), 1, "Should include component with mixed zero/non-zero balances");

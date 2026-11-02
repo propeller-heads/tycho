@@ -149,14 +149,13 @@ impl TraceRenderer {
 
         // Render logs for this trace
         for log in &node.logs {
-            self.render_log(output, log)?;
+            Self::render_log(output, log)?;
         }
         Ok(())
     }
 
     /// Render a log entry
     fn render_log(
-        &self,
         output: &mut String,
         log: &revm_inspectors::tracing::types::CallLog,
     ) -> std::fmt::Result {

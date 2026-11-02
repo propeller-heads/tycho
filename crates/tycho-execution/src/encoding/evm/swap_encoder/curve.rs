@@ -30,7 +30,7 @@ pub struct CurveSwapEncoder {
 }
 
 impl CurveSwapEncoder {
-    fn get_pool_type(&self, pool_id: &str, factory_address: &str) -> Result<U8, EncodingError> {
+    fn get_pool_type(pool_id: &str, factory_address: &str) -> Result<U8, EncodingError> {
         match pool_id {
             // TriPool
             "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7" => Ok(U8::from(1)),
@@ -171,7 +171,7 @@ impl SwapEncoder for CurveSwapEncoder {
         let pool_address = Address::from_str(&swap.component().id)
             .map_err(|e| EncodingError::FatalError(format!("Invalid curve pool address: {e}")))?;
         let pool_type =
-            self.get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
+            Self::get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
 
         let (i, j) = self.get_coin_indexes(swap, token_in, token_out)?;
 

@@ -226,7 +226,7 @@ where
 
     /// Purges all blocks following the specified block hash from the buffer. Returns the purged
     /// blocks ordered by ascending number or an error if the target hash is not found.
-    pub fn purge(&mut self, target_hash: Bytes) -> Result<Vec<B>, StorageError> {
+    pub fn purge(&mut self, target_hash: &Bytes) -> Result<Vec<B>, StorageError> {
         debug!("Purging reorg buffer... Target hash {}", target_hash.to_string());
         let mut target_index = None;
 
@@ -236,7 +236,7 @@ where
             .rev()
             .enumerate()
         {
-            if block_message.block().hash == target_hash {
+            if block_message.block().hash == *target_hash {
                 target_index = Some(self.block_messages.len() - index);
                 break;
             }
@@ -1335,7 +1335,7 @@ mod test {
 
         let purged = reorg_buffer
             .purge(
-                Bytes::from_str(
+                &Bytes::from_str(
                     "0x0000000000000000000000000000000000000000000000000000000000000001",
                 )
                 .unwrap(),
@@ -1347,7 +1347,7 @@ mod test {
         assert_eq!(purged, vec![get_block_changes(2), get_block_changes(3)]);
 
         let unknown = reorg_buffer.purge(
-            Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
+            &Bytes::from_str("0x0000000000000000000000000000000000000000000000000000000000000999")
                 .unwrap(),
         );
 
