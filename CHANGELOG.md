@@ -1,3 +1,11 @@
+## [0.495.2](https://github.com/propeller-heads/tycho/compare/0.495.1...0.495.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **common:** make Bytes to integer conversions fallible ([5b21613](https://github.com/propeller-heads/tycho/commit/5b216133b8f6b69e14775e7a1fff9c4924820ea7))
+* **common:** make Bytes to integer conversions fallible ([#1706](https://github.com/propeller-heads/tycho/issues/1706)) ([5722600](https://github.com/propeller-heads/tycho/commit/5722600c82227b4ef18d5128855ff7004bf7bcd2))
+
 ## [0.495.1](https://github.com/propeller-heads/tycho/compare/0.495.0...0.495.1) (2026-11-02)
 
 
