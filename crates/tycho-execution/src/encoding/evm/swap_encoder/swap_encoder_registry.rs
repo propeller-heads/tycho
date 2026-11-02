@@ -150,7 +150,9 @@ impl SwapEncoderRegistry {
     /// `pancakeswap_infinity_cl` encoder the same way: one Infinity executor serves hooked and
     /// hookless CL pools and Bin pools, picking the pool type by a byte in the swap data. Bin only
     /// on the chains whose executor holds a BinPoolManager; the Robinhood one has none and would
-    /// revert `UnknownPoolType(1)`.
+    /// revert `PancakeswapInfinityRobinhoodExecutor__UnknownPoolType(1)`. A configured
+    /// `pancakeswap_infinity_bin` entry is refused at build on those chains, so an exact entry
+    /// never bypasses the check.
     #[expect(
         clippy::borrowed_box,
         reason = "public API; returning Option<&dyn SwapEncoder> is a breaking change"
@@ -159,11 +161,10 @@ impl SwapEncoderRegistry {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
         }
-        let has_bin_pool_manager = matches!(self.chain, Chain::Base | Chain::Bsc);
         let family = match protocol_system {
             UNISWAP_V4_HOOKS => "uniswap_v4",
             PANCAKESWAP_INFINITY_CL_HOOKS => PANCAKESWAP_INFINITY_CL,
-            PANCAKESWAP_INFINITY_BIN if has_bin_pool_manager => PANCAKESWAP_INFINITY_CL,
+            PANCAKESWAP_INFINITY_BIN if self.has_bin_pool_manager() => PANCAKESWAP_INFINITY_CL,
             _ if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) => PRICE_LEVEL_STREAM_KEY,
             _ if protocol_system.starts_with(FALLBACK_PREFIX) &&
                 protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
@@ -174,6 +175,12 @@ impl SwapEncoderRegistry {
             _ => return None,
         };
         self.encoders.get(family)
+    }
+
+    /// Whether the chain's Infinity executor holds a BinPoolManager. Hardcoded: the registry sees
+    /// executor addresses, not the constructor arguments in `executor_deployments.json`.
+    fn has_bin_pool_manager(&self) -> bool {
+        matches!(self.chain, Chain::Base | Chain::Bsc)
     }
 
     /// The executor address of every encoder in this registry, keyed by protocol system.
@@ -214,6 +221,13 @@ impl SwapEncoderRegistry {
             // the pool's hook out of its `hooks` attribute either way.
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            PANCAKESWAP_INFINITY_BIN if !self.has_bin_pool_manager() => {
+                Err(EncodingError::FatalError(format!(
+                    "{PANCAKESWAP_INFINITY_BIN} on {}: the Infinity executor there has no \
+                     BinPoolManager",
+                    self.chain
+                )))
             }
             PANCAKESWAP_INFINITY_CL | PANCAKESWAP_INFINITY_CL_HOOKS | PANCAKESWAP_INFINITY_BIN => {
                 Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
@@ -497,6 +511,31 @@ mod tests {
             }
             None if !resolves => {}
             found => panic!("{protocol_system} on {chain}: resolved = {}", found.is_some()),
+        }
+    }
+
+    /// An exact `pancakeswap_infinity_bin` entry would skip the alias gate, so building one is
+    /// refused where the executor has no BinPoolManager.
+    #[rstest]
+    #[case::base(Chain::Base, true)]
+    #[case::robinhood(Chain::Robinhood, false)]
+    fn test_bin_entry_builds_only_with_a_bin_pool_manager(
+        #[case] chain: Chain,
+        #[case] builds: bool,
+    ) {
+        let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
+        let executors = format!(r#"{{"{chain}": {{"pancakeswap_infinity_bin": "{executor}"}}}}"#);
+
+        let result = SwapEncoderRegistry::new(chain).add_default_encoders(Some(executors));
+
+        match result {
+            Ok(registry) if builds => assert!(registry
+                .get_encoder("pancakeswap_infinity_bin")
+                .is_some()),
+            Err(EncodingError::FatalError(message)) if !builds => {
+                assert!(message.contains("BinPoolManager"), "{message}")
+            }
+            other => panic!("{chain}: built = {}", other.is_ok()),
         }
     }
 
