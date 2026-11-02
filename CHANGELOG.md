@@ -1,3 +1,12 @@
+## [0.496.1](https://github.com/propeller-heads/tycho/compare/0.496.0...0.496.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **deps:** drop stale RUSTSEC-2026-0049 audit ignore ([ceac560](https://github.com/propeller-heads/tycho/commit/ceac560242b746b1f86fd4073adbafbbb23de8b2))
+* **deps:** ignore zip advisory RUSTSEC-2026-0429 ([f9a0644](https://github.com/propeller-heads/tycho/commit/f9a06443c27a51046c68883eeff18c0072829ef3))
+* **deps:** ignore zip advisory RUSTSEC-2026-0429, drop stale 0049 ([#1715](https://github.com/propeller-heads/tycho/issues/1715)) ([b403197](https://github.com/propeller-heads/tycho/commit/b40319705e6faa5e3e4b885fc6e967b0d3be6acf))
+
 ## [0.496.0](https://github.com/propeller-heads/tycho/compare/0.495.2...0.496.0) (2026-11-02)
 
 
