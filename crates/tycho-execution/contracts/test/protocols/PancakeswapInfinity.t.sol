@@ -417,7 +417,7 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
         );
     }
 
-    /// @dev Swaps `amountIn` through the executor and pins the exact output at ALICE. The Bin
+    /// @dev Swaps `amountIn` through the executor and pins the exact output ALICE gains. The Bin
     /// pool is far shallower than the CL one at this block, so its cases size the input
     /// themselves rather than draining the pool and reverting BinPool__OutOfLiquidity.
     function _assertSwap(
@@ -427,9 +427,10 @@ contract PancakeswapInfinityForkTest is Constants, TestUtils {
         uint256 amountIn,
         uint256 expectedOut
     ) internal {
+        uint256 before = IERC20(tokenOut).balanceOf(ALICE);
         deal(tokenIn, address(executor), amountIn);
         executor.swap(amountIn, data, ALICE);
-        assertEq(IERC20(tokenOut).balanceOf(ALICE), expectedOut);
+        assertEq(IERC20(tokenOut).balanceOf(ALICE) - before, expectedOut);
         assertEq(IERC20(tokenIn).balanceOf(address(executor)), 0);
     }
 

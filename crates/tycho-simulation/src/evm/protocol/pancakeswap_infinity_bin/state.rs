@@ -812,11 +812,13 @@ mod tests {
                 .amount,
             max_out
         );
+        let over = state
+            .get_amount_out(max_in + BigUint::from(1u64), &token_in, &token_out)
+            .expect_err("one unit over the limit still quoted");
         assert!(
-            state
-                .get_amount_out(max_in + BigUint::from(1u64), &token_in, &token_out)
-                .is_err(),
-            "one unit over the limit still quoted"
+            over.to_string()
+                .contains("Out of liquidity"),
+            "{over}"
         );
     }
 
@@ -1087,11 +1089,14 @@ mod tests {
             0.9049731282105973,
             max_relative = 1e-12
         );
+        let refused = state
+            .get_amount_out(BigUint::from(1_000u64), &usdc(), &usdt())
+            .expect_err("nothing to buy, so the quote must still refuse");
         assert!(
-            state
-                .get_amount_out(BigUint::from(1_000u64), &usdc(), &usdt())
-                .is_err(),
-            "nothing to buy, so the quote must still refuse"
+            refused
+                .to_string()
+                .contains("Out of liquidity"),
+            "{refused}"
         );
     }
 
@@ -1135,11 +1140,13 @@ mod tests {
             max_out
         );
         // One wei past it runs out of bins.
+        let over = state
+            .get_amount_out(max_in + BigUint::from(1u64), &usdc(), &usdt())
+            .expect_err("one wei over the limit still quoted");
         assert!(
-            state
-                .get_amount_out(max_in + BigUint::from(1u64), &usdc(), &usdt())
-                .is_err(),
-            "one wei over the limit still quoted"
+            over.to_string()
+                .contains("Out of liquidity"),
+            "{over}"
         );
     }
 
@@ -1394,6 +1401,29 @@ mod tests {
             .into()
     }
 
+    /// The fixture is a capture of what the package emitted for a live pool, so decoding it pins
+    /// the decoder to the package's attribute schema. Every other test builds attributes with
+    /// this crate's own helpers, where the two can drift apart unnoticed.
+    #[tokio::test]
+    async fn test_snapshot_fixture_decodes() {
+        let state =
+            try_decode_snapshot_with_defaults::<PancakeswapInfinityBinState>(bin_snapshot())
+                .await
+                .expect("snapshot decodes");
+
+        assert_eq!(state.active_id, REAL_ID_SHIFT);
+        assert!(state.active_in_tree);
+        assert_eq!(state.bin_step, 10);
+        assert_eq!(state.lp_fee, 7);
+        assert_eq!((state.protocol_fee_zero_for_one, state.protocol_fee_one_for_zero), (3, 3));
+        // 29 bins each side of the active one, 4.237288 USDC or USDT each, and the active bin
+        // half and half.
+        assert_eq!(state.bins.len(), 59);
+        assert_eq!(state.bins[&(REAL_ID_SHIFT - 29)], (0, 4_237_288));
+        assert_eq!(state.bins[&REAL_ID_SHIFT], (2_118_644, 2_118_644));
+        assert_eq!(state.bins[&(REAL_ID_SHIFT + 29)], (4_237_288, 0));
+    }
+
     /// The pool key the quoter needs, taken from the snapshot's static attributes rather than
     /// rebuilt, so the test cannot disagree with the indexer about which pool it is asking about.
     fn pool_key(snapshot: &ComponentWithState) -> PoolKey {
@@ -1439,8 +1469,9 @@ mod tests {
             .await
             .expect("snapshot decodes");
 
-        // A revert is `None`, so "no quote" compares on both sides. Only the node's error response
-        // counts: a transport failure would otherwise pass every expected revert.
+        // A revert is `None`, so "no quote" compares on both sides. Only a revert counts: a
+        // transport failure or any other error response would otherwise pass every expected
+        // revert.
         let quoter = |zero_for_one: bool, amount_in: u128| {
             let params = QuoteExactSingleParams {
                 poolKey: key.clone(),
@@ -1463,7 +1494,13 @@ mod tests {
                     .await
                 {
                     Ok(returned) => returned,
-                    Err(err) if err.as_error_resp().is_some() => return None,
+                    Err(err)
+                        if err
+                            .as_error_resp()
+                            .is_some_and(|resp| resp.as_revert_data().is_some()) =>
+                    {
+                        return None
+                    }
                     Err(err) => panic!("quoter call failed: {err}"),
                 };
                 let quoted = quoteExactInputSingleCall::abi_decode_returns(&returned)
@@ -1503,11 +1540,13 @@ mod tests {
             assert!(crossed, "zero_for_one={zero_for_one}: no amount crossed a bin");
 
             // One past the limit runs out of bins: the quoter reverts, the port must error.
+            let over = state
+                .get_amount_out(BigUint::from(limit + 1), token_in, token_out)
+                .expect_err("zero_for_one={zero_for_one}: port quoted past its own limit");
             assert!(
-                state
-                    .get_amount_out(BigUint::from(limit + 1), token_in, token_out)
-                    .is_err(),
-                "zero_for_one={zero_for_one}: port quoted past its own limit"
+                over.to_string()
+                    .contains("Out of liquidity"),
+                "{over}"
             );
             assert_eq!(
                 quoter(zero_for_one, limit + 1).await,
