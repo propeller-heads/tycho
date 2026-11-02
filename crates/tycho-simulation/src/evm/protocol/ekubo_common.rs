@@ -13,7 +13,7 @@ use tycho_common::{
 use crate::evm::query_pool_swap::{price_to_f64_with_decimals, query_pool_swap};
 
 /// The pool operations that [`swap_to_target_price`] needs, in the SDK types of each version.
-pub(crate) trait EkuboSwapToPrice: ProtocolSim + Sized {
+pub trait EkuboSwapToPrice: ProtocolSim + Sized {
     type SqrtRatio: Copy + Ord;
 
     /// Converts a Q128.128 sqrt ratio, or returns `None` when it is outside the valid range.
@@ -41,7 +41,7 @@ pub(crate) trait EkuboSwapToPrice: ProtocolSim + Sized {
 /// # Errors
 ///
 /// Returns [`SimulationError::InvalidInput`] when the target is above the spot price.
-pub(crate) fn swap_to_target_price<S: EkuboSwapToPrice>(
+pub fn swap_to_target_price<S: EkuboSwapToPrice>(
     state: &S,
     params: &QueryPoolSwapParams,
     target: &Price,
@@ -135,7 +135,7 @@ fn target_sqrt_ratio(target: &Price, zero_for_one: bool, spot_price_fee: u64) ->
 }
 
 #[cfg(test)]
-pub(crate) mod test_helpers {
+pub mod test_helpers {
     use num_bigint::BigUint;
     use tycho_common::{
         models::token::Token,
@@ -162,7 +162,7 @@ pub(crate) mod test_helpers {
 
     /// Checks in both directions that a target of `multiplier` times the spot price lands the
     /// spot price in `[target, target * (1 + tolerance)]`.
-    pub(crate) fn assert_lands_in_band(
+    pub fn assert_lands_in_band(
         state: &dyn ProtocolSim,
         token0: &Token,
         token1: &Token,
@@ -193,7 +193,7 @@ pub(crate) mod test_helpers {
         }
     }
 
-    pub(crate) fn assert_target_above_spot_rejected(
+    pub fn assert_target_above_spot_rejected(
         state: &dyn ProtocolSim,
         token0: &Token,
         token1: &Token,
@@ -214,7 +214,7 @@ pub(crate) mod test_helpers {
     }
 
     /// Checks a zero swap and an unchanged state for a pool whose spot price is exactly 1.
-    pub(crate) fn assert_target_at_spot_gives_zero_swap(
+    pub fn assert_target_at_spot_gives_zero_swap(
         state: &dyn ProtocolSim,
         token0: &Token,
         token1: &Token,
@@ -234,11 +234,7 @@ pub(crate) mod test_helpers {
     }
 
     /// Checks that a target outside the sqrt ratio range gives the numerical search result.
-    pub(crate) fn assert_out_of_range_falls_back(
-        state: &dyn ProtocolSim,
-        token0: &Token,
-        token1: &Token,
-    ) {
+    pub fn assert_out_of_range_falls_back(state: &dyn ProtocolSim, token0: &Token, token1: &Token) {
         for (token_in, token_out) in [(token0, token1), (token1, token0)] {
             let target = Price::new(BigUint::from(1u8), BigUint::from(10u8).pow(60));
             let params = target_price_params(token_in, token_out, target, 1e-4);
@@ -252,11 +248,7 @@ pub(crate) mod test_helpers {
 
     /// Checks that a pool with no liquidity, whose quote stops before the limit, gives the
     /// numerical search result and not a swap that leaves the price unchanged.
-    pub(crate) fn assert_missed_limit_falls_back(
-        state: &dyn ProtocolSim,
-        token0: &Token,
-        token1: &Token,
-    ) {
+    pub fn assert_missed_limit_falls_back(state: &dyn ProtocolSim, token0: &Token, token1: &Token) {
         for (token_in, token_out) in [(token0, token1), (token1, token0)] {
             let spot = state
                 .spot_price(token_in, token_out)
@@ -274,7 +266,7 @@ pub(crate) mod test_helpers {
 
     /// Checks rejection when virtual orders move the price below the target before the user swap.
     /// `token_in` must be the token that the virtual orders sell.
-    pub(crate) fn assert_virtual_orders_applied_before_direction_check(
+    pub fn assert_virtual_orders_applied_before_direction_check(
         state: &dyn ProtocolSim,
         token_in: &Token,
         token_out: &Token,

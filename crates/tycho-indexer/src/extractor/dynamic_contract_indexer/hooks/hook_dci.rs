@@ -27,7 +27,7 @@ use crate::extractor::{
     ExtractionError, ExtractorExtension,
 };
 
-pub(crate) struct UniswapV4HookDCI<AE, T, G>
+pub struct UniswapV4HookDCI<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,
@@ -565,7 +565,7 @@ where
 
 // Component state tracking
 #[derive(Clone, Debug, DeepSizeOf)]
-pub(crate) struct ComponentProcessingState {
+pub struct ComponentProcessingState {
     status: ProcessingStatus,
     retry_count: u32,
     last_error: Option<ProcessingError>,

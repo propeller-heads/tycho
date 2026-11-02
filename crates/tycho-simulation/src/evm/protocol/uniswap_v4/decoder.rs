@@ -265,7 +265,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
 /// is the pool at the end of the block that created it, and the sibling `_sources.json` names the
 /// log or storage read each of its fields was taken from.
 #[cfg(test)]
-pub(crate) mod pons_fixture {
+pub mod pons_fixture {
     use std::{collections::HashMap, fs, path::Path, str::FromStr};
 
     use num_bigint::BigUint;
@@ -281,20 +281,19 @@ pub(crate) mod pons_fixture {
         models::{DecoderContext, TryFromWithBlock},
     };
 
-    pub(crate) const POOL_ID: &str =
-        "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289";
+    pub const POOL_ID: &str = "0xc96847cc43f7595aafcbc1c99d335cb91be7ce1107524c87030f48a716a5f289";
     const XLG_ADDRESS: &str = "0xab5983fe30f186055095305c862b0e097dab3b52";
     const NVDA_ADDRESS: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 
     /// The terms `registerPool` froze for this pool, read out of `launches[poolId]`.
-    pub(crate) const HOOK_FEE_BPS: u32 = 100;
-    pub(crate) const CREATOR_TAX_BPS: u32 = 100;
+    pub const HOOK_FEE_BPS: u32 = 100;
+    pub const CREATOR_TAX_BPS: u32 = 100;
 
     /// The block the pool was created in, and its timestamp.
     const BLOCK_NUMBER: u64 = 58_759_099;
     const BLOCK_TIMESTAMP: u64 = 1_788_978_331;
 
-    pub(crate) fn snapshot() -> ComponentWithState {
+    pub fn snapshot() -> ComponentWithState {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/assets/decoder/uniswap_v4_pons_snapshot_robinhood.json");
         let raw =
@@ -307,7 +306,7 @@ pub(crate) mod pons_fixture {
     /// The same pool with everything the hook contributes stripped off the wire, which is what a
     /// pool of this shape looks like with no hook at all. Its quotes are the core swap math the
     /// hook's cut is measured against.
-    pub(crate) fn hookless_snapshot() -> ComponentWithState {
+    pub fn hookless_snapshot() -> ComponentWithState {
         let mut snapshot = snapshot();
         snapshot.component.protocol_system = "uniswap_v4".to_string();
         for attribute in ["hooks", "hook_identifier", "pons_hook_fee_bps", "pons_creator_tax_bps"] {
@@ -320,7 +319,7 @@ pub(crate) mod pons_fixture {
     }
 
     /// The same pool behind an address no native handler is registered for on any chain.
-    pub(crate) fn unknown_hook_snapshot() -> ComponentWithState {
+    pub fn unknown_hook_snapshot() -> ComponentWithState {
         let mut snapshot = snapshot();
         snapshot
             .component
@@ -347,22 +346,22 @@ pub(crate) mod pons_fixture {
 
     /// `currency0` of the pool: the lower of the two addresses, so a swap out of it is
     /// zero-for-one.
-    pub(crate) fn xlg() -> Token {
+    pub fn xlg() -> Token {
         token(XLG_ADDRESS, "XLG")
     }
 
-    pub(crate) fn nvda() -> Token {
+    pub fn nvda() -> Token {
         token(NVDA_ADDRESS, "NVDA")
     }
 
-    pub(crate) fn tokens() -> HashMap<Bytes, Token> {
+    pub fn tokens() -> HashMap<Bytes, Token> {
         [xlg(), nvda()]
             .into_iter()
             .map(|token| (token.address.clone(), token))
             .collect()
     }
 
-    pub(crate) fn header() -> BlockHeader {
+    pub fn header() -> BlockHeader {
         BlockHeader {
             number: BLOCK_NUMBER,
             hash: Bytes::from([1u8; 32]),
@@ -375,7 +374,7 @@ pub(crate) mod pons_fixture {
 
     /// Decodes `snapshot` as a component of `chain`, the way a decoder registered for that chain
     /// would.
-    pub(crate) async fn decode_on(
+    pub async fn decode_on(
         snapshot: ComponentWithState,
         chain: Chain,
     ) -> Result<UniswapV4State, InvalidSnapshotError> {
@@ -394,7 +393,7 @@ pub(crate) mod pons_fixture {
     /// Trade sizes are taken as fractions of this rather than of `get_limits`. A full-range
     /// position can absorb an unbounded amount of one side while giving up a bounded amount of
     /// the other, so even a millionth of the limit on the `currency0` side drains the pool.
-    pub(crate) fn reserve(token: &Token) -> BigUint {
+    pub fn reserve(token: &Token) -> BigUint {
         let snapshot = snapshot();
         let balance = snapshot
             .state
@@ -406,7 +405,7 @@ pub(crate) mod pons_fixture {
 
     /// What is left of a `core` output once the hook has taken its fee and its tax, each floored
     /// on its own exactly as `_afterSwap` computes them.
-    pub(crate) fn net_of_hook_take(core: &BigUint) -> BigUint {
+    pub fn net_of_hook_take(core: &BigUint) -> BigUint {
         let denominator = BigUint::from(10_000u32);
         let fee = core * BigUint::from(HOOK_FEE_BPS) / &denominator;
         let tax = core * BigUint::from(CREATOR_TAX_BPS) / &denominator;

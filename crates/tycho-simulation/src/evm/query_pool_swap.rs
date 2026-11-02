@@ -369,7 +369,7 @@ pub(crate) mod test_helpers {
 
     /// Converts a price of `token_out` per `token_in` in whole-token units into a [`Price`] in
     /// atomic units.
-    pub(crate) fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
+    pub fn to_price(price_f64: f64, token_in: &Token, token_out: &Token) -> Price {
         let decimal_adj = 10_f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
         let price_no_decimals = price_f64 / decimal_adj;
         Price::new(BigUint::from((price_no_decimals * 1e18) as u128), BigUint::from(10u128.pow(18)))
@@ -377,7 +377,7 @@ pub(crate) mod test_helpers {
 
     /// Builds [`QueryPoolSwapParams`] for a [`SwapConstraint::PoolTargetPrice`] with no amount
     /// bounds.
-    pub(crate) fn target_price_params(
+    pub fn target_price_params(
         token_in: &Token,
         token_out: &Token,
         target: Price,

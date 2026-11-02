@@ -61,7 +61,7 @@ use tycho_common::{
 use crate::extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus, ReorgBuffer};
 
 /// Receives blocks evicted from a [`DeltaWindow`].
-pub(crate) trait FoldSink: Send + Sync {
+pub trait FoldSink: Send + Sync {
     /// Merges one finalized, database-committed block into the long-lived store.
     ///
     /// Blocks arrive in ascending order. Delta values are absolute, so applying the same block
@@ -89,7 +89,7 @@ impl Default for WindowConfig {
 
 /// One empty window per extractor, keyed by extractor name, all with the same `config`. The
 /// windows are shared: every holder of the map reads and writes the same windows.
-pub(crate) fn new_windows<'a>(
+pub fn new_windows<'a>(
     extractors: impl IntoIterator<Item = &'a str>,
     config: WindowConfig,
 ) -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
@@ -106,7 +106,7 @@ pub(crate) fn new_windows<'a>(
 }
 
 /// Drops every folded block: the sink for `ENTITY_CACHE_MODE=off`, which keeps no cache.
-pub(crate) struct DiscardSink;
+pub struct DiscardSink;
 
 impl FoldSink for DiscardSink {
     fn fold(&self, _block: &BlockAggregatedChanges) -> Result<(), StorageError> {
@@ -116,7 +116,7 @@ impl FoldSink for DiscardSink {
 
 /// Outcome of resolving a requested version against the window contents.
 #[derive(Debug, PartialEq)]
-pub(crate) enum WindowResolution {
+pub enum WindowResolution {
     /// The version maps to a block currently held in the window.
     InWindow(Block),
     /// The version is older than the window floor.
@@ -131,7 +131,7 @@ pub(crate) enum WindowResolution {
 
 /// One block's changes to a component, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ComponentChange {
+pub struct ComponentChange {
     /// Write timestamp of the block the change belongs to.
     pub at: WriteTimestamp,
     /// State delta of the block, if the block changed the component's state.
@@ -142,7 +142,7 @@ pub(crate) struct ComponentChange {
 
 /// One block's changes to an account, as captured from the window.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AccountChange {
+pub struct AccountChange {
     /// Write timestamp of the block the change belongs to.
     pub at: WriteTimestamp,
     /// Account delta of the block, if the block changed the account.
@@ -161,7 +161,7 @@ const SLOW_FOLD_THRESHOLD: Duration = Duration::from_millis(5);
 /// behind a `Mutex`. Window and database overlap by up to `depth` blocks; readers that merge both
 /// must start window reads at `db_committed + 1` (see [`DeltaWindow::uncommitted_blocks`]).
 #[derive(DeepSizeOf)]
-pub(crate) struct DeltaWindow {
+pub struct DeltaWindow {
     extractor: String,
     buffer: ReorgBuffer<Arc<BlockAggregatedChanges>>,
     config: WindowConfig,
@@ -528,7 +528,7 @@ impl DeltaWindow {
 // on the same blocks, so a fix to one that misses the other fails.
 
 /// Every change in `blocks` to the components `ids`, in block order. Ids with no change are absent.
-pub(crate) fn component_changes(
+pub fn component_changes(
     blocks: &[Arc<BlockAggregatedChanges>],
     ids: &[&str],
 ) -> HashMap<String, Vec<ComponentChange>> {
@@ -571,7 +571,7 @@ pub(crate) fn component_changes(
 
 /// Every change in `blocks` to the accounts `addresses`, in block order. Addresses with no change
 /// are absent.
-pub(crate) fn account_changes(
+pub fn account_changes(
     blocks: &[Arc<BlockAggregatedChanges>],
     addresses: &[Bytes],
 ) -> HashMap<Bytes, Vec<AccountChange>> {

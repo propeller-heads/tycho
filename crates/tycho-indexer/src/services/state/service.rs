@@ -83,7 +83,7 @@ impl<T> EntityCacheSetup<T> {
 
 /// Why the cache handed a request to the database path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FallbackReason {
+pub enum FallbackReason {
     /// The version is below the window.
     BelowWindow,
     /// The window holds no block: at startup, or after the extractor restarted.
@@ -126,7 +126,7 @@ impl FallbackReason {
 
 /// Why the state service did not answer a request. The RPC handler picks the response for each.
 #[derive(Debug, Error)]
-pub(crate) enum StateServiceError {
+pub enum StateServiceError {
     /// The cache cannot answer this request; the database path answers it instead. See the
     /// module doc for when this happens.
     #[error("Entity cache fallback: {0:?}")]
@@ -151,14 +151,14 @@ pub(crate) enum StateServiceError {
 /// What a read depends on besides the request: the window of the requested system and the entity
 /// cache. A read straddles a change when the tokens taken before and after it differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StraddleToken {
+pub struct StraddleToken {
     /// `None` when the system has no window or its lock is poisoned; the read then fails anyway.
     window_generation: Option<u64>,
     folds: u64,
 }
 
 /// Answers state requests from the delta windows and the entity cache. Never reads the database.
-pub(crate) struct StateService {
+pub struct StateService {
     /// One window per protocol system, shared with the pump that writes them.
     windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
     cache: Arc<EntityCache>,

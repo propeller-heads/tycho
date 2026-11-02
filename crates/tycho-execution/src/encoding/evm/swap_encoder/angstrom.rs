@@ -37,7 +37,7 @@ type WindowFetcher = Box<dyn Fn() -> Result<AttestationResponse, EncodingError> 
 ///
 /// A refresh replaces the whole window rather than appending to it, so this holds one window of
 /// `ANGSTROM_BLOCKS_IN_FUTURE + 1` attestations and does not grow with uptime.
-pub(crate) struct AttestationCache {
+pub struct AttestationCache {
     fetcher: Result<WindowFetcher, String>,
     window: RwLock<Option<CachedWindow>>,
 }
@@ -282,14 +282,14 @@ fn encode_attestations(response: &AttestationResponse) -> Result<Vec<u8>, Encodi
 
 /// Response from the Angstrom attestation API.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct AttestationResponse {
+pub struct AttestationResponse {
     pub(crate) success: bool,
     pub(crate) attestations: Vec<AttestationData>,
 }
 
 /// The attestation unlocking Angstrom's pools for one block.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct AttestationData {
+pub struct AttestationData {
     #[serde(rename = "blockNumber")]
     pub(crate) block_number: u64,
     #[serde(rename = "unlockData")]

@@ -5,14 +5,14 @@ use tycho_common::simulation::errors::SimulationError;
 
 use crate::evm::protocol::safe_math::safe_div_u256;
 
-pub(crate) const MIN_TICK: i32 = -887272;
-pub(crate) const MAX_TICK: i32 = 887272;
+pub const MIN_TICK: i32 = -887272;
+pub const MAX_TICK: i32 = 887272;
 
 // MIN_SQRT_RATIO: 4295128739
-pub(crate) const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739u64, 0, 0, 0]);
+pub const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739u64, 0, 0, 0]);
 
 // MAX_SQRT_RATIO: 1461446703485210103287273052203988822378723970342
-pub(crate) const MAX_SQRT_RATIO: U256 =
+pub const MAX_SQRT_RATIO: U256 =
     U256::from_limbs([6743328256752651558u64, 17280870778742802505u64, 4294805859u64, 0]);
 
 /// Slots in each thread's cache of [`get_sqrt_ratio_at_tick_cached`]. Must be a power of two.
@@ -31,7 +31,7 @@ thread_local! {
 /// [`get_sqrt_ratio_at_tick`], with the results kept in a cache for each thread.
 ///
 /// Each slot holds one tick. A different tick that maps to the same slot replaces it.
-pub(crate) fn get_sqrt_ratio_at_tick_cached(tick: i32) -> Result<U256, SimulationError> {
+pub fn get_sqrt_ratio_at_tick_cached(tick: i32) -> Result<U256, SimulationError> {
     let shift = u32::BITS - SQRT_RATIO_CACHE_SLOTS.trailing_zeros();
     let slot = ((tick as u32).wrapping_mul(FIBONACCI_HASH_MULTIPLIER) >> shift) as usize;
     let cached = SQRT_RATIO_CACHE.with_borrow(|cache| match cache[slot] {
@@ -54,7 +54,7 @@ fn mul_shift_128(ratio: U256, factor: U256) -> U256 {
     ratio.wrapping_mul(factor) >> 128
 }
 
-pub(crate) fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError> {
+pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, SimulationError> {
     if !(MIN_TICK..=MAX_TICK).contains(&tick) {
         return Err(SimulationError::FatalError(format!(
             "Tick {} is outside valid range [{}, {}]",
@@ -207,7 +207,7 @@ fn square_u128(x: u128) -> (u128, u128) {
 
 /// Returns the range error of `get_tick_at_sqrt_ratio` when `sqrt_price < MIN_SQRT_RATIO` or
 /// `sqrt_price >= MAX_SQRT_RATIO`.
-pub(crate) fn check_sqrt_price_in_range(sqrt_price: U256) -> Result<(), SimulationError> {
+pub fn check_sqrt_price_in_range(sqrt_price: U256) -> Result<(), SimulationError> {
     if sqrt_price < MIN_SQRT_RATIO || sqrt_price >= MAX_SQRT_RATIO {
         return Err(SimulationError::FatalError(format!(
             "sqrt_price {} is outside valid range [{}, {})",
@@ -217,7 +217,7 @@ pub(crate) fn check_sqrt_price_in_range(sqrt_price: U256) -> Result<(), Simulati
     Ok(())
 }
 
-pub(crate) fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
+pub fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> {
     check_sqrt_price_in_range(sqrt_price)?;
     let ratio_x128 = sqrt_price << 32;
     let msb = most_significant_bit(ratio_x128)?;

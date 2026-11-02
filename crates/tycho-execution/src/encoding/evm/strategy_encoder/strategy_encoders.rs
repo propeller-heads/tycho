@@ -129,7 +129,7 @@ fn encode_swap_groups(
 /// * `single_swap_validator`: SingleSwapValidator, responsible for checking validity of the swap
 ///   path
 #[derive(Clone)]
-pub(crate) struct SingleSwapStrategyEncoder {
+pub struct SingleSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     router_address: Bytes,
     single_swap_validator: SingleSwapValidator,
@@ -231,7 +231,7 @@ impl SingleSwapStrategyEncoder {
 /// * `sequential_swap_validator`: SequentialSwapValidator, responsible for checking validity of
 ///   sequential swap solutions
 #[derive(Clone)]
-pub(crate) struct SequentialSwapStrategyEncoder {
+pub struct SequentialSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     router_address: Bytes,
     sequential_swap_validator: SequentialSwapValidator,
@@ -325,7 +325,7 @@ impl SequentialSwapStrategyEncoder {
 ///   solutions
 /// * `router_address`: Address of the router to be used to execute swaps
 #[derive(Clone)]
-pub(crate) struct SplitSwapStrategyEncoder {
+pub struct SplitSwapStrategyEncoder {
     swap_encoder_registry: SwapEncoderRegistry,
     split_swap_validator: SplitSwapValidator,
     router_address: Bytes,

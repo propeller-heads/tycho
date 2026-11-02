@@ -31,11 +31,11 @@ use super::{
 
 /// A component id, an entry point, its tracing type, its tracing params JSON and its tracing
 /// result JSON.
-pub(crate) type TracedEntryPointRow =
+pub type TracedEntryPointRow =
     (String, orm::EntryPoint, EntryPointTracingType, Option<String>, Option<String>);
 
 /// Traced entry point rows as loaded from the database, with unparsed JSON.
-pub(crate) struct TracedEntryPointRows {
+pub struct TracedEntryPointRows {
     pub(crate) total: Option<i64>,
     pub(crate) rows: Vec<TracedEntryPointRow>,
 }

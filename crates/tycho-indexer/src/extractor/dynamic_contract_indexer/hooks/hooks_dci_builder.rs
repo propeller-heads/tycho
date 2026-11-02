@@ -34,7 +34,7 @@ use crate::extractor::{
 };
 
 /// Builder for creating a fully configured UniswapV4HookDCI
-pub(crate) struct UniswapV4HookDCIBuilder<AE, T, G>
+pub struct UniswapV4HookDCIBuilder<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,

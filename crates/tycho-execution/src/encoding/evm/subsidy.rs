@@ -33,14 +33,14 @@ mod typed {
 
 const PAYER_CONFIG_KEY: &str = "payer_address";
 const MAX_ENCODABLE_DEADLINE: u64 = (1 << 48) - 1;
-pub(crate) const SUBSIDY_SIGNATURE_LEN: usize = 65;
+pub const SUBSIDY_SIGNATURE_LEN: usize = 65;
 
 /// Start of the signature in the subsidizing executor's swap data.
-pub(crate) const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
+pub const SUBSIDY_SIGNATURE_OFFSET: usize = 20 + 32 + 32 + 32 + 6;
 
 /// The subsidizing executor and the subsidy payer of a chain.
 #[derive(Clone, Debug)]
-pub(crate) struct SubsidyEncoder {
+pub struct SubsidyEncoder {
     executor_address: Bytes,
     payer_address: Bytes,
     chain: Chain,
@@ -75,7 +75,7 @@ impl SubsidyEncoder {
 }
 
 /// The swap group that carries a solution's subsidy.
-pub(crate) struct SubsidizedGroup<'a> {
+pub struct SubsidizedGroup<'a> {
     pub(crate) group_index: usize,
     token_out: &'a Bytes,
     terms: &'a SubsidyTerms,
@@ -84,7 +84,7 @@ pub(crate) struct SubsidizedGroup<'a> {
 }
 
 /// Signing hash and signature position of the subsidized group, after wrapping.
-pub(crate) struct SubsidizedGroupSignature {
+pub struct SubsidizedGroupSignature {
     pub(crate) group_index: usize,
     signing_hash: B256,
     /// Distance from the start of the signature to the end of the group's protocol data.
@@ -152,7 +152,7 @@ impl SubsidizedGroup<'_> {
 }
 
 /// The solution's subsidy terms, or `None` when it has none or is cyclical.
-pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
+pub fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
     if solution.token_in() == solution.token_out() {
         return None;
     }
@@ -164,7 +164,7 @@ pub(crate) fn encoded_subsidy(solution: &Solution) -> Option<&SubsidyTerms> {
 ///
 /// Expects a solution that passed [`validate_subsidy`]. Fails with `FatalError` when the chain
 /// has no subsidizing executor.
-pub(crate) fn select_subsidized_group<'a>(
+pub fn select_subsidized_group<'a>(
     solution: &'a Solution,
     groups: &'a [SwapGroup],
     swap_encoder_registry: &'a SwapEncoderRegistry,
@@ -185,7 +185,7 @@ pub(crate) fn select_subsidized_group<'a>(
 /// Fails unless the solution's subsidy, if any, can be paid: `InvalidInput` when the solution, its
 /// subsidy terms or the swap group they name cannot carry it, `FatalError` when the chain has no
 /// subsidizing executor.
-pub(crate) fn validate_subsidy(
+pub fn validate_subsidy(
     solution: &Solution,
     groups: &[SwapGroup],
     swap_encoder_registry: &SwapEncoderRegistry,

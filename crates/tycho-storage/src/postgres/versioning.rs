@@ -121,7 +121,7 @@ pub trait StoredVersionedRow {
 }
 
 #[derive(Debug)]
-pub(crate) enum VersioningEntry<T: PartitionedVersionedRow> {
+pub enum VersioningEntry<T: PartitionedVersionedRow> {
     Update(T),
     Deletion((T::EntityId, NaiveDateTime)),
 }

@@ -40,7 +40,7 @@ pub struct AeroHookFee {
 }
 
 /// The pool's oracle state the TWAP reads, before the swap.
-pub(crate) struct PoolOracle<'a> {
+pub struct PoolOracle<'a> {
     pub tick: i32,
     pub liquidity: u128,
     pub observation_index: u16,
@@ -50,7 +50,7 @@ pub(crate) struct PoolOracle<'a> {
 
 /// Where a quoted swap executes.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Execution {
+pub struct Execution {
     pub block: u64,
     pub timestamp: u32,
     /// Whether the quote may assume it is the first swap on the pool in its block.
@@ -59,7 +59,7 @@ pub(crate) struct Execution {
 
 /// The fee a swap pays, and the block fee the hook stores when the swap is the block's first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HookFee {
+pub struct HookFee {
     pub fee: u32,
     pub block_fee_to_store: Option<u32>,
     /// Whether resolving the fee ran the TWAP `observe` (for gas).

@@ -11,7 +11,7 @@ use crate::evm::protocol::{
 
 /// How the curve evaluates `a * b / c` products.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StableMath {
+pub enum StableMath {
     /// Checked 256-bit multiplication: overflow is an error, as in Solidity 0.8 `a * b / c`
     /// (Aerodrome V1).
     Checked,
@@ -30,7 +30,7 @@ impl StableMath {
 
 /// A Solidly stable pool (`x^3 * y + y^3 * x = k`): raw reserves and token decimals.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct StablePool {
+pub struct StablePool {
     pub reserve0: U256,
     pub reserve1: U256,
     pub decimals0: u8,

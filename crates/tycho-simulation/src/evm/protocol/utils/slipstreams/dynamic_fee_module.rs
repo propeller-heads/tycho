@@ -6,12 +6,12 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::protocol::utils::slipstreams::observations::Observations;
 
-pub(crate) const ZERO_FEE_INDICATOR: u32 = 420;
-pub(crate) const DEFAULT_SECONDS_AGO: u32 = 600;
-pub(crate) const MIN_SECONDS_AGO: u32 = 2;
-pub(crate) const DEFAULT_SCALING_FACTOR: u64 = 0;
+pub const ZERO_FEE_INDICATOR: u32 = 420;
+pub const DEFAULT_SECONDS_AGO: u32 = 600;
+pub const MIN_SECONDS_AGO: u32 = 2;
+pub const DEFAULT_SCALING_FACTOR: u64 = 0;
 // The upgraded DynamicSwapFeeModule deployments use 30_000 as their default fee cap.
-pub(crate) const DEFAULT_FEE_CAP: u32 = 30_000;
+pub const DEFAULT_FEE_CAP: u32 = 30_000;
 const SCALING_PRECISION: u128 = 1_000_000;
 const SUPPORTED_DYNAMIC_FEE_MODULES: [Address; 4] = [
     address!("090b2A6bb475c00e2256e2095A60887cD710803b"),
@@ -144,7 +144,7 @@ impl DynamicFeeConfig {
 /// worst-case default the oracle read is charged whenever the dynamic branch evaluated it, even
 /// when the initial fee wins the max — conservative on both fee and gas.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedFee {
+pub struct ResolvedFee {
     pub(crate) fee: u32,
     pub(crate) observed_twap: bool,
 }
@@ -166,7 +166,7 @@ impl ResolvedFee {
     clippy::too_many_arguments,
     reason = "inputs mirror the on-chain dynamic fee module and pool state"
 )]
-pub(crate) fn get_dynamic_fee(
+pub fn get_dynamic_fee(
     dfc: &DynamicFeeConfig,
     default_base_fee: u32,
     current_tick: i32,

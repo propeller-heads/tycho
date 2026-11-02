@@ -56,7 +56,7 @@ pub(super) trait HookOrchestrator: Send + Sync {
     ) -> Result<(), HookOrchestratorError>;
 }
 
-pub(crate) struct HookOrchestratorRegistry {
+pub struct HookOrchestratorRegistry {
     hooks: HashMap<Address, Box<dyn HookOrchestrator>>,
     hook_identifiers: HashMap<String, Box<dyn HookOrchestrator>>,
     default_orchestrator: Option<Box<dyn HookOrchestrator>>,
@@ -125,7 +125,7 @@ impl HookOrchestratorRegistry {
     }
 }
 
-pub(crate) struct DefaultUniswapV4HookOrchestrator<B>
+pub struct DefaultUniswapV4HookOrchestrator<B>
 where
     B: BalanceSlotDetector,
 {

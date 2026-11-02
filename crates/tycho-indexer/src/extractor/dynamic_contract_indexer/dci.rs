@@ -30,7 +30,7 @@ use crate::extractor::{
     ExtractionError, ExtractorExtension,
 };
 
-pub(crate) struct DynamicContractIndexer<AE, T, G>
+pub struct DynamicContractIndexer<AE, T, G>
 where
     AE: AccountExtractor + Send + Sync,
     T: EntryPointTracer + Send + Sync,

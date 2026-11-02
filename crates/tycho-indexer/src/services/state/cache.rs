@@ -59,7 +59,7 @@ use tycho_common::{
     Bytes,
 };
 
-pub(crate) mod view;
+pub mod view;
 
 use super::window::FoldSink;
 
@@ -79,7 +79,7 @@ enum WriteOutcome {
 
 /// A cached value together with the timestamp of the write that set it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Timestamped<T> {
+pub struct Timestamped<T> {
     value: T,
     written_at: WriteTimestamp,
 }
@@ -136,7 +136,7 @@ fn write_timestamped<K: Eq + Hash, V: PartialEq>(
 
 /// Contract code with its hash, so a code write replaces both or neither.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedCode {
+pub struct CachedCode {
     pub(crate) code: Code,
     pub(crate) hash: CodeHash,
 }
@@ -153,7 +153,7 @@ impl CachedCode {
 /// (which run at different points of the chain) can never regress a value: only a strictly newer
 /// block replaces one. The getters return each value with its timestamp.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedAccount {
+pub struct CachedAccount {
     chain: Chain,
     address: Address,
     title: String,
@@ -396,7 +396,7 @@ impl From<CachedAccount> for Account {
 
 /// Cached state of one protocol component.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CachedComponentState {
+pub struct CachedComponentState {
     component_id: ComponentId,
     attributes: HashMap<AttrStoreKey, StoreVal>,
     balances: HashMap<Address, Balance>,
@@ -503,7 +503,7 @@ pub struct EntityCache {
 }
 
 /// The maps behind the lock.
-pub(crate) struct CacheState {
+pub struct CacheState {
     accounts: HashMap<Address, Arc<CachedAccount>>,
     /// Component states by protocol system, then component id. The system is the extractor name:
     /// the RPC resolves one window per protocol system by extractor name, so both are one string.

@@ -26,7 +26,7 @@ use crate::rpc::config::RPCRetryConfig;
 /// Adapted from alloy-transport:
 /// https://github.com/alloy-rs/alloy/blob/a3899575fbc0c789275f95661516b99e9a92838d/crates/transport/src/error.rs#L156
 /// License: MIT OR Apache-2.0
-pub(crate) trait RetryableError {
+pub trait RetryableError {
     /// Analyzes whether to retry the request depending on the error.
     ///
     /// Returns `true` for transient errors that are likely to succeed on retry:
@@ -237,7 +237,7 @@ impl RetryPolicy {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::{
         borrow::Cow,
         sync::{
@@ -254,9 +254,9 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) const MOCK_RETRY_POLICY_MAX_ATTEMPTS: usize = 3;
+    pub const MOCK_RETRY_POLICY_MAX_ATTEMPTS: usize = 3;
 
-    pub(crate) fn mock_retry_policy() -> RetryPolicy {
+    pub fn mock_retry_policy() -> RetryPolicy {
         let inner = ExponentialBackoffBuilder::new()
             .with_initial_interval(Duration::from_millis(10))
             .with_multiplier(2.0)

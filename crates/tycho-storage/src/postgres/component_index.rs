@@ -121,14 +121,14 @@ const MAX_REFRESH_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// One page of a query: the database ids on the page, in ascending order, and the number of
 /// components matching the filters on all pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ComponentPage {
+pub struct ComponentPage {
     pub(crate) ids: Vec<i64>,
     pub(crate) total: i64,
 }
 
 /// What a [`ComponentIndex::refresh`] did with TVL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefreshOutcome {
+pub enum RefreshOutcome {
     /// No TVL row changed.
     TvlUnchanged,
     /// Applied the TVL rows that changed.
@@ -290,7 +290,7 @@ struct RefreshState {
 /// Holds only the database id and the TVL of each component of one chain, grouped by protocol
 /// system in ascending id order. Answers which components match a request and how many there are;
 /// the component contents stay in Postgres. See the module docs for the design.
-pub(crate) struct ComponentIndex {
+pub struct ComponentIndex {
     chain: Chain,
     chain_db_id: i64,
     index: RwLock<ChainIndex>,
