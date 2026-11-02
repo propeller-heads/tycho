@@ -49,6 +49,8 @@ pub const MIN_SNAPSHOT_JITTER: Duration = Duration::from_secs(5);
 const SNAPSHOT_BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// Longest background snapshot backoff.
 const SNAPSHOT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Messages a synchronizer can queue for the block synchronizer before its send waits.
+pub(crate) const SYNC_CHANNEL_CAPACITY: usize = 15;
 
 /// Returns the background snapshot backoff after `failures` consecutive transient failures.
 /// One failure gives [`SNAPSHOT_BACKOFF_BASE`]; each further failure doubles it, up to
@@ -1247,7 +1249,7 @@ where
     async fn start(
         mut self,
     ) -> (SynchronizerTaskHandle, Receiver<SyncResult<StateSyncMessage<BlockHeader>>>) {
-        let (mut tx, rx) = channel(15);
+        let (mut tx, rx) = channel(SYNC_CHANNEL_CAPACITY);
         let (end_tx, end_rx) = oneshot::channel::<()>();
 
         let jh = tokio::spawn(async move {
