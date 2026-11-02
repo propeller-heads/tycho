@@ -362,7 +362,6 @@ fn set_partitioned_versioning_attributes<N: PartitionedVersionedRow>(
     let mut latest = db_latest.clone();
     let mut archived = Vec::new();
     let mut deleted = HashSet::new();
-    let mut to_skip = HashSet::new();
     for item in new_data.iter() {
         let id = item.get_id();
         match item {
@@ -377,7 +376,6 @@ fn set_partitioned_versioning_attributes<N: PartitionedVersionedRow>(
                             "Skipping update for {:?} since it's older than/equal to the latest version",
                             id
                         );
-                        to_skip.insert(id.clone());
                         continue;
                     }
                 }
@@ -398,7 +396,6 @@ fn set_partitioned_versioning_attributes<N: PartitionedVersionedRow>(
                             "Skipping delete for {:?} since it's older than/equal to the latest version",
                             id
                         );
-                        to_skip.insert(id.clone());
                         continue;
                     }
                 }
@@ -416,7 +413,14 @@ fn set_partitioned_versioning_attributes<N: PartitionedVersionedRow>(
             }
         }
     }
-    latest.retain(|id, _| !to_skip.contains(id));
+    // Write only rows newer than the stored latest. An outdated entry in the batch (e.g. a version
+    // another extractor already stored) is skipped on its own; it must not drop newer versions of
+    // the same entity that the batch also carries.
+    latest.retain(|id, row| {
+        db_latest
+            .get(id)
+            .is_none_or(|stored| row.get_valid_from() > stored.get_valid_from())
+    });
     Ok((latest.into_values().collect(), archived, deleted.into_iter().collect()))
 }
 
@@ -601,6 +605,53 @@ mod test {
             Some(txns[1]),
         )
         .await;
+    }
+
+    fn ps(value: u8, ts: i64) -> NewProtocolState {
+        NewProtocolState {
+            protocol_component_id: 1,
+            attribute_name: "slot".to_string(),
+            attribute_value: Bytes::from(value),
+            previous_value: None,
+            modify_tx: ts,
+            valid_from: chrono::DateTime::from_timestamp_micros(ts)
+                .unwrap()
+                .naive_utc(),
+            valid_to: chrono::DateTime::from_timestamp_micros(i64::MAX / 2)
+                .unwrap()
+                .naive_utc(),
+        }
+    }
+
+    /// A batch that re-sends the stored version and then carries newer ones (e.g. two extractors
+    /// writing the same account's storage) must archive the stored version and keep the newest
+    /// one as latest.
+    #[test]
+    fn test_resent_version_followed_by_newer_ones_keeps_the_newest() {
+        let db = vec![ps(1, 10)];
+        let batch = [
+            VersioningEntry::Update(ps(1, 10)), // already stored: skipped
+            VersioningEntry::Update(ps(2, 20)),
+            VersioningEntry::Update(ps(3, 30)),
+        ];
+        let (latest, archived, _) = set_partitioned_versioning_attributes(&db, &batch).unwrap();
+        let archived: Vec<_> = archived
+            .iter()
+            .map(|r| (r.attribute_value.clone(), r.valid_to.and_utc().timestamp_micros()))
+            .collect();
+        assert_eq!(archived, vec![(Bytes::from(1u8), 20), (Bytes::from(2u8), 30)]);
+        let latest: Vec<_> = latest
+            .iter()
+            .map(|r| {
+                (
+                    r.attribute_value.clone(),
+                    r.valid_from
+                        .and_utc()
+                        .timestamp_micros(),
+                )
+            })
+            .collect();
+        assert_eq!(latest, vec![(Bytes::from(3u8), 30)]);
     }
 
     #[tokio::test]
