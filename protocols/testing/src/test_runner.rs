@@ -54,7 +54,9 @@ use tycho_test::{
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig},
+    config::{
+        Harness, IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip,
+    },
     execution,
     report::{CheckId, Checks, Report},
     rpc::RPCProvider,
@@ -567,6 +569,21 @@ impl TestRunner {
 
         info!("Running {} tests on Chain {}...\n", tests_count, self.chain);
 
+        if config.harness == Harness::Strict &&
+            execution::has_executor_fixture(self.chain, &config.protocol_system)
+        {
+            let unjustified = config.execution_skips_without_evidence();
+            ensure!(
+                unjustified.is_empty(),
+                "`harness: strict`: the harness plants the {} executor's runtime bytecode from \
+                 protocols/testing/fixtures/, so execution runs whether or not the executor is \
+                 deployed, and a missing deployment is not a reason to skip it. Remove these \
+                 `skip_execution`s, or add `evidence` showing why execution cannot be tested: {}",
+                config.protocol_system,
+                unjustified.join("; ")
+            );
+        }
+
         let mut failed_tests: Vec<String> = Vec::new();
         let mut report = Report {
             package: self.protocol.clone(),
@@ -733,9 +750,9 @@ impl TestRunner {
             self.validate_excluded_components(&test.excluded_components, &protocol_components)
         })?;
 
-        if config.skip_balance_check {
-            info!("Skipping balance check");
-            checks.skip(CheckId::Balances, "skip_balance_check: true");
+        if let Some(reason) = config.skip_balance_check.reason() {
+            info!("Skipping balance check: {reason}");
+            checks.skip(CheckId::Balances, reason);
         } else {
             checks.run(CheckId::Balances, || {
                 self.validate_token_balances(
@@ -746,6 +763,16 @@ impl TestRunner {
                 info!("All token balances match the values found onchain");
                 Ok(())
             })?;
+        }
+
+        for component in &test.expected_components {
+            let id = &component.base.id;
+            if let Some(reason) = component.skip_simulation.reason() {
+                checks.skip_component(CheckId::SimLadder, id, reason);
+                checks.skip_component(CheckId::ExecLadder, id, reason);
+            } else if let Some(reason) = component.skip_execution.reason() {
+                checks.skip_component(CheckId::ExecLadder, id, reason);
+            }
         }
 
         let Some(update) = checks.run(CheckId::Decode, || {
@@ -1283,23 +1310,14 @@ impl TestRunner {
         expected_components: &[ProtocolComponentWithTestConfig],
         protocol_system: &String,
     ) -> miette::Result<HashMap<String, TychoExecutionInput>> {
-        let skip_simulation: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_simulation)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
-
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
+        let skip_simulation = skip_reasons(expected_components, |c| &c.skip_simulation);
+        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
 
         let mut execution_data = HashMap::new();
 
         for (id, state) in update.states.iter() {
-            if skip_simulation.contains(id) {
-                info!("Skipping simulation for component {id}");
+            if let Some(reason) = skip_simulation.get(id) {
+                info!("Skipping simulation for component {id}: {reason}");
                 continue;
             }
             let component = protocol_components
@@ -1414,8 +1432,8 @@ impl TestRunner {
 
                     quoted_any_direction = true;
 
-                    if skip_execution.contains(id) {
-                        info!("Skipping execution for component {id}");
+                    if let Some(reason) = skip_execution.get(id) {
+                        info!("Skipping execution for component {id}: {reason}");
                         continue;
                     }
 
@@ -1510,16 +1528,12 @@ impl TestRunner {
             return Ok(());
         }
 
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
+        let skip_execution = skip_reasons(expected_components, |c| &c.skip_execution);
 
         // Filter out skipped components
         let filtered_execution_data: HashMap<_, _> = execution_data
             .into_iter()
-            .filter(|(_, input)| !skip_execution.contains(&input.component_id.to_lowercase()))
+            .filter(|(_, input)| !skip_execution.contains_key(&input.component_id.to_lowercase()))
             .collect();
 
         if filtered_execution_data.is_empty() {
@@ -1737,10 +1751,24 @@ fn undecoded_components<'a>(
         .collect();
     expected_components
         .iter()
-        .filter(|component| !component.skip_simulation)
+        .filter(|component| !component.skip_simulation.is_skipped())
         .map(|component| component.base.id.to_lowercase())
         .filter(|id| !decoded.contains(id))
         .collect()
+}
+
+/// The lowercase ids of the expected components whose `flag` is skipped, each with its reason.
+fn skip_reasons<'a>(
+    expected_components: &'a [ProtocolComponentWithTestConfig],
+    flag: impl Fn(&'a ProtocolComponentWithTestConfig) -> &'a Skip,
+) -> HashMap<String, &'a str> {
+    let mut reasons = HashMap::new();
+    for component in expected_components {
+        if let Some(reason) = flag(component).reason() {
+            reasons.insert(component.base.id.to_lowercase(), reason);
+        }
+    }
+    reasons
 }
 
 #[cfg(test)]

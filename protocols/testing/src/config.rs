@@ -1,11 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     io::Read,
 };
 
 use colored::Colorize;
 use miette::{miette, IntoDiagnostic, WrapErr};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, MapAccess, Visitor},
+    ser::SerializeMap,
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
@@ -25,8 +30,8 @@ pub struct ProtocolComponentExpectation {
 pub struct ProtocolComponentWithTestConfig {
     #[serde(flatten)]
     pub base: ProtocolComponentExpectation,
-    pub skip_simulation: bool,
-    pub skip_execution: bool,
+    pub skip_simulation: Skip,
+    pub skip_execution: Skip,
 }
 
 /// An `expected_components` entry as written in the yaml, with every key at one level.
@@ -40,10 +45,10 @@ struct ExpectedComponentEntry {
     #[serde(default)]
     static_attributes: HashMap<String, Bytes>,
     creation_tx: Bytes,
-    #[serde(default = "default_false")]
-    skip_simulation: bool,
-    #[serde(default = "default_false")]
-    skip_execution: bool,
+    #[serde(default)]
+    skip_simulation: Skip,
+    #[serde(default)]
+    skip_execution: Skip,
 }
 
 impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
@@ -60,6 +65,123 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
             skip_simulation,
             skip_execution,
+        }
+    }
+}
+
+/// A check a package turns off, and why.
+///
+/// Written as `false`, as a bare `true`, or as an object with the reason:
+///
+/// ```yaml
+/// skip_execution:
+///   reason: "range predates Shanghai; the router needs PUSH0"
+///   until: "re-record the range after block 17034870"
+/// ```
+///
+/// A bare `true` gives no reason; strict mode rejects it. `evidence` is what shows the check cannot
+/// run, such as a revert trace or a command and its output; strict mode requires it where the
+/// reason alone cannot justify the skip.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Skip {
+    #[default]
+    No,
+    Yes {
+        reason: Option<String>,
+        until: Option<String>,
+        evidence: Option<String>,
+    },
+}
+
+impl Skip {
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Skip::Yes { .. })
+    }
+
+    /// Why the check is off, for logs and the report. `None` when it is not skipped.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Skip::No => None,
+            Skip::Yes { reason: Some(reason), .. } => Some(reason),
+            Skip::Yes { reason: None, .. } => Some("no reason given"),
+        }
+    }
+
+    fn has_reason(&self) -> bool {
+        matches!(self, Skip::No | Skip::Yes { reason: Some(_), .. })
+    }
+
+    fn has_evidence(&self) -> bool {
+        matches!(self, Skip::Yes { evidence: Some(_), .. })
+    }
+}
+
+impl<'de> Deserialize<'de> for Skip {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SkipVisitor;
+
+        impl<'de> Visitor<'de> for SkipVisitor {
+            type Value = Skip;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("`false`, `true`, or `{reason: ..., until: ..., evidence: ...}`")
+            }
+
+            fn visit_bool<E: de::Error>(self, skipped: bool) -> Result<Skip, E> {
+                Ok(if skipped {
+                    Skip::Yes { reason: None, until: None, evidence: None }
+                } else {
+                    Skip::No
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Skip, A::Error> {
+                let (mut reason, mut until, mut evidence) = (None, None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    let slot = match key.as_str() {
+                        "reason" => &mut reason,
+                        "until" => &mut until,
+                        "evidence" => &mut evidence,
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &["reason", "until", "evidence"],
+                            ))
+                        }
+                    };
+                    let value: String = map.next_value()?;
+                    if value.trim().is_empty() {
+                        return Err(de::Error::custom(format!("`{key}` of a skip is empty")));
+                    }
+                    *slot = Some(value);
+                }
+                if reason.is_none() {
+                    return Err(de::Error::missing_field("reason"));
+                }
+                Ok(Skip::Yes { reason, until, evidence })
+            }
+        }
+
+        deserializer.deserialize_any(SkipVisitor)
+    }
+}
+
+impl Serialize for Skip {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Skip::No => serializer.serialize_bool(false),
+            Skip::Yes { reason: None, until: None, evidence: None } => {
+                serializer.serialize_bool(true)
+            }
+            Skip::Yes { reason, until, evidence } => {
+                let mut map = serializer.serialize_map(None)?;
+                for (key, value) in [("reason", reason), ("until", until), ("evidence", evidence)] {
+                    if let Some(value) = value {
+                        map.serialize_entry(key, value)?;
+                    }
+                }
+                map.end()
+            }
         }
     }
 }
@@ -158,10 +280,6 @@ impl ProtocolComponentExpectation {
     }
 }
 
-fn default_false() -> bool {
-    false
-}
-
 /// Configuration for an individual test
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationTest {
@@ -198,7 +316,7 @@ pub struct IntegrationTestsConfig {
     pub adapter_build_signature: Option<String>,
     pub adapter_build_args: Option<String>,
     pub initialized_accounts: Option<Vec<String>>,
-    pub skip_balance_check: bool,
+    pub skip_balance_check: Skip,
     pub protocol_type_names: Vec<String>,
     pub protocol_system: String,
     pub module_name: Option<String>,
@@ -219,6 +337,9 @@ impl IntegrationTestsConfig {
             .into_diagnostic()
             .wrap_err_with(|| format!("Failed to load test configuration {source}"))?;
 
+        if config.harness == Harness::Strict {
+            config.check_skips_have_reasons(source)?;
+        }
         if unknown_keys.is_empty() {
             return Ok(config);
         }
@@ -236,5 +357,50 @@ impl IntegrationTestsConfig {
                 Ok(config)
             }
         }
+    }
+
+    /// Every skip in the configuration, with where it is written: `(location, flag, skip)`.
+    pub fn skips(&self) -> Vec<(String, &'static str, &Skip)> {
+        let mut skips =
+            vec![("package".to_string(), "skip_balance_check", &self.skip_balance_check)];
+        for test in &self.tests {
+            for component in &test.expected_components {
+                let location = format!("test `{}`, component {}", test.name, component.base.id);
+                skips.push((location.clone(), "skip_simulation", &component.skip_simulation));
+                skips.push((location, "skip_execution", &component.skip_execution));
+            }
+        }
+        skips
+    }
+
+    /// Strict mode: every skip states its reason.
+    fn check_skips_have_reasons(&self, source: &str) -> miette::Result<()> {
+        let missing: Vec<String> = self
+            .skips()
+            .into_iter()
+            .filter(|(_, _, skip)| !skip.has_reason())
+            .map(|(location, flag, _)| format!("{flag} ({location})"))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(miette!(
+            "{source} declares `harness: strict`, where every skip needs a reason, but these are a \
+             bare `true`: {}. Write each as `{{reason: \"...\"}}`, or remove it.",
+            missing.join(", ")
+        ))
+    }
+
+    /// Strict mode: a `skip_execution` needs evidence when the harness has the protocol's executor
+    /// fixture, since the harness plants that bytecode and execution can run whether or not the
+    /// executor is deployed. Returns the components whose skip lacks it.
+    pub fn execution_skips_without_evidence(&self) -> Vec<String> {
+        self.skips()
+            .into_iter()
+            .filter(|(_, flag, skip)| {
+                *flag == "skip_execution" && skip.is_skipped() && !skip.has_evidence()
+            })
+            .map(|(location, _, _)| location)
+            .collect()
     }
 }
