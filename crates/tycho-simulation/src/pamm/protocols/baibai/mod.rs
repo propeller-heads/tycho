@@ -66,11 +66,11 @@ pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
     address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
 ];
 
-/// The entrypoint's fee on Tycho's router, in millionths of the gross output: the venue default
-/// every unlisted caller pays. Set by hand rather than read from the chain; becomes zero once
-/// BaiBai whitelists the router. Above the live fee the books under-quote; below it a swap
-/// receives less than quoted and the router's minimum output reverts it.
-pub(crate) const ROUTER_FEE_PIPS: u32 = 50;
+/// The entrypoint's fee on Tycho's router, in millionths of the gross output. BaiBai whitelisted
+/// the router at zero for every base at block 53,359,421; other callers pay the venue default of
+/// 50. Set by hand rather than read from the chain. Above the live fee the books under-quote;
+/// below it a swap receives less than quoted and the router's minimum output reverts it.
+pub(crate) const ROUTER_FEE_PIPS: u32 = 0;
 
 #[cfg(test)]
 mod test_support;
