@@ -212,7 +212,7 @@ impl ExtractorFactory {
         let chain_state = ChainState::new(
             chrono::Local::now().naive_utc(),
             block_number,
-            chain.block_time_secs() as i64,
+            chain.block_time_secs(),
         );
 
         Ok(Self {
@@ -388,7 +388,12 @@ impl ExtractorFactory {
             Some(spkg),
             self.config.module_name.clone(),
             start_block,
-            self.config.stop_block.unwrap_or(0) as u64,
+            u64::try_from(self.config.stop_block.unwrap_or(0)).map_err(|_overflow| {
+                ExtractionError::Setup(format!(
+                    "stop block {:?} must not be negative",
+                    self.config.stop_block
+                ))
+            })?,
             false, // final_block_only: not exposed in config, always false.
             extractor.get_id().to_string(),
             self.partial_blocks,

@@ -155,10 +155,9 @@ impl Permit2 {
         token: &Bytes,
         amount: &BigUint,
     ) -> Result<models::PermitSingle, EncodingError> {
-        let current_time = Utc::now()
-            .naive_utc()
-            .and_utc()
-            .timestamp() as u64;
+        let current_time = u64::try_from(Utc::now().timestamp()).map_err(|_| {
+            EncodingError::FatalError("System clock is before the Unix epoch".into())
+        })?;
 
         let (_, _, nonce) = self.get_existing_allowance(owner, spender, token)?;
         let expiration = U48::from(current_time + PERMIT_EXPIRATION);
@@ -259,13 +258,19 @@ mod tests {
         let expected_details = models::PermitDetails::new(
             token,
             amount,
-            BigUint::from(Utc::now().timestamp() as u64 + PERMIT_EXPIRATION),
+            BigUint::from(
+                u64::try_from(Utc::now().timestamp()).expect("the clock is after the Unix epoch") +
+                    PERMIT_EXPIRATION,
+            ),
             BigUint::from(0u64),
         );
         let expected_permit_single = models::PermitSingle::new(
             expected_details,
             Bytes::from_str("0xba12222222228d8ba445958a75a0704d566bf2c8").unwrap(),
-            BigUint::from(Utc::now().timestamp() as u64 + PERMIT_SIG_EXPIRATION),
+            BigUint::from(
+                u64::try_from(Utc::now().timestamp()).expect("the clock is after the Unix epoch") +
+                    PERMIT_SIG_EXPIRATION,
+            ),
         );
 
         assert_eq!(

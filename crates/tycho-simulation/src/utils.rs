@@ -15,6 +15,33 @@ use tycho_common::{
     Bytes,
 };
 
+/// The signed exponent `from_decimals - to_decimals` of a decimals correction factor, or an
+/// error when it does not fit an `i32`.
+pub(crate) fn decimals_exponent(
+    from_decimals: u32,
+    to_decimals: u32,
+) -> Result<i32, SimulationError> {
+    i32::try_from(i64::from(from_decimals) - i64::from(to_decimals)).map_err(|e| {
+        SimulationError::InvalidInput(
+            format!("Decimals exponent {from_decimals} - {to_decimals} out of range: {e}"),
+            None,
+        )
+    })
+}
+
+/// A token's decimals as a signed exponent, or an error when they do not fit an `i32`.
+pub(crate) fn decimals_i32(decimals: u32) -> Result<i32, SimulationError> {
+    i32::try_from(decimals).map_err(|e| {
+        SimulationError::InvalidInput(format!("Decimals {decimals} out of range: {e}"), None)
+    })
+}
+
+/// `10^decimals` as a float. Decimals beyond `i32` give infinity, which `10^decimals` is in `f64`
+/// from an exponent of 309 on.
+pub(crate) fn decimals_scale(decimals: u32) -> f64 {
+    decimals_i32(decimals).map_or(f64::INFINITY, |exponent| 10f64.powi(exponent))
+}
+
 /// Converts a hexadecimal string into a `Vec<u8>`.
 ///
 /// This function accepts a hexadecimal string with or without the `0x` prefix. If the prefix

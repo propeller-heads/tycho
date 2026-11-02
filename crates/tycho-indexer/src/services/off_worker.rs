@@ -437,9 +437,9 @@ mod tests {
     ) -> dto::ProtocolStateRequestResponse {
         let states = (0..n_components)
             .map(|component| {
-                let attributes = (0..n_attributes as i64)
+                let attributes = (0..i64::try_from(n_attributes).unwrap())
                     .map(|tick| {
-                        let liquidity = Bytes::from(1_000_000_007 * tick as u64);
+                        let liquidity = Bytes::from(1_000_000_007 * u64::try_from(tick).unwrap());
                         (format!("ticks/{}/net-liquidity", tick * 60 - 887_220), liquidity)
                     })
                     .collect();

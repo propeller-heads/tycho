@@ -4,12 +4,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::{
-    safe_math::{
-        div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
+use crate::{
+    evm::protocol::{
+        safe_math::{
+            div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
+        },
+        u256_num::{biguint_to_u256, u256_to_f64},
+        utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
     },
-    u256_num::{biguint_to_u256, u256_to_f64},
-    utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
+    utils::decimals_exponent,
 };
 
 const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
@@ -192,7 +195,7 @@ pub fn sqrt_price_q96_to_f64(
             "sqrt_price_q96_to_f64: x value {x} exceeds U160 max"
         )));
     }
-    let token_correction = 10f64.powi(token_0_decimals as i32 - token_1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token_0_decimals, token_1_decimals)?);
 
     let price = u256_to_f64(x)? / 2.0f64.powi(96);
     Ok(price.powi(2) * token_correction)

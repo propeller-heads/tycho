@@ -193,7 +193,7 @@ impl PendingBlockProcessor {
                     &state_msg.snapshots,
                     &state_msg.header,
                     self.chain,
-                );
+                )?;
                 indexer
                     .apply_block(&block_changes)
                     .map_err(|e| PendingError::Indexer {
@@ -231,9 +231,17 @@ fn snapshot_to_block_changes(
     snapshot: &Snapshot,
     header: &BlockHeader,
     chain: Chain,
-) -> BlockAggregatedChanges {
-    let ts = chrono::DateTime::from_timestamp(header.timestamp as i64, 0)
-        .unwrap_or_default()
+) -> Result<BlockAggregatedChanges, PendingError> {
+    let ts = i64::try_from(header.timestamp)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .ok_or_else(|| PendingError::Indexer {
+            extractor: extractor.to_string(),
+            message: format!(
+                "block {} has an invalid timestamp {}",
+                header.number, header.timestamp
+            ),
+        })?
         .naive_utc();
     let block = Block {
         number: header.number,
@@ -303,7 +311,7 @@ fn snapshot_to_block_changes(
         component_balances.insert(id.clone(), token_balances);
     }
 
-    BlockAggregatedChanges {
+    Ok(BlockAggregatedChanges {
         extractor: extractor.to_string(),
         chain,
         block,
@@ -313,7 +321,7 @@ fn snapshot_to_block_changes(
         component_balances,
         dci_update,
         ..Default::default()
-    }
+    })
 }
 
 #[cfg(test)]
@@ -412,7 +420,8 @@ mod tests {
         };
         let header = BlockHeader { number: 7, ..Default::default() };
 
-        let changes = snapshot_to_block_changes("vm:curve", &snapshot, &header, Chain::Ethereum);
+        let changes =
+            snapshot_to_block_changes("vm:curve", &snapshot, &header, Chain::Ethereum).unwrap();
 
         let dci = &changes.dci_update;
         assert_eq!(dci.new_entrypoints[&component_id], HashSet::from([entry_point.clone()]));

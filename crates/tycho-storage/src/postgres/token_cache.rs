@@ -105,7 +105,7 @@ use tycho_common::{
     storage::{StorageError, WithTotal},
 };
 
-use crate::postgres::{orm, schema, PostgresError};
+use crate::postgres::{convert_int, count_to_i64, orm, page_window, schema, PostgresError};
 
 /// Number of rows fetched per query during the initial full load.
 const LOAD_BATCH_SIZE: i64 = 500_000;
@@ -144,7 +144,7 @@ impl ChainTokenStore {
     /// Inserts or updates a token. With `overwrite` false an existing entry is left
     /// untouched, mirroring the `ON CONFLICT DO NOTHING` semantics of the token
     /// insert statement.
-    fn upsert(&mut self, token: Token, overwrite: bool) {
+    fn upsert(&mut self, token: Token, overwrite: bool) -> Result<(), StorageError> {
         match self
             .idx_by_address
             .get(&token.address)
@@ -152,35 +152,36 @@ impl ChainTokenStore {
         {
             Some(idx) => {
                 if !overwrite {
-                    return;
+                    return Ok(());
                 }
                 let old = &self.tokens[idx as usize];
                 if old.quality != token.quality {
-                    if let Some(bitmap) = self
-                        .quality_index
-                        .get_mut(&(old.quality as i32))
-                    {
+                    let old_quality: i32 = convert_int(old.quality, "token quality")?;
+                    let new_quality: i32 = convert_int(token.quality, "token quality")?;
+                    if let Some(bitmap) = self.quality_index.get_mut(&old_quality) {
                         bitmap.remove(idx);
                     }
                     self.quality_index
-                        .entry(token.quality as i32)
+                        .entry(new_quality)
                         .or_default()
                         .insert(idx);
                 }
                 self.tokens[idx as usize] = Arc::new(token);
             }
             None => {
-                let idx = self.tokens.len() as u32;
+                let idx: u32 = convert_int(self.tokens.len(), "token position")?;
+                let quality: i32 = convert_int(token.quality, "token quality")?;
                 self.idx_by_address
                     .insert(token.address.clone(), idx);
                 self.quality_index
-                    .entry(token.quality as i32)
+                    .entry(quality)
                     .or_default()
                     .insert(idx);
                 self.tokens.push(Arc::new(token));
                 self.last_traded.push(NEVER_TRADED);
             }
         }
+        Ok(())
     }
 
     fn update_last_traded(&mut self, address: &Address, ts: NaiveDateTime) {
@@ -204,7 +205,7 @@ impl ChainTokenStore {
     ///   rows that fall inside the requested page.
     /// - no filters at all: `total` is the store size and the page is a plain slice of the token
     ///   vector.
-    fn query(&self, query: &TokenQuery) -> WithTotal<Vec<Token>> {
+    fn query(&self, query: &TokenQuery) -> Result<WithTotal<Vec<Token>>, StorageError> {
         let candidates = self.candidate_bitmap(query);
         let ts_threshold = query
             .last_traded_ts_threshold
@@ -213,12 +214,13 @@ impl ChainTokenStore {
         let (offset, limit) = query
             .pagination
             .as_ref()
-            .map(|p| (p.offset().max(0) as usize, p.page_size.max(0) as usize))
+            .map(page_window)
+            .transpose()?
             .unwrap_or((0, usize::MAX));
 
-        match (candidates, ts_threshold) {
+        let page = match (candidates, ts_threshold) {
             (Some(bitmap), None) => {
-                let total = bitmap.len() as i64;
+                let total: i64 = convert_int(bitmap.len(), "candidate count")?;
                 let entity = bitmap
                     .iter()
                     .skip(offset)
@@ -234,7 +236,7 @@ impl ChainTokenStore {
                 limit,
             ),
             (None, None) => {
-                let total = self.tokens.len() as i64;
+                let total = count_to_i64(self.tokens.len());
                 let entity = self
                     .tokens
                     .iter()
@@ -247,7 +249,8 @@ impl ChainTokenStore {
             (None, Some(threshold)) => {
                 self.paginate_filtered(0..self.tokens.len(), threshold, offset, limit)
             }
-        }
+        };
+        Ok(page)
     }
 
     /// Combines the address and quality filters into a single set of candidate
@@ -315,7 +318,7 @@ impl ChainTokenStore {
             }
             total += 1;
         }
-        WithTotal { entity, total: Some(total as i64) }
+        WithTotal { entity, total: Some(count_to_i64(total)) }
     }
 }
 
@@ -418,10 +421,11 @@ impl TokenCache {
             for (orm_token, address) in batch {
                 last_db_id = orm_token.id;
                 max_modified_ts = max_modified_ts.max(orm_token.modified_ts);
-                idx_by_db_id.insert(orm_token.id, store.tokens.len() as u32);
-                store.upsert(to_model_token(&orm_token, &address, chain), true);
+                idx_by_db_id
+                    .insert(orm_token.id, convert_int(store.tokens.len(), "token position")?);
+                store.upsert(orm_token.to_model(&address, chain)?, true)?;
             }
-            if (batch_len as i64) < LOAD_BATCH_SIZE {
+            if count_to_i64(batch_len) < LOAD_BATCH_SIZE {
                 break;
             }
         }
@@ -461,21 +465,21 @@ impl TokenCache {
         let guard = store
             .read()
             .expect("token cache lock poisoned");
-        Ok(guard.query(query))
+        guard.query(query)
     }
 
     /// Inserts tokens that are not yet cached; existing entries are left untouched,
     /// mirroring the `ON CONFLICT DO NOTHING` insert semantics.
-    pub(crate) fn add_tokens(&self, tokens: &[Token]) {
-        self.write_tokens(tokens, false);
+    pub(crate) fn add_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
+        self.write_tokens(tokens, false)
     }
 
     /// Inserts or overwrites tokens with the given values.
-    pub(crate) fn upsert_tokens(&self, tokens: &[Token]) {
-        self.write_tokens(tokens, true);
+    pub(crate) fn upsert_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
+        self.write_tokens(tokens, true)
     }
 
-    fn write_tokens(&self, tokens: &[Token], overwrite: bool) {
+    fn write_tokens(&self, tokens: &[Token], overwrite: bool) -> Result<(), StorageError> {
         let mut by_chain: HashMap<Chain, Vec<&Token>> = HashMap::new();
         for token in tokens {
             by_chain
@@ -488,13 +492,14 @@ impl TokenCache {
                 error!(chain = %chain, "Token upsert for chain missing from token cache");
                 continue;
             };
-            let mut guard = store
-                .write()
-                .expect("token cache lock poisoned");
+            let mut guard = store.write().map_err(|_poisoned| {
+                StorageError::Unexpected("token cache lock poisoned".to_string())
+            })?;
             for token in chain_tokens {
-                guard.upsert(token.clone(), overwrite);
+                guard.upsert(token.clone(), overwrite)?;
             }
         }
+        Ok(())
     }
 
     pub(crate) fn update_last_traded<'a>(
@@ -555,9 +560,9 @@ impl TokenCache {
                 continue;
             };
             max_modified_ts = max_modified_ts.max(orm_token.modified_ts);
-            refreshed.push(to_model_token(&orm_token, &address, *chain));
+            refreshed.push(orm_token.to_model(&address, *chain)?);
         }
-        self.upsert_tokens(&refreshed);
+        self.upsert_tokens(&refreshed)?;
 
         *self
             .last_sync
@@ -619,23 +624,6 @@ impl TokenCache {
     }
 }
 
-fn to_model_token(orm_token: &orm::Token, address: &Address, chain: Chain) -> Token {
-    let gas_usage: Vec<_> = orm_token
-        .gas
-        .iter()
-        .map(|gas| gas.map(|value| value as u64))
-        .collect();
-    Token::new(
-        address,
-        orm_token.symbol.as_str(),
-        orm_token.decimals as u32,
-        orm_token.tax as u64,
-        gas_usage.as_slice(),
-        chain,
-        orm_token.quality as u32,
-    )
-}
-
 #[cfg(test)]
 mod test {
     use chrono::DateTime;
@@ -675,9 +663,9 @@ mod test {
         let tokens: Vec<Token> = qualities
             .iter()
             .enumerate()
-            .map(|(position, quality)| make_token(position as u8, *quality))
+            .map(|(position, quality)| make_token(u8::try_from(position).unwrap(), *quality))
             .collect();
-        cache.add_tokens(&tokens);
+        cache.add_tokens(&tokens).unwrap();
         cache
     }
 
@@ -722,7 +710,7 @@ mod test {
         let cache = store_with_tokens(&[100, 100]);
         let mut updated = make_token(0, 5);
         updated.symbol = "TOK0v2".to_string();
-        cache.upsert_tokens(&[updated]);
+        cache.upsert_tokens(&[updated]).unwrap();
 
         let high = cache
             .query_tokens(&TokenQuery { quality_range: QualityRange::min_only(50), ..base_query() })
@@ -740,7 +728,7 @@ mod test {
         let cache = store_with_tokens(&[100]);
         let mut duplicate = make_token(0, 5);
         duplicate.symbol = "SHOULD_NOT_APPEAR".to_string();
-        cache.add_tokens(&[duplicate]);
+        cache.add_tokens(&[duplicate]).unwrap();
 
         let result = cache
             .query_tokens(&base_query())
@@ -1145,7 +1133,7 @@ mod benchmark {
         println!(
             "full sweep (q>=51, 30d, {n_pages} pages): cache {cache_sweep:?}; sql {:?} for first {sql_pages} pages (~{:.1?} extrapolated)",
             sql_sweep,
-            sql_sweep * (n_pages.max(1) as u32) / (sql_pages.max(1) as u32),
+            sql_sweep * u32::try_from(n_pages.max(1)).unwrap() / u32::try_from(sql_pages.max(1)).unwrap(),
         );
     }
 }

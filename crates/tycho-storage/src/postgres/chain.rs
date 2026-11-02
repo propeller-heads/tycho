@@ -10,7 +10,9 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{orm, schema, storage_error_from_diesel, PostgresError, PostgresGateway, MAX_TS};
+use super::{
+    convert_int, orm, schema, storage_error_from_diesel, PostgresError, PostgresGateway, MAX_TS,
+};
 
 impl PostgresGateway {
     #[instrument(skip_all)]
@@ -27,15 +29,17 @@ impl PostgresGateway {
         let block_chain_id = self.get_chain_id(&blocks[0].chain)?;
         let new_blocks = blocks
             .iter()
-            .map(|new| orm::NewBlock {
-                hash: new.hash.clone(),
-                parent_hash: new.parent_hash.clone(),
-                chain_id: block_chain_id,
-                main: true,
-                number: new.number as i64,
-                ts: new.ts,
+            .map(|new| {
+                Ok(orm::NewBlock {
+                    hash: new.hash.clone(),
+                    parent_hash: new.parent_hash.clone(),
+                    chain_id: block_chain_id,
+                    main: true,
+                    number: convert_int(new.number, "block number")?,
+                    ts: new.ts,
+                })
             })
-            .collect_vec();
+            .collect::<Result<Vec<_>, StorageError>>()?;
 
         // Insert in batches to avoid exceeding PostgreSQL parameter limit
         // assumes that block with the same hash will not appear with different values
@@ -83,7 +87,7 @@ impl PostgresGateway {
         .map_err(|err| storage_error_from_diesel(err, "Block", &block_id.to_string(), None))?;
         let chain = self.get_chain(&orm_block.chain_id)?;
         Ok(Block::new(
-            orm_block.number as u64,
+            convert_int(orm_block.number, "block number")?,
             chain,
             std::mem::take(&mut orm_block.hash),
             std::mem::take(&mut orm_block.parent_hash),
@@ -149,7 +153,7 @@ impl PostgresGateway {
                     block_id: bid,
                     from: new.from.clone(),
                     to: new.to.clone().unwrap_or_default(),
-                    index: new.index as i64,
+                    index: convert_int(new.index, "transaction index")?,
                 })
             })
             .collect::<Result<Vec<orm::NewTransaction>, StorageError>>()?;
@@ -198,7 +202,7 @@ impl PostgresGateway {
                     block_hash,
                     from: std::mem::take(&mut orm_tx.from),
                     to: Some(std::mem::take(&mut orm_tx.to)),
-                    index: orm_tx.index as u64,
+                    index: convert_int(orm_tx.index, "transaction index")?,
                 })
             })
             .map_err(|err| {

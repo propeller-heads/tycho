@@ -299,8 +299,9 @@ where
         )
         .set(blocks_per_minute);
 
+        let minutes_remaining = distance_to_current as f64 / blocks_per_minute;
         if let Some(time_remaining) =
-            Duration::try_minutes((distance_to_current as f64 / blocks_per_minute) as i64)
+            whole_minutes(minutes_remaining).and_then(Duration::try_minutes)
         {
             let hours = time_remaining.num_hours();
             let minutes = (time_remaining.num_minutes()) % 60;
@@ -314,10 +315,7 @@ where
                 name = "SyncProgress"
             );
         } else {
-            warn!(
-                "Failed to convert {} to a duration",
-                (distance_to_current as f64 / blocks_per_minute) as i64,
-            );
+            warn!("Failed to convert {} minutes to a duration", minutes_remaining,);
             info!(
                 extractor_id = self.name,
                 blocks_per_minute = format!("{blocks_per_minute:.2}"),
@@ -928,6 +926,20 @@ enum AttrRevert {
     /// No prior value: revert as a deletion when still alive at the end of the range,
     /// otherwise revert to nothing.
     CreatedInRange { alive: bool },
+}
+
+/// The whole minutes of `minutes`, or `None` when it is not finite or does not fit `i64`.
+fn whole_minutes(minutes: f64) -> Option<i64> {
+    // `i64::MAX as f64` rounds up to 2^63, which is itself out of range, hence the strict bound.
+    if !minutes.is_finite() || minutes.abs() >= i64::MAX as f64 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "minutes is finite and within the i64 range, checked above; the fraction is dropped"
+    )]
+    let whole = minutes as i64;
+    Some(whole)
 }
 
 /// One event on a (component, attribute) pair, in chronological order.
@@ -3199,7 +3211,9 @@ mod test {
     /// `pb_vm_block_changes(block_num)`. This method strips balance changes and token balances
     /// to avoid triggering TVL code paths, which would require the CachedGateway to be setup.
     fn make_partial_block_with_data(block_num: u64, partial_index: u32) -> BlockScopedData {
-        let mut msg = pb_fixtures::pb_vm_block_changes(block_num as u8 + partial_index as u8);
+        let mut msg = pb_fixtures::pb_vm_block_changes(
+            u8::try_from(block_num).unwrap() + u8::try_from(partial_index).unwrap(),
+        );
         msg.block = Some(pb_fixtures::pb_blocks(block_num));
         for tx in &mut msg.changes {
             // Rename a protocol type to be consistent with extractor fixtures.
@@ -3229,7 +3243,7 @@ mod test {
     /// `pb_vm_block_changes(block_num)`. This method strips balance changes and token balances to
     /// avoid triggering TVL code paths, which would require the CachedGateway to be setup.
     fn make_full_block_with_data(block_num: u64, final_block_height: u64) -> BlockScopedData {
-        let mut msg = pb_fixtures::pb_vm_block_changes(block_num as u8);
+        let mut msg = pb_fixtures::pb_vm_block_changes(u8::try_from(block_num).unwrap());
         msg.block = Some(pb_fixtures::pb_blocks(block_num));
         for tx in &mut msg.changes {
             // Rename a protocol type to be consistent with extractor fixtures.
@@ -5827,7 +5841,7 @@ mod test_serial_db {
                     None,
                     &BlockOrTimestamp::Block(BlockIdentifier::Number((
                         Chain::Ethereum,
-                        msg.block.number as i64,
+                        i64::try_from(msg.block.number).unwrap(),
                     ))),
                 )
                 .await
@@ -6304,9 +6318,12 @@ mod test_serial_db {
             .expect("Failed to create extractor");
 
             // Send a sequence of block scoped data with the same timestamp.
-            let base_ts = db_fixtures::yesterday_midnight()
-                .and_utc()
-                .timestamp() as u64;
+            let base_ts = u64::try_from(
+                db_fixtures::yesterday_midnight()
+                    .and_utc()
+                    .timestamp(),
+            )
+            .unwrap();
             let versions = [1, 2, 3, 4];
 
             let inp_sequence = versions

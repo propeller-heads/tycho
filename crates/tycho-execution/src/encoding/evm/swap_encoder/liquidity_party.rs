@@ -42,7 +42,12 @@ impl LiquidityPartySwapEncoder {
                 EncodingError::FatalError("Token out not found in pool tokens".to_string())
             })?;
 
-        Ok((token_in.clone(), token_out.clone(), token_in_idx as u8, token_out_idx as u8))
+        let to_u8 = |idx: usize| {
+            u8::try_from(idx).map_err(|_| {
+                EncodingError::InvalidInput(format!("Pool token index {idx} exceeds u8"))
+            })
+        };
+        Ok((token_in.clone(), token_out.clone(), to_u8(token_in_idx)?, to_u8(token_out_idx)?))
     }
 }
 

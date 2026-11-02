@@ -139,7 +139,7 @@ use diesel_async::{
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{debug, info};
 use tycho_common::{
-    models::{token::Token, Chain, TxHash},
+    models::{token::Token, Chain, PaginationParams, TxHash},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -382,6 +382,36 @@ fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     }
 
     result
+}
+
+/// Converts an integer between its domain type and its database column type.
+///
+/// Fails with [`StorageError::DecodeError`] naming `field` when the value does not fit the target
+/// type, e.g. a block number above `i64::MAX` on write or a negative column value on read.
+fn convert_int<T, U>(value: T, field: &str) -> Result<U, StorageError>
+where
+    T: Copy + std::fmt::Display,
+    U: TryFrom<T>,
+{
+    U::try_from(value).map_err(|_overflow| {
+        StorageError::DecodeError(format!(
+            "{field} value {value} is out of range for {}",
+            std::any::type_name::<U>()
+        ))
+    })
+}
+
+/// Converts a collection length to the `i64` of a database count.
+pub fn count_to_i64(count: usize) -> i64 {
+    i64::try_from(count).expect("a collection length is below isize::MAX and fits in i64")
+}
+
+/// The `(offset, limit)` item window of a page.
+///
+/// Fails with [`StorageError::DecodeError`] when the offset or the page size is negative or does
+/// not fit `usize`.
+pub fn page_window(params: &PaginationParams) -> Result<(usize, usize), StorageError> {
+    Ok((convert_int(params.offset(), "page offset")?, convert_int(params.page_size, "page size")?))
 }
 
 fn storage_error_from_diesel(
@@ -741,7 +771,7 @@ pub(crate) async fn ensure_token_with_price(
         .values((
             schema::token::account_id.eq(account_id),
             schema::token::symbol.eq(&token.symbol),
-            schema::token::decimals.eq(token.decimals as i32),
+            schema::token::decimals.eq(i32::try_from(token.decimals).unwrap()),
             schema::token::gas.eq(Vec::<Option<i64>>::new()),
             schema::token::quality.eq(100),
         ))
@@ -757,7 +787,7 @@ pub(crate) async fn ensure_token_with_price(
         .await
         .expect("Token must exist after insert");
 
-    let price = 10.0_f64.powi(token.decimals as i32);
+    let price = 10.0_f64.powi(i32::try_from(token.decimals).unwrap());
     diesel::insert_into(schema::token_price::table)
         .values((schema::token_price::token_id.eq(token_id), schema::token_price::price.eq(price)))
         .on_conflict(schema::token_price::token_id)
@@ -1106,7 +1136,7 @@ pub mod db_fixtures {
                     schema::contract_storage::modify_tx.eq(modify_tx),
                     schema::contract_storage::valid_from.eq(valid_from),
                     schema::contract_storage::valid_to.eq(valid_to.unwrap_or(&MAX_TS)),
-                    schema::contract_storage::ordinal.eq(idx as i64),
+                    schema::contract_storage::ordinal.eq(i64::try_from(idx).unwrap()),
                 )
             })
             .collect::<Vec<_>>();
@@ -1351,7 +1381,7 @@ pub mod db_fixtures {
                                     .eq(component_id),
                                 schema::protocol_component_holds_token::token_id.eq(t_id),
                                 schema::protocol_component_holds_token::token_index
-                                    .eq(t_idx as i16),
+                                    .eq(i16::try_from(t_idx).unwrap()),
                             )
                         })
                         .collect::<Vec<_>>(),

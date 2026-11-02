@@ -196,9 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let delta_pct = p50_adj.map(|adj| {
             if adj == 0 {
-                return 0i64;
+                return 0i128;
             }
-            (est_avg as i64 - adj as i64) * 100 / adj as i64
+            (i128::from(est_avg) - i128::from(adj)) * 100 / i128::from(adj)
         });
 
         println!(

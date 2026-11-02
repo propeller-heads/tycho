@@ -573,7 +573,7 @@ mod tests {
     fn hex_cases() -> Vec<Vec<u8>> {
         let long = |len: usize| {
             (0..len)
-                .map(|i| (i * 31 % 256) as u8)
+                .map(|i| u8::try_from(i * 31 % 256).unwrap())
                 .collect()
         };
         vec![
@@ -617,7 +617,7 @@ mod tests {
         for (i, key) in cases.iter().enumerate() {
             for value in &cases {
                 let mut key = key.clone();
-                key.push(i as u8);
+                key.push(u8::try_from(i).unwrap());
                 key.extend_from_slice(&value[..value.len().min(40)]);
                 map.insert(Bytes::from(key), Bytes::from(value.clone()));
             }

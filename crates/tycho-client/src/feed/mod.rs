@@ -96,6 +96,10 @@ impl Display for BlockHeader {
 }
 
 impl From<&Block> for BlockHeader {
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "public infallible From; rejecting a pre-1970 server timestamp needs TryFrom, a breaking change"
+    )]
     fn from(block: &Block) -> Self {
         Self {
             hash: block.hash.clone(),

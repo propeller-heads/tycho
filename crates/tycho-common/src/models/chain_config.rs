@@ -17,12 +17,15 @@ pub struct ChainAddress {
 
 impl ChainAddress {
     pub fn new(bytes: &[u8]) -> Result<Self, ChainConfigError> {
-        if bytes.len() > 32 {
+        let Some(len) = u8::try_from(bytes.len())
+            .ok()
+            .filter(|&len| len <= 32)
+        else {
             return Err(ChainConfigError::AddressTooLong(bytes.len()));
-        }
+        };
         let mut arr = [0u8; 32];
         arr[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self { bytes: arr, len: bytes.len() as u8 })
+        Ok(Self { bytes: arr, len })
     }
 
     pub fn as_bytes(&self) -> &[u8] {

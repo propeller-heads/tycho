@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(&encoded_swap[0..20], token_in.as_ref());
         assert_eq!(&encoded_swap[20..40], token_out.as_ref());
         assert_eq!(&encoded_swap[40..60], target.as_ref());
-        assert_eq!(encoded_swap[60], partial_fill_offset as u8);
+        assert_eq!(encoded_swap[60], u8::try_from(partial_fill_offset).unwrap());
         assert_eq!(&encoded_swap[61..93], &biguint_to_u256(&quote_amount_in).to_be_bytes::<32>());
         assert_eq!(&encoded_swap[93..], bebop_calldata.as_ref());
     }

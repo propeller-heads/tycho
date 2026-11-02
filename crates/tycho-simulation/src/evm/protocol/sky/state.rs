@@ -17,12 +17,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::{
-    protocol::{
-        safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+use crate::{
+    evm::{
+        protocol::{
+            safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
+            u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        },
+        query_pool_swap::is_within_tolerance,
     },
-    query_pool_swap::is_within_tolerance,
+    utils::decimals_i32,
 };
 
 const WAD: u128 = 1_000_000_000_000_000_000;
@@ -431,7 +434,7 @@ impl ProtocolSim for SkyState {
                 } else {
                     1.0 / (1.0 + Self::fee_f64(self.tout))
                 };
-                let limit = price_f64(limit, token_in.decimals, token_out.decimals);
+                let limit = price_f64(limit, token_in.decimals, token_out.decimals)?;
                 if execution < limit {
                     return Ok(zero_swap());
                 }
@@ -441,7 +444,7 @@ impl ProtocolSim for SkyState {
                 Ok(PoolSwap::new(max_in, result.amount, result.new_state, None))
             }
             SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
-                let target = price_f64(target, token_in.decimals, token_out.decimals);
+                let target = price_f64(target, token_in.decimals, token_out.decimals)?;
                 let spot = self.spot_price(token_in, token_out)?;
                 if is_within_tolerance(spot, target, *tolerance) {
                     return Ok(zero_swap());
@@ -456,12 +459,12 @@ impl ProtocolSim for SkyState {
 }
 
 /// Decimal-adjusted f64 of a `Price` (`token_out` per `token_in`).
-fn price_f64(price: &Price, in_decimals: u32, out_decimals: u32) -> f64 {
-    (to_f64(&price.numerator, out_decimals)) / (to_f64(&price.denominator, in_decimals))
+fn price_f64(price: &Price, in_decimals: u32, out_decimals: u32) -> Result<f64, SimulationError> {
+    Ok(to_f64(&price.numerator, out_decimals)? / to_f64(&price.denominator, in_decimals)?)
 }
 
-fn to_f64(amount: &BigUint, decimals: u32) -> f64 {
-    amount.to_f64().unwrap_or(f64::MAX) / 10f64.powi(decimals as i32)
+fn to_f64(amount: &BigUint, decimals: u32) -> Result<f64, SimulationError> {
+    Ok(amount.to_f64().unwrap_or(f64::MAX) / 10f64.powi(decimals_i32(decimals)?))
 }
 
 #[cfg(test)]

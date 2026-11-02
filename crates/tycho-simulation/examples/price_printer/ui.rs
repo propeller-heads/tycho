@@ -25,7 +25,7 @@ const INFO_TEXT: [&str; 2] = [
     "(f) Filter by Protocol | (c) Clear Filter | Quote: Press ↵ to show/hide | Use +/- to adjust | = to enter custom amount",
 ];
 
-const ITEM_HEIGHT: usize = 3;
+const ITEM_HEIGHT: u16 = 3;
 
 struct TableColors {
     buffer_bg: Color,
@@ -139,8 +139,11 @@ impl App {
         // Calculate the new index based on direction
         let new_index = match self.state.selected() {
             Some(i) => {
-                ((i as isize + direction + current_items_len as isize) % current_items_len as isize)
-                    as usize
+                if direction.is_positive() {
+                    (i + 1) % current_items_len
+                } else {
+                    (i + current_items_len - 1) % current_items_len
+                }
             }
             None => 0,
         };
@@ -149,7 +152,7 @@ impl App {
         self.state.select(Some(new_index));
         self.scroll_state = self
             .scroll_state
-            .position(new_index * ITEM_HEIGHT);
+            .position(new_index * usize::from(ITEM_HEIGHT));
 
         // Adjust quote amount if decimals have changed
         if let Some(prev_decimals) = current_decimals {
@@ -450,7 +453,7 @@ impl App {
                             .fg(self.colors.row_fg)
                             .bg(color),
                     )
-                    .height(ITEM_HEIGHT as u16)
+                    .height(ITEM_HEIGHT)
             });
         let bar = " █ ";
         let t = Table::new(

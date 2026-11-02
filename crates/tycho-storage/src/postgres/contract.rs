@@ -23,7 +23,8 @@ use tycho_common::{
 };
 
 use super::{
-    maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
+    count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema,
+    storage_error_from_diesel,
     versioning::{apply_partitioned_versioning, apply_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -1050,7 +1051,7 @@ impl PostgresGateway {
                 .map_err(PostgresError::from)?
         } else {
             // If no pagination, use the length of the result
-            res.len() as i64
+            count_to_i64(res.len())
         };
 
         Ok(WithTotal { entity: res, total: Some(total_count) })

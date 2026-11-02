@@ -139,7 +139,9 @@ fn coin_decimals(
     pool_address: &Bytes,
 ) -> Result<u8, InvalidSnapshotError> {
     if let Some(token) = all_tokens.get(coin) {
-        return Ok(token.decimals as u8);
+        return u8::try_from(token.decimals).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("Token {coin} decimals out of range: {e}"))
+        });
     }
     if coin.iter().all(|b| *b == 0) {
         return Ok(18);

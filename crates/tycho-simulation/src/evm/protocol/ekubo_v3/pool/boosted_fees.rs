@@ -47,6 +47,12 @@ struct BoostedFeesPoolSwapState {
     active_tick: Option<i32>,
 }
 
+/// The low 32 bits of a unix timestamp, the `uint32` the Ekubo contract stores as
+/// `lastDonateTime`.
+fn contract_time(timestamp: u64) -> u32 {
+    (timestamp & 0xFFFF_FFFF) as u32
+}
+
 impl BoostedFeesPool {
     #[expect(
         clippy::too_many_arguments,
@@ -78,7 +84,7 @@ impl BoostedFeesPool {
                     concentrated_pool_state: concentrated_sdk_state,
                     donate_rate0,
                     donate_rate1,
-                    last_donate_time: last_donate_time as u32,
+                    last_donate_time: contract_time(last_donate_time),
                 },
                 swapped_this_block: false,
                 last_real_time: last_donate_time,
@@ -203,7 +209,7 @@ impl EkuboPool for BoostedFeesPool {
             self.swap_state.last_real_time = last_donate_time;
             self.swap_state
                 .sdk_state
-                .last_donate_time = last_donate_time as u32;
+                .last_donate_time = contract_time(last_donate_time);
         }
 
         if ticks.is_some() || donate_rate_deltas.is_some() {

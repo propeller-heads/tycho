@@ -15,7 +15,7 @@ use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use postgres::NoTls;
 use serde_json::json;
 use tokio::runtime::Runtime;
@@ -829,7 +829,9 @@ impl TestRunner {
                     self.chain
                 )
             })?;
-        Ok(row.map(|row| row.get::<_, i64>(0) as u64))
+        row.map(|row| u64::try_from(row.get::<_, i64>(0)))
+            .transpose()
+            .into_diagnostic()
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
@@ -1310,7 +1312,10 @@ impl TestRunner {
 
                 for percentage in percentages.iter() {
                     // For precision, multiply by 1000 then divide by 1000
-                    let percentage_biguint = BigUint::from((percentage * 1000.0) as u32);
+                    let percentage_biguint =
+                        BigUint::from_f64(percentage * 1000.0).ok_or_else(|| {
+                            miette!("[{id}] Percentage {percentage} is not a non-negative number")
+                        })?;
                     let thousand = BigUint::from(1000u32);
                     let amount_in = (&max_input * &percentage_biguint) / &thousand;
 

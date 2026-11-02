@@ -421,8 +421,8 @@ mod tests {
                 .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
                 .unwrap();
 
-            assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-            assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+            assert_eq!(sell_limit, BigUint::from(7_000_000_000_000_000_000u128));
+            assert_eq!(buy_limit, BigUint::from(20_995_000_000u128));
         }
     }
 

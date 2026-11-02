@@ -19,6 +19,7 @@ use tycho_common::{
 };
 
 use super::{overrides::PammSimulationOverrides, telemetry};
+use crate::utils::decimals_scale;
 
 /// How long the quotes of one price level message stay quotable: one slot after the message's `ts`.
 /// Titan prices the block it is building, so quotes older than one slot were priced for a block
@@ -363,8 +364,7 @@ fn whole_unit_price(
     let amount_out = amount_out.to_f64().ok_or_else(|| {
         SimulationError::RecoverableError("Can't convert amount out to f64".to_string())
     })?;
-    Ok((amount_out / 10f64.powi(quote.decimals as i32)) /
-        (amount_in / 10f64.powi(base.decimals as i32)))
+    Ok((amount_out / decimals_scale(quote.decimals)) / (amount_in / decimals_scale(base.decimals)))
 }
 
 /// `amount` less `taken`, or zero when `taken` is larger.

@@ -23,6 +23,7 @@ use tycho_common::{
 };
 
 use super::{
+    convert_int,
     schema::{
         account, account_balance, block, chain, component_balance, component_balance_default,
         component_tvl, contract_code, contract_storage, contract_storage_default, entry_point,
@@ -1403,19 +1404,49 @@ impl NewToken {
     /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 
-    pub fn from_token(account_id: i64, token: &models::token::Token) -> Self {
-        Self {
+    pub fn from_token(account_id: i64, token: &models::token::Token) -> Result<Self, StorageError> {
+        Ok(Self {
             account_id,
             symbol: token.symbol.clone(),
-            decimals: token.decimals as i32,
-            tax: token.tax as i64,
+            decimals: convert_int(token.decimals, "token decimals")?,
+            tax: convert_int(token.tax, "token tax")?,
             gas: token
                 .gas
                 .iter()
-                .map(|g| g.map(|u| u as i64))
-                .collect(),
-            quality: token.quality as i32,
-        }
+                .map(|g| {
+                    g.map(|u| convert_int(u, "token gas"))
+                        .transpose()
+                })
+                .collect::<Result<_, _>>()?,
+            quality: convert_int(token.quality, "token quality")?,
+        })
+    }
+}
+
+impl Token {
+    /// Builds the domain token of this row, failing when a column holds a negative value.
+    pub fn to_model(
+        &self,
+        address: &Address,
+        chain: models::Chain,
+    ) -> Result<models::token::Token, StorageError> {
+        let gas_usage = self
+            .gas
+            .iter()
+            .map(|gas| {
+                gas.map(|value| convert_int(value, "token gas"))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(models::token::Token::new(
+            address,
+            self.symbol.as_str(),
+            convert_int(self.decimals, "token decimals")?,
+            convert_int(self.tax, "token tax")?,
+            gas_usage.as_slice(),
+            chain,
+            convert_int(self.quality, "token quality")?,
+        ))
     }
 }
 

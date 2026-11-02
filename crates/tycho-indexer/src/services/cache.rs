@@ -15,6 +15,12 @@ use mini_moka::sync::Cache;
 use tokio::sync::MutexGuard;
 use tracing::{debug, instrument, trace, Level};
 
+/// Converts a byte size to the `u32` cache weight, saturating at `u32::MAX` for entries larger
+/// than 4 GiB.
+fn saturating_u32(size: usize) -> u32 {
+    u32::try_from(size).unwrap_or(u32::MAX)
+}
+
 /// A wrapper around the cached value that also tracks its size.
 /// The value is wrapped in a Mutex to allow for in-flight requests to be handled correctly.
 /// The size is stored in an AtomicU32 to allow for concurrent read/write access.
@@ -42,7 +48,7 @@ impl<V: DeepSizeOf + Send + Sync> ValueWithSize<V> {
     /// the value at the same time.
     fn update(&self, new_value: Arc<V>, mut value_update_guard: MutexGuard<Option<Arc<V>>>) {
         self.size
-            .store(new_value.deep_size_of() as u32, Ordering::Relaxed);
+            .store(saturating_u32(new_value.deep_size_of()), Ordering::Relaxed);
         *value_update_guard = Some(new_value);
     }
 }
@@ -81,7 +87,7 @@ where
 
     pub fn new(name: &str, capacity: u64, ttl: u64) -> Self {
         let weigher = Box::new(|key: &R, value_with_size: &Arc<ValueWithSize<V>>| {
-            let key_weight = key.deep_size_of() as u32;
+            let key_weight = saturating_u32(key.deep_size_of());
             value_with_size
                 .size()
                 .saturating_add(key_weight)

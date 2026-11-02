@@ -1845,9 +1845,12 @@ mod tests {
                 Chain::Ethereum,
                 Bytes::from(block_number).lpad(32, 0),
                 Bytes::from(block_number - 1).lpad(32, 0),
-                chrono::DateTime::from_timestamp(1719849000 + (block_number * 12) as i64, 0)
-                    .unwrap()
-                    .naive_utc(),
+                chrono::DateTime::from_timestamp(
+                    1719849000 + i64::try_from(block_number * 12).unwrap(),
+                    0,
+                )
+                .unwrap()
+                .naive_utc(),
             )
         }
 

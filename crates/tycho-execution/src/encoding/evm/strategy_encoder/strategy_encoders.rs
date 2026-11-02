@@ -65,7 +65,7 @@ fn encode_swap_group(
                 initial_protocol_data.extend(protocol_data);
             }
         } else {
-            initial_protocol_data.extend(ple_encode(grouped_protocol_data));
+            initial_protocol_data.extend(ple_encode(grouped_protocol_data)?);
         }
     }
 
@@ -302,7 +302,7 @@ impl SequentialSwapStrategyEncoder {
         let subsidy_signing_data = subsidized_group_signature.map(|signature| {
             signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
         });
-        let encoded_swaps = ple_encode(swaps);
+        let encoded_swaps = ple_encode(swaps)?;
         let gas_usage = estimate_gas_usage(solution, Strategy::Sequential);
         Ok(EncodedSolution::new(
             encoded_swaps,
@@ -444,7 +444,7 @@ impl SplitSwapStrategyEncoder {
         let subsidy_signing_data = subsidized_group_signature.map(|signature| {
             signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
         });
-        let encoded_swaps = ple_encode(swaps);
+        let encoded_swaps = ple_encode(swaps)?;
         let tokens_len = if solution.token_in() == solution.token_out() {
             tokens.len() - 1
         } else {

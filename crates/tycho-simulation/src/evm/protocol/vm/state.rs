@@ -35,14 +35,17 @@ use super::{
     models::Capability,
     tycho_simulation_contract::TychoSimulationContract,
 };
-use crate::evm::{
-    engine_db::{engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB},
-    override_stream::{FailurePolicy, OverrideSnapshot},
-    protocol::{
-        u256_num::{u256_to_biguint, u256_to_f64},
-        utils::bytes_to_address,
+use crate::{
+    evm::{
+        engine_db::{engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB},
+        override_stream::{FailurePolicy, OverrideSnapshot},
+        protocol::{
+            u256_num::{u256_to_biguint, u256_to_f64},
+            utils::bytes_to_address,
+        },
+        simulation::BlockEnvOverrides,
     },
-    simulation::BlockEnvOverrides,
+    utils::{decimals_exponent, decimals_i32},
 };
 
 /// Cached derived values (spot prices, swap limits) for one pool-state version.
@@ -508,8 +511,8 @@ where
                 })?;
                 let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
                 let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
-                Ok(*unscaled_price * 10f64.powi(sell_token_decimals as i32) /
-                    10f64.powi(buy_token_decimals as i32))
+                Ok(*unscaled_price * 10f64.powi(decimals_i32(sell_token_decimals)?) /
+                    10f64.powi(decimals_i32(buy_token_decimals)?))
             }
         } else {
             // If the pool does not support price function, we need to calculate spot prices by
@@ -572,7 +575,7 @@ where
 
             // Calculate the marginal price, adjusting for token decimals.
             let token_correction =
-                10f64.powi(sell_token_decimals as i32 - buy_token_decimals as i32);
+                10f64.powi(decimals_exponent(sell_token_decimals, buy_token_decimals)?);
             let num_f64 = u256_to_f64(num)?;
             let den_f64 = u256_to_f64(den)?;
             if den_f64 == 0.0 {
@@ -618,10 +621,10 @@ where
         &self,
         tokens: &HashMap<Bytes, Token>,
         sell_token_address: &Address,
-    ) -> Result<usize, SimulationError> {
+    ) -> Result<u32, SimulationError> {
         tokens
             .get(&Bytes::from(sell_token_address.as_slice()))
-            .map(|t| t.decimals as usize)
+            .map(|t| t.decimals)
             .ok_or_else(|| {
                 SimulationError::FatalError(format!(
                     "Failed to scale spot prices! Pool: {} Token 0x{:x} is not available!",

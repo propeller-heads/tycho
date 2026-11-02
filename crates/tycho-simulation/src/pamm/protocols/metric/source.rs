@@ -184,7 +184,17 @@ impl MetricBookAssembler {
             }
 
             let component_id = metadata.pool_address.clone();
-            let updated_at = DateTime::from_timestamp(bid_ask.server_ts as i64, 0);
+            let Some(updated_at) = i64::try_from(bid_ask.server_ts)
+                .ok()
+                .and_then(|secs| DateTime::from_timestamp(secs, 0))
+            else {
+                warn!(
+                    pool = %metadata.pool_address,
+                    server_ts = bid_ask.server_ts,
+                    "skipping pool, server timestamp out of range"
+                );
+                continue;
+            };
             let state = MetricState {
                 base_token: token0.clone(),
                 quote_token: token1.clone(),
@@ -197,7 +207,7 @@ impl MetricBookAssembler {
                 self.book_config.chain,
                 component_id,
                 state,
-                updated_at,
+                Some(updated_at),
             ));
         }
         books
@@ -341,7 +351,7 @@ mod tests {
         assert_eq!(books.keys().collect::<Vec<_>>(), vec![&healthy_id]);
         let book = &books[&healthy_id];
         assert_eq!(book.component.id, Bytes::from(healthy_id.as_str()));
-        assert_eq!(book.updated_at, DateTime::from_timestamp(SERVER_TS as i64, 0));
+        assert_eq!(book.updated_at, DateTime::from_timestamp(i64::try_from(SERVER_TS).unwrap(), 0));
     }
 
     #[tokio::test]

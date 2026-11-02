@@ -813,7 +813,7 @@ mod test {
     /// Creates history with full blocks 0..(block_num-1) and partials 0..=partial_idx for
     /// block_num.
     fn history_with_partial(block_num: u64, partial_idx: u32) -> (BlockHistory, Bytes) {
-        let full_blocks = generate_blocks(block_num as usize, 0, None);
+        let full_blocks = generate_blocks(usize::try_from(block_num).unwrap(), 0, None);
         let parent_hash = full_blocks
             .last()
             .map(|b| b.hash.clone())
@@ -864,7 +864,7 @@ mod test {
         let blocks = generate_blocks(history_len, 0, None);
         let history = BlockHistory::new(blocks.clone(), 20).unwrap();
         let parent_hash = blocks
-            .get(incoming_block_num.saturating_sub(1) as usize)
+            .get(usize::try_from(incoming_block_num.saturating_sub(1)).unwrap())
             .map(|b| b.hash.clone())
             .unwrap_or_else(random_hash);
 

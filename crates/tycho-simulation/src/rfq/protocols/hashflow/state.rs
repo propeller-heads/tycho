@@ -22,6 +22,7 @@ use crate::{
         sim::{self, SwapDirection},
     },
     rfq::protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
+    utils::decimals_scale,
 };
 
 /// Rough gas estimate for one Hashflow settlement.
@@ -68,7 +69,7 @@ impl HashflowState {
             .levels
             .first()
             .map_or(0.0, |level| level.quantity);
-        let scaled = first_level_quantity * 10f64.powi(self.base_token.decimals as i32);
+        let scaled = first_level_quantity * decimals_scale(self.base_token.decimals);
         // `BigUint::from_f64` truncates, which is the rounding this wants.
         BigUint::from_f64(scaled).unwrap_or_default()
     }
@@ -583,8 +584,8 @@ mod tests {
 
         // Total sell: 0.5 + 1.5 + 5.0 = 7.0 WETH (18 decimals)
         // Total buy: (0.5+1.5)*3000 + 5.0*2999 = 20995 USDC (6 decimals)
-        assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-        assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+        assert_eq!(sell_limit, BigUint::from(7_000_000_000_000_000_000u128));
+        assert_eq!(buy_limit, BigUint::from(20_995_000_000u128));
     }
 
     /// The venue refuses a swap of nothing, so simulating one must not report a fill.

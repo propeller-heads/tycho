@@ -19,6 +19,7 @@ use tycho_common::{
 };
 
 use super::decoder::apply_delta;
+use crate::utils::decimals_exponent;
 
 pub type Address = [u8; 20];
 // Pool-call estimate for routing, not a transaction gas limit.
@@ -133,7 +134,7 @@ impl ProtocolSim for LunarBaseState {
         let token_out = address_from_bytes(quote.address.as_ref())?;
         if token_in == self.token_x && token_out == self.token_y {
             return Ok(apply_fee_discount(
-                anchor_price(self.anchor_price_x96, base, quote),
+                anchor_price(self.anchor_price_x96, base, quote)?,
                 self.fee_bid_x24,
             ));
         }
@@ -142,7 +143,7 @@ impl ProtocolSim for LunarBaseState {
                 return Ok(0.0);
             }
             return Ok(apply_fee_discount(
-                1.0 / anchor_price(self.anchor_price_x96, quote, base),
+                1.0 / anchor_price(self.anchor_price_x96, quote, base)?,
                 self.fee_ask_x24,
             ));
         }
@@ -342,9 +343,13 @@ enum QuoteError {
     Math(MathError),
 }
 
-fn anchor_price(anchor_price_x96: U256, token_in: &Token, token_out: &Token) -> f64 {
-    let decimals_adjustment = 10f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
-    sqrt_price_x96_to_price(anchor_price_x96) * decimals_adjustment
+fn anchor_price(
+    anchor_price_x96: U256,
+    token_in: &Token,
+    token_out: &Token,
+) -> Result<f64, SimulationError> {
+    let decimals_adjustment = 10f64.powi(decimals_exponent(token_in.decimals, token_out.decimals)?);
+    Ok(sqrt_price_x96_to_price(anchor_price_x96) * decimals_adjustment)
 }
 
 fn apply_fee_discount(price: f64, fee_x24: u32) -> f64 {

@@ -84,7 +84,9 @@ impl TryFromMessage for Block {
             number: msg.number,
             hash: msg.hash.into(),
             parent_hash: msg.parent_hash.into(),
-            ts: DateTime::from_timestamp(msg.ts as i64, 0)
+            ts: i64::try_from(msg.ts)
+                .ok()
+                .and_then(|secs| DateTime::from_timestamp(secs, 0))
                 .ok_or_else(|| {
                     DecodeError::Decode(format!(
                         "Failed to convert timestamp {} to datetime!",

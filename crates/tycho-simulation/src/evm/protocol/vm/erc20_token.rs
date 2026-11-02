@@ -178,7 +178,12 @@ pub fn string_to_storage_bytes(s: &str) -> [u8; 32] {
     let mut padded = [0u8; 32];
     let len = s.len().min(31);
     padded[..len].copy_from_slice(&s.as_bytes()[..len]);
-    padded[31] = (len * 2) as u8; // Length * 2 for short strings
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "len is at most 31, so len * 2 fits in a byte"
+    )]
+    let encoded_len = (len * 2) as u8; // Length * 2 for short strings
+    padded[31] = encoded_len;
     padded
 }
 
@@ -281,7 +286,7 @@ mod tests {
         let mut expected_bytes = [0u8; 32];
         let name_bytes = name.as_bytes();
         expected_bytes[..name_bytes.len()].copy_from_slice(name_bytes);
-        expected_bytes[31] = (name_bytes.len() * 2) as u8; // Length * 2 for short strings
+        expected_bytes[31] = u8::try_from(name_bytes.len() * 2).unwrap(); // Length * 2 for short strings
         let expected_value = U256::from_be_bytes(expected_bytes);
         assert_eq!(factory.overwrites[&*CUSTOM_NAME_POSITION], expected_value);
 
@@ -301,7 +306,7 @@ mod tests {
         let mut expected_bytes = [0u8; 32];
         let symbol_bytes = symbol.as_bytes();
         expected_bytes[..symbol_bytes.len()].copy_from_slice(symbol_bytes);
-        expected_bytes[31] = (symbol_bytes.len() * 2) as u8; // Length * 2 for short strings
+        expected_bytes[31] = u8::try_from(symbol_bytes.len() * 2).unwrap(); // Length * 2 for short strings
         let expected_value = U256::from_be_bytes(expected_bytes);
         assert_eq!(factory.overwrites[&*CUSTOM_SYMBOL_POSITION], expected_value);
 

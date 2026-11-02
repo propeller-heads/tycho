@@ -119,7 +119,14 @@ impl PlanRestrictions {
     /// timestamp are rejected since their age cannot be verified.
     pub fn check_version_recency(&self, version: &dto::VersionParam) -> Result<(), RpcError> {
         let Some(max_minutes) = self.max_version_age_minutes else { return Ok(()) };
-        let max_age = TimeDelta::minutes(max_minutes as i64);
+        let max_age = i64::try_from(max_minutes)
+            .ok()
+            .and_then(TimeDelta::try_minutes)
+            .ok_or_else(|| {
+                RpcError::Unknown(format!(
+                    "max_version_age_minutes {max_minutes} is out of range for a duration"
+                ))
+            })?;
         match version.timestamp {
             Some(ts) if Utc::now().naive_utc() - ts <= max_age => Ok(()),
             _ => Err(RpcError::PlanRestrictionViolation(format!(

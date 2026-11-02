@@ -1376,7 +1376,11 @@ mod tests {
                 let served = tracker
                     .on_price_level_message(message, clock.at(1))
                     .is_some();
-                assert_eq!(served, (index as usize) < MAX_AUTO_DETECTED, "venue {index}");
+                assert_eq!(
+                    served,
+                    usize::try_from(index).unwrap() < MAX_AUTO_DETECTED,
+                    "venue {index}"
+                );
             }
             tracker.registry.len()
         });

@@ -62,7 +62,7 @@ impl Token {
     /// ## Return
     /// Returns one token as BigUint
     pub fn one(&self) -> BigUint {
-        BigUint::from((1.0 * 10f64.powi(self.decimals as i32)) as u128)
+        BigUint::from(10u32).pow(self.decimals)
     }
 
     pub fn gas_usage(&self) -> BigUint {

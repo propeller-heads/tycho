@@ -4068,9 +4068,14 @@ mod test {
     }
 
     fn make_block_changes(block_num: u64, partial_idx: Option<u32>) -> BlockAggregatedChanges {
-        // Use vec to create Bytes from block number
-        let hash = Bytes::from(vec![block_num as u8; 32]);
-        let parent_hash = Bytes::from(vec![block_num.saturating_sub(1) as u8; 32]);
+        // A 32-byte hash whose last 8 bytes are the block number, so every block has its own hash.
+        let hash_of = |number: u64| {
+            let mut hash = [0u8; 32];
+            hash[24..].copy_from_slice(&number.to_be_bytes());
+            Bytes::from(hash.to_vec())
+        };
+        let hash = hash_of(block_num);
+        let parent_hash = hash_of(block_num.saturating_sub(1));
         BlockAggregatedChanges {
             extractor: "uniswap-v2".to_string(),
             chain: Chain::Ethereum,
@@ -4729,7 +4734,7 @@ mod test {
                         .into_iter()
                         .map(|id| ProtocolComponent { id, ..Default::default() })
                         .collect();
-                    let total = components.len() as i64;
+                    let total = i64::try_from(components.len()).unwrap();
                     Ok(Page::new(components, total, 0, 100))
                 });
             rpc_client

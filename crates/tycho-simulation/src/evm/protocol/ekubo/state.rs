@@ -29,11 +29,14 @@ use tycho_common::{
 use super::pool::{
     base::BasePool, full_range::FullRangePool, oracle::OraclePool, twamm::TwammPool, EkuboPool,
 };
-use crate::evm::protocol::{
-    ekubo::pool::mev_resist::MevResistPool,
-    ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
-    u256_num::u256_to_f64,
-    utils::add_fee_markup,
+use crate::{
+    evm::protocol::{
+        ekubo::pool::mev_resist::MevResistPool,
+        ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
+        u256_num::u256_to_f64,
+        utils::add_fee_markup,
+    },
+    utils::decimals_exponent,
 };
 
 #[enum_delegate::implement(EkuboPool)]
@@ -48,9 +51,9 @@ pub enum EkuboState {
 
 fn sqrt_price_q128_to_f64(
     x: U256,
-    (token0_decimals, token1_decimals): (usize, usize),
+    (token0_decimals, token1_decimals): (u32, u32),
 ) -> Result<f64, SimulationError> {
-    let token_correction = 10f64.powi(token0_decimals as i32 - token1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token0_decimals, token1_decimals)?);
 
     let price = u256_to_f64(alloy::primitives::U256::from_limbs(x.0))? / 2.0f64.powi(128);
     Ok(price.powi(2) * token_correction)
@@ -93,7 +96,7 @@ impl ProtocolSim for EkuboState {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let sqrt_ratio = self.sqrt_ratio();
-        let (base_decimals, quote_decimals) = (base.decimals as usize, quote.decimals as usize);
+        let (base_decimals, quote_decimals) = (base.decimals, quote.decimals);
 
         let price = if base < quote {
             sqrt_price_q128_to_f64(sqrt_ratio, (base_decimals, quote_decimals))?

@@ -41,8 +41,13 @@ pub struct Sampler {
 impl Sampler {
     /// Samples the share `rate` of requests, from `0.0` (none) to `1.0` (all).
     pub(crate) fn new(rate: f64) -> Self {
-        // `as` saturates, so a rate of 1.0 gives `u64::MAX`.
-        Self { threshold: (rate * u64::MAX as f64) as u64 }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the saturating cast clamps the threshold: a rate of 1.0 or more gives u64::MAX, below 0.0 or NaN gives 0"
+        )]
+        let threshold = (rate * u64::MAX as f64) as u64;
+        Self { threshold }
     }
 
     /// Whether shadow mode compares `request`. Does no work when the rate is zero.
@@ -545,6 +550,7 @@ mod test {
     };
     use rstest::rstest;
     use tycho_common::dto::PaginationResponse;
+    use tycho_storage::postgres::count_to_i64;
 
     use super::*;
     use crate::services::state::{
@@ -603,7 +609,10 @@ mod test {
 
     /// Both paths report `total` as the number of requested ids, not of returned entities.
     fn contracts(accounts: Vec<dto::ResponseAccount>, total: usize) -> dto::StateRequestResponse {
-        dto::StateRequestResponse::new(accounts, PaginationResponse::new(0, 100, total as i64))
+        dto::StateRequestResponse::new(
+            accounts,
+            PaginationResponse::new(0, 100, count_to_i64(total)),
+        )
     }
 
     fn compare_contracts(
@@ -872,7 +881,7 @@ mod test {
     ) -> dto::ProtocolStateRequestResponse {
         dto::ProtocolStateRequestResponse::new(
             states,
-            PaginationResponse::new(0, 100, total as i64),
+            PaginationResponse::new(0, 100, count_to_i64(total)),
         )
     }
 

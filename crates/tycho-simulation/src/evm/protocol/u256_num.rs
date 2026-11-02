@@ -33,12 +33,16 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
         return Ok(0.0);
     }
 
-    let x_bits = x.bit_len();
-    let n_shifts = 53i32 - x_bits as i32;
-    let mut exponent = (1023 + 52 - n_shifts) as u64;
+    // A U256 has at most 256 bits, so the shift and the exponent are small and the exponent is
+    // positive.
+    let n_shifts = i32::try_from(x.bit_len())
+        .map(|x_bits| 53i32 - x_bits)
+        .map_err(|e| SimulationError::FatalError(format!("Bit length of {x} out of range: {e}")))?;
+    let mut exponent = u64::try_from(1023 + 52 - n_shifts)
+        .map_err(|e| SimulationError::FatalError(format!("Exponent for {x} out of range: {e}")))?;
 
     let mut significant = if n_shifts >= 0 {
-        let shift = n_shifts as u32;
+        let shift = n_shifts.unsigned_abs();
         let shifted = x << shift;
         u64::try_from(shifted).map_err(|_| {
             SimulationError::FatalError(format!(
@@ -110,7 +114,7 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
 pub fn u256_to_biguint(value: U256) -> BigUint {
     let digits = value
         .as_limbs()
-        .map(|limb| [limb as u32, (limb >> 32) as u32]);
+        .map(|limb| [(limb & 0xFFFF_FFFF) as u32, (limb >> 32) as u32]);
     BigUint::from_slice(digits.as_flattened())
 }
 

@@ -552,7 +552,8 @@ mod tests {
             (
                 "liquidity".to_string(),
                 Bytes::from(
-                    (liquidity as u128)
+                    u128::try_from(liquidity)
+                        .unwrap()
                         .to_be_bytes()
                         .to_vec(),
                 ),
@@ -581,7 +582,7 @@ mod tests {
     fn reference_hookless_state() -> UniswapV4State {
         let liquidity = 1_000_000_000_000_000_000_i128;
         UniswapV4State::new(
-            liquidity as u128,
+            u128::try_from(liquidity).unwrap(),
             U256::from(79228162514264337593543950336_u128),
             UniswapV4Fees::new(0, 0, 500),
             0,

@@ -401,7 +401,8 @@ impl StakingState {
                 return Err(SimulationError::RecoverableError("STAKE_LIMIT".to_string()));
             }
             self.prev_stake_limit = current_stake_limit - amount;
-            self.prev_stake_block_number = block_number as u32;
+            // Lido stores prevStakeBlockNumber as a uint32: the low 32 bits of the block number.
+            self.prev_stake_block_number = (block_number & 0xFFFF_FFFF) as u32;
         }
 
         Ok(())
@@ -1110,7 +1111,8 @@ mod tests {
         let mut staking_state = state.staking_state;
         // Capacity gone, but the pair still has a rate: the limit bounds size, not price.
         staking_state.prev_stake_limit = U256::ZERO;
-        staking_state.prev_stake_block_number = state.execution_block_number as u32;
+        staking_state.prev_stake_block_number =
+            u32::try_from(state.execution_block_number).unwrap();
         staking_state.max_stake_limit_growth_blocks = 0;
         state.staking_state = staking_state;
 

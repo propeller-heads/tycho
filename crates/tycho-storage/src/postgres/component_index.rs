@@ -102,7 +102,7 @@ use tycho_common::{
 };
 
 use crate::postgres::{
-    schema,
+    count_to_i64, page_window, schema,
     snapshot::{bound_snapshot_reads, snapshot_transaction},
     PostgresError,
 };
@@ -192,7 +192,7 @@ impl SystemIndex {
                 .min(self.ids.len());
             return ComponentPage {
                 ids: self.ids[start..end].to_vec(),
-                total: self.ids.len() as i64,
+                total: count_to_i64(self.ids.len()),
             };
         };
 
@@ -206,7 +206,7 @@ impl SystemIndex {
                 total += 1;
             }
         }
-        ComponentPage { ids, total: total as i64 }
+        ComponentPage { ids, total: count_to_i64(total) }
     }
 }
 
@@ -339,19 +339,20 @@ impl ComponentIndex {
         protocol_system_id: i64,
         min_tvl: Option<f64>,
         pagination: Option<&PaginationParams>,
-    ) -> Option<ComponentPage> {
+    ) -> Result<Option<ComponentPage>, StorageError> {
         if *chain != self.chain {
-            return None;
+            return Ok(None);
         }
         let (offset, limit) = pagination
-            .map(|params| (params.offset().max(0) as usize, params.page_size.max(0) as usize))
+            .map(page_window)
+            .transpose()?
             .unwrap_or((0, usize::MAX));
         let index = self.read_index();
         let page = match index.systems.get(&protocol_system_id) {
             Some(system) => system.query(min_tvl, offset, limit),
             None => ComponentPage { ids: Vec::new(), total: 0 },
         };
-        Some(page)
+        Ok(Some(page))
     }
 
     /// Brings the index up to date with the database: a full reload when the last one is older
@@ -732,8 +733,18 @@ mod test {
     fn test_query_unknown_system_is_empty_and_unknown_chain_is_none() {
         let index = index_with(&[(7, 100)]);
 
-        assert_eq!(index.query(&Chain::Ethereum, 8, None, None), Some(page(&[], 0)));
-        assert_eq!(index.query(&Chain::Base, 7, None, None), None);
+        assert_eq!(
+            index
+                .query(&Chain::Ethereum, 8, None, None)
+                .unwrap(),
+            Some(page(&[], 0))
+        );
+        assert_eq!(
+            index
+                .query(&Chain::Base, 7, None, None)
+                .unwrap(),
+            None
+        );
     }
 }
 
@@ -777,6 +788,7 @@ mod benchmark {
         let total = index
             .query(&chain, system_id, min_tvl, Some(&PaginationParams::new(0, 1)))
             .unwrap()
+            .unwrap()
             .total;
         let page_size = 2550;
         let deep_page = total / page_size / 2;
@@ -784,12 +796,14 @@ mod benchmark {
             let iterations = 20;
             let started = Instant::now();
             for _ in 0..iterations {
-                index.query(
-                    &chain,
-                    system_id,
-                    min_tvl,
-                    Some(&PaginationParams::new(page, page_size)),
-                );
+                index
+                    .query(
+                        &chain,
+                        system_id,
+                        min_tvl,
+                        Some(&PaginationParams::new(page, page_size)),
+                    )
+                    .unwrap();
             }
             println!(
                 "query tvl>{min_tvl:?} page {page} of {}: {:?} (total {total})",

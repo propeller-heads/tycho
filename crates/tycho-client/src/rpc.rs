@@ -799,11 +799,14 @@ pub trait RPCClient: Send + Sync {
         let mut sorted_ids = params.contract_ids;
         sorted_ids.sort();
 
-        let max_page_size = StateRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(CONTRACT_STATE_CHUNK_SIZE)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            Some(
+                params
+                    .chunk_size
+                    .unwrap_or(CONTRACT_STATE_CHUNK_SIZE),
+            ),
+            StateRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let mut tasks = Vec::new();
         for chunk in sorted_ids.chunks(chunk_size) {
@@ -812,7 +815,7 @@ pub trait RPCClient: Send + Sync {
                 ContractStateParams::new(params.chain, params.protocol_system.as_str())
                     .with_contract_ids(chunk.to_vec())
                     .with_version(params.version.clone())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
             tasks.push(async move {
                 let _permit = sem
                     .acquire()
@@ -857,11 +860,10 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let max_page_size =
-            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            chunk_size,
+            ProtocolComponentsRequestBody::effective_max_page_size(self.compression()),
+        );
 
         // If a set of component IDs is specified, the maximum return size is already known,
         // allowing us to pre-compute the number of requests to be made.
@@ -875,7 +877,7 @@ pub trait RPCClient: Send + Sync {
                             let mut base =
                                 ProtocolComponentsParams::new(chain, protocol_system.as_str())
                                     .with_component_ids(chunk.to_vec())
-                                    .with_pagination(0, chunk_size as i64);
+                                    .with_pagination(0, page_size);
                             if let Some(tvl) = tvl_gt {
                                 base = base.with_tvl_gt(tvl);
                             }
@@ -897,7 +899,7 @@ pub trait RPCClient: Send + Sync {
                 // number of results from the first response.
                 let mut base_params =
                     ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                        .with_pagination(0, chunk_size as i64);
+                        .with_pagination(0, page_size);
                 if let Some(tvl) = tvl_gt {
                     base_params = base_params.with_tvl_gt(tvl);
                 }
@@ -907,20 +909,21 @@ pub trait RPCClient: Send + Sync {
                     .await?;
 
                 let total_items = first_page.total();
-                let total_pages = (total_items as f64 / chunk_size as f64).ceil() as i64;
+                let total_pages = total_pages(total_items, page_size);
 
                 let mut all: Vec<ProtocolComponent> = first_page.into_data();
 
                 let mut page = 1;
                 while page < total_pages {
-                    let requests_in_this_iteration = (total_pages - page).min(concurrency as i64);
+                    let requests_in_this_iteration =
+                        (total_pages - page).min(saturating_i64(concurrency));
 
                     let tasks: Vec<_> = (0..requests_in_this_iteration)
                         .map(|iter| {
                             let sem = semaphore.clone();
                             let mut p =
                                 ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                                    .with_pagination(page + iter, chunk_size as i64);
+                                    .with_pagination(page + iter, page_size);
                             if let Some(tvl) = tvl_gt {
                                 p = p.with_tvl_gt(tvl);
                             }
@@ -963,12 +966,10 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<Vec<ProtocolComponentState>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let max_page_size =
-            ProtocolStateRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            ProtocolStateRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let tasks: Vec<_> = params
             .protocol_ids
@@ -979,7 +980,7 @@ pub trait RPCClient: Send + Sync {
                     .with_protocol_ids(c.to_vec())
                     .with_include_balances(params.include_balances)
                     .with_version(params.version.clone())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
                 async move {
                     let _permit = sem
                         .acquire()
@@ -1004,17 +1005,12 @@ pub trait RPCClient: Send + Sync {
     ///
     /// If `chunk_size` is `None`, it defaults to the maximum page size.
     async fn get_all_tokens(&self, params: AllTokensParams) -> Result<Vec<Token>, RPCError> {
-        let max_page_size = TokensRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (_, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            TokensRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
-
-        let page_size: i64 = chunk_size.try_into().map_err(|_| {
-            RPCError::FormatRequest("Failed to convert chunk_size into i64".to_string())
-        })?;
 
         let mut base_params = TokensParams::new(params.chain).with_pagination(0, page_size);
         if let Some(q) = params.min_quality {
@@ -1025,7 +1021,7 @@ pub trait RPCClient: Send + Sync {
         }
 
         let first_page = self.get_tokens(base_params).await?;
-        let total_pages = (first_page.total() as f64 / chunk_size as f64).ceil() as i64;
+        let total_pages = total_pages(first_page.total(), page_size);
 
         let mut all_tokens: Vec<Token> = first_page.into_data();
 
@@ -1084,12 +1080,10 @@ pub trait RPCClient: Send + Sync {
     ) -> Result<HashMap<String, f64>, RPCError> {
         let semaphore = Arc::new(Semaphore::new(params.concurrency));
 
-        let max_page_size =
-            ComponentTvlRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = params
-            .chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            params.chunk_size,
+            ComponentTvlRequestBody::effective_max_page_size(self.compression()),
+        );
 
         match params.component_ids {
             Some(ids) => {
@@ -1100,7 +1094,7 @@ pub trait RPCClient: Send + Sync {
                             let sem = semaphore.clone();
                             let mut p = ComponentTvlParams::new(params.chain)
                                 .with_component_ids(chunk.to_vec())
-                                .with_pagination(0, chunk_size as i64);
+                                .with_pagination(0, page_size);
                             if let Some(ref ps) = params.protocol_system {
                                 p = p.with_protocol_system(ps.as_str());
                             }
@@ -1125,28 +1119,27 @@ pub trait RPCClient: Send + Sync {
                 Ok(merged_tvl)
             }
             None => {
-                let mut base =
-                    ComponentTvlParams::new(params.chain).with_pagination(0, chunk_size as i64);
+                let mut base = ComponentTvlParams::new(params.chain).with_pagination(0, page_size);
                 if let Some(ref ps) = params.protocol_system {
                     base = base.with_protocol_system(ps.as_str());
                 }
 
                 let first_page = self.get_component_tvl(base).await?;
                 let total_items = first_page.total();
-                let total_pages = (total_items as f64 / chunk_size as f64).ceil() as i64;
+                let total_pages = total_pages(total_items, page_size);
 
                 let mut merged_tvl: HashMap<String, f64> = first_page.into_data();
 
                 let mut page = 1;
                 while page < total_pages {
                     let requests_in_this_iteration =
-                        (total_pages - page).min(params.concurrency as i64);
+                        (total_pages - page).min(saturating_i64(params.concurrency));
 
                     let tasks: Vec<_> = (0..requests_in_this_iteration)
                         .map(|i| {
                             let sem = semaphore.clone();
                             let mut p = ComponentTvlParams::new(params.chain)
-                                .with_pagination(page + i, chunk_size as i64);
+                                .with_pagination(page + i, page_size);
                             if let Some(ref ps) = params.protocol_system {
                                 p = p.with_protocol_system(ps.as_str());
                             }
@@ -1198,11 +1191,10 @@ pub trait RPCClient: Send + Sync {
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let max_page_size =
-            TracedEntryPointRequestBody::effective_max_page_size(self.compression()) as usize;
-        let chunk_size = chunk_size
-            .unwrap_or(max_page_size)
-            .min(max_page_size);
+        let (chunk_size, page_size) = resolve_chunk_size(
+            chunk_size,
+            TracedEntryPointRequestBody::effective_max_page_size(self.compression()),
+        );
 
         let tasks: Vec<_> = component_ids
             .chunks(chunk_size)
@@ -1210,7 +1202,7 @@ pub trait RPCClient: Send + Sync {
                 let sem = semaphore.clone();
                 let params = TracedEntryPointsParams::new(chain, protocol_system.as_str())
                     .with_component_ids(c.to_vec())
-                    .with_pagination(0, chunk_size as i64);
+                    .with_pagination(0, page_size);
                 async move {
                     let _permit = sem
                         .acquire()
@@ -1482,6 +1474,29 @@ impl HttpRPCClient {
         .await?;
         Ok(response)
     }
+}
+
+/// Resolves a requested chunk size against the server's maximum page size. Returns the chunk size
+/// as an item count and as the page size to put in a request; `None` selects the maximum.
+fn resolve_chunk_size(requested: Option<usize>, max_page_size: i64) -> (usize, i64) {
+    let max_chunk_size =
+        usize::try_from(max_page_size).expect("maximum page sizes are positive constants");
+    let chunk_size = requested
+        .unwrap_or(max_chunk_size)
+        .min(max_chunk_size);
+    let page_size =
+        i64::try_from(chunk_size).expect("the chunk size is clamped to the maximum page size");
+    (chunk_size, page_size)
+}
+
+/// Number of pages of `page_size` items needed to hold `total_items`.
+fn total_pages(total_items: i64, page_size: i64) -> i64 {
+    total_items / page_size + i64::from(total_items % page_size > 0)
+}
+
+/// Converts a count to `i64`, clamping to `i64::MAX`.
+fn saturating_i64(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 fn parse_retry_value(val: &str) -> Option<SystemTime> {
@@ -2041,7 +2056,7 @@ mod tests {
                         protocol_system.to_string(),
                         include_balances,
                         block_number,
-                        PaginationParams { page: 0, page_size: chunk_size as i64 },
+                        PaginationParams { page: 0, page_size: i64::try_from(chunk_size).unwrap() },
                     )
                 })
                 .collect()
@@ -2259,7 +2274,7 @@ mod tests {
                     RPC_CLIENT_CONCURRENCY,
                 )
                 .with_component_ids(ids)
-                .with_chunk_size(max as usize * 2),
+                .with_chunk_size(usize::try_from(max).unwrap() * 2),
             )
             .await
             .expect("get components");
@@ -2292,7 +2307,7 @@ mod tests {
             .get_component_tvl_paginated(
                 ComponentTvlPaginatedParams::new(Chain::Ethereum, RPC_CLIENT_CONCURRENCY)
                     .with_component_ids(ids)
-                    .with_chunk_size(max as usize * 2),
+                    .with_chunk_size(usize::try_from(max).unwrap() * 2),
             )
             .await
             .expect("get component tvl");
@@ -3652,7 +3667,7 @@ mod tests {
 
         let mut server = Server::new_async().await;
 
-        let total_pages = (total_tokens as f64 / page_size as f64).ceil() as i64;
+        let total_pages = total_tokens.div_ceil(page_size);
 
         // Mock all required pages
         for page in 0..total_pages {
@@ -3660,8 +3675,8 @@ mod tests {
             let max_conc = max_concurrent.clone();
 
             let tokens_in_page = {
-                let start_idx = (page as usize) * page_size;
-                let end_idx = ((page as usize + 1) * page_size).min(total_tokens);
+                let start_idx = page * page_size;
+                let end_idx = ((page + 1) * page_size).min(total_tokens);
                 (start_idx..end_idx)
                     .map(|i| {
                         format!(
@@ -3723,7 +3738,7 @@ mod tests {
 
         // Verify concurrency was respected
         let max = max_concurrent.load(Ordering::SeqCst);
-        let expected_max_concurrency = (total_pages as usize)
+        let expected_max_concurrency = total_pages
             .saturating_sub(1)
             .min(allowed_concurrency);
         assert!(

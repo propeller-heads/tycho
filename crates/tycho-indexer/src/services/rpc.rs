@@ -24,6 +24,7 @@ use tycho_common::{
     traits::EntryPointTracer,
     Bytes,
 };
+use tycho_storage::postgres::{count_to_i64, page_window};
 
 use crate::{
     extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
@@ -57,7 +58,7 @@ pub enum RpcError {
     DeltasError(#[from] PendingDeltasError),
 
     #[error("Page size must be less than or equal to {0}.")]
-    Pagination(usize),
+    Pagination(i64),
 
     #[error("Page must be at least 0 and page size at least 1, got page {page} and page size {page_size}.")]
     InvalidPagination { page: i64, page_size: i64 },
@@ -275,7 +276,7 @@ where
                         Box::new(move |b: &BlockAggregatedChanges| b.block.hash == hash)
                     }
                     BlockIdentifier::Number((_, no)) => {
-                        let no = *no as u64;
+                        let no = u64::try_from(*no).ok()?;
                         Box::new(move |b: &BlockAggregatedChanges| b.block.number == no)
                     }
                     BlockIdentifier::Latest(_) => return None,
@@ -391,6 +392,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the contract IDs from the request
         let addresses = request.contract_ids.clone();
@@ -404,8 +406,8 @@ where
             paginated_addrs = Some(
                 addrs
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );
@@ -447,7 +449,7 @@ where
         let total = match addresses {
             Some(adrs) => {
                 // If contract addresses are specified, the total count is the number of addresses
-                adrs.len() as i64
+                count_to_i64(adrs.len())
             }
             None => account_data.total.unwrap_or_default(), /* TODO: handle case where contract
                                                              * addresses are not specified */
@@ -482,7 +484,9 @@ where
     ) -> Result<(Version, Option<BlockNumberOrTimestamp>), RpcError> {
         let ordered_version = match request_version {
             BlockOrTimestamp::Block(BlockIdentifier::Number((_, no))) => {
-                BlockNumberOrTimestamp::Number(*no as u64)
+                BlockNumberOrTimestamp::Number(u64::try_from(*no).map_err(|_overflow| {
+                    RpcError::Parse(format!("Block number {no} is negative"))
+                })?)
             }
             BlockOrTimestamp::Block(BlockIdentifier::Hash(hash)) => {
                 let block_number = if let Some(block_number) = self
@@ -667,6 +671,7 @@ where
             .await?;
 
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // Get the protocol IDs from the request
         let protocol_ids = request.protocol_ids.clone();
@@ -681,11 +686,11 @@ where
         let (paginated_ids, total): (Vec<String>, i64) = match ids {
             Some(ids) => (
                 ids.iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .map(|s| s.to_string())
                     .collect(),
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
             None => {
                 let req = dto::ProtocolComponentsRequestBody {
@@ -775,11 +780,10 @@ where
                 .collect(),
             None => self.protocol_systems.iter().collect(),
         };
-        let total = filtered.len() as i64;
+        let total = count_to_i64(filtered.len());
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
-        let skip = (page * page_size) as usize;
-        let take = page_size as usize;
+        let (skip, take) = page_window(&PaginationParams::new(page, page_size))?;
         let systems: Vec<String> = filtered
             .into_iter()
             .skip(skip)
@@ -941,7 +945,8 @@ where
                         // If component ids were specified, check if we have all requested
                         // components are in the response (should cache)
                         if let Some(component_ids) = &request.component_ids {
-                            let all_found = component_ids.len() == res.pagination.total as usize;
+                            let all_found =
+                                count_to_i64(component_ids.len()) == res.pagination.total;
                             if all_found {
                                 return (res, true);
                             }
@@ -985,16 +990,15 @@ where
                 .map(|comp| comp.id.as_str())
                 .collect();
 
-            let total = buffered_components.len() as i64;
+            let n_buffered = buffered_components.len();
+            let total = count_to_i64(n_buffered);
+            let (page_offset, page_limit) = page_window(&pagination_params)?;
 
             if requested_ids.len() == fetched_ids.len() {
                 let response_components: Vec<dto::ProtocolComponent> = buffered_components
                     .into_iter()
-                    .skip(
-                        ((pagination_params.page * pagination_params.page_size) as usize)
-                            .min(total as usize),
-                    )
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset.min(n_buffered))
+                    .take(page_limit)
                     .map(dto::ProtocolComponent::from)
                     .collect();
 
@@ -1022,7 +1026,8 @@ where
         {
             Ok(component_data) => {
                 let db_total = component_data.total.unwrap_or_default();
-                let total = db_total + buffered_components.len() as i64;
+                let total = db_total + count_to_i64(buffered_components.len());
+                let (_, page_limit) = page_window(&pagination_params)?;
                 let mut components = component_data.entity;
 
                 // Handle adding buffered components to the response
@@ -1032,12 +1037,13 @@ where
                     // buffered data only
                     components = buffered_components
                         .into_iter()
-                        .skip(buffer_offset as usize)
-                        .take(pagination_params.page_size as usize)
+                        .skip(usize::try_from(buffer_offset).map_err(|_overflow| {
+                            RpcError::Unknown(format!("Buffer offset {buffer_offset} is too large"))
+                        })?)
+                        .take(page_limit)
                         .collect();
                 } else {
-                    let remaining_capacity =
-                        pagination_params.page_size as usize - components.len();
+                    let remaining_capacity = page_limit - components.len();
                     if remaining_capacity > 0 {
                         // The db response does not fill a page - add buffered components to the
                         // response
@@ -1101,6 +1107,7 @@ where
         request: dto::TracedEntryPointRequestBody,
     ) -> Result<dto::TracedEntryPointRequestResponse, RpcError> {
         let pagination_params: PaginationParams = (&request.pagination).into();
+        let (page_offset, page_limit) = page_window(&pagination_params)?;
 
         // For consistency, we pre-apply pagination to the component ids to ensure it's
         // predetermined which components will appear on which page.
@@ -1109,8 +1116,8 @@ where
             paginated_component_ids = Some(
                 component_ids
                     .iter()
-                    .skip(pagination_params.offset() as usize)
-                    .take(pagination_params.page_size as usize)
+                    .skip(page_offset)
+                    .take(page_limit)
                     .cloned()
                     .collect(),
             );

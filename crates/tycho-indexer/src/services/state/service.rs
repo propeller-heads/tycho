@@ -41,6 +41,7 @@ use tycho_common::{
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
+use tycho_storage::postgres::{count_to_i64, page_window};
 
 use super::{
     cache::{CachedAccount, EntityCache},
@@ -244,11 +245,12 @@ impl StateService {
         // Slice the page out of the requested ids and keep each id once, like the database path
         // does. `total` still counts every requested id.
         let pagination = PaginationParams::from(&request.pagination);
+        let (offset, limit) = page_window(&pagination).map_err(StateServiceError::WindowRead)?;
         let mut seen = HashSet::new();
         let page: Vec<Bytes> = ids
             .iter()
-            .skip(pagination.offset() as usize)
-            .take(pagination.page_size as usize)
+            .skip(offset)
+            .take(limit)
             .filter(|id| seen.insert(*id))
             .cloned()
             .collect();
@@ -331,7 +333,7 @@ impl StateService {
             pagination: PaginationResponse::new(
                 pagination.page,
                 pagination.page_size,
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
         })
     }
@@ -370,11 +372,12 @@ impl StateService {
         // Slice the page out of the requested ids and keep each id once, like the database path
         // does. `total` still counts every requested id.
         let pagination = PaginationParams::from(&request.pagination);
+        let (offset, limit) = page_window(&pagination).map_err(StateServiceError::WindowRead)?;
         let mut seen = HashSet::new();
         let page: Vec<&str> = ids
             .iter()
-            .skip(pagination.offset() as usize)
-            .take(pagination.page_size as usize)
+            .skip(offset)
+            .take(limit)
             .map(String::as_str)
             .filter(|id| seen.insert(*id))
             .collect();
@@ -432,7 +435,7 @@ impl StateService {
             pagination: PaginationResponse::new(
                 pagination.page,
                 pagination.page_size,
-                ids.len() as i64,
+                count_to_i64(ids.len()),
             ),
         })
     }

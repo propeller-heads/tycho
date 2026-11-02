@@ -386,15 +386,23 @@ fn deviation_bps(price_level_amount_out: &BigUint, signed_amount_out: &BigUint) 
 ///
 /// Prefix-length encoding is a data encoding method where the beginning of a data segment
 /// (the "prefix") contains information about the length of the following data.
-pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Vec<u8> {
+///
+/// Fails if a segment is longer than `u16::MAX` bytes, the largest length the prefix can hold.
+pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Result<Vec<u8>, EncodingError> {
     let mut encoded_action_data: Vec<u8> = Vec::new();
 
     for action_data in action_data_array {
-        let args = (encoded_action_data, action_data.len() as u16, action_data);
+        let length = u16::try_from(action_data.len()).map_err(|_| {
+            EncodingError::InvalidInput(format!(
+                "Action data of {} bytes exceeds the u16 length prefix",
+                action_data.len()
+            ))
+        })?;
+        let args = (encoded_action_data, length, action_data);
         encoded_action_data = args.abi_encode_packed();
     }
 
-    encoded_action_data
+    Ok(encoded_action_data)
 }
 
 /// End of `items[index]` in `ple_encode(items)`.

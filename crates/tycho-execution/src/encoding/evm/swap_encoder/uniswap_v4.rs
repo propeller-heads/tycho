@@ -104,7 +104,14 @@ impl SwapEncoder for UniswapV4SwapEncoder {
             None => v4_user_data.hook_data.to_vec(),
         };
 
-        let hook_data_length = (hook_data.len() as u16).to_be_bytes();
+        let hook_data_length = u16::try_from(hook_data.len())
+            .map_err(|_| {
+                EncodingError::InvalidInput(format!(
+                    "Hook data of {} bytes exceeds the u16 length prefix",
+                    hook_data.len()
+                ))
+            })?
+            .to_be_bytes();
 
         // Early check if this is not the first swap
         if encoding_context.group_token_in != *swap.token_in().address {
@@ -469,7 +476,7 @@ mod tests {
         let combined_hex = format!(
             "{}{}",
             encode(&initial_encoded_swap),
-            encode(ple_encode(vec![second_encoded_swap]))
+            encode(ple_encode(vec![second_encoded_swap]).unwrap())
         );
 
         assert_eq!(
@@ -594,8 +601,11 @@ mod tests {
             let second_encoded = encoder
                 .encode_swap(&second_swap, &context)
                 .unwrap();
-            let combined_hex =
-                format!("{}{}", encode(&first_encoded), encode(ple_encode(vec![second_encoded])));
+            let combined_hex = format!(
+                "{}{}",
+                encode(&first_encoded),
+                encode(ple_encode(vec![second_encoded]).unwrap())
+            );
 
             write_calldata_to_file("test_encode_angstrom_grouped_swap", combined_hex.as_str());
 

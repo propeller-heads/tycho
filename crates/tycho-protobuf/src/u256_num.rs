@@ -47,8 +47,10 @@ pub fn bytes_to_f64(data: &[u8]) -> Option<f64> {
         }
 
         let x_bits = x.bits();
-        let n_shifts = 53i32 - x_bits as i32;
-        let mut exponent = (1023 + 52 - n_shifts) as u64;
+        let n_shifts =
+            53i32 - i32::try_from(x_bits).expect("input is at most 32 bytes, so at most 256 bits");
+        let mut exponent = u64::try_from(1023 + 52 - n_shifts)
+            .expect("the exponent is positive for inputs of at most 256 bits");
 
         let mut significant = if n_shifts >= 0 {
             // shift left if pos, no rounding needed

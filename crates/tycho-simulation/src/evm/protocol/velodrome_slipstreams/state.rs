@@ -88,7 +88,10 @@ impl VelodromeSlipstreamsState {
         tick: i32,
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
-        let tick_list = TickList::from(tick_spacing as u16, ticks)?;
+        let tick_list_spacing = u16::try_from(tick_spacing).map_err(|e| {
+            SimulationError::InvalidInput(format!("Invalid tick spacing {tick_spacing}: {e}"), None)
+        })?;
+        let tick_list = TickList::from(tick_list_spacing, ticks)?;
         Ok(VelodromeSlipstreamsState {
             liquidity,
             sqrt_price,

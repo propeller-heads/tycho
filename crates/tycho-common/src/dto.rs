@@ -1168,6 +1168,10 @@ impl VersionParam {
                     deprecated,
                     reason = "BlockParam is deprecated for consumers but still constructed by this crate"
                 )]
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "public API; returning a Result for block numbers above i64::MAX is a breaking change"
+                )]
                 BlockParam { hash: None, chain: Some(chain), number: Some(block_number as i64) }
             }),
         )
@@ -3369,8 +3373,8 @@ mod memory_size_tests {
         let create_response_with_slots = |slot_count: usize| {
             let mut slots = HashMap::new();
             for i in 0..slot_count {
-                let key = vec![i as u8; 32]; // 32-byte key
-                let value = vec![(i + 100) as u8; 32]; // 32-byte value
+                let key = vec![u8::try_from(i).unwrap(); 32]; // 32-byte key
+                let value = vec![u8::try_from(i + 100).unwrap(); 32]; // 32-byte value
                 slots.insert(key.into(), value.into());
             }
 

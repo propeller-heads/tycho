@@ -27,8 +27,8 @@ use tycho_common::{
 };
 
 use super::{
-    maybe_lookup_block_ts, maybe_lookup_version_ts, orm, schema, storage_error_from_diesel,
-    truncate_to_byte_limit,
+    convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, page_window,
+    schema, storage_error_from_diesel, truncate_to_byte_limit,
     versioning::{apply_partitioned_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -168,7 +168,8 @@ impl PostgresGateway {
             (&self.component_index, &system, ids)
         {
             let system_id = self.get_protocol_system_id(system_name)?;
-            if let Some(page) = component_index.query(chain, system_id, min_tvl, pagination_params)
+            if let Some(page) =
+                component_index.query(chain, system_id, min_tvl, pagination_params)?
             {
                 let components = self
                     .get_protocol_components_by_db_ids(chain, &page.ids, conn)
@@ -563,28 +564,21 @@ impl PostgresGateway {
             .flat_map(|pc| pc.tokens.iter().cloned())
             .collect();
 
-        let pc_tokens_map = filtered_new_protocol_components
-            .iter()
-            .flat_map(|pc| {
-                let pc_id = protocol_db_id_map
+        let mut pc_tokens_map: Vec<(i64, Address, i16)> = Vec::new();
+        for pc in &filtered_new_protocol_components {
+            let pc_id = protocol_db_id_map
                     .get(&(pc.id.clone(), pc.protocol_system.clone(), pc.chain))
-                    .unwrap_or_else(|| {
-                        //Because we just inserted the protocol systems, there should not be any missing.
-                        // However, trying to handle this via Results is needlessly difficult, because you
-                        // can not use flat_map on a Result.
-                        panic!(
-                            "Could not find Protocol Component with ID: {}, Protocol System: {}, Chain: {}",
-                            pc.id, pc.protocol_system, pc.chain
-                        )
-                    });
-                pc.tokens
-                    .clone()
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(idx, add)| (*pc_id, add, idx as i16))
-                    .collect::<Vec<(i64, Address, i16)>>()
-            })
-            .collect::<Vec<(i64, Address, i16)>>();
+                .unwrap_or_else(|| {
+                    // The protocol systems were inserted just before, so none can be missing.
+                    panic!(
+                        "Could not find Protocol Component with ID: {}, Protocol System: {}, Chain: {}",
+                        pc.id, pc.protocol_system, pc.chain
+                    )
+                });
+            for (idx, add) in pc.tokens.iter().enumerate() {
+                pc_tokens_map.push((*pc_id, add.clone(), convert_int(idx, "token index")?));
+            }
+        }
 
         let token_addr_count = token_addresses.len();
         let token_add_by_id: HashMap<Address, i64> = async {
@@ -1106,23 +1100,8 @@ impl PostgresGateway {
 
         let tokens: Vec<Token> = results
             .into_iter()
-            .map(|(orm_token, address_)| {
-                let gas_usage: Vec<_> = orm_token
-                    .gas
-                    .iter()
-                    .map(|u| u.map(|g| g as u64))
-                    .collect();
-                Token::new(
-                    &address_,
-                    orm_token.symbol.as_str(),
-                    orm_token.decimals as u32,
-                    orm_token.tax as u64,
-                    gas_usage.as_slice(),
-                    chain,
-                    orm_token.quality as u32,
-                )
-            })
-            .collect();
+            .map(|(orm_token, address_)| orm_token.to_model(&address_, chain))
+            .collect::<Result<_, _>>()?;
 
         Ok(WithTotal { entity: tokens, total: Some(count) })
     }
@@ -1205,7 +1184,7 @@ impl PostgresGateway {
                     .get(&account_key)
                     .expect("Account ID not found");
 
-                let mut new_token = orm::NewToken::from_token(account_id, token);
+                let mut new_token = orm::NewToken::from_token(account_id, token)?;
                 new_token.symbol = truncate_to_byte_limit(&token.symbol, 255);
                 Ok(new_token)
             })
@@ -1231,7 +1210,7 @@ impl PostgresGateway {
         .await?;
 
         if let Some(token_cache) = &self.token_cache {
-            token_cache.add_tokens(tokens);
+            token_cache.add_tokens(tokens)?;
         }
 
         Ok(())
@@ -1266,18 +1245,14 @@ impl PostgresGateway {
         async {
             for t in tokens.iter() {
                 if let Some(db_id) = address_to_db_id.get(&t.address) {
-                    let gas_val = t
-                        .gas
-                        .iter()
-                        .map(|v| v.map(|g| g as i64))
-                        .collect::<Vec<_>>();
+                    let db_token = orm::NewToken::from_token(*db_id, t)?;
                     diesel::update(schema::token::table)
                         .set((
                             symbol.eq(&t.symbol),
-                            decimals.eq(t.decimals as i32),
-                            tax.eq(t.tax as i64),
-                            quality.eq(t.quality as i32),
-                            gas.eq(gas_val),
+                            decimals.eq(db_token.decimals),
+                            tax.eq(db_token.tax),
+                            quality.eq(db_token.quality),
+                            gas.eq(db_token.gas),
                         ))
                         .filter(id.eq(db_id))
                         .execute(conn)
@@ -1300,7 +1275,7 @@ impl PostgresGateway {
                 .filter(|t| address_to_db_id.contains_key(&t.address))
                 .cloned()
                 .collect();
-            token_cache.upsert_tokens(&updated);
+            token_cache.upsert_tokens(&updated)?;
         }
 
         Ok(())
@@ -1966,12 +1941,13 @@ impl PostgresGateway {
             .sorted()
             .collect();
 
-        let total = all_protocol_systems.len() as i64;
+        let total = count_to_i64(all_protocol_systems.len());
         let paginated_protocol_systems = if let Some(params) = pagination_params {
+            let (offset, limit) = page_window(params)?;
             all_protocol_systems
                 .into_iter()
-                .skip(params.offset() as usize)
-                .take(params.page_size as usize)
+                .skip(offset)
+                .take(limit)
                 .collect()
         } else {
             all_protocol_systems
@@ -4167,7 +4143,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(exp.len() as i64));
+        assert_eq!(res.total, Some(i64::try_from(exp.len()).unwrap()));
         assert_eq!(
             res.entity
                 .into_iter()
@@ -4192,7 +4168,7 @@ mod test {
             .await
             .expect("retrieving protocol systems failed!");
 
-        assert_eq!(res.total, Some(all.len() as i64));
+        assert_eq!(res.total, Some(i64::try_from(all.len()).unwrap()));
         assert_eq!(res.entity.iter().collect_vec(), exp);
     }
 

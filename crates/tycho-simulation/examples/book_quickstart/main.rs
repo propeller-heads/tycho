@@ -26,7 +26,7 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use dotenv::dotenv;
 use futures::StreamExt as _;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use tracing_subscriber::EnvFilter;
 use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::{
@@ -196,8 +196,8 @@ async fn main() {
         .get(&buy_token_address)
         .expect("Buy token not found")
         .clone();
-    let amount_in =
-        BigUint::from((cli.sell_amount * 10f64.powi(sell_token.decimals as i32)) as u128);
+    let amount_in = BigUint::from_f64(cli.sell_amount * 10f64.powf(f64::from(sell_token.decimals)))
+        .expect("sell amount must be finite and non-negative");
 
     println!(
         "Looking for quotes for {amount} {sell_symbol} -> {buy_symbol} on {chain:?}",
@@ -820,7 +820,7 @@ async fn main() {
 
 // Format token amounts to human-readable values
 fn format_token_amount(amount: &BigUint, token: &Token) -> String {
-    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powi(token.decimals as i32);
+    let decimal_amount = amount.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token.decimals));
     format!("{decimal_amount:.6}")
 }
 
@@ -831,8 +831,9 @@ fn format_price_ratios(
     token_in: &Token,
     token_out: &Token,
 ) -> (f64, f64) {
-    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powi(token_in.decimals as i32);
-    let decimal_out = amount_out.to_f64().unwrap_or(0.0) / 10f64.powi(token_out.decimals as i32);
+    let decimal_in = amount_in.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_in.decimals));
+    let decimal_out =
+        amount_out.to_f64().unwrap_or(0.0) / 10f64.powf(f64::from(token_out.decimals));
 
     if decimal_in > 0.0 && decimal_out > 0.0 {
         let forward = decimal_out / decimal_in;

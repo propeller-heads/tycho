@@ -45,7 +45,11 @@ impl TryFrom<BlockOrTimestamp> for BlockNumberOrTimestamp {
     fn try_from(value: BlockOrTimestamp) -> Result<Self, Self::Error> {
         Ok(match value {
             BlockOrTimestamp::Block(bid) => match bid {
-                BlockIdentifier::Number((_, no)) => BlockNumberOrTimestamp::Number(no as u64),
+                BlockIdentifier::Number((_, no)) => {
+                    BlockNumberOrTimestamp::Number(u64::try_from(no).map_err(|_overflow| {
+                        StorageError::Unexpected(format!("Block number {no} is negative"))
+                    })?)
+                }
                 BlockIdentifier::Hash(_) => {
                     return Err(StorageError::Unexpected("BlockHash unsupported!".to_string()))
                 }

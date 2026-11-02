@@ -33,7 +33,10 @@ thread_local! {
 /// Each slot holds one tick. A different tick that maps to the same slot replaces it.
 pub fn get_sqrt_ratio_at_tick_cached(tick: i32) -> Result<U256, SimulationError> {
     let shift = u32::BITS - SQRT_RATIO_CACHE_SLOTS.trailing_zeros();
-    let slot = ((tick as u32).wrapping_mul(FIBONACCI_HASH_MULTIPLIER) >> shift) as usize;
+    let slot = (tick
+        .cast_unsigned()
+        .wrapping_mul(FIBONACCI_HASH_MULTIPLIER) >>
+        shift) as usize;
     let cached = SQRT_RATIO_CACHE.with_borrow(|cache| match cache[slot] {
         Some((cached_tick, ratio)) if cached_tick == tick => Some(ratio),
         _ => None,
@@ -270,11 +273,11 @@ mod tests {
     fn tick_at_sqrt_ratio_reference(sqrt_price: U256) -> i32 {
         let ratio_x128 = sqrt_price << 32;
         let msb = most_significant_bit(ratio_x128).unwrap();
-        let msb_diff = (msb as i32) - 128;
+        let msb_diff = i32::try_from(msb).unwrap() - 128;
         let mut log_2: I256 = if msb_diff >= 0 {
-            I256::from_raw(U256::from(msb_diff as u64)) << 64
+            I256::from_raw(U256::from(msb_diff.unsigned_abs())) << 64
         } else {
-            -I256::from_raw(U256::from((-msb_diff) as u64)) << 64
+            -I256::from_raw(U256::from(msb_diff.unsigned_abs())) << 64
         };
         let mut r = if msb >= 128 { ratio_x128 >> (msb - 127) } else { ratio_x128 << (127 - msb) };
         for i in 0..14 {

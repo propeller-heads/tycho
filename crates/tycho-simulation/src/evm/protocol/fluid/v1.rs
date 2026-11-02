@@ -146,14 +146,14 @@ impl FluidV1 {
         sync_time: u64,
     ) -> Self {
         let pool_reserve0 = get_max_reserves(
-            token0.decimals as u8,
+            token0.decimals,
             &dex_limits.withdrawable_token0,
             &dex_limits.borrowable_token0,
             &collateral_reserves.token0_real_reserves,
             &debt_reserves.token0_real_reserves,
         );
         let pool_reserve1 = get_max_reserves(
-            token1.decimals as u8,
+            token1.decimals,
             &dex_limits.withdrawable_token1,
             &dex_limits.borrowable_token1,
             &collateral_reserves.token1_real_reserves,
@@ -518,7 +518,7 @@ impl ProtocolSim for FluidV1 {
         self.sync_time = state.sync_time;
 
         self.pool_reserve0 = get_max_reserves(
-            self.token0.decimals as u8,
+            self.token0.decimals,
             &self.dex_limits.withdrawable_token0,
             &self.dex_limits.borrowable_token0,
             &self
@@ -527,7 +527,7 @@ impl ProtocolSim for FluidV1 {
             &self.debt_reserves.token0_real_reserves,
         );
         self.pool_reserve1 = get_max_reserves(
-            self.token1.decimals as u8,
+            self.token1.decimals,
             &self.dex_limits.withdrawable_token1,
             &self.dex_limits.borrowable_token1,
             &self
@@ -1155,7 +1155,7 @@ fn from_adjusted_amount(adjusted_amount: U256, decimals: i64) -> U256 {
 }
 
 fn ten_pow(v: i64) -> U256 {
-    U256::from(10u64).pow(U256::from((v) as u64))
+    U256::from(10u64).pow(U256::from(u64::try_from(v).expect("ten_pow exponent is non-negative")))
 }
 
 /// Checks if token0 reserves are sufficient compared to token1 reserves.
@@ -1346,7 +1346,7 @@ fn update_debt_reserves_and_limits(
 }
 
 fn get_max_reserves(
-    decimals: u8,
+    decimals: u32,
     withdrawable_limit: &TokenLimit,
     borrowable_limit: &TokenLimit,
     real_col_reserves: &U256,
@@ -1362,12 +1362,11 @@ fn get_max_reserves(
     // Step 2: Calculate maxRealReserves
     let mut max_real_reserves = *real_col_reserves + *real_debt_reserves;
 
-    if decimals > constant::DEX_AMOUNT_DECIMALS as u8 {
-        let diff = decimals as i64 - constant::DEX_AMOUNT_DECIMALS;
-        max_real_reserves *= ten_pow(diff);
-    } else if decimals < constant::DEX_AMOUNT_DECIMALS as u8 {
-        let diff = constant::DEX_AMOUNT_DECIMALS - decimals as i64;
-        max_real_reserves /= ten_pow(diff);
+    let decimals_shift = i64::from(decimals) - constant::DEX_AMOUNT_DECIMALS;
+    if decimals_shift > 0 {
+        max_real_reserves *= ten_pow(decimals_shift);
+    } else if decimals_shift < 0 {
+        max_real_reserves /= ten_pow(-decimals_shift);
     }
 
     // Step 3: Return the smaller of the two
@@ -1916,7 +1915,13 @@ mod test {
         let spot = pool.spot_price(&wsteth, &eth).unwrap();
         // spot is in [1, 2), so spot * 2^52 is an exact integer.
         let scale = 1u128 << 52;
-        let target = Price::new(BigUint::from((spot * scale as f64) as u128), BigUint::from(scale));
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the scaled spot is a positive exact integer below 2^53"
+        )]
+        let target_numerator = (spot * scale as f64) as u128;
+        let target = Price::new(BigUint::from(target_numerator), BigUint::from(scale));
         let params = target_price_params(&wsteth, &eth, target, 0.001);
 
         let swap = pool.query_pool_swap(&params).unwrap();
@@ -2112,7 +2117,7 @@ mod test {
             out_decimals,
             &mut limits,
             price,
-            sync_time as u64,
+            u64::try_from(sync_time).unwrap(),
         )
         .expect("swap_out_adjusted failed");
 
@@ -2320,10 +2325,13 @@ mod test {
 
     #[test]
     fn test_swap_out() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         assert_swap_out_result(
@@ -2505,10 +2513,13 @@ mod test {
 
     #[test]
     fn test_swap_out_empty_debt() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         // swap0To1 = true
@@ -2540,10 +2551,13 @@ mod test {
 
     #[test]
     fn test_swap_out_empty_collateral() {
-        let sync_time = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64) -
+        let sync_time = (i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()) -
             10;
 
         // swap0To1 = true

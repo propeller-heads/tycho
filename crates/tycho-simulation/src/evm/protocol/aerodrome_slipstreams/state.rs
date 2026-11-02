@@ -30,7 +30,7 @@ use crate::{
                     aero_hook_fee::{AeroHookFee, Execution, HookFee, PoolOracle},
                     dynamic_fee_module::{get_dynamic_fee, DynamicFeeConfig, ResolvedFee},
                     observations::{Observation, Observations},
-                    raw_target_price,
+                    oracle_timestamp, raw_target_price,
                 },
                 uniswap::{
                     i24_be_bytes_to_i32, liquidity_math,
@@ -57,30 +57,29 @@ use crate::{
 // Cold-storage warmup on the first loop iteration:
 // nextInitializedTickWithinOneWord first call (~3,000) vs warm (~1,060)
 // calculateFees first call via cold getUnstakedFee STATICCALL (~19,050) vs warm (~6,055)
-const FIRST_LOOP_OVERHEAD: i32 = 15_000;
+const FIRST_LOOP_OVERHEAD: u64 = 15_000;
 // Steady-state per-loop: nextInitializedTickWithinOneWord (warm) + getSqrtRatioAtTick
 // + computeSwapStep + calculateFees (warm) + toInt256x2 + EVM opcode overhead
-const LOOP_GAS_COST: i32 = 12_500;
+const LOOP_GAS_COST: u64 = 12_500;
 // cross(): updates tick fee growth and staked reward growth slots.
 // Warm ticks (previously crossed, non-zero SSTORE slots) cost ~22k; cold ticks ~76k.
 // We bias toward the cold end to prefer overestimation: 70k.
-const TICK_CROSSING_GAS_COST: i32 = 70_000;
+const TICK_CROSSING_GAS_COST: u64 = 70_000;
 // When dfc.scaling_factor != 0, fee() does a TWAP binary search on the observation ring
 // buffer (~77k–91k gas) instead of a simple slot read (~18k–27k gas). This extra cost is
 // added once per swap on top of the base.
-const TWAP_FEE_OVERHEAD: i32 = 65_000;
+const TWAP_FEE_OVERHEAD: u64 = 65_000;
 // Pre/post loop overhead: fee(), slot0 reads, end-of-swap writes.
-const SWAP_BASE_GAS: i32 = 125_000;
+const SWAP_BASE_GAS: u64 = 125_000;
 // AERO v1.1 pools call their swap hook, which runs the TWAP observe and stores the block fee,
 // then record the swap on the pool tape and settle the gauge. Measured with eth_simulateV1 of
 // single-step swaps on Base: ~312-317k for the pool's swap against ~140k for an Aerodrome
 // Slipstreams pool. Replaces TWAP_FEE_OVERHEAD.
-const AERO_HOOK_GAS: i32 = 160_000;
+const AERO_HOOK_GAS: u64 = 160_000;
 // Conservative max gas for a single swap. Used to cap get_limits iteration.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 // Maximum initialized ticks that can be crossed within MAX_SWAP_GAS.
-const MAX_TICKS_CROSSED: u64 =
-    (MAX_SWAP_GAS - SWAP_BASE_GAS as u64) / TICK_CROSSING_GAS_COST as u64;
+const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / TICK_CROSSING_GAS_COST;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AerodromeSlipstreamsState {
@@ -159,7 +158,10 @@ impl AerodromeSlipstreamsState {
         observations: Vec<Observation>,
         dfc: DynamicFeeConfig,
     ) -> Result<Self, SimulationError> {
-        let tick_list = TickList::from(tick_spacing as u16, ticks)?;
+        let tick_list_spacing = u16::try_from(tick_spacing).map_err(|e| {
+            SimulationError::InvalidInput(format!("Invalid tick spacing {tick_spacing}: {e}"), None)
+        })?;
+        let tick_list = TickList::from(tick_list_spacing, ticks)?;
         Ok(AerodromeSlipstreamsState {
             id,
             execution_block_timestamp,
@@ -207,7 +209,7 @@ impl AerodromeSlipstreamsState {
             self.observation_index,
             self.observation_cardinality,
             &self.observations,
-            self.execution_block_timestamp as u32,
+            oracle_timestamp(self.execution_block_timestamp),
             self.position_assumption == BlockPositionAssumption::First,
         )
     }
@@ -224,7 +226,7 @@ impl AerodromeSlipstreamsState {
             self.default_fee,
             Execution {
                 block: self.execution_block_number,
-                timestamp: self.execution_block_timestamp as u32,
+                timestamp: oracle_timestamp(self.execution_block_timestamp),
                 first_in_block: self.position_assumption == BlockPositionAssumption::First,
             },
         )
@@ -242,7 +244,7 @@ impl AerodromeSlipstreamsState {
         }
         self.observation_index = self.observations.write(
             self.observation_index,
-            self.execution_block_timestamp as u32,
+            oracle_timestamp(self.execution_block_timestamp),
             self.tick,
             self.liquidity,
             self.observation_cardinality,
@@ -369,7 +371,7 @@ impl AerodromeSlipstreamsState {
         } else {
             0
         };
-        let mut gas_used = U256::from((SWAP_BASE_GAS + twap_overhead) as u64);
+        let mut gas_used = U256::from(SWAP_BASE_GAS + twap_overhead);
         let mut n_loops = 0;
 
         let fee = resolved_fee.fee;

@@ -19,17 +19,20 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::{
-    engine_db::{create_engine, SHARED_TYCHO_DB},
-    protocol::{
-        curve::{
-            adapter::{build_pool, CurveVariant},
-            math::Pool,
-            swap_to_price::{exchange, swap_to_price, SwapToPriceError},
-            vm,
+use crate::{
+    evm::{
+        engine_db::{create_engine, SHARED_TYCHO_DB},
+        protocol::{
+            curve::{
+                adapter::{build_pool, CurveVariant},
+                math::Pool,
+                swap_to_price::{exchange, swap_to_price, SwapToPriceError},
+                vm,
+            },
+            u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         },
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
     },
+    utils::decimals_exponent,
 };
 
 /// Curve fee denominator (`10^10`); both StableSwap `fee` and CryptoSwap `mid_fee` use it.
@@ -160,7 +163,7 @@ impl CurveState {
             Err(SwapToPriceError::TargetAboveSpot) => {
                 let spot = self.spot_price(token_in, token_out)?;
                 let decimal_adjustment =
-                    10f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
+                    10f64.powi(decimals_exponent(token_in.decimals, token_out.decimals)?);
                 let target =
                     u256_to_f64(target_num)? / u256_to_f64(target_den)? * decimal_adjustment;
                 Err(SimulationError::InvalidInput(
@@ -220,7 +223,7 @@ impl ProtocolSim for CurveState {
         // curve_math returns dy/dx (quote per base) in native token units and fee-inclusive;
         // rescale to human units of quote per 1 base.
         let ratio = u256_to_f64(numerator)? / u256_to_f64(denominator)?;
-        let decimal_adjustment = 10f64.powi(base.decimals as i32 - quote.decimals as i32);
+        let decimal_adjustment = 10f64.powi(decimals_exponent(base.decimals, quote.decimals)?);
         Ok(ratio * decimal_adjustment)
     }
 
@@ -558,7 +561,7 @@ mod tests {
 
     fn curve_state(pool: Pool, variant: CurveVariant, decimals: Vec<u8>) -> CurveState {
         let tokens: Vec<Bytes> = (0..decimals.len())
-            .map(|k| token(k as u8, decimals[k] as u32).address)
+            .map(|k| token(u8::try_from(k).unwrap(), decimals[k] as u32).address)
             .collect();
         CurveState::new(
             Bytes::from_str("0x00000000000000000000000000000000000000ff").expect("valid address"),

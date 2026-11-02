@@ -228,10 +228,14 @@ impl EVMEntrypointService {
                 called_addresses.contains(&address)
             })
         {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "offset indexes into a 32-byte B256, so it fits into u8"
+            )]
+            let offset = offset as u8;
             return Some(AddressStorageLocation::new(
                 tycho_common::Bytes::from(slot.as_slice()),
-                // This is safe since indices into B256 will always fit into u8
-                offset as u8,
+                offset,
             ));
         }
         None

@@ -514,7 +514,7 @@ where
 
                                 // Assign original token contract to new address
                                 let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
+                                    state_guard.proxy_token_addresses.len(),
                                 )?;
                                 state_guard
                                     .proxy_token_addresses
@@ -840,7 +840,7 @@ where
                                 // Assign original token (implementation) contract to new proxy
                                 // address
                                 let impl_addr = generate_proxy_token_address(
-                                    state_guard.proxy_token_addresses.len() as u32,
+                                    state_guard.proxy_token_addresses.len(),
                                 )?;
                                 state_guard
                                     .proxy_token_addresses
@@ -1308,7 +1308,7 @@ where
 }
 
 /// Generate a proxy token address for a given token index
-fn generate_proxy_token_address(idx: u32) -> Result<Address, StreamDecodeError> {
+fn generate_proxy_token_address(idx: usize) -> Result<Address, StreamDecodeError> {
     let padded_idx = format!("{idx:x}");
     let padded_zeroes = "0".repeat(33 - padded_idx.len());
     let proxy_token_address = format!("{padded_zeroes}{padded_idx}BAdbaBe");

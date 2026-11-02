@@ -28,15 +28,19 @@ use super::pool::{
     concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
     twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
 };
-use crate::evm::protocol::{
-    ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
-    ekubo_v3::{
-        addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
-        pool::{
-            boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
+use crate::{
+    evm::protocol::{
+        ekubo_common::{swap_to_target_price, EkuboSwapToPrice},
+        ekubo_v3::{
+            addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
+            pool::{
+                boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool,
+                stableswap::StableswapPool,
+            },
         },
+        u256_num::u256_to_f64,
     },
-    u256_num::u256_to_f64,
+    utils::decimals_exponent,
 };
 
 /// Gas cost of `Core.forward`, the signature check and the signed-fee accounting, on top of the
@@ -62,9 +66,9 @@ pub enum EkuboV3State {
 
 fn sqrt_price_q128_to_f64(
     x: U256,
-    (token0_decimals, token1_decimals): (usize, usize),
+    (token0_decimals, token1_decimals): (u32, u32),
 ) -> Result<f64, SimulationError> {
-    let token_correction = 10f64.powi(token0_decimals as i32 - token1_decimals as i32);
+    let token_correction = 10f64.powi(decimals_exponent(token0_decimals, token1_decimals)?);
 
     let price = u256_to_f64(x)? / 2.0f64.powi(128);
     Ok(price.powi(2) * token_correction)
@@ -127,7 +131,7 @@ impl ProtocolSim for EkuboV3State {
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         let sqrt_ratio = self.sqrt_ratio();
-        let (base_decimals, quote_decimals) = (base.decimals as usize, quote.decimals as usize);
+        let (base_decimals, quote_decimals) = (base.decimals, quote.decimals);
 
         if base < quote {
             sqrt_price_q128_to_f64(sqrt_ratio, (base_decimals, quote_decimals))

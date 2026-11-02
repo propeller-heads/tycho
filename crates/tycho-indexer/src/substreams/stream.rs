@@ -145,7 +145,7 @@ fn stream_blocks(
     partial_blocks: bool,
 ) -> impl Stream<Item = Result<BlockResponse, Error>> {
     let mut latest_cursor = cursor.unwrap_or_default();
-    let mut latest_block = start_block_num as u64;
+    let mut latest_block: Option<u64> = None;
     let mut retry_count = 0;
     let mut backoff = retry_delays();
     let mut block_received = false;
@@ -192,11 +192,13 @@ fn stream_blocks(
                                     if !block_scoped_data.is_partial || block_scoped_data.is_last_partial.is_some_and(|last_partial| last_partial) {
                                         if let Some(block_ts) = block.timestamp {
                                             let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards!?").as_millis();
-                                            let lag = now.saturating_sub((block_ts.seconds * 1000) as u128);
+                                            let block_millis = u128::try_from(block_ts.seconds * 1000)
+                                                .map_err(|_overflow| anyhow::anyhow!("Block timestamp {} is negative", block_ts.seconds))?;
+                                            let lag = now.saturating_sub(block_millis);
                                             gauge!("substreams_lag_millis", "extractor" => extractor_id.clone()).set(lag as f64);
                                         }
                                     }
-                                    latest_block = block.number;
+                                    latest_block = Some(block.number);
                                 };
 
                                 gauge!("block_message_size_bytes", "extractor" => extractor_id.clone()).set(block_scoped_data.encoded_len() as f64);
@@ -223,7 +225,7 @@ fn stream_blocks(
                                     "chain_reorg",
                                     "extractor" => extractor_id.clone(),
                                     "to_block" => to_block.to_string(),
-                                    "from_block" => latest_block.to_string()
+                                    "from_block" => latest_block.map_or_else(|| start_block_num.to_string(), |number| number.to_string())
                                 )
                                 .increment(1);
 
