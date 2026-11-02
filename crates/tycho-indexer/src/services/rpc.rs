@@ -127,7 +127,6 @@ pub struct RpcHandler<G, T> {
         RpcCache<dto::ProtocolComponentsRequestBody, dto::ProtocolComponentRequestResponse>,
     traced_entry_point_cache:
         RpcCache<dto::TracedEntryPointRequestBody, dto::TracedEntryPointRequestResponse>,
-    #[allow(dead_code)]
     tracer: T,
     plans_config: PlansConfig,
     /// Protocol systems that use Dynamic Contract Indexing (DCI). Included in the
@@ -1162,7 +1161,6 @@ where
         })
     }
 
-    #[allow(dead_code)]
     async fn add_entry_points(
         &self,
         request: &dto::AddEntryPointRequestBody,
@@ -1685,7 +1683,6 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // elision, so the mocked trait methods need explicit lifetime parameters.
 // The allow is on the module because Clippy does not apply this lint allow
 // reliably when it is placed on the macro invocation itself.
-#[allow(clippy::extra_unused_lifetimes)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
 
@@ -2962,7 +2959,7 @@ mod tests {
     }
 
     /// Helper used to make tracing results comparisons deterministic.
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn normalize_tracing_result(
         result: &dto::TracingResult,
     ) -> (Vec<(Bytes, dto::AddressStorageLocation)>, Vec<(Bytes, Vec<Bytes>)>) {
@@ -2996,7 +2993,7 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn get_add_entry_point_test_data(
         block_hash: Bytes,
         component_id: ComponentId,

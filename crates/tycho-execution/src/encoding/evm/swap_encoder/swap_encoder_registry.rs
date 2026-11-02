@@ -149,7 +149,7 @@ impl SwapEncoderRegistry {
     ///
     /// `pancakeswap_infinity_cl_hooks` resolves to the `pancakeswap_infinity_cl` encoder the same
     /// way: one Infinity executor serves hooked and hookless CL pools alike.
-    #[allow(clippy::borrowed_box)]
+    #[expect(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);

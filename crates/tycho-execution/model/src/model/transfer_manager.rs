@@ -34,7 +34,7 @@ pub fn _tstore_transfer_from_info(
 }
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/TransferManager.sol#L130>
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn _transfer(
     state: &mut State,
     vault: &mut Vault,

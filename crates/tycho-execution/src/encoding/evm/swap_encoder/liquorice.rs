@@ -42,7 +42,7 @@ pub struct LiquoriceSwapEncoder {
     settlement_address: Address,
     balance_manager_address: Address,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     runtime: SafeRuntime,
 }
 

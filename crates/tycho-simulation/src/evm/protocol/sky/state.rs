@@ -82,7 +82,7 @@ pub struct SkyState {
 }
 
 impl SkyState {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         component_id: String,
         kind: SkyComponentKind,

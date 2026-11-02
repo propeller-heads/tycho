@@ -426,7 +426,7 @@ where
     /// Retrieves [CommitStatus] for a block, returns None if the buffer is empty.
     // The RPC side now answers from `DeltaWindow::commit_status`. Kept with its tests, which pin
     // the buffer-bound behaviour the window deliberately diverges from.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn get_commit_status(&self, version: BlockNumberOrTimestamp) -> Option<CommitStatus> {
         let first_block = self.block_messages.front();
         let last_block = self.block_messages.back();
@@ -466,19 +466,16 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
     ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
         &self,
         keys: Vec<(&AccountStateIdType, &AccountStateKeyType)>,
     ) -> HashMap<(AccountStateIdType, AccountStateKeyType), AccountStateValueType>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_component_balance_update(
         &self,
         keys: Vec<(&String, &Bytes)>,
     ) -> HashMap<(String, Bytes), ComponentBalance>;
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_balance_update(
         &self,
         keys: Vec<(&Address, &Address)>,
@@ -495,7 +492,7 @@ where
     /// Looks up buffered protocol state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
     // Clippy thinks it is a complex type that is difficult to read
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub fn lookup_protocol_state(
         &self,
         keys: &[(&ProtocolStateIdType, &ProtocolStateKeyType)],
@@ -549,7 +546,7 @@ where
 
     /// Looks up buffered account state updates for the provided keys. Returns a map of updates and
     /// a list of keys for which updates were not found in the buffered blocks.
-    #[allow(clippy::mutable_key_type, clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub fn lookup_account_state(
         &self,
         keys: &[(&AccountStateIdType, &AccountStateKeyType)],
@@ -587,7 +584,7 @@ where
     /// Looks up buffered balance updates for the provided component and token keys. Returns a map
     /// where each key is a component ID associated with its token balances, and a list of
     /// component-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(clippy::type_complexity)]
     pub fn lookup_component_balances(
         &self,
         keys: &[(&ComponentId, &Bytes)],
@@ -625,7 +622,7 @@ where
     /// Looks up buffered account balance updates for the provided account and token keys. Returns a
     /// map where each key is an account address associated with its token balances, and a list
     /// of account-token pairs for which no updates were found.
-    #[allow(clippy::type_complexity, clippy::mutable_key_type)]
+    #[expect(clippy::type_complexity)]
     pub fn lookup_account_balances(
         &self,
         keys: &[(&Address, &Address)],

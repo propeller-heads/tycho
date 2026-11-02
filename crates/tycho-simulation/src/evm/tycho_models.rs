@@ -96,7 +96,6 @@ impl std::fmt::Debug for ResponseAccount {
 impl TryFrom<tycho_common::dto::ResponseAccount> for ResponseAccount {
     type Error = SimulationError;
 
-    #[allow(deprecated)]
     fn try_from(value: tycho_common::dto::ResponseAccount) -> Result<Self, Self::Error> {
         let token_balances = value
             .token_balances
@@ -171,7 +170,6 @@ mod tests {
     use super::*;
 
     fn make_dto_response_account(address: Bytes) -> tycho_common::dto::ResponseAccount {
-        #[allow(deprecated)]
         tycho_common::dto::ResponseAccount::new(
             tycho_common::dto::Chain::Ethereum,
             address,

@@ -672,7 +672,6 @@ fn get_best_swap(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_solution(
     component: ProtocolComponent,
     sell_token: Token,

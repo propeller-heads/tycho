@@ -25,7 +25,7 @@ use crate::{
     substreams::SubstreamsEndpoint,
 };
 
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub enum BlockResponse {
     New(BlockScopedData),
     Undo(BlockUndoSignal),
@@ -37,7 +37,7 @@ pub struct SubstreamsStream {
 }
 
 impl SubstreamsStream {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         endpoint: Arc<SubstreamsEndpoint>,
         cursor: Option<String>,
@@ -123,7 +123,7 @@ async fn wait_for_next_retry(
 // `latest_cursor` is populated from the response. On any subsequent reconnection
 // (hot reconnect within the same process), `latest_cursor` is sent as
 // `start_cursor` which takes precedence over `start_block_num`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn stream_blocks(
     endpoint: Arc<SubstreamsEndpoint>,
     cursor: Option<String>,
@@ -285,7 +285,6 @@ fn stream_blocks(
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 enum BlockProcessedResult {
     Skip(),
     BlockScopedData(BlockScopedData),

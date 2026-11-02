@@ -3,7 +3,7 @@ pub(super) mod dci;
 pub(super) mod hooks;
 
 enum PausingReason {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     Substreams,
     TracingError,
     MetadataError,

@@ -79,7 +79,6 @@ impl VelodromeSlipstreamsState {
     /// - `tick_spacing`: The tick spacing for the pool.
     /// - `tick`: The current tick of the pool.
     /// - `ticks`: A vector of `TickInfo` representing the tick information for the pool.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         liquidity: u128,
         sqrt_price: U256,

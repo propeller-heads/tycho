@@ -262,7 +262,7 @@ pub enum Response {
 }
 
 /// A message sent from the server to the client
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Display, Clone)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
@@ -357,7 +357,7 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -1033,7 +1033,7 @@ pub struct ResponseAccount {
 }
 
 impl ResponseAccount {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         address: Bytes,
@@ -1152,7 +1152,7 @@ impl VersionParam {
         Self::new(
             None,
             Some({
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 BlockParam { hash: None, chain: Some(chain), number: Some(block_number as i64) }
             }),
         )

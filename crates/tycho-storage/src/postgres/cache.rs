@@ -70,7 +70,7 @@ pub(crate) enum WriteOp {
     // Simply merge
     InsertTokens(Vec<models::token::Token>),
     // Currently unused but supported, please see `CacheGateway.update_tokens` docs.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     UpdateTokens(Vec<models::token::Token>),
     // Simply merge
     InsertComponentBalances(Vec<models::protocol::ComponentBalance>),
@@ -701,7 +701,7 @@ impl CachedGateway {
         }
     }
 
-    #[allow(private_interfaces)]
+    #[expect(private_interfaces)]
     pub fn new(
         tx: mpsc::Sender<DBCacheMessage>,
         pool: Pool<AsyncPgConnection>,
@@ -2039,7 +2039,7 @@ mod test_serial_db {
     }
 
     //noinspection SpellCheckingInspection
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     async fn setup_data(conn: &mut AsyncPgConnection) {
         // set up blocks and txns
         let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;

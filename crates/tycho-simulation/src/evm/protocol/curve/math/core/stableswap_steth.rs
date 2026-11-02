@@ -82,7 +82,7 @@ pub fn get_y(i: usize, j: usize, x_new: U256, xp: &[U256], d: U256, amp: U256) -
     let mut s_prime = U256::ZERO;
     let mut c = d;
 
-    #[allow(clippy::needless_range_loop)]
+    #[expect(clippy::needless_range_loop)]
     for k in 0..n_coins {
         let x_k = if k == i {
             x_new

@@ -63,7 +63,7 @@ pub struct RocketpoolState {
 }
 
 impl RocketpoolState {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         reth_supply: U256,
         total_eth: U256,

@@ -80,7 +80,7 @@ pub struct TokenSlots {
     pub allowance_slot: B256,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn encode_swap(
     component: &ProtocolComponent,
     state: Option<Arc<dyn ProtocolSim>>,

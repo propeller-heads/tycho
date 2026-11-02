@@ -234,7 +234,7 @@ where
     /// simulate a protocol-agnostic transaction.
     ///
     /// See struct definition of `EVMPoolState` for attribute explanations.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         tokens: Vec<Bytes>,

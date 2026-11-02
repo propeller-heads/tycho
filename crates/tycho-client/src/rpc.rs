@@ -1229,7 +1229,6 @@ pub trait RPCClient: Send + Sync {
 
     // clippy false positive: `'a` is required by the trait method signature and is
     // used in `SnapshotParameters<'a>`, but `async_trait` makes Clippy miss it.
-    #[allow(clippy::extra_unused_lifetimes)]
     async fn get_snapshots<'a>(
         &self,
         request: &SnapshotParameters<'a>,
@@ -2014,7 +2013,7 @@ mod tests {
     // Dummy implementation of `get_protocol_states_paginated` for backwards compatibility testing
     // purposes
     impl MockRPCClient {
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         async fn test_get_protocol_states_paginated<T>(
             &self,
             chain: Chain,

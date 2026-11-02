@@ -136,7 +136,7 @@ pub struct StakingState {
 }
 
 impl LidoV4State {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         execution_block_number: u64,
         total_shares: U256,

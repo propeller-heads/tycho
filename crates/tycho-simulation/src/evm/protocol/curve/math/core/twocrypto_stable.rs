@@ -67,7 +67,7 @@ pub fn get_y(i: usize, j: usize, x_new: U256, xp: &[U256], d: U256, amp: U256) -
     let ann = amp.checked_mul(n)?;
     let mut s_prime = U256::ZERO;
     let mut c = d;
-    #[allow(clippy::needless_range_loop)]
+    #[expect(clippy::needless_range_loop)]
     for k in 0..xp.len() {
         let x_k = if k == i {
             x_new

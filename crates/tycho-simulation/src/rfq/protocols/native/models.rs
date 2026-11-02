@@ -149,7 +149,7 @@ pub struct FirmQuoteRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct WidgetFee {
     pub signer: String,
     pub fee_recipient: String,
@@ -165,7 +165,7 @@ pub struct TxRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct FirmQuoteOrder {
     pub pool: String,
     pub signer: String,
@@ -188,7 +188,7 @@ pub struct FirmQuoteOrder {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct FirmQuoteResponse {
     pub success: bool,
     pub orders: Vec<FirmQuoteOrder>,

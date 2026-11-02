@@ -48,7 +48,7 @@ struct BoostedFeesPoolSwapState {
 }
 
 impl BoostedFeesPool {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         key: EvmBoostedFeesConcentratedPoolKey,
         concentrated_sdk_state: EvmConcentratedPoolState,

@@ -72,7 +72,7 @@ impl HookOrchestratorRegistry {
         self.default_orchestrator = Some(orchestrator);
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn register_hook_orchestrator(
         &mut self,
         hook_address: Address,
@@ -82,7 +82,7 @@ impl HookOrchestratorRegistry {
             .insert(hook_address, orchestrator);
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn register_hook_identifier(
         &mut self,
         hook_identifier: String,

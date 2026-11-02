@@ -493,7 +493,7 @@ impl PostgresGateway {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn from_connection(conn: &mut AsyncPgConnection) -> Self {
         let chain_cache = ChainEnumCache::from_connection(conn)
             .await
@@ -1220,7 +1220,7 @@ pub mod db_fixtures {
     }
 
     // Insert a new Component Balance
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn insert_component_balance(
         conn: &mut AsyncPgConnection,
         balance: Balance,
@@ -1305,7 +1305,7 @@ pub mod db_fixtures {
             .unwrap()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     // Insert a new Protocol Component
     pub async fn insert_protocol_component(
         conn: &mut AsyncPgConnection,

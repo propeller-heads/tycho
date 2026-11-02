@@ -27,7 +27,7 @@ pub struct NativeSwapEncoder {
     executor_address: Bytes,
     router_v6: Address,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     runtime: SafeRuntime,
 }
 

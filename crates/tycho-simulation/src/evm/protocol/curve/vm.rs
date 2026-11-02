@@ -24,7 +24,6 @@ use crate::evm::{
 };
 
 sol! {
-    #[allow(missing_docs)]
     interface ICurve {
         function balances(uint256 i) external view returns (uint256);
         function A() external view returns (uint256);
@@ -44,23 +43,19 @@ sol! {
         function version() external view returns (string);
     }
 
-    #[allow(missing_docs)]
     interface ICurveOld {
         function balances(int128 i) external view returns (uint256);
     }
 
-    #[allow(missing_docs)]
     interface ICurveTri {
         function price_scale(uint256 i) external view returns (uint256);
         function precisions() external view returns (uint256[3]);
     }
 
-    #[allow(missing_docs)]
     interface ICurveTwo {
         function precisions() external view returns (uint256[2]);
     }
 
-    #[allow(missing_docs)]
     interface IBasePool {
         function get_virtual_price() external view returns (uint256);
     }

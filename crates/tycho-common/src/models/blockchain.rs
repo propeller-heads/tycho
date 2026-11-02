@@ -188,7 +188,7 @@ pub struct BlockTransactionDeltas<T> {
     pub deltas: Vec<TransactionDeltaGroup<T>>,
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct TransactionDeltaGroup<T> {
     changes: T,
     protocol_component: HashMap<String, ProtocolComponent>,
@@ -220,7 +220,7 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -601,7 +601,7 @@ pub struct TxWithChanges {
 }
 
 impl TxWithChanges {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         tx: Transaction,
         protocol_components: HashMap<ComponentId, ProtocolComponent>,

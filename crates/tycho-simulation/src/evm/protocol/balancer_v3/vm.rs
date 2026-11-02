@@ -34,7 +34,6 @@ use crate::evm::{
 };
 
 sol! {
-    #[allow(missing_docs)]
     struct LiquidityManagement {
         bool disableUnbalancedLiquidity;
         bool enableAddLiquidityCustom;
@@ -42,7 +41,6 @@ sol! {
         bool enableDonation;
     }
 
-    #[allow(missing_docs)]
     struct PoolConfig {
         LiquidityManagement liquidityManagement;
         uint256 staticSwapFeePercentage;
@@ -56,7 +54,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct WeightedPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -67,7 +64,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct StablePoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -85,7 +81,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct ReClammPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -107,7 +102,6 @@ sol! {
         bool isPoolInRecoveryMode;
     }
 
-    #[allow(missing_docs)]
     struct QuantAmmPoolDynamicData {
         uint256[] balancesLiveScaled18;
         uint256[] tokenRates;
@@ -121,7 +115,6 @@ sol! {
         uint40 lastInteropTime;
     }
 
-    #[allow(missing_docs)]
     struct QuantAmmPoolImmutableData {
         address[] tokens;
         uint256 oracleStalenessThreshold;
@@ -134,7 +127,6 @@ sol! {
         uint256 maxTradeSizeRatio;
     }
 
-    #[allow(missing_docs)]
     interface IBalancerV3Pool {
         function getWeightedPoolDynamicData() external view returns (WeightedPoolDynamicData memory);
         function getMinTokenBalances() external view returns (uint256[] memory);
@@ -144,7 +136,6 @@ sol! {
         function getQuantAMMWeightedPoolImmutableData() external view returns (QuantAmmPoolImmutableData memory);
     }
 
-    #[allow(missing_docs)]
     struct HooksConfig {
         bool enableHookAdjustedAmounts;
         bool shouldCallBeforeInitialize;
@@ -159,7 +150,6 @@ sol! {
         address hooksContract;
     }
 
-    #[allow(missing_docs)]
     interface IBalancerV3Vault {
         function getPoolConfig(address pool) external view returns (PoolConfig memory);
         function getHooksConfig(address pool) external view returns (HooksConfig memory);
@@ -720,7 +710,7 @@ fn refreshed_base(
 }
 
 /// Assembles the fields every pool family shares.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn base_state(
     pool: &AlloyAddress,
     pool_type: BalancerPoolType,

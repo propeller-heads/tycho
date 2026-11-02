@@ -41,7 +41,7 @@ fn parse_partial_fill_offset(partial_fill_offset: &Bytes) -> Result<u8, Encoding
 pub struct BebopSwapEncoder {
     executor_address: Bytes,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     runtime: SafeRuntime,
 }
 

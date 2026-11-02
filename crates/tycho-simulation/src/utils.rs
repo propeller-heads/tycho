@@ -85,7 +85,6 @@ pub async fn load_all_tokens(
     // Chain specific defaults for special case chains. Otherwise defaults to 14 days.
     let default_min_days = HashMap::from([(Chain::Base, 7_u64), (Chain::Ethereum, 30_u64)]);
 
-    #[allow(clippy::mutable_key_type)]
     let min_q = min_quality.or(Some(100));
     let traded = max_days_since_last_trade.or_else(|| {
         default_min_days

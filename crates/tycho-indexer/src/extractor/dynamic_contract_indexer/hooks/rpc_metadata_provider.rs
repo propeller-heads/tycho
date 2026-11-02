@@ -39,7 +39,7 @@ pub(super) struct RPCMetadataProvider {
 }
 
 impl RPCMetadataProvider {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn new(batch_size_limit: usize) -> Self {
         Self::new_with_retry_config(batch_size_limit, RPCRetryConfig::default())
     }

@@ -249,7 +249,7 @@ pub fn calculate_out_given_in(
 /// wO = token_weight_out                          ( 1 - sF )
 /// sF = swap_fee
 /// ```
-#[allow(clippy::disallowed_names)]
+#[expect(clippy::disallowed_names)]
 pub fn calculate_in_given_out(
     token_balance_in: U256,
     token_weight_in: U256,

@@ -1013,7 +1013,7 @@ fn create_router_overwrites_data(chain: Chain) -> miette::Result<RouterOverwrite
     Ok(RouterOverwritesData { executors, ..Default::default() })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn process_update(
     cli: Arc<Cli>,
     chain: Chain,
@@ -1549,7 +1549,7 @@ async fn process_update(
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn select_components_to_process(
     update: &StreamUpdate,
     tycho_state: &Arc<RwLock<TychoState>>,
@@ -1708,7 +1708,7 @@ fn select_components_to_process(
 )]
 /// Simulates a swap in each of the component's directions, at most `max_swap_directions` of
 /// them where the component advertises a set of its own.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn process_state(
     simulation_id: &str,
     chain: Chain,
@@ -1944,7 +1944,7 @@ async fn process_state(
         component_id = %execution_info.component_id,
     )
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn process_execution_result(
     simulation_id: &String,
     result: &TychoExecutionResult,

@@ -398,7 +398,7 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// * `Err(SimulationError)` - If:
     ///   - The calculation encounters numerical issues
     ///   - The method is not implemented for this protocol
-    #[allow(unused)]
+    #[expect(unused)]
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
         Err(SimulationError::FatalError("query_pool_swap not implemented".into()))
     }
@@ -490,7 +490,7 @@ where
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         self.quote(
             QuoteParams::fixed_in(&token_in.address, &token_out.address, amount_in)?
                 .with_new_state(),
@@ -544,7 +544,7 @@ where
                 }
             }
         };
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         self.query_swap(swap::QuerySwapParams::new(
             &params.token_in.address,
             &params.token_out.address,
@@ -572,7 +572,7 @@ where
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         self.to_protocol_sim()
     }
 

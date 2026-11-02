@@ -46,7 +46,7 @@ impl<T> ProtocolComponent<T>
 where
     T: Into<Address> + Clone,
 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         protocol_system: &str,
@@ -266,7 +266,7 @@ impl QualityRange {
         Self { min: Some(min), max: None }
     }
 
-    #[allow(non_snake_case)]
+    #[expect(non_snake_case)]
     pub fn None() -> Self {
         Self { min: None, max: None }
     }

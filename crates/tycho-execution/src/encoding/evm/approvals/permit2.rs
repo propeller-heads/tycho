@@ -31,7 +31,7 @@ pub struct Permit2 {
     address: Address,
     client: EVMProvider,
     runtime_handle: Handle,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     runtime: SafeRuntime,
 }
 

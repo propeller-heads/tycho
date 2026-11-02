@@ -39,7 +39,7 @@ use crate::{
 };
 
 /// Enum to handle both standard DCI and UniswapV4 Hook DCI
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum DCIPlugin<AE: AccountExtractor + Send + Sync> {
     Standard(DynamicContractIndexer<AE, EVMEntrypointService, CachedGateway>),
     UniswapV4Hooks(Box<UniswapV4HookDCI<AE, EVMEntrypointService, CachedGateway>>),

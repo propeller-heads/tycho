@@ -843,7 +843,7 @@ fn format_price_ratios(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn create_solution(
     component: ProtocolComponent,
     state: Arc<dyn ProtocolSim>,

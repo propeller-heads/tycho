@@ -30,6 +30,10 @@ use tycho_common::{
 };
 
 #[expect(
+    clippy::allow_attributes,
+    reason = "mockall copies these attributes onto several generated items, so an #[expect] would go unfulfilled on some of them"
+)]
+#[expect(
     clippy::ref_option_ref,
     reason = "mockall's expectation API takes each argument by reference, so an Option<&T> parameter becomes &Option<&T>"
 )]

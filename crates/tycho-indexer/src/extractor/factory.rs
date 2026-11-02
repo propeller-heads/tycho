@@ -86,7 +86,7 @@ pub struct ExtractorConfig {
 }
 
 impl ExtractorConfig {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         chain: Chain,
@@ -183,7 +183,7 @@ impl ExtractorFactory {
     /// must pass one shared, already populated instance to every factory on the chain instead
     /// of populating one per extractor. Both `chain_state` and the cache are reused across all
     /// subsequent restarts.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn create(
         config: ExtractorConfig,
         endpoint_url: String,

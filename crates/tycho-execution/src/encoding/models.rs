@@ -157,7 +157,7 @@ pub struct Solution {
 }
 
 impl Solution {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         sender: Bytes,
         receiver: Bytes,

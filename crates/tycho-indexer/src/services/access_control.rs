@@ -57,7 +57,7 @@ where
                 let fut = self.service.call(req);
 
                 // More problems occur if we try to fix this warning
-                #[allow(clippy::redundant_async_block)]
+                #[expect(clippy::redundant_async_block)]
                 return Box::pin(async move { fut.await });
             }
         }

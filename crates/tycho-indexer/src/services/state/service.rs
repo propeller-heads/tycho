@@ -858,7 +858,7 @@ mod test {
     }
 
     fn at_hash(n: u64) -> dto::VersionParam {
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         let block =
             dto::BlockParam { hash: Some(testing::block(n).hash), chain: None, number: None };
         dto::VersionParam::new(None, Some(block))

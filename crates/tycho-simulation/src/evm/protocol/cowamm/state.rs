@@ -60,7 +60,7 @@ impl CowAMMState {
     ///
     /// # Returns
     /// A new `CowAMMState` with token states initialized.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         address: Bytes,
         token_a_addr: Bytes,

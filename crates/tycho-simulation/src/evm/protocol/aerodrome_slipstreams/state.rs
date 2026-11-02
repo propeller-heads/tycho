@@ -141,7 +141,7 @@ impl AerodromeSlipstreamsState {
     /// - `observations`: A vector of `Observation` representing the observation information for the
     ///   pool.
     /// - `dfc`: The dynamic fee configuration for the pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         execution_block_timestamp: u64,

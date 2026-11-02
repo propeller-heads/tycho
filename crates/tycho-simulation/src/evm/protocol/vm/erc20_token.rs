@@ -22,18 +22,23 @@ static CUSTOM_APPROVAL_MAPPING_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
 static HAS_CUSTOM_APPROVAL_MAPPING_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0x9F0C1BC0E9C3078F9AD5FC59C8606416B3FABCBD4C8353FED22937C66C866CE3").unwrap()
 });
+#[cfg(test)]
 static CUSTOM_NAME_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0xCC1E513FB5BDA80DC466AD9D44DF38805A8DEE4C82B3C6DF3D9B25D3D5355D1C").unwrap()
 });
+#[cfg(test)]
 static CUSTOM_SYMBOL_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0xDC17DD3380A9A034A702A2B2B1C6C25D39EBF0E89796E0D15E1E04D23E3BB221").unwrap()
 });
+#[cfg(test)]
 static CUSTOM_DECIMALS_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0xADD486B234562DE9AC745F036F538CDA2547EF6DBB4DA3FA1C017625F888A8E8").unwrap()
 });
+#[cfg(test)]
 static CUSTOM_TOTAL_SUPPLY_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0x6014AF1E8E9BB2844581B2FA9E5E3620181C3192EEFD3258319AEC23538DA9F5").unwrap()
 });
+#[cfg(test)]
 static HAS_CUSTOM_METADATA_POSITION: LazyLock<SlotId> = LazyLock::new(|| {
     U256::from_str("0x9F37243DE61714BE9CC00628D4B9BF9897AE670218AF52ADE6D192B4339D7616").unwrap()
 });
@@ -112,14 +117,14 @@ impl TokenProxyOverwriteFactory {
             .insert(has_approval_index, U256::from(1)); // true in Solidity
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_total_supply(&mut self, supply: U256) {
         self.overwrites
             .insert(*CUSTOM_TOTAL_SUPPLY_POSITION, supply);
     }
 
     /// Sets the has_custom_metadata flag for a given key
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn set_metadata_flag(&mut self, key: &str) {
         let key_bytes = string_to_storage_bytes(key);
         let mapping_slot_bytes: [u8; 32] = HAS_CUSTOM_METADATA_POSITION.to_be_bytes();
@@ -130,7 +135,7 @@ impl TokenProxyOverwriteFactory {
             .insert(has_metadata_index, U256::from(1)); // true in Solidity
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_name(&mut self, name: &str) {
         // Store the name value
         let name_value = U256::from_be_bytes(string_to_storage_bytes(name));
@@ -141,7 +146,7 @@ impl TokenProxyOverwriteFactory {
         self.set_metadata_flag("name");
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_symbol(&mut self, symbol: &str) {
         // Store the symbol value
         let symbol_value = U256::from_be_bytes(string_to_storage_bytes(symbol));
@@ -152,7 +157,7 @@ impl TokenProxyOverwriteFactory {
         self.set_metadata_flag("symbol");
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_decimals(&mut self, decimals: u8) {
         self.overwrites
             .insert(*CUSTOM_DECIMALS_POSITION, U256::from(decimals));

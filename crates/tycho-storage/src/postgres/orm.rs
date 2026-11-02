@@ -1633,7 +1633,6 @@ pub struct NewContractCode<'a> {
     pub valid_to: Option<NaiveDateTime>,
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<'a> VersionedRow for NewContractCode<'a> {
     type SortKey = (i64, NaiveDateTime, i64);
     type EntityId = i64;
@@ -1662,7 +1661,7 @@ pub struct NewContract {
     pub chain_id: i64,
     pub creation_tx: Option<i64>,
     pub created_at: Option<NaiveDateTime>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub deleted_at: Option<NaiveDateTime>,
 }
 
@@ -1823,7 +1822,7 @@ impl From<NewSlot> for NewSlotLatest {
 pub struct ProtocolHoldsToken {
     protocol_component_id: i64,
     token_id: i64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     token_index: i16,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
@@ -1934,7 +1933,7 @@ impl EntryPoint {
     }
 
     /// Retrieves the database id of an entry point from a target address and function signature.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) async fn id_by_target_and_signature(
         target_: &Bytes,
         signature_: &String,
@@ -1989,7 +1988,7 @@ impl From<&EntryPointTracingParams> for models::blockchain::TracingParams {
 impl EntryPointTracingParams {
     /// Retrieves the database id of an entry point tracing params from an
     /// `EntryPointWithTracingParams`.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) async fn id_from_entry_point_with_tracing_params(
         entry_point: &EntryPointWithTracingParamsCommon,
         conn: &mut AsyncPgConnection,

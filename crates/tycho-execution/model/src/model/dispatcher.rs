@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// <https://github.com/propeller-heads/tycho-execution/blob/0454514f4f6ccff55dcaa8e3abbb4ac494d89eba/foundry/src/Dispatcher.sol#L89>
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn _call_swap_on_executor(
     params: &Params,
     state: &mut State,

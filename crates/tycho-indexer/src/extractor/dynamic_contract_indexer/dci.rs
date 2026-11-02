@@ -721,7 +721,7 @@ where
     /// let mut dci = DynamicContractIndexer::new(...);
     /// dci.with_max_retry_count(10); // Allow up to 10 retries
     /// ```
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_max_retry_count(&mut self, count: u32) {
         self.max_retry_count = count;
     }

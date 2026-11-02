@@ -29,7 +29,7 @@ pub struct Account {
 }
 
 impl Account {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         chain: Chain,
         address: Address,
@@ -379,7 +379,7 @@ impl From<dto::AccountUpdate> for AccountDelta {
     }
 }
 
-#[allow(deprecated)] // creation_tx field on ResponseAccount is deprecated
+#[expect(deprecated)] // creation_tx field on ResponseAccount is deprecated
 impl From<dto::ResponseAccount> for Account {
     fn from(value: dto::ResponseAccount) -> Self {
         // Snapshot responses don't carry per-balance modify_tx; use zero as placeholder.

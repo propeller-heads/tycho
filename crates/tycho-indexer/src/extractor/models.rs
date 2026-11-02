@@ -91,7 +91,7 @@ pub(crate) fn insert_state_attribute_update(
 ///
 /// * `Ok(())` if the operation succeeds
 /// * `Err(MergeError)` if merging with existing deltas fails
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn insert_state_attribute_deletion(
     txs_with_update: &mut Vec<TxWithChanges>,
     component_id: &ComponentId,
@@ -158,7 +158,6 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
         &self,
         keys: Vec<(&AccountStateIdType, &AccountStateKeyType)>,
@@ -182,7 +181,7 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     fn get_filtered_component_balance_update(
         &self,
         keys: Vec<(&ComponentId, &Address)>,
@@ -207,7 +206,7 @@ impl StateUpdateBufferEntry for BlockChanges {
         res
     }
 
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     fn get_filtered_account_balance_update(
         &self,
         keys: Vec<(&Address, &Address)>,
@@ -579,7 +578,6 @@ mod test {
             (&contract, &missing_slot),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_account_state_update(keys);
 
         assert_eq!(
@@ -643,7 +641,6 @@ mod test {
             (&missing_component, &token),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_component_balance_update(keys);
 
         assert_eq!(
@@ -692,7 +689,6 @@ mod test {
             (&missing_account, &token),
         ];
 
-        #[allow(clippy::mutable_key_type)]
         let filtered = block_changes.get_filtered_account_balance_update(keys);
 
         assert_eq!(

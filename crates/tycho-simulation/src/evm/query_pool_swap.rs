@@ -836,7 +836,7 @@ mod tests {
                 alloy::primitives::Address::from_str("0xA2C5C98A892fD6656a7F39A2f63228C0Bc846270")
                     .unwrap();
 
-            #[allow(deprecated)]
+            #[expect(deprecated)]
             EVMPoolStateBuilder::new(pool_id, tokens, adapter_address)
                 .balances(balances)
                 .balance_owner(

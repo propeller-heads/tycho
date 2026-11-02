@@ -162,7 +162,6 @@ pub(super) enum EntrypointGenerationError {
 }
 
 /// Trait for generating hook entrypoints
-#[allow(dead_code)]
 #[async_trait]
 pub(super) trait HookEntrypointGenerator<B>
 where

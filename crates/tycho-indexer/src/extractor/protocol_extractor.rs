@@ -100,7 +100,7 @@ where
     T: TokenPreProcessor,
     E: ExtractorExtension,
 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new(
         gateway: G,
         database_insert_batch_size: usize,
@@ -1159,7 +1159,7 @@ where
         skip_all,
         fields(current_block, current_partial_block_index, target_hash, target_number)
     )]
-    #[allow(clippy::mutable_key_type)] // Clippy thinks that tuple with Bytes are a mutable type.
+    // Clippy thinks that tuple with Bytes are a mutable type.
     async fn handle_revert(
         &self,
         inp: BlockUndoSignal,

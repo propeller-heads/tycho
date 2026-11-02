@@ -926,7 +926,6 @@ impl TestRunner {
     /// - `Vec<ProtocolComponent>` - Every component of the protocol system
     /// - `Snapshot` - States and contract storage of the expected components at `block`
     /// - `HashMap<Bytes, Token>` - All tokens on the chain, by address
-    #[allow(clippy::type_complexity)]
     fn fetch_from_tycho_rpc(
         &self,
         protocol_system: &str,

@@ -130,7 +130,7 @@ impl From<SwapError> for SimulationError {
     }
 }
 impl FluidV1 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
         pool_address: &Bytes,
         token0: &Token,
@@ -604,7 +604,7 @@ where
     (best, best_result)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn swap_in_adjusted(
     swap0_to_1: bool,
     amount_to_swap: U256,
@@ -823,7 +823,8 @@ fn swap_in_adjusted(
     Ok(from_adjusted_amount(amount_out_collateral + amount_out_debt, out_decimals))
 }
 
-#[allow(clippy::too_many_arguments, dead_code)]
+#[expect(clippy::too_many_arguments)]
+#[cfg(test)]
 fn swap_out_adjusted(
     swap0_to_1: bool,
     amount_to_receive: U256,
@@ -1085,7 +1086,7 @@ fn swap_routing_in(t: U256, x: U256, y: U256, x2: U256, y2: U256) -> U256 {
 /// - If `a < 0` → entire trade goes through debt pool.
 /// - If `a > t` → entire trade goes through collateral pool.
 /// - If `0 < a < t` → swap routes through both pools.
-#[allow(dead_code)]
+#[cfg(test)]
 fn swap_routing_out(t: U256, x: U256, y: U256, x2: U256, y2: U256) -> U256 {
     let xy_root = (x * y * constant::B_I1E18).root(2);
     let x2y2_root = (x2 * y2 * constant::B_I1E18).root(2);
@@ -1103,7 +1104,7 @@ fn get_amount_out(amount_in: U256, i_reserve_in: U256, i_reserve_out: U256) -> U
 /// Given an output amount of asset and reserves, returns the input amount of the other asset.
 ///
 /// Formula: (amount_out * iReserveIn) / (iReserveOut - amount_out)
-#[allow(dead_code)]
+#[cfg(test)]
 fn get_amount_in(amount_out: U256, i_reserve_in: U256, i_reserve_out: U256) -> U256 {
     amount_out * i_reserve_in / (i_reserve_out - amount_out)
 }
@@ -2039,7 +2040,7 @@ mod test {
     /// - `out_decimals`: Decimals for the output token.
     /// - `limits`: Dex limits.
     /// - `sync_time`: Timestamp for syncing.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn assert_swap_in_result(
         swap0_to_1: bool,
         amount_in: U256,
@@ -2071,7 +2072,7 @@ mod test {
         assert_eq!(expected_amount_out, out_amt.to_string(), "Amount out mismatch");
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn assert_swap_out_result(
         swap0_to_1: bool,
         amount_out: U256,

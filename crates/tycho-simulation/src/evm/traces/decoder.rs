@@ -116,7 +116,7 @@ impl CallTraceDecoder {
     }
 
     /// Add known ABI to the decoder
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn with_abi(mut self, abi: &JsonAbi, address: Option<Address>) -> Self {
         // Add functions
         for function in abi.functions() {
@@ -142,7 +142,7 @@ impl CallTraceDecoder {
     }
 
     /// Add a custom label for an address  
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn with_label(mut self, address: Address, label: String) -> Self {
         self.labels.insert(address, label);
         self

@@ -144,8 +144,8 @@ pub struct ProtocolComponent {
 }
 
 impl ProtocolComponent {
-    #[allow(deprecated)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(deprecated)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         id: Bytes,
         protocol_system: String,

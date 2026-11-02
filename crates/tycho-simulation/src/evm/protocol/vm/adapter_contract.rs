@@ -57,7 +57,7 @@ where
 {
     /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
     /// `EXTERNAL_ACCOUNT`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn price(
         &self,
         pair_id: &str,
@@ -92,7 +92,7 @@ where
         Ok(price)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn swap(
         &self,
         pair_id: &str,
@@ -189,7 +189,6 @@ where
         Ok(capabilities)
     }
 
-    #[allow(dead_code)]
     pub fn min_gas_usage(&self) -> Result<u64, SimulationError> {
         let args = ();
         let selector = "minGasUsage()";
