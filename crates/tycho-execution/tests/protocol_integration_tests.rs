@@ -4443,7 +4443,8 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
 
     let encoder = get_tycho_router_encoder(Chain::Base);
 
-    // ETH goes to BOB: ALICE holds a forwarding contract on Base, which hides an ETH balance diff.
+    // ETH goes to BOB: ALICE carries an EIP-7702 delegation on Base that forwards any ETH it
+    // receives, which hides an ETH balance diff.
     let solution = Solution::new(
         alice_address(),
         bob_address(),

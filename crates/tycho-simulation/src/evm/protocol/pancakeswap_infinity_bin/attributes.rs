@@ -3,8 +3,8 @@
 //!
 //! - `active_id`: `to_signed_bytes_be` of the u24 id, so 3 bytes below `0x800000` and 4 with a
 //!   leading `0x00` at or above. Decoded length-tolerantly
-//! - `active_in_tree`: one byte, `0` or `1`, created with the pool and updated with every write
-//!   to the active bin and every swap that lands on a bin it did not write
+//! - `active_in_tree`: one byte, `0` or `1`, created with the pool and updated with every write to
+//!   the active bin and every swap that lands on a bin it did not write
 //! - `protocol_fees/zero2one`, `protocol_fees/one2zero`: 12-bit, big-endian
 //! - `bins/{id}/reserve_x`, `bins/{id}/reserve_y`: 16-byte big-endian `uint128`, one pair per bin
 //!   with reserves a swap can reach. A bin at `(0, 0)` holds nothing and is dropped; a deletion of
@@ -13,8 +13,8 @@
 //! Shared by `state::delta_transition` and `decoder`; [`AttributeError`] converts into the error
 //! type each of them returns.
 //!
-//! Every helper checks the length first. The `Bytes` conversions right-align into a fixed buffer
-//! and panic on anything longer, and these values come from the indexer.
+//! Every helper checks the width itself and names the attribute in its error. `TryFrom<Bytes>`
+//! would fail on a wide value too, but its error says only which integer type did not fit.
 
 use std::collections::BTreeMap;
 
