@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 #[cfg(feature = "evm")]
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use clap::ValueEnum;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,8 @@ use tycho_common::{
 };
 
 use crate::encoding::serde_primitives::biguint_string;
+#[cfg(feature = "evm")]
+use crate::encoding::{errors::EncodingError, evm::subsidy::SUBSIDY_SIGNATURE_LEN};
 
 /// Specifies the method for transferring user funds into Tycho execution.
 ///
@@ -149,6 +151,9 @@ pub struct Solution {
     /// provider use its own default.
     #[serde(default)]
     origin: Option<Bytes>,
+    #[cfg(feature = "evm")]
+    #[serde(default)]
+    subsidy: Option<SubsidyTerms>,
 }
 
 impl Solution {
@@ -174,6 +179,8 @@ impl Solution {
             swaps,
             user_transfer_type: UserTransferType::TransferFrom,
             origin: None,
+            #[cfg(feature = "evm")]
+            subsidy: None,
         }
     }
     pub fn sender(&self) -> &Bytes {
@@ -230,6 +237,48 @@ impl Solution {
         self.origin = Some(origin);
         self
     }
+}
+
+#[cfg(feature = "evm")]
+impl Solution {
+    pub fn subsidy(&self) -> Option<&SubsidyTerms> {
+        self.subsidy.as_ref()
+    }
+
+    /// Pays a signed subsidy on top of the swap output, through the subsidizing executor.
+    ///
+    /// - `expected_amount_out` must include the subsidy, or positive slippage capture takes it.
+    /// - `min_amount_out` must exclude it, so the swap fills when the payer skips the subsidy.
+    ///   Encoding fails when `min_amount_out > expected_amount_out - amount`.
+    /// - Router and client fees apply to the subsidy.
+    /// - Until [`EncodedSolution::write_subsidy_signature`], the swaps fill without the subsidy.
+    /// - A cyclical solution (`token_in == token_out`) encodes without the subsidy, and its
+    ///   [`EncodedSolution::subsidy_signing_hash`] is `None`.
+    pub fn with_subsidy(mut self, subsidy: SubsidyTerms) -> Self {
+        self.subsidy = Some(subsidy);
+        self
+    }
+}
+
+/// Unsigned terms of a subsidy paid on one swap group of a solution, bound to the solution's
+/// `sender`.
+#[cfg(feature = "evm")]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SubsidyTerms {
+    /// Paid in the output token of the subsidized swap group.
+    #[serde(with = "biguint_string")]
+    pub amount: BigUint,
+    /// Smallest input of the subsidized swap group, in its input token, that earns the subsidy.
+    #[serde(with = "biguint_string")]
+    pub min_amount_in: BigUint,
+    /// Each nonce pays at most once.
+    pub nonce: B256,
+    /// Unix timestamp in seconds. Must fit in 48 bits.
+    pub deadline: u64,
+    /// Index in the solution's swaps of a swap in the subsidized swap group. The group's output
+    /// must be the solution's `token_out`, or the input of a final wrap/unwrap that takes all of
+    /// it. Never a wrap/unwrap.
+    pub subsidized_swap_index: usize,
 }
 
 /// Represents a swap operation to be performed on a pool.
@@ -380,6 +429,16 @@ pub struct EncodedSolution {
     n_tokens: usize,
     /// Estimated gas usage for this solution
     estimated_gas: BigUint,
+    #[cfg(feature = "evm")]
+    subsidy_signing_data: Option<SubsidySigningData>,
+}
+
+/// What the caller signs for a subsidy, and where in `swaps` the signature goes.
+#[cfg(feature = "evm")]
+#[derive(Clone, Debug)]
+pub(crate) struct SubsidySigningData {
+    pub(crate) signing_hash: B256,
+    pub(crate) offset_in_swaps: usize,
 }
 
 impl EncodedSolution {
@@ -390,7 +449,15 @@ impl EncodedSolution {
         n_tokens: usize,
         estimated_gas: BigUint,
     ) -> Self {
-        Self { swaps, interacting_with, function_signature, n_tokens, estimated_gas }
+        Self {
+            swaps,
+            interacting_with,
+            function_signature,
+            n_tokens,
+            estimated_gas,
+            #[cfg(feature = "evm")]
+            subsidy_signing_data: None,
+        }
     }
 
     pub fn swaps(&self) -> &[u8] {
@@ -432,6 +499,48 @@ impl EncodedSolution {
         };
         // selector (4) + ABI head + offset to signature data within ClientFeeParams tuple
         4 + head_params * 32 + 192
+    }
+}
+
+#[cfg(feature = "evm")]
+impl EncodedSolution {
+    pub(crate) fn with_subsidy_signing_data(
+        mut self,
+        subsidy_signing_data: Option<SubsidySigningData>,
+    ) -> Self {
+        self.subsidy_signing_data = subsidy_signing_data;
+        self
+    }
+
+    /// The EIP-712 hash the subsidy signer signs, or `None` without a subsidy.
+    pub fn subsidy_signing_hash(&self) -> Option<B256> {
+        self.subsidy_signing_data
+            .as_ref()
+            .map(|subsidy| subsidy.signing_hash)
+    }
+
+    /// Byte offset within `swaps` where the 65-byte subsidy signature starts, or `None` without a
+    /// subsidy.
+    pub fn subsidy_signature_offset_in_swaps(&self) -> Option<usize> {
+        self.subsidy_signing_data
+            .as_ref()
+            .map(|subsidy| subsidy.offset_in_swaps)
+    }
+
+    /// Writes the subsidy signature into `swaps`. Fails when the solution has no subsidy.
+    ///
+    /// The client fee signature covers `swaps`: write the subsidy signature before computing it.
+    pub fn write_subsidy_signature(
+        &mut self,
+        signature: &[u8; SUBSIDY_SIGNATURE_LEN],
+    ) -> Result<(), EncodingError> {
+        let offset = self
+            .subsidy_signature_offset_in_swaps()
+            .ok_or_else(|| {
+                EncodingError::InvalidInput("The solution has no subsidy to sign".to_string())
+            })?;
+        self.swaps[offset..offset + signature.len()].copy_from_slice(signature);
+        Ok(())
     }
 }
 

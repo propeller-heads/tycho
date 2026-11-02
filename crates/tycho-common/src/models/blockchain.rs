@@ -349,6 +349,7 @@ impl BlockAggregatedChanges {
 
         self.component_tvl
             .extend(other.component_tvl);
+        self.new_tokens.extend(other.new_tokens);
         self.new_protocol_components
             .extend(other.new_protocol_components);
         self.deleted_protocol_components
@@ -1616,6 +1617,24 @@ pub mod fixtures {
         changes.merge(later).unwrap();
 
         assert_eq!(changes.account_deltas[&contract].change_type(), ChangeType::Creation);
+    }
+
+    #[test]
+    fn test_block_changes_merge_keeps_new_tokens_of_both() {
+        let changes = |addr: &Bytes| BlockAggregatedChanges {
+            new_tokens: HashMap::from([(
+                addr.clone(),
+                Token::new(addr, "T", 18, 0, &[], Chain::Ethereum, 100),
+            )]),
+            ..Default::default()
+        };
+        let first = Bytes::from(vec![0x11; 20]);
+        let second = Bytes::from(vec![0x22; 20]);
+
+        let merged = changes(&first).merge(changes(&second));
+
+        assert!(merged.new_tokens.contains_key(&first));
+        assert!(merged.new_tokens.contains_key(&second));
     }
 
     #[rstest]

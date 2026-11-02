@@ -6,7 +6,8 @@
 //! uses it; an unregistered hook falls back to [`generic_vm_hook_handler`] on Ethereum and
 //! Unichain only, and fails to decode everywhere else. [`angstrom`] is the native handler for
 //! Angstrom's hook on Ethereum; [`pons_v2`] is the native handler for the Pons V2 MemeHook on
-//! Robinhood.
+//! Robinhood; [`pancakeswap_clalpha`] is the native handler for PancakeSwap Infinity's
+//! `CLAlphaHook` on BSC.
 //!
 //! [`UniswapV4State`]: crate::evm::protocol::uniswap_v4::state::UniswapV4State
 
@@ -15,5 +16,6 @@ pub mod generic_vm_hook_handler;
 pub mod hook_handler;
 pub mod hook_handler_creator;
 pub mod models;
+pub mod pancakeswap_clalpha;
 pub mod pons_v2;
 pub mod utils;

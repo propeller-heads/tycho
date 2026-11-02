@@ -7,14 +7,17 @@ pub const TWAMM_ADDRESS_V2: Address = address!("0xd47f1B1eDCfEaBb08F6eBd8FC337c2
 pub const MEV_CAPTURE_ADDRESS: Address = address!("0x5555fF9Ff2757500BF4EE020DcfD0210CFfa41Be");
 pub const BOOSTED_FEES_CONCENTRATED_ADDRESS: Address =
     address!("0xd4b54d0ca6979da05f25895e6e269e678ba00f9e");
-pub const SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS: Address =
+// SignedExclusiveSwap v3.2.0, deployed on Ethereum.
+pub const SIGNED_EXCLUSIVE_SWAP_V3_2_ADDRESS: Address =
     address!("0x55b703eED01b35641963da2FB2E14885993605A3");
-pub const SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS: Address =
+// SignedExclusiveSwap v3.3.0, which adds per-pool owner fees.
+pub const SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS: Address =
     address!("0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09");
-// SignedExclusiveSwap is deployed per chain; each deployment has its own address.
-pub const SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS: [(Chain, Address); 2] = [
-    (Chain::Ethereum, SIGNED_EXCLUSIVE_SWAP_ETHEREUM_ADDRESS),
-    (Chain::Robinhood, SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS),
+pub const SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS: [(Chain, Address); 4] = [
+    (Chain::Ethereum, SIGNED_EXCLUSIVE_SWAP_V3_2_ADDRESS),
+    (Chain::Robinhood, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS),
+    (Chain::Bsc, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS),
+    (Chain::Base, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS),
 ];
 // The Ve33 extension is deployment-specific (see the v3.2.0 release notes of
 // EkuboProtocol/evm-contracts); this is the Robinhood deployment.

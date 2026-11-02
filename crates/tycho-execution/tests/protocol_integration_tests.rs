@@ -2037,6 +2037,128 @@ fn test_single_encoding_strategy_slipstreams() {
 }
 
 #[test]
+fn test_single_encoding_strategy_aero_cl() {
+    // WETH -> (AERO CL) -> cbBTC
+    let pool = ProtocolComponent {
+        id: String::from("0xbb5507daae822ba89c4da61bbfdf4b49a1666bac"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(10).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let swap =
+        Swap::new(pool, default_token(weth.clone()), default_token(cbbtc.clone()), BigUint::ZERO);
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        cbbtc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_aero_cl", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_aero_cl() {
+    // WETH -> (AERO CL) -> USDC -> (AERO CL) -> cbBTC
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x4a7af46bc8abc00048c6c7920a1488daf568366c"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(50).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let usdc_cbbtc_pool = ProtocolComponent {
+        id: String::from("0x784e539f15ca2d19449a6311c5dab6cf37d8f1ba"),
+        protocol_system: String::from("aero_cl"),
+        static_attributes: HashMap::from([(
+            "tick_spacing".to_string(),
+            Bytes::from(BigInt::from(100).to_signed_bytes_be()),
+        )]),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let swap1 = Swap::new(
+        weth_usdc_pool,
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 = Swap::new(
+        usdc_cbbtc_pool,
+        default_token(usdc.clone()),
+        default_token(cbbtc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        cbbtc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        BigUint::from_str("1").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_aero_cl", hex_calldata.as_str());
+}
+
+#[test]
 fn test_sequential_encoding_strategy_slipstreams() {
     // WETH -> (Slipstreams) -> USDC -> (Slipstreams) -> cbBTC
     let slipstreams_weth_usdc_pool = ProtocolComponent {
@@ -2219,6 +2341,120 @@ fn test_sequential_encoding_strategy_aerodrome_v1() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_aerodrome_v1", hex_calldata.as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_aero_basic() {
+    // WETH -> (AERO basic volatile) -> USDC
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x800eb395b577b234c5065c8e0ccb0f3a1401b2c2"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let swap = Swap::new(
+        weth_usdc_pool,
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        weth,
+        usdc,
+        BigUint::from_str("10000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_single_encoding_strategy_aero_basic", hex_calldata.as_str());
+}
+
+#[test]
+fn test_sequential_encoding_strategy_aero_basic() {
+    // DOLA -> (AERO basic stable) -> USDC -> (AERO basic volatile) -> WETH
+    let dola_usdc_pool = ProtocolComponent {
+        id: String::from("0x9bfc7e23feefee8cf08ba544e7cd5c28c79f1679"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let weth_usdc_pool = ProtocolComponent {
+        id: String::from("0x800eb395b577b234c5065c8e0ccb0f3a1401b2c2"),
+        protocol_system: String::from("aero_basic"),
+        ..Default::default()
+    };
+    let dola = Bytes::from("0x4621b7a9c75199271f773ebd9a499dbd165c3191");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let swap1 = Swap::new(
+        dola_usdc_pool,
+        default_token(dola.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    );
+    let swap2 = Swap::new(
+        weth_usdc_pool,
+        default_token(usdc.clone()),
+        default_token(weth.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Base);
+
+    let solution = Solution::new(
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        dola,
+        weth,
+        BigUint::from_str("100000000000000000000").unwrap(),
+        BigUint::from_str("1000").unwrap(),
+        BigUint::from_str("980").unwrap(),
+        vec![swap1, swap2],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        Bytes::zero(20),
+        BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file("test_sequential_encoding_strategy_aero_basic", hex_calldata.as_str());
 }
 
 #[test]
@@ -3174,8 +3410,9 @@ fn test_evm_single_encoding_strategy_usv4_twif_fee_token_output() {
 #[test]
 fn test_single_encoding_strategy_liquorice_settle_single() {
     // Generates calldata for TychoRouterForLiquoriceTest Solidity integration test.
-    // USDC -> WETH via Liquorice RFQ settleSingleOrder
-    // Real calldata captured at block 24,392,845
+    // USDC -> WETH via Liquorice RFQ settleSingle. The order is built for the settlement at
+    // 0x43Dcd658..., whose Single struct the Solidity test's interface mirrors; the maker
+    // signature is arbitrary because the Solidity test mocks the ecrecover precompile.
     let user = Bytes::from_str("0xd2068e04cf586f76eece7ba5beb779d7bb1474a1").unwrap();
 
     let usdc = usdc();
@@ -3200,21 +3437,20 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
             "00000000000000000000000000000000000000000000000000000000b2d05e00",
             "0000000000000000000000000000000000000000000000000de0b6b3a7640000",
             "0000000000000000000000000000000000000000000000000000000000000001",
-            "0000000000000000000000000000000000000000000000000000000069850367",
+            "000000000000000000000000000000000000000000000000000000006ab13b80",
             "00000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058",
             "0000000000000000000000000000000000000000000000000000000000000001",
             "3100000000000000000000000000000000000000000000000000000000000000",
-            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000003",
             "0000000000000000000000000000000000000000000000000000000000000001",
             "0000000000000000000000000000000000000000000000000000000000000060",
             "0000000000000000000000000000000000000000000000000000000000000041",
-            "9ab2af25941edb594c4c33388649c35f7bbc545ce0a745f9e6272c0ea0e8b251",
-            "7939f2747b980419ca5f22129742f65755464928ac9592aff9d16ac4446b18df",
-            "1c00000000000000000000000000000000000000000000000000000000000000",
-            "0000000000000000000000000000000000000000000000000000000000000001",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "2200000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000003",
             "0000000000000000000000000000000000000000000000000000000000000001",
             "0000000000000000000000000000000000000000000000000000000000000060",
-            "0000000000000000000000000000000000000000000000000000000000000020",
             "0000000000000000000000000000000000000000000000000000000000000000",
         ))
         .unwrap(),
@@ -3225,6 +3461,18 @@ fn test_single_encoding_strategy_liquorice_settle_single() {
         quote_amount_out,
         quote_data: HashMap::from([
             ("calldata".to_string(), liquorice_calldata),
+            (
+                "settlement".to_string(),
+                Bytes::from_str("0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8").unwrap(),
+            ),
+            (
+                // [(USDC, balance manager, 3000000000)]
+                "allowances".to_string(),
+                Bytes::from_str(
+                    "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+                )
+                .unwrap(),
+            ),
             (
                 "base_token_amount".to_string(),
                 Bytes::from(
@@ -3459,7 +3707,9 @@ fn test_evm_two_hop_usv4_twif_intermediary() {
 fn test_single_encoding_strategy_liquorice_settle() {
     // Generates calldata for TychoRouterForLiquoriceTest Solidity integration test.
     // USDC -> WETH via Liquorice RFQ settle
-    // Real calldata captured at block 24,392,845
+    // The order is built for the settlement at 0x43Dcd658..., whose Order struct carries
+    // makerFlags and per-token lockedCollateral; the maker signature is arbitrary because the
+    // Solidity test mocks the ecrecover precompile.
     let user = Bytes::from_str("0xd2068e04cf586f76eece7ba5beb779d7bb1474a1").unwrap();
 
     let usdc = usdc();
@@ -3469,31 +3719,32 @@ fn test_single_encoding_strategy_liquorice_settle() {
 
     let liquorice_calldata = Bytes::from(
         hex::decode(concat!(
-            "cba673a7",
+            "053b4100",
             "00000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058",
             "00000000000000000000000000000000000000000000000000000000b2d05e00",
             "00000000000000000000000000000000000000000000000000000000000000e0",
-            "0000000000000000000000000000000000000000000000000000000000000380",
             "00000000000000000000000000000000000000000000000000000000000003a0",
-            "0000000000000000000000000000000000000000000000000000000000000420",
-            "0000000000000000000000000000000000000000000000000000000000000500",
-            "0000000000000000000000000448633eb8b0a42efed924c42069e0dcf08fb552",
-            "0000000000000000000000000000000000000000000000000000000000000001",
-            "0000000000000000000000000000000000000000000000000000000000000260",
+            "00000000000000000000000000000000000000000000000000000000000003c0",
+            "0000000000000000000000000000000000000000000000000000000000000440",
+            "0000000000000000000000000000000000000000000000000000000000000520",
+            "0000000000000000000000000000000000000000000000000000000000000280",
             "0000000000000000000000000000000000000000000000000000000000000001",
             "0000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66",
             "0000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66",
-            "0000000000000000000000000000000000000000000000000000000069850367",
+            "000000000000000000000000000000000000000000000000000000006ab13b80",
             "00000000000000000000000006465bceeaef280bb7340a58d75dfc5e1f687058",
             "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000000",
             "000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
             "00000000000000000000000000000000000000000000000000000000b2d05e00",
             "00000000000000000000000000000000000000000000000000000000b2d05e00",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
             "000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
             "0000000000000000000000000000000000000000000000000de0b6b3a7640000",
             "0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000001",
@@ -3503,17 +3754,16 @@ fn test_single_encoding_strategy_liquorice_settle() {
             "0000000000000000000000000000000000000000000000000000000000000060",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000000",
-            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000003",
             "0000000000000000000000000000000000000000000000000000000000000001",
             "0000000000000000000000000000000000000000000000000000000000000060",
             "0000000000000000000000000000000000000000000000000000000000000041",
-            "6e4084d38e2d4e334057a124ce1ed667947b4fe6a0b44d6cbd62baa5dd384ff9",
-            "3eba5c03f8ea1f4fec128c1c76ce49eb1aad71f053adf3a4d860ef9fe973374d",
-            "1b00000000000000000000000000000000000000000000000000000000000000",
-            "0000000000000000000000000000000000000000000000000000000000000100",
-            "0000000000000000000000000000000000000000000000000000000000000100",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "2200000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000000000000000000000000000001",
             "0000000000000000000000000000000000000000000000000000000000000060",
-            "0000000000000000000000000000000000000000000000000000000000000020",
             "0000000000000000000000000000000000000000000000000000000000000000",
         ))
         .unwrap(),
@@ -3524,6 +3774,18 @@ fn test_single_encoding_strategy_liquorice_settle() {
         quote_amount_out,
         quote_data: HashMap::from([
             ("calldata".to_string(), liquorice_calldata),
+            (
+                "settlement".to_string(),
+                Bytes::from_str("0x43Dcd6586e6209eE7235A21bDC4aa301E5Bc44e8").unwrap(),
+            ),
+            (
+                // [(USDC, balance manager, 3000000000)]
+                "allowances".to_string(),
+                Bytes::from_str(
+                    "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000056b4720e40df52c560e520238e34e9c33d57e59300000000000000000000000000000000000000000000000000000000b2d05e00"
+                )
+                .unwrap(),
+            ),
             (
                 "base_token_amount".to_string(),
                 Bytes::from(

@@ -1,8 +1,9 @@
 //! In-memory serving of state requests.
 //!
 //! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
-//! and the service that answers state requests from both ([`service`]). Locking is described in
-//! the [`cache`] module doc; the read order in the [`service`] module doc.
+//! the service that answers state requests from both ([`service`]), and the views those answers
+//! are written from ([`view`]). Locking is described in the [`cache`] module doc; the read order
+//! in the [`service`] module doc.
 //!
 //! # How a state request is served
 //!
@@ -19,6 +20,7 @@
 pub(crate) mod cache;
 pub(crate) mod service;
 pub(crate) mod shadow;
+pub(crate) use cache::view;
 pub(crate) mod window;
 
 /// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with

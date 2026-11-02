@@ -24,7 +24,7 @@ unicode-segmentation.workspace = true
 futures = "0.3"
 backoff = { version = "0.4.0", features = ["tokio"], default-features = false }
 num-bigint = { version = "0.4", features = ["serde"] }
-serde_with = "3.16.1"
+serde_with = { workspace = true }
 
 # Required dependencies
 alloy = { workspace = true, default-features = false, features = [

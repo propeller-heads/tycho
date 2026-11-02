@@ -5,7 +5,11 @@ use metrics::gauge;
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc::{self, error::SendError, Receiver, Sender},
+        mpsc::{
+            self,
+            error::{SendError, TrySendError},
+            Receiver, Sender,
+        },
         oneshot, Mutex,
     },
     task::JoinHandle,
@@ -21,6 +25,7 @@ use tycho_common::{
 };
 use tycho_ethereum::services::entrypoint_tracer::tracer::EVMEntrypointService;
 use tycho_storage::postgres::cache::CachedGateway;
+use uuid::Uuid;
 
 use crate::{
     extractor::{
@@ -88,9 +93,14 @@ impl<AE: AccountExtractor + Send + Sync> ExtractorExtension for DCIPlugin<AE> {
     }
 }
 
+/// Buffer size of a client subscription channel. A client is removed once it is full, so the
+/// buffer absorbs a short pause: about a minute on BSC (about 2.2 blocks per second), but about
+/// 25 seconds on Base with partial blocks, where partials and full blocks share the channel.
+const CLIENT_SUBSCRIPTION_CHANNEL_SIZE: usize = 128;
+
 pub enum ControlMessage {
     Stop,
-    Subscribe(Sender<DeltaCommand>),
+    Subscribe { sender: Sender<DeltaCommand>, subscription_id: Uuid, user_identity: Option<String> },
 }
 
 /// A trait for a message sender that can be used to subscribe to messages.
@@ -98,7 +108,11 @@ pub enum ControlMessage {
 /// Extracted out of [`ExtractorHandle`] to allow for easier testing.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+    async fn subscribe(
+        &self,
+        subscription_id: Uuid,
+        user_identity: Option<String>,
+    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
 }
 
 #[derive(Clone)]
@@ -128,8 +142,12 @@ impl ExtractorHandle {
 #[async_trait]
 impl MessageSender for ExtractorHandle {
     #[instrument(skip(self))]
-    async fn subscribe(&self) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
-        let (tx, rx) = mpsc::channel(16);
+    async fn subscribe(
+        &self,
+        subscription_id: Uuid,
+        user_identity: Option<String>,
+    ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>> {
+        let (tx, rx) = mpsc::channel(CLIENT_SUBSCRIPTION_CHANNEL_SIZE);
         // Define a timeout duration
         let timeout_duration = std::time::Duration::from_secs(5); // 5 seconds timeout
 
@@ -137,7 +155,7 @@ impl MessageSender for ExtractorHandle {
         let send_result = tokio::time::timeout(
             timeout_duration,
             self.control_tx
-                .send(ControlMessage::Subscribe(tx)),
+                .send(ControlMessage::Subscribe { sender: tx, subscription_id, user_identity }),
         )
         .await;
 
@@ -150,8 +168,63 @@ impl MessageSender for ExtractorHandle {
     }
 }
 
-// Define the SubscriptionsMap type alias
-pub(crate) type SubscriptionsMap = HashMap<u64, Sender<DeltaCommand>>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubscriberKind {
+    /// An in-process consumer that must see every message, such as `PendingDeltas`.
+    Internal,
+    /// A websocket client, which reads at the speed of its own connection.
+    Client { subscription_id: Uuid, user_identity: Option<String> },
+}
+
+/// A receiver of an extractor's [`DeltaCommand`]s.
+pub struct Subscriber {
+    pub(crate) sender: Sender<DeltaCommand>,
+    pub(crate) kind: SubscriberKind,
+}
+
+/// What happened to a [`DeltaCommand`] sent to a [`Subscriber`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Sent,
+    /// The receiver is gone.
+    Closed,
+    /// The channel of a client subscriber has no room. Never returned for an internal
+    /// subscriber.
+    Full,
+}
+
+impl Subscriber {
+    /// Sends `command`. Waits for room only for an internal subscriber, so a slow client cannot
+    /// stall the extractor for the other subscribers.
+    pub(crate) async fn deliver(&self, command: DeltaCommand) -> Delivery {
+        match self.kind {
+            SubscriberKind::Internal => match self.sender.send(command).await {
+                Ok(()) => Delivery::Sent,
+                Err(_) => Delivery::Closed,
+            },
+            SubscriberKind::Client { .. } => match self.sender.try_send(command) {
+                Ok(()) => Delivery::Sent,
+                Err(TrySendError::Full(_)) => Delivery::Full,
+                Err(TrySendError::Closed(_)) => Delivery::Closed,
+            },
+        }
+    }
+}
+
+/// Returns the counter of client subscribers removed because their channel was full, registered
+/// at zero. A series born at one looks flat to `increase()` on Prometheus, so the first removal
+/// would go unseen.
+pub(crate) fn slow_client_removals(id: &ExtractorIdentity) -> metrics::Counter {
+    let removals = metrics::counter!(
+        "extractor_slow_clients_removed_total",
+        "extractor" => id.name.clone(),
+        "chain" => id.chain.to_string()
+    );
+    removals.increment(0);
+    removals
+}
+
+pub(crate) type SubscriptionsMap = HashMap<u64, Subscriber>;
 
 pub struct ExtractorRunner {
     extractor: Arc<dyn Extractor>,
@@ -195,6 +268,7 @@ impl ExtractorRunner {
 
         runtime.spawn(async move {
             let id = self.extractor.get_id();
+            let slow_client_removals = slow_client_removals(&id);
             // Track the number of partials received for the current block != partial_index.
             let mut partials_in_block: u32 = 0;
             loop {
@@ -260,7 +334,7 @@ impl ExtractorRunner {
                                     })?;
                                     for msg in msgs {
                                         trace!("Propagating block data message.");
-                                        Self::propagate_msg(&self.subscriptions, msg).await;
+                                        Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
                                     }
 
                                     let duration_ms = start_time.elapsed().as_millis() as f64;
@@ -283,7 +357,7 @@ impl ExtractorRunner {
                                     match self.extractor.handle_revert(undo_signal.clone()).await {
                                         Ok(Some(msg)) => {
                                             trace!("Propagating block undo message.");
-                                            Self::propagate_msg(&self.subscriptions, msg).await;
+                                            Self::propagate_msg(&self.subscriptions, msg, &slow_client_removals).await;
                                         }
                                         Ok(None) => {
                                             trace!("No message to propagate.");
@@ -380,7 +454,11 @@ impl ExtractorRunner {
 
     // TODO: add message tracing_id to the log
     #[instrument(skip_all, fields(subscriber_count))]
-    async fn propagate_msg(subscribers: &Arc<Mutex<SubscriptionsMap>>, message: ExtractorMsg) {
+    async fn propagate_msg(
+        subscribers: &Arc<Mutex<SubscriptionsMap>>,
+        message: ExtractorMsg,
+        slow_client_removals: &metrics::Counter,
+    ) {
         trace!(msg = %message, "Propagating message to subscribers.");
 
         let command = DeltaCommand::Block(message);
@@ -391,24 +469,30 @@ impl ExtractorRunner {
         let mut subscribers = subscribers.lock().await;
         tracing::Span::current().record("subscriber_count", subscribers.len());
 
-        for (counter, sender) in subscribers.iter_mut() {
-            match sender.send(command.clone()).await {
-                Ok(_) => {
-                    // Message sent successfully
-                    trace!(subscriber_id = %counter, "Message sent successfully.");
+        for (&subscriber_id, subscriber) in subscribers.iter() {
+            match subscriber
+                .deliver(command.clone())
+                .await
+            {
+                Delivery::Sent => {}
+                Delivery::Closed => {
+                    debug!(subscriber_id, kind = ?subscriber.kind, "Removed a closed subscriber");
+                    to_remove.push(subscriber_id);
                 }
-                Err(err) => {
-                    // Receiver has been dropped, mark for removal
-                    to_remove.push(*counter);
-                    error!(error = %err, counter, "Error while sending message to subscriber");
+                Delivery::Full => {
+                    warn!(
+                        subscriber_id,
+                        kind = ?subscriber.kind,
+                        "Removed a client subscriber whose channel is full"
+                    );
+                    slow_client_removals.increment(1);
+                    to_remove.push(subscriber_id);
                 }
             }
         }
 
-        // Remove inactive subscribers
-        for counter in to_remove {
-            subscribers.remove(&counter);
-            debug!("Subscriber {} has been dropped", counter);
+        for subscriber_id in to_remove {
+            subscribers.remove(&subscriber_id);
         }
     }
 }
@@ -436,6 +520,12 @@ pub(crate) fn compute_start_block(
 
 #[cfg(test)]
 mod test {
+    use std::{collections::BTreeMap, time::Duration};
+
+    use metrics_util::{
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+        MetricKind,
+    };
     use tycho_common::models::{blockchain::BlockAggregatedChanges, Chain};
 
     use super::*;
@@ -565,5 +655,200 @@ mod test {
         );
         // Should resume from last_committed + 1, ignoring config start block.
         assert_eq!(compute_start_block(Some(&block), 500), Ok(1001));
+    }
+
+    fn client_kind() -> SubscriberKind {
+        SubscriberKind::Client { subscription_id: Uuid::new_v4(), user_identity: None }
+    }
+
+    /// A subscriber of `kind` with a channel of `capacity`, holding `queued` messages.
+    fn subscriber(
+        kind: SubscriberKind,
+        capacity: usize,
+        queued: usize,
+    ) -> (Subscriber, Receiver<DeltaCommand>) {
+        let (sender, rx) = mpsc::channel(capacity);
+        for _ in 0..queued {
+            sender
+                .try_send(DeltaCommand::Block(one_msg()))
+                .expect("channel has room");
+        }
+        (Subscriber { sender, kind }, rx)
+    }
+
+    #[tokio::test]
+    async fn test_propagate_msg_removes_full_client_without_waiting() {
+        let (full_client, mut full_client_rx) = subscriber(client_kind(), 1, 1);
+        let (client, mut client_rx) = subscriber(client_kind(), 4, 0);
+        let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 4, 0);
+        let subscribers =
+            Arc::new(Mutex::new(HashMap::from([(0, full_client), (1, client), (2, internal)])));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ExtractorRunner::propagate_msg(&subscribers, one_msg(), &metrics::Counter::noop()),
+        )
+        .await
+        .expect("a full client must not make the extractor wait");
+
+        let mut remaining: Vec<u64> = subscribers
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec![1, 2]);
+        assert!(matches!(client_rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        assert!(matches!(internal_rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        assert!(
+            matches!(full_client_rx.recv().await, Some(DeltaCommand::Block(_))),
+            "the removed client still gets the messages queued before its removal"
+        );
+        assert!(full_client_rx.recv().await.is_none(), "the removed client's stream ends");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_propagate_msg_waits_for_full_internal_subscriber() {
+        let (internal, mut internal_rx) = subscriber(SubscriberKind::Internal, 1, 1);
+        let subscribers = Arc::new(Mutex::new(HashMap::from([(0, internal)])));
+
+        let propagate = tokio::spawn({
+            let subscribers = subscribers.clone();
+            async move {
+                ExtractorRunner::propagate_msg(&subscribers, one_msg(), &metrics::Counter::noop())
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!propagate.is_finished(), "the extractor must wait for an internal subscriber");
+
+        assert!(matches!(internal_rx.recv().await, Some(DeltaCommand::Block(_))));
+        tokio::time::timeout(Duration::from_secs(1), propagate)
+            .await
+            .expect("room in the channel unblocks the extractor")
+            .expect("propagate_msg must not panic");
+        assert!(matches!(internal_rx.recv().await, Some(DeltaCommand::Block(_))));
+        assert!(subscribers
+            .lock()
+            .await
+            .contains_key(&0));
+    }
+
+    fn slow_client_removals_series(
+        snapshotter: &Snapshotter,
+    ) -> Vec<(BTreeMap<String, String>, u64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                key.kind() == MetricKind::Counter &&
+                    key.key().name() == "extractor_slow_clients_removed_total"
+            })
+            .map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                let DebugValue::Counter(count) = value else {
+                    panic!("extractor_slow_clients_removed_total must be a counter");
+                };
+                (labels, count)
+            })
+            .collect()
+    }
+
+    fn uniswap_v2_labels() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("extractor".to_string(), "uniswap_v2".to_string()),
+            ("chain".to_string(), "ethereum".to_string()),
+        ])
+    }
+
+    #[test]
+    fn test_slow_client_removals_exists_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+
+        let _removals = metrics::with_local_recorder(&recorder, || slow_client_removals(&id));
+
+        assert_eq!(slow_client_removals_series(&snapshotter), vec![(uniswap_v2_labels(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn test_propagate_msg_counts_only_full_clients() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let id = ExtractorIdentity::new(Chain::Ethereum, "uniswap_v2");
+        let removals = metrics::with_local_recorder(&recorder, || slow_client_removals(&id));
+        let (full_client, _full_client_rx) = subscriber(client_kind(), 1, 1);
+        let (closed_client, closed_client_rx) = subscriber(client_kind(), 1, 0);
+        drop(closed_client_rx);
+        let (client, _client_rx) = subscriber(client_kind(), 4, 0);
+        let subscribers = Arc::new(Mutex::new(HashMap::from([
+            (0, full_client),
+            (1, closed_client),
+            (2, client),
+        ])));
+
+        ExtractorRunner::propagate_msg(&subscribers, one_msg(), &removals).await;
+
+        assert_eq!(slow_client_removals_series(&snapshotter), vec![(uniswap_v2_labels(), 1)]);
+        let remaining: Vec<u64> = subscribers
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(remaining, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_deliver_reports_full_client_without_waiting() {
+        let (client, _rx) = subscriber(client_kind(), 1, 1);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.deliver(DeltaCommand::Block(one_msg())),
+        )
+        .await
+        .expect("a full client must not make the caller wait");
+
+        assert_eq!(outcome, Delivery::Full);
+    }
+
+    #[tokio::test]
+    async fn test_deliver_reports_closed_for_both_kinds() {
+        for kind in [client_kind(), SubscriberKind::Internal] {
+            let (sub, rx) = subscriber(kind, 1, 0);
+            drop(rx);
+
+            assert_eq!(
+                sub.deliver(DeltaCommand::Block(one_msg()))
+                    .await,
+                Delivery::Closed,
+                "{:?}",
+                sub.kind
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deliver_sends_when_there_is_room() {
+        for kind in [client_kind(), SubscriberKind::Internal] {
+            let (sub, mut rx) = subscriber(kind, 1, 0);
+
+            assert_eq!(
+                sub.deliver(DeltaCommand::Block(one_msg()))
+                    .await,
+                Delivery::Sent,
+                "{:?}",
+                sub.kind
+            );
+            assert!(matches!(rx.try_recv(), Ok(DeltaCommand::Block(_))));
+        }
     }
 }

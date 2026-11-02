@@ -34,41 +34,13 @@ use tracing::{error_span, Instrument as _};
 pub use crate::snapshot_feed::publisher::Publisher;
 
 #[cfg(feature = "book-feeds")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub mod errors;
 #[cfg(feature = "book-feeds")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 mod failures;
 #[cfg(feature = "book-feeds")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub mod http;
 mod publisher;
 #[cfg(feature = "book-feeds")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-    )
-)]
 pub mod ws;
 
 /// A source that can be turned into a live snapshot feed.

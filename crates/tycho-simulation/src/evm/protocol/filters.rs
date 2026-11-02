@@ -87,7 +87,7 @@ pub fn balancer_v3_pool_filter(component: &ComponentWithState) -> bool {
 }
 
 pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
-    const PAUSED_POOLS: [&str; 5] = [
+    const PAUSED_POOLS: [&str; 18] = [
         // The components below are properly paused by substreams but the way indexer
         // handles tracing atm wrongly paused all components due to tracing failure. The
         // failure is unrelated to any issues with the protocol itself.
@@ -98,6 +98,21 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
         // a high tvl value.
         "0x2886a01a0645390872a9eb99dae1283664b0c524",
         "0x276084527b801e00db8e4410504f9baf93f72c67",
+        // Swaps paused by Fluid governance. The simulation does not read the `paused`
+        // attribute, so a swap through these pools reverts with DexT1__SwapAndArbitragePaused.
+        "0x8710039d5de6840ede452a85672b32270a709ae2",
+        "0xd64e12101614209ee810efde214542a2cb68d9fd",
+        "0x0ffda76c8a06d03c104f58ece336348488487e60",
+        "0xba9ed8ae94c70ef9aa2cd1045ed473aaa405c6c7",
+        "0x1dd125c32e4b5086c63cc13b3ca02c4a2a61fa9b",
+        "0xf063bd202e45d6b2843102cb4ece339026645d4a",
+        "0xdd5f2afab5ae5484339f9ad40fb4d51fc5c96be3",
+        "0xc6ca3e74e4af761ee4d0fba922b72408aac3a819",
+        "0xb0960263e39c70c9b6e9ea2a382b18095264a364",
+        "0x862fc0a67623a4e6f0776103340836c91728b06d",
+        "0x505844cbb4ca37af433cf0abf247d6a2abed705d",
+        "0x86df50987c744efc5a0cef83f8efd87e1880dab1",
+        "0xb96cee75211700bc148b95b1c907d726791f4457",
     ];
 
     if PAUSED_POOLS.contains(
@@ -114,22 +129,23 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
 
 /// Filters `vm:curve` components to those the hybrid `CurveState` can quote correctly.
 ///
-/// Excludes pools with rate-bearing or rebasing coins, unless every such coin is an oracle coin
-/// whose rate provider is on a trusted list. Such a coin prices through a per-block
-/// rate (an oracle, an ERC4626 vault, or an in-place rebase exposed via `stored_rates`) whose
-/// source is an external contract. The hybrid reads that rate via VM getters against the locally
-/// indexed storage. If DCI does not capture every slot the rate read touches, the hybrid gets a
-/// stale or default value and the quote drifts from the on-chain swap (observed up to ~30% on
-/// oracle-rate NG pools). Some providers also return an inflated rate to callers that look like
-/// a quote.
+/// Excludes pools with rate-bearing or rebasing coins, unless the pool is on a trusted list. An
+/// oracle coin is trusted when its rate provider is on the trusted list, and an ERC4626 coin when
+/// its vault is on the trusted list. A pool with rebasing coins is trusted only by its pool id.
+/// Such a coin prices through a per-block rate (an oracle, an ERC4626 vault, or an in-place rebase
+/// exposed via `stored_rates`) whose source is an external contract. The hybrid reads that rate via
+/// VM getters against the locally indexed storage. If DCI does not capture every slot the rate read
+/// touches, the hybrid gets a stale or default value and the quote drifts from the on-chain swap
+/// (observed up to ~30% on oracle-rate NG pools). Some providers also return an inflated rate to
+/// callers that look like a quote.
 ///
 /// Detection uses the substreams' static markers:
 /// - `rebase_tokens` — non-empty list of rebasing coins (e.g. stETH, ETHx). A pool carrying it is
 ///   kept only if its id is on a trusted list.
 /// - `asset_types` — per-coin Curve NG asset type encoded as a hex int. Standard coins encode as
 ///   `"0x"` / `"0x00"`. An oracle coin (`"0x01"`) is kept only if its entry in `oracles` and
-///   `method_ids` is a trusted provider. Rebasing (`"0x02"`) and ERC4626 (`"0x03"`) coins are
-///   always excluded.
+///   `method_ids` is a trusted provider. An ERC4626 coin (`"0x03"`) is kept only if its entry in
+///   `coins` is a trusted vault. Rebasing (`"0x02"`) coins are always excluded.
 pub fn curve_filter(component: &ComponentWithState) -> bool {
     let attrs = &component.component.static_attributes;
     if has_untrusted_rebase_tokens(component) || has_unsupported_asset_type(attrs) {
@@ -205,9 +221,9 @@ fn has_untrusted_rebase_tokens(component: &ComponentWithState) -> bool {
 }
 
 /// True when `asset_types` contains a coin the hybrid cannot quote: any non-standard coin other
-/// than an oracle coin backed by a trusted rate provider. Each entry is a hex-encoded integer
-/// (`"0x"`/`"0x00"` = standard; `"0x01"` oracle, `"0x02"` rebasing, `"0x03"` ERC4626). A pool
-/// without `asset_types` has only standard coins.
+/// than an oracle coin backed by a trusted rate provider or an ERC4626 coin on the trusted vault
+/// list. Each entry is a hex-encoded integer (`"0x"`/`"0x00"` = standard; `"0x01"` oracle,
+/// `"0x02"` rebasing, `"0x03"` ERC4626). A pool without `asset_types` has only standard coins.
 fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
     // Oracle rate providers as `(oracle, method id)` pairs, matched against the pool's `oracles`
     // and `method_ids` static attributes. An entry must return the same rate to a quote as to a
@@ -221,16 +237,40 @@ fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
         ("0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce"),
     ];
 
+    // ERC4626 coins whose `convertToAssets` the hybrid reads correctly. The pool reads the rate
+    // through `stored_rates()`, so DCI must capture every slot that read touches, on every branch.
+    //
+    // scrvUSD is not listed: once its profit unlock period ends, `convertToAssets` reads
+    // `balance_of[vault]`, which DCI does not capture. The rate then reads low by the locked share
+    // of the supply (3.7 bps on 2026-10-16).
+    const TRUSTED_ERC4626_COINS: [&str; 1] = [
+        // sDAI: the rate reads only `pot` (`chi`, `dsr`, `rho`) on every branch. `pot` is not a
+        // component token, so DCI indexes all of its storage.
+        "0x83f20f44975d03b1b09e64809b757c47f942beea",
+    ];
+
     let Some(types) = attr_json_list(attrs, "asset_types") else {
         return false;
     };
     let oracles = attr_json_list(attrs, "oracles").unwrap_or_default();
     let method_ids = attr_json_list(attrs, "method_ids").unwrap_or_default();
+    let coins = attr_json_list(attrs, "coins").unwrap_or_default();
     for (index, entry) in types.iter().enumerate() {
         let asset_type = entry
             .trim_start_matches("0x")
             .trim_start_matches('0');
         if asset_type.is_empty() {
+            continue;
+        }
+        if asset_type == "3" {
+            let trusted_vault = coins.get(index).is_some_and(|coin| {
+                TRUSTED_ERC4626_COINS
+                    .iter()
+                    .any(|trusted| coin.eq_ignore_ascii_case(trusted))
+            });
+            if !trusted_vault {
+                return true;
+            }
             continue;
         }
         let (Some(oracle), Some(method_id)) = (oracles.get(index), method_ids.get(index)) else {
@@ -260,7 +300,7 @@ fn has_unsupported_asset_type(attrs: &HashMap<String, Bytes>) -> bool {
 /// graph outright. The fix belongs in the substreams: emit an entrypoint per rate getter, so the
 /// slot is captured whichever branch a conversion takes.
 pub fn erc4626_filter(component: &ComponentWithState) -> bool {
-    const UNSUPPORTED_POOLS: [&str; 3] = [
+    const UNSUPPORTED_POOLS: [&str; 2] = [
         // Spark Vault V2 (spUSDC, spUSDT). Their rate is `nowChi()`, which reads `vsr` (slot 4)
         // only on the `block.timestamp > rho` branch. Any deposit/withdraw leaves
         // `rho == block.timestamp`, and entrypoints are traced once, at the component's first
@@ -272,13 +312,6 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
         // non-drip block, so `vsr` is captured and stays indexed.
         "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
-        // sDAI: `maxDeposit` returns `type(uint256).max`, which `ERC4626State` takes at face
-        // value as the deposit limit, so deposits quote unbounded. The real limit is not
-        // exposed on-chain in any form we can trace, and there is no generic fix.
-        // This is not the branch-tracing issue that excludes the Spark V2 vaults above:
-        // sDAI's rate lives on `pot` (`0x197E90f9FAD81970bA7976f33CbD77088E5D7cf7`), which
-        // both branches call and which DCI full-indexes since it is not a component token.
-        "0x83f20f44975d03b1b09e64809b757c47f942beea",
     ];
     if UNSUPPORTED_POOLS.contains(
         &component
@@ -386,7 +419,7 @@ mod tests {
         )));
         // Trusted oracle, other method.
         assert!(!curve_filter(&oracle_pool("0x01", weeth, "0x12345678")));
-        // The allowlist covers oracle coins only: ERC4626 stays out.
+        // A trusted oracle does not make an ERC4626 coin trusted.
         assert!(!curve_filter(&oracle_pool("0x03", weeth, "0x679aefce")));
         // Oracle coin without the oracle attributes.
         assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x01"]"#)])));
@@ -426,6 +459,30 @@ mod tests {
             .static_attributes
             .extend(attrs(&[("asset_types", r#"["0x00","0x03"]"#)]));
         assert!(!curve_filter(&component));
+    }
+
+    fn erc4626_coin_pool(coin: &str) -> ComponentWithState {
+        let coins = format!(r#"["0x853d955acef822db058eb8505911ed77f175b99e","{coin}"]"#);
+        curve_component(&[("asset_types", r#"["0x00","0x03"]"#), ("coins", coins.as_str())])
+    }
+
+    #[test]
+    fn curve_keeps_trusted_erc4626_coin() {
+        // FRAX/sDAI: coin 1 prices through sDAI `convertToAssets`. Checksummed input still matches.
+        assert!(curve_filter(&erc4626_coin_pool("0x83F20F44975D03b1b09e64809B757c47f942BEeA")));
+    }
+
+    #[test]
+    fn curve_excludes_untrusted_erc4626_coin() {
+        // scrvUSD.
+        assert!(!curve_filter(&erc4626_coin_pool("0x0655977feb2f289a4ab78af67bab0d17aab84367")));
+        // ERC4626 coin without the `coins` attribute.
+        assert!(!curve_filter(&curve_component(&[("asset_types", r#"["0x00","0x03"]"#)])));
+    }
+
+    #[test]
+    fn erc4626_keeps_sdai() {
+        assert!(erc4626_filter(&erc4626_component("0x83f20f44975d03b1b09e64809b757c47f942beea")));
     }
 
     #[test]

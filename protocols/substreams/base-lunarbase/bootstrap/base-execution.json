@@ -1,0 +1,460 @@
+{
+  "chain": "base",
+  "pool": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+  "quote_caller": "0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67",
+  "token_x": "0x0000000000000000000000000000000000000000",
+  "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+  "provenance": {
+    "rpc_endpoint": "https://mainnet.base.org",
+    "header_and_log_rpc_endpoint": "https://base-rpc.publicnode.com",
+    "captured_at": "2026-10-15T11:05:36.036571+00:00",
+    "source": "Block-pinned eth_call, eth_getStorageAt, eth_getBlockByNumber and eth_getLogs; no state overrides.",
+    "canonicality_check": "Parent and stop hashes re-read after capture; bootstrap parentHash matched.",
+    "quote_encoding": "Decimal amountOut, pNext, fee words from eth_call with from set to quote_caller."
+  },
+  "bootstrap_block": 52636221,
+  "bootstrap_block_hash": "0x3b7819f7940abaf495c2062d4119907fb0b32e07f89b91b4878f33a55c3f5243",
+  "stop_block": 52636230,
+  "discovery_tx": "0xc47282a8f4f6cf1b45692c7be01eedafd402ca4fed3dac1469b35536b46509e5",
+  "implementation": "0x5a2340665fb7e091852e0234d97605a81dbc3754",
+  "implementation_storage_word": "0x0000000000000000000000005a2340665fb7e091852e0234d97605a81dbc3754",
+  "snapshot": {
+    "block_number": 52636220,
+    "block_hash": "0x92eacfb9fc8804785cf8cfb41cbc8bdd41b65cd846a9385ed9ffcaee2631e7a0",
+    "attributes": {
+      "anchor_price_x96": "0x000000000000000000032fe65c099a6880000000",
+      "fee_ask_x24": "0x0000047c",
+      "fee_bid_x24": "0x00000c7c",
+      "latest_update_block": "0x0000000003232a3b",
+      "reserve_x": "0x00000000000000007aece2cf629e036f",
+      "reserve_y": "0x000000000000000000000004186fa148",
+      "max_punishment_x24": "0x00003a98",
+      "block_delay": "0x0000000000000003",
+      "paused": "0x00"
+    }
+  },
+  "execution_state": {
+    "block_number": 52636230,
+    "block_hash": "0x26eec9a630bda6c71295d0e923ba45c7e6d5246d37b07143772c0b0c512d3f6c",
+    "attributes": {
+      "anchor_price_x96": "0x000000000000000000032fdd1721a90360000000",
+      "fee_ask_x24": "0x00000229",
+      "fee_bid_x24": "0x00000a27",
+      "latest_update_block": "0x0000000003232a46",
+      "reserve_x": "0x00000000000000007aece2cf629e036f",
+      "reserve_y": "0x000000000000000000000004186fa148",
+      "max_punishment_x24": "0x00003a98",
+      "block_delay": "0x0000000000000003",
+      "paused": "0x00"
+    }
+  },
+  "parent_calls": [
+    {
+      "signature": "state()",
+      "arguments": [],
+      "calldata": "0xc19d93fb",
+      "raw_result": "0x000000000000000000000000000000000000000000032fe65c099a6880000000000000000000000000000000000000000000000000000000000000000000047c0000000000000000000000000000000000000000000000000000000000000c7c0000000000000000000000000000000000000000000000000000000003232a3b",
+      "result": [
+        "3852978066677413940559872",
+        "1148",
+        "3196",
+        "52636219"
+      ]
+    },
+    {
+      "signature": "getXReserve()",
+      "arguments": [],
+      "calldata": "0x817aeea5",
+      "raw_result": "0x0000000000000000000000000000000000000000000000007aece2cf629e036f",
+      "result": [
+        "8857703947471553391"
+      ]
+    },
+    {
+      "signature": "getYReserve()",
+      "arguments": [],
+      "calldata": "0xf8e58d6c",
+      "raw_result": "0x00000000000000000000000000000000000000000000000000000004186fa148",
+      "result": [
+        "17589838152"
+      ]
+    },
+    {
+      "signature": "maxPunishmentX24()",
+      "arguments": [],
+      "calldata": "0x4eb07977",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000003a98",
+      "result": [
+        "15000"
+      ]
+    },
+    {
+      "signature": "blockDelay()",
+      "arguments": [],
+      "calldata": "0xd98f6088",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "result": [
+        "3"
+      ]
+    },
+    {
+      "signature": "paused()",
+      "arguments": [],
+      "calldata": "0x5c975abb",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "result": [
+        "0"
+      ]
+    },
+    {
+      "signature": "isWhitelisted(address)",
+      "arguments": [
+        "0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67"
+      ],
+      "calldata": "0x3af32abf000000000000000000000000aba5b53b03eafad1c5fc8bd5fc765fc85bb3de67",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "result": [
+        "1"
+      ]
+    },
+    {
+      "signature": "blacklistFeeMultiplier()",
+      "arguments": [],
+      "calldata": "0x93b6ab27",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000064",
+      "result": [
+        "100"
+      ]
+    }
+  ],
+  "execution_calls": [
+    {
+      "signature": "state()",
+      "arguments": [],
+      "calldata": "0xc19d93fb",
+      "raw_result": "0x000000000000000000000000000000000000000000032fdd1721a9036000000000000000000000000000000000000000000000000000000000000000000002290000000000000000000000000000000000000000000000000000000000000a270000000000000000000000000000000000000000000000000000000003232a46",
+      "result": [
+        "3852807080778219724472320",
+        "553",
+        "2599",
+        "52636230"
+      ]
+    },
+    {
+      "signature": "getXReserve()",
+      "arguments": [],
+      "calldata": "0x817aeea5",
+      "raw_result": "0x0000000000000000000000000000000000000000000000007aece2cf629e036f",
+      "result": [
+        "8857703947471553391"
+      ]
+    },
+    {
+      "signature": "getYReserve()",
+      "arguments": [],
+      "calldata": "0xf8e58d6c",
+      "raw_result": "0x00000000000000000000000000000000000000000000000000000004186fa148",
+      "result": [
+        "17589838152"
+      ]
+    },
+    {
+      "signature": "maxPunishmentX24()",
+      "arguments": [],
+      "calldata": "0x4eb07977",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000003a98",
+      "result": [
+        "15000"
+      ]
+    },
+    {
+      "signature": "blockDelay()",
+      "arguments": [],
+      "calldata": "0xd98f6088",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "result": [
+        "3"
+      ]
+    },
+    {
+      "signature": "paused()",
+      "arguments": [],
+      "calldata": "0x5c975abb",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "result": [
+        "0"
+      ]
+    },
+    {
+      "signature": "isWhitelisted(address)",
+      "arguments": [
+        "0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67"
+      ],
+      "calldata": "0x3af32abf000000000000000000000000aba5b53b03eafad1c5fc8bd5fc765fc85bb3de67",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "result": [
+        "1"
+      ]
+    },
+    {
+      "signature": "blacklistFeeMultiplier()",
+      "arguments": [],
+      "calldata": "0x93b6ab27",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000000064",
+      "result": [
+        "100"
+      ]
+    }
+  ],
+  "observed_quotes": [
+    {
+      "signature": "quoteXToY(uint256)",
+      "arguments": [
+        "1000000000000000"
+      ],
+      "calldata": "0x17d37d0800000000000000000000000000000000000000000000000000038d7ea4c68000",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000000000000241417000000000000000000000000000000000000000000032fdd1721a90360000000000000000000000000000000000000000000000000000000000000000000016e",
+      "result": [
+        "2364439",
+        "3852807080778219724472320",
+        "366"
+      ]
+    },
+    {
+      "signature": "quoteXToY(uint256)",
+      "arguments": [
+        "100000000000000000"
+      ],
+      "calldata": "0x17d37d08000000000000000000000000000000000000000000000000016345785d8a0000",
+      "raw_result": "0x000000000000000000000000000000000000000000000000000000000e17d3c9000000000000000000000000000000000000000000032fdd1721a903600000000000000000000000000000000000000000000000000000000000000000009438",
+      "result": [
+        "236442569",
+        "3852807080778219724472320",
+        "37944"
+      ]
+    },
+    {
+      "signature": "quoteXToY(uint256)",
+      "arguments": [
+        "1000000000000000000"
+      ],
+      "calldata": "0x17d37d080000000000000000000000000000000000000000000000000de0b6b3a7640000",
+      "raw_result": "0x000000000000000000000000000000000000000000000000000000008cec7df1000000000000000000000000000000000000000000032fdd1721a90360000000000000000000000000000000000000000000000000000000000000000007921b",
+      "result": [
+        "2364308977",
+        "3852807080778219724472320",
+        "496155"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "arguments": [
+        "1000000"
+      ],
+      "calldata": "0xe56d5e0000000000000000000000000000000000000000000000000000000000000f4240",
+      "raw_result": "0x0000000000000000000000000000000000000000000000000001809556217d2f000000000000000000000000000000000000000000032fdd1721a9036000000000000000000000000000000000000000000000000000000000000003404a3585",
+      "result": [
+        "422853860228399",
+        "3852807080778219724472320",
+        "13963507077"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "arguments": [
+        "100000000"
+      ],
+      "calldata": "0xe56d5e000000000000000000000000000000000000000000000000000000000005f5e100",
+      "raw_result": "0x00000000000000000000000000000000000000000000000000963a3f5847da32000000000000000000000000000000000000000000032fdd1721a903600000000000000000000000000000000000000000000000000000000000015b69d5e0e4",
+      "result": [
+        "42285290245052978",
+        "3852807080778219724472320",
+        "1492129276132"
+      ]
+    },
+    {
+      "signature": "quoteYToX(uint256)",
+      "arguments": [
+        "1000000000"
+      ],
+      "calldata": "0xe56d5e00000000000000000000000000000000000000000000000000000000003b9aca00",
+      "raw_result": "0x00000000000000000000000000000000000000000000000005de3e6d9d957758000000000000000000000000000000000000000000032fdd1721a903600000000000000000000000000000000000000000000000000000000000159df796aa7d",
+      "result": [
+        "422844055535581016",
+        "3852807080778219724472320",
+        "23768207895165"
+      ]
+    }
+  ],
+  "range_logs": [
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fe65c14057bc000000000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000000000000000000000000000000000000000099f",
+      "blockHash": "0x3b7819f7940abaf495c2062d4119907fb0b32e07f89b91b4878f33a55c3f5243",
+      "blockNumber": "0x3232a3d",
+      "blockTimestamp": "0x6ad0b15d",
+      "transactionHash": "0xc47282a8f4f6cf1b45692c7be01eedafd402ca4fed3dac1469b35536b46509e5",
+      "transactionIndex": "0x29",
+      "logIndex": "0xaf",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdc3454deff8000000000000000000000000000000000000000000000000000000000000000000007c60000000000000000000000000000000000000000000000000000000000000fc5",
+      "blockHash": "0xf05666b7f77096894bcb866838ea17ec7e767ca53e77ac0c31437c40edbc904e",
+      "blockNumber": "0x3232a3e",
+      "blockTimestamp": "0x6ad0b15f",
+      "transactionHash": "0xf83edafd49b6d8e52ecca5a8c8c5e8b73873aaf71dfdb718380d701ba63bc8c4",
+      "transactionIndex": "0x42",
+      "logIndex": "0x107",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdc3536525aa000000000000000000000000000000000000000000000000000000000000000000004110000000000000000000000000000000000000000000000000000000000000c0f",
+      "blockHash": "0xf05666b7f77096894bcb866838ea17ec7e767ca53e77ac0c31437c40edbc904e",
+      "blockNumber": "0x3232a3e",
+      "blockTimestamp": "0x6ad0b15f",
+      "transactionHash": "0xc27c364eaba2b9e257c4e6276c09c8a8f46ed7c943ae88616227f0686fff5c8b",
+      "transactionIndex": "0x6b",
+      "logIndex": "0x1ab",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdc35167c8fa0000000000000000000000000000000000000000000000000000000000000000000018a0000000000000000000000000000000000000000000000000000000000000988",
+      "blockHash": "0x616221405f3bd3e3350dd6895d4862068b1d13703fa21009f7a6e95c2fc0af86",
+      "blockNumber": "0x3232a40",
+      "blockTimestamp": "0x6ad0b163",
+      "transactionHash": "0xe68cce641fcf235cb608b5783de539c6d375d6a95a285b3c73f0470e78e3f190",
+      "transactionIndex": "0x22",
+      "logIndex": "0x7e",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fd6e854c0704000000000000000000000000000000000000000000000000000000000000000000004ad0000000000000000000000000000000000000000000000000000000000000cab",
+      "blockHash": "0x616221405f3bd3e3350dd6895d4862068b1d13703fa21009f7a6e95c2fc0af86",
+      "blockNumber": "0x3232a40",
+      "blockTimestamp": "0x6ad0b163",
+      "transactionHash": "0xd994c1eff74562173f000f6502b1dee5a859630548e88fb63f79aa12430a4d2a",
+      "transactionIndex": "0x7a",
+      "logIndex": "0x1d1",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fd0b9f3f5a380000000000000000000000000000000000000000000000000000000000000000000071f0000000000000000000000000000000000000000000000000000000000000f1d",
+      "blockHash": "0x616221405f3bd3e3350dd6895d4862068b1d13703fa21009f7a6e95c2fc0af86",
+      "blockNumber": "0x3232a40",
+      "blockTimestamp": "0x6ad0b163",
+      "transactionHash": "0xaa3d35054af0fbae5f985aee90b929a55079a4ffa05e380249d376c6c07301f4",
+      "transactionIndex": "0xa9",
+      "logIndex": "0x26b",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fd0b9b3b4f82000000000000000000000000000000000000000000000000000000000000000000003cd0000000000000000000000000000000000000000000000000000000000000bca",
+      "blockHash": "0x262c7be6759f58f72f517a57926efafc611ffa6c7a4f28fb36ca1b7c9793db5d",
+      "blockNumber": "0x3232a41",
+      "blockTimestamp": "0x6ad0b165",
+      "transactionHash": "0x13768e73b2f7c7696ca95c345918a75d238bb18fd3c6afd636e25bffc2145e5d",
+      "transactionIndex": "0x2f",
+      "logIndex": "0x15f",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fd0b9c2c1cfa000000000000000000000000000000000000000000000000000000000000000000001840000000000000000000000000000000000000000000000000000000000000981",
+      "blockHash": "0x768b03a160582d2d8cabc000fc96d3d186a96827e0714a0133b39e352442a432",
+      "blockNumber": "0x3232a43",
+      "blockTimestamp": "0x6ad0b169",
+      "transactionHash": "0x8cd967bf4d0673e3f750d4ca7b1b525cd2d7297fd86a47d9017900d5f093c6f9",
+      "transactionIndex": "0x25",
+      "logIndex": "0x44",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdd16c1497860000000000000000000000000000000000000000000000000000000000000000000093d0000000000000000000000000000000000000000000000000000000000001139",
+      "blockHash": "0xe5bf6a435c69391f9170b93614b77ac5549740d735d56c444ffb577bd502c61d",
+      "blockNumber": "0x3232a45",
+      "blockTimestamp": "0x6ad0b16d",
+      "transactionHash": "0x2d7c10dd9f1ee2b0a963f6835c6705d8c75e372da426e1b8c5a373e389e2962b",
+      "transactionIndex": "0x3f",
+      "logIndex": "0xf0",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdd171e7a098000000000000000000000000000000000000000000000000000000000000000000005760000000000000000000000000000000000000000000000000000000000000d73",
+      "blockHash": "0xe5bf6a435c69391f9170b93614b77ac5549740d735d56c444ffb577bd502c61d",
+      "blockNumber": "0x3232a45",
+      "blockTimestamp": "0x6ad0b16d",
+      "transactionHash": "0xb9ada614f3c58f6ca436a8c5f74b667b165692dfff36f0260af13d818eefe3a8",
+      "transactionIndex": "0x63",
+      "logIndex": "0x1be",
+      "removed": false
+    },
+    {
+      "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+      "topics": [
+        "0x8acb811d2c5106785f847faf03ce160d2eb124b8632eb42d466f46c087033d61"
+      ],
+      "data": "0x000000000000000000000000000000000000000000032fdd1721a9036000000000000000000000000000000000000000000000000000000000000000000002290000000000000000000000000000000000000000000000000000000000000a27",
+      "blockHash": "0x26eec9a630bda6c71295d0e923ba45c7e6d5246d37b07143772c0b0c512d3f6c",
+      "blockNumber": "0x3232a46",
+      "blockTimestamp": "0x6ad0b16f",
+      "transactionHash": "0x2f736e1d69d3d3cfd15094abda0d62f47167701e218a82bd5cfa517b3842e474",
+      "transactionIndex": "0x25",
+      "logIndex": "0x158",
+      "removed": false
+    }
+  ],
+  "partner_activation_log": {
+    "address": "0x0000efc4ec03a7c47d3a38a9be7ff1d52dd01b99",
+    "topics": [
+      "0x0aa5ec5ffdc7f6f9c4d0dded489d7450297155cb2f71cb771e02427f7dff4f51",
+      "0x000000000000000000000000aba5b53b03eafad1c5fc8bd5fc765fc85bb3de67"
+    ],
+    "data": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "blockHash": "0xea485e3749b49114c0ea60c2733be33d083b6a4fce2db512720f61c0fc94428b",
+    "blockNumber": "0x3232a39",
+    "blockTimestamp": "0x6ad0b155",
+    "transactionHash": "0xb9cc388195cedcf714d5d308a826f1031144b75bc34e6cafdfda9caf2f1dd04c",
+    "transactionIndex": "0x45",
+    "logIndex": "0xf0",
+    "removed": false
+  }
+}

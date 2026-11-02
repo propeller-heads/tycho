@@ -4,7 +4,12 @@ use tycho_common::{models::Chain, storage::StorageError};
 
 use crate::{
     postgres,
-    postgres::{cache::CachedGateway, direct::DirectGateway, PostgresGateway},
+    postgres::{
+        cache::CachedGateway,
+        direct::DirectGateway,
+        pool::{spawn_status_gauges, DIRECT_POOL, EXTRACTION_POOL, POOL_STATUS_PERIOD, RPC_POOL},
+        PostgresGateway,
+    },
 };
 
 #[derive(Default)]
@@ -100,6 +105,7 @@ impl GatewayBuilder {
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
+        spawn_status_gauges(pool.clone(), EXTRACTION_POOL, POOL_STATUS_PERIOD);
         let (tx, rx) = mpsc::channel(10);
         let write_executor = postgres::cache::DBCacheWriteExecutor::new(
             chain.to_string(),
@@ -124,7 +130,8 @@ impl GatewayBuilder {
     ) -> Result<(CachedGateway, CachedGateway, JoinHandle<()>), StorageError> {
         let rpc_pool = postgres::new_pool(&self.database_url)?;
         let (extraction_gw, writer) = self.build().await?;
-        let rpc_gw = extraction_gw.with_pool(rpc_pool);
+        spawn_status_gauges(rpc_pool.clone(), RPC_POOL, POOL_STATUS_PERIOD);
+        let rpc_gw = extraction_gw.with_pool(rpc_pool, RPC_POOL);
         Ok((extraction_gw, rpc_gw, writer))
     }
 
@@ -170,6 +177,7 @@ impl GatewayBuilder {
         )
         .await?;
         spawn_refresh_tasks(&inner_gw, &pool);
+        spawn_status_gauges(pool.clone(), DIRECT_POOL, POOL_STATUS_PERIOD);
 
         let direct_gw = DirectGateway::new(pool.clone(), inner_gw.clone(), chain);
         Ok(direct_gw)

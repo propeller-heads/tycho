@@ -29,6 +29,7 @@ jobs:
     continue-on-error: true
     outputs:
       rust: ${{ steps.filter.outputs.any_changed }}
+      price-level-stream: ${{ steps.price-level-stream.outputs.any_changed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -45,6 +46,16 @@ jobs:
             Cargo.lock
             rust-toolchain.toml
             .github/workflows/ci-rust-evm.yaml
+
+      # The pAMM simulation overrides test dials the live Titan sockets and makes real RPC calls,
+      # so it runs only when the code it covers changes, or on a manual dispatch.
+      - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        id: price-level-stream
+        with:
+          files: |
+            crates/tycho-simulation/src/price_level_stream/**
+            crates/tycho-test/src/execution/**
+            crates/tycho-integration-test/tests/pamm_simulation_overrides.rs
 
   test-evm:
     name: EVM tests (requires RPC)
@@ -92,3 +103,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Rust changes detected, skipping EVM tests"
+
+  test-pamm-overrides:
+    name: pAMM simulation overrides (live)
+    needs: [changes]
+    if: needs.changes.outputs.price-level-stream == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Same reason as test-evm: this runs fork code (cargo build/test) with an RPC secret in scope,
+    # so a fork PR waits on required-reviewer approval before the job starts. Internal-branch PRs
+    # run without approval. This is why the job lives here rather than in ci-rust.yaml, which runs
+    # on `pull_request` and so hands a fork no secret at all — the test would skip itself and the
+    # check would pass green without testing anything.
+    environment: ${{ github.event.pull_request.head.repo.fork && 'integration-tests' || '' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@888c2e1ea69ab0d4330cbf0af1ecc7b68f368cc1  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+        with:
+          cache-on-failure: true
+
+      # Captures live pAMM quotes, then simulates each encoded swap on the parent of the block it
+      # targets, with and without the quote's own overrides. It fails when a quote's own overrides
+      # revert or miss the quoted amount, or when the stream served quotes and none carried
+      # overrides. It passes with a `::warning::` when Titan serves no quote, or when none of the
+      # captured quotes can be checked against the chain: the RPC returns none of the quoted
+      # blocks, or no simulation runs.
+      - name: Simulate live pAMM quotes with their overrides
+        run: |
+          cargo test -p tycho-integration-test --test pamm_simulation_overrides --locked \
+            -- --ignored --nocapture
+        env:
+          RPC_URL: ${{ secrets.ETH_RPC_URL }}
+
+  test-pamm-overrides-skip:
+    name: pAMM simulation overrides (live)
+    needs: [changes]
+    if: needs.changes.outputs.price-level-stream != 'true' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No price level stream changes detected, skipping the pAMM override check"

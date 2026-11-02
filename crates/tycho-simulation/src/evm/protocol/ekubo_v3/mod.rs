@@ -46,14 +46,16 @@ mod tests {
 
     use revm::primitives::address;
     use tycho_common::{
-        models::protocol::{ProtocolComponent, ProtocolComponentState},
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            Chain,
+        },
         Bytes,
     };
 
     use super::{
         addresses::{
-            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
-            SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS,
+            ORACLE_ADDRESS, SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS, SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS,
         },
         *,
     };
@@ -87,12 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn signed_exclusive_swap_address_on_another_chain() {
-        // The default component chain is Ethereum, where the Robinhood deployment does not exist.
-        let robinhood_on_ethereum = with_extension(SIGNED_EXCLUSIVE_SWAP_ROBINHOOD_ADDRESS);
+    fn signed_exclusive_swap_v3_3_chains() {
+        for chain in [Chain::Robinhood, Chain::Bsc, Chain::Base] {
+            let mut signed = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+            signed.component.chain = chain;
 
-        assert!(!filter_fn(&robinhood_on_ethereum));
-        assert!(!filter_fn_with_signed_exclusive_swap(&robinhood_on_ethereum));
+            assert!(!filter_fn(&signed), "{chain} pool passed the default filter");
+            assert!(filter_fn_with_signed_exclusive_swap(&signed), "{chain} pool not recognised");
+        }
+    }
+
+    #[test]
+    fn signed_exclusive_swap_address_on_another_chain() {
+        // The default component chain is Ethereum, which only has the v3.2.0 deployment.
+        let v3_3_on_ethereum = with_extension(SIGNED_EXCLUSIVE_SWAP_V3_3_ADDRESS);
+
+        assert!(!filter_fn(&v3_3_on_ethereum));
+        assert!(!filter_fn_with_signed_exclusive_swap(&v3_3_on_ethereum));
     }
 
     #[test]

@@ -18,6 +18,12 @@ error Dispatcher__ExecutorAlreadyExists(address executor);
 error Dispatcher__SwapReverted(address executor);
 error Dispatcher__CallbackReverted(address executor);
 
+// keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
+// Shared with TychoSubsidizingExecutor, which points the router's fallback at
+// its inner executor.
+uint256 constant CURRENTLY_SWAPPING_EXECUTOR_SLOT =
+    0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
+
 /**
  * @title Dispatcher - Dispatch execution to external contracts
  * @dev Provides the ability to delegate execution of swaps to external
@@ -34,9 +40,6 @@ contract Dispatcher is TransferManager {
 
     mapping(address => uint256) public executorsActivationTimestamp;
 
-    // keccak256("Dispatcher#CURRENTLY_SWAPPING_EXECUTOR_SLOT")
-    uint256 private constant _CURRENTLY_SWAPPING_EXECUTOR_SLOT =
-        0x098a7a3b47801589e8cdf9ec791b93ad44273246946c32ef1fc4dbe45390c80e;
     // keccak256("Dispatcher#IS_SPLIT_SWAP_SLOT")
     uint256 private constant _IS_SPLIT_SWAP_SLOT =
         0x7b3c4e5f6a8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d5e6f7c8d9e0f1c2b3a4d;
@@ -101,7 +104,7 @@ contract Dispatcher is TransferManager {
         _validateExecutor(executor);
 
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, executor)
             tstore(_IS_FIRST_SWAP_SLOT, isFirstSwap)
             tstore(_IS_SPLIT_SWAP_SLOT, isSplitSwap)
             tstore(_SWAP_INPUT_AMOUNT_SLOT, amount)
@@ -152,7 +155,7 @@ contract Dispatcher is TransferManager {
 
         // Clear transient storage in case no callback was performed
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
             tstore(_IS_FIRST_SWAP_SLOT, 0)
             tstore(_IS_SPLIT_SWAP_SLOT, 0)
             tstore(_SWAP_INPUT_AMOUNT_SLOT, 0)
@@ -202,7 +205,7 @@ contract Dispatcher is TransferManager {
         uint256 amount;
         address tokenIn;
         assembly {
-            executor := tload(_CURRENTLY_SWAPPING_EXECUTOR_SLOT)
+            executor := tload(CURRENTLY_SWAPPING_EXECUTOR_SLOT)
             isFirstSwap := tload(_IS_FIRST_SWAP_SLOT)
             isSplitSwap := tload(_IS_SPLIT_SWAP_SLOT)
             amount := tload(_SWAP_INPUT_AMOUNT_SLOT)
@@ -248,7 +251,7 @@ contract Dispatcher is TransferManager {
 
         // to prevent multiple callbacks
         assembly {
-            tstore(_CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
+            tstore(CURRENTLY_SWAPPING_EXECUTOR_SLOT, 0)
             tstore(_IS_FIRST_SWAP_SLOT, 0)
             tstore(_IS_SPLIT_SWAP_SLOT, 0)
         }

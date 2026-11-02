@@ -10,7 +10,9 @@ use crate::{
     evm::protocol::{
         uniswap_v4::{
             hooks::{
-                hook_handler_creator::{instantiate_hook_handler, HookCreationParams},
+                hook_handler_creator::{
+                    has_native_hook_handler, instantiate_hook_handler, HookCreationParams,
+                },
                 utils::{has_permission, HookOptions},
             },
             state::UniswapV4Fees,
@@ -25,6 +27,10 @@ use crate::{
         models::{DecoderContext, TryFromWithBlock},
     },
 };
+
+/// The protocol system whose pool manager reads hook permissions from the pool key rather than
+/// the hook address, and which only emits pools whose hook takes part in swaps.
+const POOL_KEY_PERMISSION_SYSTEM: &str = "pancakeswap_infinity_cl_hooks";
 
 /// Whether a hook can take part in a swap at all, which it can exactly when its address carries
 /// the `beforeSwap` or the `afterSwap` permission bit. Uniswap V4 encodes a hook's permissions in
@@ -43,7 +49,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
     /// if the snapshot is missing any required attributes.
     async fn try_from_with_header(
         snapshot: ComponentWithState,
-        _block: BlockHeader,
+        block: BlockHeader,
         account_balances: &HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: &HashMap<Bytes, Token>,
         decoder_context: &DecoderContext,
@@ -178,7 +184,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
         // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
         // about whether the pool has a hook: the zero address is what "no hook" looks like on the
         // wire, and the length check rejects a malformed value. A pool whose hook cannot take part
-        // in a swap is a plain V4 pool too, on every chain: no handler, no chain needed.
+        // in a swap is a plain V4 pool too, on every chain: no handler, no chain needed. A hook
+        // with a native handler registered on this chain is always simulated by it, because some
+        // pool managers (PancakeSwap Infinity) do not encode permissions in the hook address. For
+        // the system that only emits such hooks the address bits are never consulted, so a missing
+        // chain or handler fails the decode instead of hinging on whatever bits the address has.
+        let permissions_in_pool_key =
+            snapshot.component.protocol_system == POOL_KEY_PERMISSION_SYSTEM;
         let hook_address = hook_attribute
             .map(bytes_to_address)
             .transpose()
@@ -187,7 +199,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     "hooks attribute is not a 20-byte address: {err}"
                 ))
             })?
-            .filter(|address| hook_participates_in_swaps(*address));
+            .filter(|address| {
+                hook_participates_in_swaps(*address) ||
+                    (permissions_in_pool_key && !address.is_zero()) ||
+                    decoder_context
+                        .chain
+                        .is_some_and(|chain| has_native_hook_handler(chain, address))
+            });
 
         if let Some(hook_address) = hook_address {
             // Merge state attributes into static_attributes for hook creation
@@ -213,7 +231,8 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 &merged_attributes,
                 &snapshot.state.balances,
                 decoder_context.vm_traces,
-            );
+            )
+            .with_block_timestamp(block.timestamp);
 
             let hook_handler = instantiate_hook_handler(chain, &hook_address, hook_params)?;
             state.set_hook_handler(hook_handler);
@@ -397,18 +416,31 @@ pub(crate) mod pons_fixture {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::HashSet, str::FromStr};
 
     use chrono::DateTime;
     use num_bigint::BigUint;
+    use num_traits::Zero;
     use rstest::rstest;
-    use tycho_common::models::{
-        protocol::{ProtocolComponent, ProtocolComponentState},
-        Chain, ChangeType,
+    use tycho_common::{
+        dto::ProtocolStateDelta,
+        models::{
+            protocol::{ProtocolComponent, ProtocolComponentState},
+            Chain, ChangeType,
+        },
+        simulation::{
+            errors::SimulationError,
+            protocol_sim::{
+                Balances, BlockContext, PoolSwap, Price, QueryPoolSwapParams, SwapConstraint,
+            },
+        },
     };
 
     use super::*;
-    use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
+    use crate::evm::protocol::{
+        test_utils::try_decode_snapshot_with_defaults,
+        uniswap_v4::hooks::pancakeswap_clalpha::hook_handler::CLALPHA_BEFORE_SWAP_GAS,
+    };
 
     fn usv4_component() -> ProtocolComponent {
         let creation_time = DateTime::from_timestamp(1622526000, 0)
@@ -696,6 +728,204 @@ mod tests {
             "a hook without beforeSwap or afterSwap must not install a hook handler"
         );
         assert_quotes_like_the_hookless_reference(&decoded);
+    }
+
+    /// PancakeSwap Infinity `CLAlphaHook` `0xb0ba…4d0f`. Its address has the v4 `beforeSwap` bit
+    /// clear, so it reaches its handler only through the BSC registration.
+    const CLALPHA_HOOK: &str = "0xb0baa371b899950b4ef6a27c21baf5ef7c434d0f";
+
+    fn clalpha_snapshot(start_timestamp: u64) -> ComponentWithState {
+        let mut snapshot = hookless_snapshot_with_hook(CLALPHA_HOOK);
+        snapshot.component.protocol_system = "pancakeswap_infinity_cl_hooks".to_string();
+        snapshot.state.attributes.insert(
+            "alpha_start_timestamp".to_string(),
+            Bytes::from(start_timestamp.to_be_bytes().to_vec()),
+        );
+        snapshot
+    }
+
+    async fn decode_at(
+        snapshot: ComponentWithState,
+        chain: Chain,
+        timestamp: u64,
+    ) -> Result<UniswapV4State, InvalidSnapshotError> {
+        initialize_hook_handlers().expect("hook handler registration should succeed");
+        let all_tokens =
+            HashMap::from([(token0().address, token0()), (token1().address, token1())]);
+        UniswapV4State::try_from_with_header(
+            snapshot,
+            BlockHeader { timestamp, ..Default::default() },
+            &HashMap::default(),
+            &all_tokens,
+            &DecoderContext::new().chain(chain),
+        )
+        .await
+    }
+
+    /// Moves the pool to 1% below its starting price of 1.
+    fn query_one_percent_move(
+        state: &UniswapV4State,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<PoolSwap, SimulationError> {
+        state.query_pool_swap(&QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(BigUint::from(990_u64), BigUint::from(1_000_u64)),
+                tolerance: 0f64,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        ))
+    }
+
+    /// Once open, a CLAlphaHook pool quotes exactly like the same pool without a hook, plus the
+    /// gas of the `beforeSwap` call and of the pool manager dispatching it.
+    #[tokio::test]
+    async fn open_clalpha_pool_quotes_like_a_hookless_pool() {
+        let decoded = decode_at(clalpha_snapshot(1_000), Chain::Bsc, 1_001)
+            .await
+            .expect("an open CLAlphaHook pool decodes on BSC");
+        assert!(decoded.hook.is_some(), "the registered handler is installed despite the bits");
+
+        let reference = reference_hookless_state();
+        let (t0, t1) = (token0(), token1());
+        assert_eq!(decoded.spot_price(&t0, &t1).unwrap(), reference.spot_price(&t0, &t1).unwrap());
+        assert_eq!(
+            decoded
+                .get_limits(t0.address.clone(), t1.address.clone())
+                .unwrap(),
+            reference
+                .get_limits(t0.address.clone(), t1.address.clone())
+                .unwrap()
+        );
+        let amount_in = BigUint::from(1_000_000_000_000_000_u64);
+        for (token_in, token_out) in [(&t0, &t1), (&t1, &t0)] {
+            let from_decoded = decoded
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .unwrap();
+            let from_reference = reference
+                .get_amount_out(amount_in.clone(), token_in, token_out)
+                .unwrap();
+            assert_eq!(from_decoded.amount, from_reference.amount);
+            assert_eq!(
+                from_decoded.gas,
+                from_reference.gas + BigUint::from(CLALPHA_BEFORE_SWAP_GAS)
+            );
+
+            let queried = query_one_percent_move(&decoded, token_in, token_out).unwrap();
+            let reference_query = query_one_percent_move(&reference, token_in, token_out).unwrap();
+            assert_eq!(queried.amount_in(), reference_query.amount_in());
+            assert_eq!(queried.amount_out(), reference_query.amount_out());
+        }
+    }
+
+    /// Before the start time, and when the start time is zero, the pool keeps a spot price but
+    /// cannot trade: no capacity and a refused quote.
+    #[tokio::test]
+    #[rstest]
+    #[case::not_started(2_000)]
+    #[case::disabled(0)]
+    async fn closed_clalpha_pool_keeps_a_price_but_cannot_trade(#[case] start: u64) {
+        let decoded = decode_at(clalpha_snapshot(start), Chain::Bsc, 1_000)
+            .await
+            .expect("a closed CLAlphaHook pool still decodes");
+        let (t0, t1) = (token0(), token1());
+
+        assert_eq!(
+            decoded.spot_price(&t0, &t1).unwrap(),
+            reference_hookless_state()
+                .spot_price(&t0, &t1)
+                .unwrap()
+        );
+        for (token_in, token_out) in [(&t0, &t1), (&t1, &t0)] {
+            assert_eq!(
+                decoded
+                    .get_limits(token_in.address.clone(), token_out.address.clone())
+                    .unwrap(),
+                (BigUint::zero(), BigUint::zero())
+            );
+            let err = decoded
+                .get_amount_out(BigUint::from(1_000_u64), token_in, token_out)
+                .unwrap_err();
+            assert!(
+                matches!(&err, SimulationError::InvalidInput(message, _) if message.contains("PoolNotStarted")),
+                "{err:?}"
+            );
+            let err = query_one_percent_move(&decoded, token_in, token_out).unwrap_err();
+            assert!(matches!(err, SimulationError::InvalidInput(..)), "{err:?}");
+        }
+    }
+
+    /// The execution block opens the pool, and a start time moved past it, as the first
+    /// CLAlphaHook version allows after launch, pauses it again.
+    #[tokio::test]
+    async fn clalpha_pool_follows_the_execution_block_and_start_time_updates() {
+        let mut state = decode_at(clalpha_snapshot(2_000), Chain::Bsc, 1_000)
+            .await
+            .unwrap();
+        let (t0, t1) = (token0(), token1());
+        let quote =
+            |state: &UniswapV4State| state.get_amount_out(BigUint::from(1_000_000_u64), &t0, &t1);
+        assert!(quote(&state).is_err());
+
+        assert!(state.apply_block(&BlockContext::new(2, 2_001)), "opening re-emits the pool");
+        assert!(quote(&state).is_ok());
+
+        state
+            .delta_transition(
+                ProtocolStateDelta {
+                    component_id: "State1".to_string(),
+                    updated_attributes: HashMap::from([(
+                        "alpha_start_timestamp".to_string(),
+                        Bytes::from(7_200_u64.to_be_bytes().to_vec()),
+                    )]),
+                    deleted_attributes: HashSet::new(),
+                },
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+        assert!(quote(&state).is_err(), "a rescheduled start pauses the pool");
+
+        assert!(state.apply_block(&BlockContext::new(3, 7_201)));
+        assert!(quote(&state).is_ok());
+    }
+
+    /// The registration is per chain: the same address in an ordinary Uniswap V4 pool elsewhere
+    /// is judged by its address bits, which for this one say it cannot take part in a swap.
+    #[tokio::test]
+    async fn clalpha_address_on_another_chain_is_not_a_clalpha_hook() {
+        let decoded = decode_at(hookless_snapshot_with_hook(CLALPHA_HOOK), Chain::Robinhood, 1_000)
+            .await
+            .unwrap();
+        assert!(decoded.hook.is_none());
+    }
+
+    /// An Infinity hooks pool never falls back to the address bits, which for `0xb0ba…4d0f` say
+    /// it cannot take part in a swap: without a chain it is rejected like any other hooked pool
+    /// rather than decoded as a hookless pool that quotes while the hook refuses swaps.
+    #[tokio::test]
+    async fn clalpha_pool_without_a_chain_is_rejected() {
+        let result = decode_with_chain(clalpha_snapshot(2_000), None).await;
+
+        let Err(InvalidSnapshotError::ValueError(message)) = result else {
+            panic!("an Infinity hooks pool must not decode without a chain: {result:?}");
+        };
+        assert!(message.contains("DecoderContext.chain"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn clalpha_pool_without_a_start_time_fails_to_decode() {
+        let snapshot = hookless_snapshot_with_hook(CLALPHA_HOOK);
+        let err = decode_at(snapshot, Chain::Bsc, 1_000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, InvalidSnapshotError::MissingAttribute(name) if name == "alpha_start_timestamp"),
+            "{err:?}"
+        );
     }
 
     /// A non-zero hook that does take part in swaps but has no registered handler is rejected

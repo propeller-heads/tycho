@@ -43,7 +43,25 @@ pub fn map_protocol_changes(
             let component = lunarbase::protocol_component(pool.pool, pool.token_x, pool.token_y);
             known_components.insert(component.id.clone());
             builder.add_protocol_component(&component);
-            builder.add_entity_change(&lunarbase::indexed::initial_entity_change(&component.id));
+            let initial_state = match config.bootstrap_states.get(&pool.pool) {
+                Some(snapshot) => {
+                    // Validate once, when consuming the parent snapshot for this pool.
+                    snapshot.validate_parent(
+                        block
+                            .header
+                            .as_ref()
+                            .map(|header| header.parent_hash.as_slice()),
+                    )?;
+                    for balance in
+                        snapshot.balance_changes(&component.id, pool.token_x, pool.token_y)
+                    {
+                        builder.add_balance_change(&balance);
+                    }
+                    snapshot.entity_change(&component.id)
+                }
+                None => lunarbase::indexed::initial_entity_change(&component.id),
+            };
+            builder.add_entity_change(&initial_state);
         }
     }
 
@@ -60,10 +78,12 @@ pub fn map_protocol_changes(
             let event = match lunarbase::events::decode_lunarbase_state_log(log) {
                 Ok(Some(event)) => event,
                 Ok(None) => continue,
-                Err(err) => {
-                    substreams::log::info!("failed to decode LunarBase log: {:?}", err);
-                    continue;
-                }
+                Err(err) => return Err(anyhow::anyhow!(
+                    "failed to decode LunarBase state for {component_id} at block {}, transaction 0x{}, log {}: {err}",
+                    block.number,
+                    hex::encode(&tx.hash),
+                    log.index,
+                )),
             };
             let tx: tycho::Transaction = tx.into();
             let builder = transaction_changes

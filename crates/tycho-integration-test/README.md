@@ -39,13 +39,16 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--parallel-simulations`   | `5`        | Number of concurrent simulations                                                                                 |
 | `--parallel-updates`       | `5`        | Number of concurrent update processors                                                                           |
 | `--tvl-threshold`          | `100.0`    | TVL threshold in native tokens for filtering                                                                     |
+| `--protocol-tvl-thresholds` | -         | Comma-separated `protocol=threshold` pairs. Each one replaces `--tvl-threshold` for its protocol. Every named protocol must be enabled |
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
-| `--disable-rfq`            | `false`    | Skip RFQ protocol testing                                                                                        |
+| `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
+| `--disable-pamm`           | `false`    | Skip the pAMM book feeds (Metric)                                                                                |
+| `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
 | `--price-level-stream-stale-threshold-secs` | `10` | Seconds without a Titan message before marking served pAMMs stale in metrics (0 disables)              |
-| `--skip-messages-duration` | `600`      | RFQ stream skip duration (seconds) after processing a message                                                    |
+| `--skip-messages-duration` | `600`      | Book stream skip duration (seconds) after processing a message                                                   |
 | `--block-wait-time`        | `12`       | Time to wait (seconds) for block N+1 before executing debug_traceCall                                            |
 | `--always-test-components` | -          | Comma-separated list of component IDs to test every block                                                        |
 | `--max-blocks`             | `0`        | Maximum number of blocks to process before exiting (0 = run indefinitely). When set, prints a summary at the end |
@@ -66,6 +69,7 @@ cargo run --package tycho-integration-test
 cargo run --package tycho-integration-test -- \
   --chain ethereum \
   --disable-rfq \
+  --disable-pamm \
   --protocols uniswap_v2 \
   --max-simulations 20 \
   --parallel-simulations 10
@@ -73,6 +77,11 @@ cargo run --package tycho-integration-test -- \
 # Run with specific components to always test
 cargo run --package tycho-integration-test -- \
   --always-test-components component_id_1,component_id_2,component_id_3
+
+# Test low-TVL pools of some protocols without lowering the threshold for the others
+cargo run --package tycho-integration-test -- \
+  --chain base \
+  --protocol-tvl-thresholds lunarbase=10,pancakeswap_infinity_cl=3
 
 # Run for a specific number of blocks and get a summary
 cargo run --package tycho-integration-test -- \

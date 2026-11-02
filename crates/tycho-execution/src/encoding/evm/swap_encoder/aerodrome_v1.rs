@@ -109,4 +109,51 @@ mod tests {
 
         write_calldata_to_file("test_encode_aerodrome_v1", hex_swap.as_str());
     }
+
+    #[test]
+    fn test_encode_aero_basic() {
+        // WETH -> USDC on the AERO basic WETH/USDC volatile pool on Base.
+        let pool = ProtocolComponent {
+            id: String::from("0x800eb395b577b234c5065c8e0ccb0f3a1401b2c2"),
+            protocol_system: String::from("aero_basic"),
+            ..Default::default()
+        };
+        let token_in = Bytes::from("0x4200000000000000000000000000000000000006");
+        let token_out = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+        let swap = Swap::new(
+            pool,
+            default_token(token_in.clone()),
+            default_token(token_out.clone()),
+            BigUint::ZERO,
+        );
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: token_in,
+            group_token_out: token_out,
+            origin: None,
+        };
+        let encoder = AerodromeV1SwapEncoder::new(
+            Bytes::from("0x1111111111111111111111111111111111111111"),
+            Chain::Base,
+            None,
+        )
+        .unwrap();
+
+        let hex_swap = encode(
+            encoder
+                .encode_swap(&swap, &encoding_context)
+                .unwrap(),
+        );
+
+        assert_eq!(
+            hex_swap,
+            String::from(concat!(
+                "800eb395b577b234c5065c8e0ccb0f3a1401b2c2",
+                "4200000000000000000000000000000000000006",
+                "833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "01",
+            ))
+        );
+        write_calldata_to_file("test_encode_aero_basic", hex_swap.as_str());
+    }
 }

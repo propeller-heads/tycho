@@ -12,14 +12,14 @@ use tycho_common::{
     simulation::{
         errors::{SimulationError, TransitionError},
         protocol_sim::{
-            Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+            Balances, BlockContext, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
             SwapConstraint,
         },
     },
     Bytes,
 };
 
-use super::hooks::utils::{has_permission, HookOptions};
+use super::hooks::utils::HookOptions;
 use crate::evm::{
     protocol::{
         clmm::clmm_swap_to_price,
@@ -69,7 +69,7 @@ const V4_CALLBACK_SETTLEMENT_GAS: u64 = 30_000;
 // PoolManager Hooks.sol wrapper overhead per hook call: ABI encode params,
 // external CALL dispatch, decode return, validate selector, and process
 // the returned BeforeSwapDelta / AfterSwapDelta.
-const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
+pub(crate) const PM_PER_HOOK_CALL_OVERHEAD: u64 = 25_000;
 // Conservative max gas budget for a single swap (Ethereum transaction gas limit)
 const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_TICKS_CROSSED: u64 = (MAX_SWAP_GAS - SWAP_BASE_GAS) / GAS_PER_TICK;
@@ -720,7 +720,7 @@ impl ProtocolSim for UniswapV4State {
 
         // Check if hook is set and has before_swap permissions
         if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::BeforeSwap) {
+            if hook.has_permission(HookOptions::BeforeSwap) {
                 let before_swap_params = BeforeSwapParameters {
                     context: state_context.clone(),
                     sender: *EXTERNAL_ACCOUNT,
@@ -728,12 +728,15 @@ impl ProtocolSim for UniswapV4State {
                     hook_data: Bytes::new(),
                 };
 
+                // A hook that refuses this swap, such as one gating trading on a start time,
+                // reports `InvalidInput`; only a failure to simulate the hook is fatal.
                 let before_swap_result = hook
                     .before_swap(before_swap_params, None, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
+                    .map_err(|e| match e {
+                        SimulationError::InvalidInput(..) => e,
+                        e => SimulationError::FatalError(format!(
                             "BeforeSwap hook simulation failed: {e:?}"
-                        ))
+                        )),
                     })?;
 
                 before_swap_gas = before_swap_result.gas_estimate;
@@ -789,7 +792,7 @@ impl ProtocolSim for UniswapV4State {
         let mut hook_delta_unspecified = before_swap_delta.get_unspecified_delta();
 
         if let Some(ref hook) = self.hook {
-            if has_permission(hook.address(), HookOptions::AfterSwap) {
+            if hook.has_permission(HookOptions::AfterSwap) {
                 let after_swap_params = AfterSwapParameters {
                     context: state_context,
                     sender: *EXTERNAL_ACCOUNT,
@@ -810,7 +813,7 @@ impl ProtocolSim for UniswapV4State {
                 // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
                 // permission the PoolManager discards the return value, so the hook still costs
                 // gas but cannot move the swapper's balance.
-                if has_permission(hook.address(), HookOptions::AfterSwapReturnsDelta) {
+                if hook.has_permission(HookOptions::AfterSwapReturnsDelta) {
                     hook_delta_unspecified += after_swap_result.result;
                 }
             }
@@ -839,15 +842,13 @@ impl ProtocolSim for UniswapV4State {
 
         // Add hook gas costs to baseline swap cost.
         // before_swap_gas / after_swap_gas capture the hook contract's internal
-        // logic (from VM simulation). PM_PER_HOOK_CALL_OVERHEAD accounts for the
-        // PoolManager's Hooks.sol dispatch wrapper that is not captured by either
-        // the native swap constants or the VM simulation.
+        // logic. The hook's pool_manager_call_overhead accounts for the pool
+        // manager's dispatch wrapper that is not captured by either the native swap
+        // constants or the hook's own estimates.
         let mut hook_overhead = before_swap_gas + after_swap_gas;
-        if before_swap_gas > 0 {
-            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
-        }
-        if after_swap_gas > 0 {
-            hook_overhead += PM_PER_HOOK_CALL_OVERHEAD;
+        if let Some(hook) = &self.hook {
+            let hook_calls = u64::from(before_swap_gas > 0) + u64::from(after_swap_gas > 0);
+            hook_overhead += hook_calls * hook.pool_manager_call_overhead();
         }
         let total_gas_used = result.gas_used + U256::from(hook_overhead);
         Ok(GetAmountOutResult::new(
@@ -863,6 +864,9 @@ impl ProtocolSim for UniswapV4State {
         token_out: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         if let Some(hook) = &self.hook {
+            if !hook.swaps_enabled() {
+                return Ok((BigUint::zero(), BigUint::zero()));
+            }
             // Check if pool has no liquidity & ticks -> hook manages liquidity
             if self.liquidity == 0 && self.has_no_initialized_ticks() {
                 // If the hook has a get_amount_ranges entrypoint, call it and return (0, limits[1])
@@ -1093,8 +1097,17 @@ impl ProtocolSim for UniswapV4State {
     /// fees and dynamic LP fees.
     ///
     /// Note: This implementation does not invoke hooks, as it is a query-only operation meant to
-    /// determine available liquidity at a given price without executing an actual swap.
+    /// determine available liquidity at a given price without executing an actual swap. It only
+    /// asks the hook whether swaps are enabled, and returns `InvalidInput` when they are not.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        if let Some(hook) = &self.hook {
+            if !hook.swaps_enabled() {
+                return Err(SimulationError::InvalidInput(
+                    format!("hook {} does not allow swaps in the execution block", hook.address()),
+                    None,
+                ));
+            }
+        }
         if self.liquidity == 0 {
             return Err(SimulationError::FatalError("No liquidity".to_string()));
         }
@@ -1142,6 +1155,14 @@ impl ProtocolSim for UniswapV4State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    /// Forwards the execution block to the pool's hook, the only part of a V4 pool whose quoting
+    /// can depend on it. Re-emits the pool exactly when the hook says its behavior changed.
+    fn apply_block(&mut self, block: &BlockContext) -> bool {
+        self.hook
+            .as_mut()
+            .is_some_and(|hook| hook.apply_block(block))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {

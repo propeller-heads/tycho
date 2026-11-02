@@ -153,6 +153,7 @@ pub mod direct;
 mod entry_point;
 mod extraction_state;
 mod orm;
+mod pool;
 mod protocol;
 mod schema;
 mod snapshot;

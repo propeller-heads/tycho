@@ -12,8 +12,11 @@ use crate::encoding::{
         strategy_encoder::strategy_validators::{
             SequentialSwapValidator, SingleSwapValidator, SplitSwapValidator, SwapValidator,
         },
+        subsidy::{select_subsidized_group, SubsidizedGroup, SubsidizedGroupSignature},
         swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-        utils::{get_token_position, map_on_threads, percentage_to_uint24, ple_encode},
+        utils::{
+            find_ple_item_end, get_token_position, map_on_threads, percentage_to_uint24, ple_encode,
+        },
     },
     models::{EncodedSolution, EncodingContext, Solution, Strategy, UserTransferType},
 };
@@ -70,6 +73,20 @@ fn encode_swap_group(
         executor_address: swap_encoder.executor_address().clone(),
         protocol_data: initial_protocol_data,
     })
+}
+
+/// Runs the subsidized group through the subsidizing executor.
+fn wrap_subsidized_group(
+    subsidized_group: Option<&SubsidizedGroup>,
+    encoded_groups: &mut [EncodedSwapGroup],
+) -> Result<Option<SubsidizedGroupSignature>, EncodingError> {
+    let Some(subsidized_group) = subsidized_group else {
+        return Ok(None);
+    };
+    let encoded_group = &mut encoded_groups[subsidized_group.group_index];
+    subsidized_group
+        .wrap(&mut encoded_group.executor_address, &mut encoded_group.protocol_data)
+        .map(Some)
 }
 
 /// Encodes every swap group and keeps the input order.
@@ -182,14 +199,22 @@ impl SingleSwapStrategyEncoder {
             ));
         }
 
-        let encoded_group = encode_swap_group(
+        let subsidized_group =
+            select_subsidized_group(solution, &grouped_swaps, &self.swap_encoder_registry)?;
+        let mut encoded_group = encode_swap_group(
             &self.swap_encoder_registry,
             grouped_swap,
             &self.router_address,
             solution.origin(),
         )?;
+        let subsidized_group_signature = wrap_subsidized_group(
+            subsidized_group.as_ref(),
+            std::slice::from_mut(&mut encoded_group),
+        )?;
         let swap_data =
             self.encode_swap_header(encoded_group.executor_address, encoded_group.protocol_data);
+        let subsidy_signing_data = subsidized_group_signature
+            .map(|signature| signature.build_signing_data(swap_data.len()));
         let gas_usage = estimate_gas_usage(solution, Strategy::Single);
         Ok(EncodedSolution::new(
             swap_data,
@@ -197,7 +222,8 @@ impl SingleSwapStrategyEncoder {
             function_signature,
             0,
             gas_usage,
-        ))
+        )
+        .with_subsidy_signing_data(subsidy_signing_data))
     }
 }
 
@@ -265,12 +291,16 @@ impl SequentialSwapStrategyEncoder {
             .validate_swap_path(solution.swaps(), solution.token_in(), solution.token_out())?;
 
         let grouped_swaps = group_swaps(solution.swaps());
-        let encoded_groups = encode_swap_groups(
+        let subsidized_group =
+            select_subsidized_group(solution, &grouped_swaps, &self.swap_encoder_registry)?;
+        let mut encoded_groups = encode_swap_groups(
             &self.swap_encoder_registry,
             &grouped_swaps,
             &self.router_address,
             solution.origin(),
         )?;
+        let subsidized_group_signature =
+            wrap_subsidized_group(subsidized_group.as_ref(), &mut encoded_groups)?;
 
         let mut swaps = vec![];
         for encoded_group in encoded_groups {
@@ -279,6 +309,9 @@ impl SequentialSwapStrategyEncoder {
             swaps.push(swap_data);
         }
 
+        let subsidy_signing_data = subsidized_group_signature.map(|signature| {
+            signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
+        });
         let encoded_swaps = ple_encode(swaps);
         let gas_usage = estimate_gas_usage(solution, Strategy::Sequential);
         Ok(EncodedSolution::new(
@@ -287,7 +320,8 @@ impl SequentialSwapStrategyEncoder {
             function_signature,
             0,
             gas_usage,
-        ))
+        )
+        .with_subsidy_signing_data(subsidy_signing_data))
     }
 }
 
@@ -400,12 +434,16 @@ impl SplitSwapStrategyEncoder {
             ));
         }
 
-        let encoded_groups = encode_swap_groups(
+        let subsidized_group =
+            select_subsidized_group(solution, &grouped_swaps, &self.swap_encoder_registry)?;
+        let mut encoded_groups = encode_swap_groups(
             &self.swap_encoder_registry,
             &grouped_swaps,
             &self.router_address,
             solution.origin(),
         )?;
+        let subsidized_group_signature =
+            wrap_subsidized_group(subsidized_group.as_ref(), &mut encoded_groups)?;
 
         let mut swaps = Vec::with_capacity(grouped_swaps.len());
         for (index, encoded_group) in encoded_groups.into_iter().enumerate() {
@@ -420,6 +458,9 @@ impl SplitSwapStrategyEncoder {
             swaps.push(swap_data);
         }
 
+        let subsidy_signing_data = subsidized_group_signature.map(|signature| {
+            signature.build_signing_data(find_ple_item_end(&swaps, signature.group_index))
+        });
         let encoded_swaps = ple_encode(swaps);
         let tokens_len = if solution.token_in() == solution.token_out() {
             tokens.len() - 1
@@ -433,7 +474,8 @@ impl SplitSwapStrategyEncoder {
             function_signature,
             tokens_len,
             gas_usage,
-        ))
+        )
+        .with_subsidy_signing_data(subsidy_signing_data))
     }
 }
 
@@ -981,6 +1023,290 @@ mod tests {
 (uint32,address,uint256,uint256,bytes),bytes)"
             );
             assert_eq!(encoded_solution.interacting_with(), &router_address());
+        }
+    }
+
+    mod subsidy {
+        use alloy::primitives::B256;
+        use rstest::rstest;
+
+        use super::*;
+        use crate::encoding::{
+            errors::EncodingError,
+            evm::subsidy::{SUBSIDY_SIGNATURE_LEN, SUBSIDY_SIGNATURE_OFFSET},
+            models::{default_token, SubsidyTerms, Swap},
+        };
+
+        const EXECUTOR: [u8; 20] = [0x11; 20];
+        const PAYER: [u8; 20] = [0x33; 20];
+        const SIGNATURE: [u8; SUBSIDY_SIGNATURE_LEN] = [0xab; SUBSIDY_SIGNATURE_LEN];
+        const DAI: &str = "0x6b175474e89094c44da98b954eedeac495271d0f";
+        const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        const ETH: &str = "0x0000000000000000000000000000000000000000";
+        /// Executor address in front of the protocol data of a sequential swap.
+        const SEQUENTIAL_SWAP_HEADER_LEN: usize = 20;
+        /// Token indexes, split and executor address in front of a split swap's protocol data.
+        const SPLIT_SWAP_HEADER_LEN: usize = 25;
+
+        #[derive(Clone, Copy, Debug)]
+        enum StrategyKind {
+            Single,
+            Sequential,
+            Split,
+        }
+
+        fn registry() -> SwapEncoderRegistry {
+            get_swap_encoder_registry()
+                .register_subsidy_contracts(Bytes::from(EXECUTOR), Bytes::from(PAYER))
+        }
+
+        fn swap(protocol_system: &str, pool: &str, token_in: &str, token_out: &str) -> Swap {
+            component_swap(
+                ProtocolComponent {
+                    id: pool.to_string(),
+                    protocol_system: protocol_system.to_string(),
+                    ..Default::default()
+                },
+                token_in,
+                token_out,
+            )
+        }
+
+        fn component_swap(component: ProtocolComponent, token_in: &str, token_out: &str) -> Swap {
+            Swap::new(
+                component,
+                default_token(Bytes::from_str(token_in).unwrap()),
+                default_token(Bytes::from_str(token_out).unwrap()),
+                BigUint::ZERO,
+            )
+        }
+
+        fn native_wrap(token_in: &str, token_out: &str) -> Swap {
+            swap("native_wrapper", "", token_in, token_out)
+        }
+
+        fn usv2_weth_dai() -> Swap {
+            swap(
+                "uniswap_v2",
+                "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11",
+                &weth().to_string(),
+                DAI,
+            )
+        }
+
+        fn sushi_weth_dai() -> Swap {
+            swap(
+                "sushiswap_v2",
+                "0xC3D03e4F041Fd4cD388c549Ee2A29a9E5075882f",
+                &weth().to_string(),
+                DAI,
+            )
+        }
+
+        fn usv2_dai_weth() -> Swap {
+            swap(
+                "uniswap_v2",
+                "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11",
+                DAI,
+                &weth().to_string(),
+            )
+        }
+
+        fn usv4_usdc_eth() -> Swap {
+            let static_attributes = HashMap::from([
+                ("key_lp_fee".to_string(), Bytes::from(BigInt::from(3000).to_signed_bytes_be())),
+                ("tick_spacing".to_string(), Bytes::from(BigInt::from(60).to_signed_bytes_be())),
+            ]);
+            component_swap(
+                ProtocolComponent {
+                    id: "0xdce6394339af00981949f5f3baf27e3610c76326a700af57e4b3e3ae4977f78d"
+                        .to_string(),
+                    protocol_system: "uniswap_v4".to_string(),
+                    static_attributes,
+                    ..Default::default()
+                },
+                USDC,
+                ETH,
+            )
+        }
+
+        fn unsubsidized_solution(token_in: &str, token_out: &str, swaps: Vec<Swap>) -> Solution {
+            Solution::new(
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+                Bytes::from_str(token_in).unwrap(),
+                Bytes::from_str(token_out).unwrap(),
+                BigUint::from(1_000_000_000_000_000_000u64),
+                BigUint::from(1_000u64),
+                BigUint::from(900u64),
+                swaps,
+            )
+        }
+
+        fn subsidized_solution(
+            token_in: &str,
+            token_out: &str,
+            swaps: Vec<Swap>,
+            subsidized_swap_index: usize,
+        ) -> Solution {
+            unsubsidized_solution(token_in, token_out, swaps).with_subsidy(SubsidyTerms {
+                amount: BigUint::from(100u32),
+                min_amount_in: BigUint::from(1u32),
+                nonce: B256::with_last_byte(7),
+                deadline: 1_700_000_000,
+                subsidized_swap_index,
+            })
+        }
+
+        fn split_weth_to_dai_swaps() -> Vec<Swap> {
+            vec![usv2_weth_dai().with_split(0.7), sushi_weth_dai()]
+        }
+
+        fn split_weth_to_dai(subsidized_swap_index: usize) -> Solution {
+            subsidized_solution(
+                &weth().to_string(),
+                DAI,
+                split_weth_to_dai_swaps(),
+                subsidized_swap_index,
+            )
+        }
+
+        fn encode_kind(
+            kind: StrategyKind,
+            solution: &Solution,
+        ) -> Result<EncodedSolution, EncodingError> {
+            match kind {
+                StrategyKind::Single => {
+                    SingleSwapStrategyEncoder::new(registry(), router_address())?
+                        .encode_strategy(solution)
+                }
+                StrategyKind::Sequential => {
+                    SequentialSwapStrategyEncoder::new(registry(), router_address())?
+                        .encode_strategy(solution)
+                }
+                StrategyKind::Split => SplitSwapStrategyEncoder::new(registry(), router_address())?
+                    .encode_strategy(solution),
+            }
+        }
+
+        fn solution_for(kind: StrategyKind) -> Solution {
+            match kind {
+                StrategyKind::Single => {
+                    subsidized_solution(&weth().to_string(), DAI, vec![usv2_weth_dai()], 0)
+                }
+                StrategyKind::Sequential => subsidized_solution(
+                    &weth().to_string(),
+                    USDC,
+                    vec![
+                        usv2_weth_dai(),
+                        swap("uniswap_v2", "0xAE461cA67B15dc8dc81CE7615e0320dA1A9aB8D5", DAI, USDC),
+                    ],
+                    1,
+                ),
+                // The second swap, so the offset counts the first swap's bytes.
+                StrategyKind::Split => split_weth_to_dai(1),
+            }
+        }
+
+        /// Where the signature starts in the swaps, found from the subsidizing executor's address.
+        fn find_signature_in_swaps(swaps: &[u8]) -> usize {
+            let executor = swaps
+                .windows(EXECUTOR.len())
+                .position(|window| window == EXECUTOR)
+                .expect("swaps name the subsidizing executor");
+            executor + EXECUTOR.len() + SUBSIDY_SIGNATURE_OFFSET
+        }
+
+        #[rstest]
+        fn test_write_subsidy_signature(
+            #[values(StrategyKind::Single, StrategyKind::Sequential, StrategyKind::Split)]
+            kind: StrategyKind,
+        ) {
+            let mut encoded = encode_kind(kind, &solution_for(kind)).unwrap();
+            let start = find_signature_in_swaps(encoded.swaps());
+            let mut expected = encoded.swaps().to_vec();
+            expected[start..start + SIGNATURE.len()].copy_from_slice(&SIGNATURE);
+
+            encoded
+                .write_subsidy_signature(&SIGNATURE)
+                .unwrap();
+
+            assert_eq!(encoded.subsidy_signature_offset_in_swaps(), Some(start));
+            assert_eq!(encoded.swaps(), expected);
+        }
+
+        /// The swaps of `ple_encode` output.
+        fn decode_ple_items(mut encoded: &[u8]) -> Vec<Vec<u8>> {
+            let mut items = vec![];
+            while !encoded.is_empty() {
+                let len = u16::from_be_bytes([encoded[0], encoded[1]]) as usize;
+                items.push(encoded[2..2 + len].to_vec());
+                encoded = &encoded[2 + len..];
+            }
+            items
+        }
+
+        /// Asserts that `subsidized` runs `unsubsidized`'s executor and protocol data through the
+        /// subsidizing executor, after the same `header_len` bytes.
+        fn assert_wraps(subsidized: &[u8], unsubsidized: &[u8], header_len: usize) {
+            let inner_executor = SUBSIDY_SIGNATURE_OFFSET + SIGNATURE.len();
+            let (header, executor) = unsubsidized[..header_len].split_at(header_len - 20);
+            assert_eq!(subsidized[..header_len - 20], *header);
+            assert_eq!(subsidized[header_len - 20..header_len], EXECUTOR);
+            let wrapper_data = &subsidized[header_len..];
+            assert_eq!(wrapper_data[inner_executor..inner_executor + 20], *executor);
+            assert_eq!(wrapper_data[inner_executor + 20..], unsubsidized[header_len..]);
+        }
+
+        #[rstest]
+        #[case::larger_swap(0)]
+        #[case::smaller_swap(1)]
+        fn test_subsidized_split_swap(#[case] subsidized_swap_index: usize) {
+            let unsubsidized = encode_kind(
+                StrategyKind::Split,
+                &unsubsidized_solution(&weth().to_string(), DAI, split_weth_to_dai_swaps()),
+            )
+            .unwrap();
+            let subsidized =
+                encode_kind(StrategyKind::Split, &split_weth_to_dai(subsidized_swap_index))
+                    .unwrap();
+
+            let unsubsidized_swaps = decode_ple_items(unsubsidized.swaps());
+            let subsidized_swaps = decode_ple_items(subsidized.swaps());
+            assert_eq!(subsidized_swaps.len(), 2);
+            let other = 1 - subsidized_swap_index;
+            assert_eq!(subsidized_swaps[other], unsubsidized_swaps[other]);
+            assert_wraps(
+                &subsidized_swaps[subsidized_swap_index],
+                &unsubsidized_swaps[subsidized_swap_index],
+                SPLIT_SWAP_HEADER_LEN,
+            );
+        }
+
+        #[rstest]
+        #[case::final_unwrap(DAI, ETH, vec![usv2_dai_weth(), native_wrap(&weth().to_string(), ETH)])]
+        #[case::final_wrap(USDC, &weth().to_string(), vec![usv4_usdc_eth(), native_wrap(ETH, &weth().to_string())])]
+        fn test_subsidized_pool_swap_before_final_wrap_or_unwrap(
+            #[case] token_in: &str,
+            #[case] token_out: &str,
+            #[case] swaps: Vec<Swap>,
+        ) {
+            let unsubsidized = encode_kind(
+                StrategyKind::Sequential,
+                &unsubsidized_solution(token_in, token_out, swaps.clone()),
+            )
+            .unwrap();
+
+            let subsidized = encode_kind(
+                StrategyKind::Sequential,
+                &subsidized_solution(token_in, token_out, swaps, 0),
+            )
+            .unwrap();
+
+            let unsubsidized_swaps = decode_ple_items(unsubsidized.swaps());
+            let subsidized_swaps = decode_ple_items(subsidized.swaps());
+            assert_wraps(&subsidized_swaps[0], &unsubsidized_swaps[0], SEQUENTIAL_SWAP_HEADER_LEN);
+            assert_eq!(subsidized_swaps[1], unsubsidized_swaps[1]);
         }
     }
 }

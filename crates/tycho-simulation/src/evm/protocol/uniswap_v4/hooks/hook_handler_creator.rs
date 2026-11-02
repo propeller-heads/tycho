@@ -21,6 +21,10 @@ use crate::{
                     angstrom::hook_handler_creator::AngstromHookCreator,
                     generic_vm_hook_handler::GenericVMHookHandler,
                     hook_handler::HookHandler,
+                    pancakeswap_clalpha::{
+                        hook_handler::CLALPHA_HOOKS_BSC,
+                        hook_handler_creator::PancakeswapClAlphaHookCreator,
+                    },
                     pons_v2::{
                         hook_handler::PONS_V2_HOOK_ROBINHOOD,
                         hook_handler_creator::PonsV2HookCreator,
@@ -50,6 +54,9 @@ pub struct HookCreationParams<'a> {
     balances: &'a HashMap<Bytes, Bytes>,
     /// Show vm traces in simulations or not
     vm_traces: Option<bool>,
+    /// Timestamp of the block the snapshot was decoded at, for hooks whose behavior depends on
+    /// time. `None` when the caller has no block header.
+    block_timestamp: Option<u64>,
 }
 
 impl<'a> HookCreationParams<'a> {
@@ -63,7 +70,27 @@ impl<'a> HookCreationParams<'a> {
         balances: &'a HashMap<Bytes, Bytes>,
         vm_traces: Option<bool>,
     ) -> Self {
-        Self { hook_address, account_balances, all_tokens, state, attributes, balances, vm_traces }
+        Self {
+            hook_address,
+            account_balances,
+            all_tokens,
+            state,
+            attributes,
+            balances,
+            vm_traces,
+            block_timestamp: None,
+        }
+    }
+
+    /// Records the timestamp of the block the snapshot was decoded at.
+    pub fn with_block_timestamp(mut self, timestamp: u64) -> Self {
+        self.block_timestamp = Some(timestamp);
+        self
+    }
+
+    /// Timestamp of the block the snapshot was decoded at, if the caller provided one.
+    pub fn block_timestamp(&self) -> Option<u64> {
+        self.block_timestamp
     }
 
     /// The address of the hook the pool was created with.
@@ -184,6 +211,12 @@ pub fn initialize_hook_handlers() -> Result<(), SimulationError> {
     // `pons_*` attributes its creator reads.
     register_hook_handler(Chain::Robinhood, PONS_V2_HOOK_ROBINHOOD, Box::new(PonsV2HookCreator))?;
 
+    // PancakeSwap Infinity's CLAlphaHook. Infinity takes hook permissions from the pool key, not
+    // the address, so these hooks reach their handler only because they are registered.
+    for hook in CLALPHA_HOOKS_BSC {
+        register_hook_handler(Chain::Bsc, hook, Box::new(PancakeswapClAlphaHookCreator))?;
+    }
+
     Ok(())
 }
 
@@ -199,6 +232,16 @@ pub fn register_hook_handler(
         .map_err(|e| SimulationError::FatalError(e.to_string()))?
         .insert((chain, hook), handler);
     Ok(())
+}
+
+/// Whether a native handler is registered for `hook` on `chain`.
+///
+/// A registered hook is simulated by its handler whatever its address bits say, which matters for
+/// pool managers that do not encode hook permissions in the address.
+pub fn has_native_hook_handler(chain: Chain, hook: &Address) -> bool {
+    HANDLER_FACTORY
+        .read()
+        .is_ok_and(|factory| factory.contains_key(&(chain, *hook)))
 }
 
 /// Builds the [`HookHandler`] for `hook_address` on `chain`.

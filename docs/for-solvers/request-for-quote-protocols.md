@@ -1,33 +1,31 @@
-# Request for Quote Protocols
+# Off-Chain Priced Venues
 
-Request for Quote (RFQ) protocols work differently from on-chain protocols. Instead of reading pool data from the chain, they fetch prices from off-chain market makers via WebSocket or API.
+Some venues price off the chain. Instead of pool state Tycho reads from the chain and simulates against, they publish a complete **book** — the price levels they will trade at — over a WebSocket or an API, and republish it whenever it changes. Tycho streams those books, simulates against them, and executes them as part of multi-protocol swaps. Their components carry the `rfq:` protocol systems in the table below.
 
-You ask for a quote for a specific trade size, and they return a price. Quotes can be:
+Two kinds share that shape, and the difference shows at execution:
 
-* **Indicative** — estimated prices used for simulation.
-* **Binding** — firm prices, valid for a short time, used at execution.
+* **RFQ market makers** — Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
+* **Off-chain-priced pAMMs** — Metric. The book prices a pool you execute against directly: there is no quote to request and nothing to sign.
 
-Tycho supports streaming, simulating, and executing RFQ quotes as part of multi-protocol swaps.
+| Protocol    | Kind | Simulation Time | Credentials | Chains                                            | Protocol system  |
+|-------------|------|-----------------|-------------|---------------------------------------------------|------------------|
+| `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:bebop`      |
+| `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum            | `rfq:hashflow`   |
+| `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum, Arbitrum                                | `rfq:liquorice`  |
+| `native`    | RFQ  | 0.4 µs          | Required    | Ethereum, Base, Arbitrum, BSC, Robinhood          | `rfq:native`     |
+| `metric`    | pAMM | -               | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:metric`     |
 
-Currently, Tycho supports the following RFQ protocols:
+A feed runs wherever its venue prices, which is what the table lists. Settling a swap against one additionally needs a Tycho executor for that venue on that chain; `config/executor_addresses.json` in tycho-execution lists the deployments.
 
-| Protocol    | Simulation Time | Credentials            | Chains                                   |
-| ----------- | --------------- | ---------------------- | ---------------------------------------- |
-| `bebop`     | 0.5 µs          | Required               | Ethereum, Base                           |
-| `hashflow`  | 0.4 µs          | Required               | Ethereum                                 |
-| `liquorice` | 0.4 µs          | Required               | Ethereum                                 |
-| `metric`    | -               | None (public endpoint) | Base, Robinhood                          |
-| `native`    | -               | Required               | Ethereum, Base, Arbitrum, BSC, Robinhood |
-
-On Ethereum, Metric is available as a pAMM venue on the [pAMM price level stream](#pamm-price-level-stream).
+On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level stream](price-level-stream.md).
 
 ## Quickstart
 
-The RFQ quickstart is similar to the other protocols [quickstart](../).
+The book-feed quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/rfq_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, Metric and Native are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, <a href="https://docs.native.org/" target="_blank" rel="noopener noreferrer">Native</a> and <a href="https://docs.metric.xyz/" target="_blank" rel="noopener noreferrer">Metric</a> are the only supported providers.
 
-You need to set up the API credentials of the desired RFQs to access live pricing data and quoting, as well as your private key if you wish to execute against the Tycho Router:
+The feed builders take credentials as plain arguments; how you obtain them is up to your application. The example reads them from the environment, so set the ones for the providers you want, plus your private key if you wish to execute against the Tycho Router:
 
 ```bash
 unset HISTFILE # to not save your credentials to your shell history
@@ -37,33 +35,34 @@ export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
 export NATIVE_API_KEY=<your-native-api-key>
+export METRIC_API_KEY=<your-metric-trading-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
 
-Metric needs no credentials: the client defaults to Metric's public endpoint. Override it with `METRIC_API_URL`, and set `METRIC_SECRET_KEY` only if your endpoint requires one. The example registers Metric under the `--run-pamm-protocols` flag, which is on by default, so it runs even without any authenticated RFQ credentials.
+Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as the Bearer token the authenticated `bid_ask` endpoint requires. The example registers Metric by default; `--disable-pamm` leaves it out.
 
 Then run the example:
 
 ```rust
-cargo run --release --example rfq_quickstart
+cargo run --release --example book_quickstart
 ```
 
 {% hint style="info" %}
-You’ll need to request credentials directly from RFQ providers.
+You’ll need to request credentials directly from each provider.
 {% endhint %}
 
 ### What it does
 
 The quickstart:
 
-* Connects to the RFQ stream and fetches live price updates.
+* Connects to the book feeds and fetches live price updates.
 * Simulates the best available amount out for a given pair (default: 10 USDC → WETH on mainnet).
 * Encodes the swap and prepares calldata to execute it via the Tycho Router.
 
 If you want to see results for a different token, amount, minimum TVL, or chain, you can set additional flags:
 
 ```bash
-cargo run --release --example rfq_quickstart -- --sell-token "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --tvl-threshold 1000 --chain "base"
+cargo run --release --example book_quickstart -- --sell-token "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" --buy-token "0x4200000000000000000000000000000000000006" --sell-amount 10 --tvl-threshold 1000 --chain "base"
 ```
 
 This example would seek the best swap for 10 USDC -> WETH on Base.
@@ -74,68 +73,103 @@ You’ll need to configure:
 
 * Tycho URL (by default `"tycho-beta.propellerheads.xyz"`)
 * Tycho API key
-* RFQ API keys (Have a look at `src/rfq/constants.rs` to see the authentication variables that are expected)
+* Provider API keys (the example's `Readme.md` lists the environment variables it reads for each provider; the library itself takes credentials as builder arguments)
 * Private key if you wish to execute the swap against the Tycho Router
 
 To get token information from Tycho Indexer RPC please use [load\_all\_tokens](simulation.md#step-1-fetch-tokens).
 
-### RFQClient
+### Book feeds
 
-Each RFQ protocol will have its own client. The client can **stream live prices updates** and **request binding quotes**.
+Each venue has its own feed type (`BebopFeed`, `HashflowFeed`, `LiquoriceFeed`, `NativeFeed`, `MetricFeed`), built from a shared `BookFeedConfig` plus provider-specific credentials and options. Every feed implements the `SnapshotFeed` trait — a live price feed that publishes the provider's latest complete set of books, or withdraws when nothing is servable (before the first set arrives, and after one goes stale). You read it through `BookFeedStreams`, which owns the channels and the feed tasks: each feed runs in its own task and hands you the newest set through a watch channel, so falling behind costs you skipped snapshots rather than a stalled venue connection. Binding quotes are not part of the feed — for the RFQ venues, the states it emits request them at encoding time through their embedded client.
 
 Example setup for Bebop:
 
 ```rust
-let bebop_client = BebopClientBuilder::new(chain, bebop_key)
-    .tokens(rfq_tokens)
-    .quote_tokens(quote_tokens)
-    .tvl_threshold(cli.tvl_threshold)
+let config = BookFeedConfig { chain, tokens: Arc::new(rfq_tokens), min_tvl_usd };
+let usd_quote_tokens = usd_stablecoins_for_chain(chain).expect("chain has curated USD stablecoins");
+
+let bebop_feed = BebopFeedBuilder::new(config.clone(), usd_quote_tokens.clone(), bebop_key)
     .build()
-    .expect("Failed to create RFQ clients");
+    .expect("Failed to create Bebop feed");
 ```
 
-**TVL threshold** is specified in USD, as most RFQ quotes are USD-denominated. This setting filters out token pairs with low liquidity on the RFQ side, helping avoid thin or illiquid quotes.
+`BookFeedConfig` carries what every book feed needs whatever transport it runs on — the chain, the tradable tokens with their metadata, and the minimum book TVL in USD. Each feed builder takes it by value (clone it when building several feeds); the builders' own setters cover only provider-specific options such as credentials, poll cadence, or Bebop's origin fields. To give one provider a different token set or threshold, build it from a different `BookFeedConfig`.
 
-**Quote tokens:** You can optionally specify quote tokens when configuring the RFQ client to define which tokens the client should consider “approved” for TVL normalization purposes. The client uses this approved quote token list exclusively for TVL filtering and does not use it for quote requests or trade execution.
+**Minimum TVL** (`min_tvl_usd`) counts in USD. This setting filters out token pairs whose book is thin on the venue's side, helping avoid illiquid quotes.
 
-You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since currently-supported RFQ providers quote most of their currently supported liquidity in USD stablecoins. This ensures the client calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the client will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. If you don’t explicitly set quote tokens, the client uses chain-specific defaults.
+**USD quote tokens:** The Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none.
 
-**Note:** Some RFQ providers may support tokens that Tycho does not. Because execution happens through the Tycho Router, it’s important to ensure that all tokens used in RFQ quotes are also supported by Tycho.
+You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one.
+
+**Note:** Some venues may support tokens that Tycho does not. Because execution happens through the Tycho Router, it’s important to ensure that every token you trade out of these books is also supported by Tycho.
 
 ### Stream: Real-Time Price Updates
 
-The `RFQStreamBuilder` handles registration of multiple RFQ clients and merges their message streams. It merges updates from one or more RFQ clients and decodes them into `Update` messages:
+Each feed publishes its complete set of books as a `BookSnapshot` over a `tokio::sync::watch` channel: one `Book` — a component, the state that prices it and the provider's `updated_at` where it reports one — for each book the venue publishes, anchored by the feed's receipt time (`anchor: ReceivedAt`, a `DateTime<Utc>`). What a book is depends on the venue: a pair for Bebop, Native and Metric, a pair and one market maker for Hashflow and Liquorice, since a firm quote comes from the maker you ask it of and so fills against that maker's depth alone.
+
+**A feed withdraws its snapshot** — the watch goes back to `None` — when nobody is refreshing it: once the published book is older than `max_snapshot_age`, and whenever the feed itself ends, because it gave up or because you dropped the stream or watch running it. So `None` means "nothing servable right now", not only "nothing yet", and you should stop quoting a provider whose snapshot has gone away. The knob lives on both feed configs, and `None` keeps the last snapshot until the feed ends. Setting it above the poll interval keeps a book servable from one poll to the next; setting it below turns it into a duty cycle — the book is servable for `max_snapshot_age` and gone until the next poll — which is what you want when a venue's rate limit fixes the cadence and you would rather decline than quote an old book. Zero is the one value no feed takes: it ends with `FeedError::InvalidInput` as soon as it runs, which reaches you as `BookFeedOutcome::Failed`. While a provider keeps failing its feed retries with growing gaps rather than hammering it, so a book that a long outage withdrew can take a while to come back after the provider recovers.
+
+The feed configs have no `Default`: start from the builder's `default_feed_config()`, whose documentation states the values it begins with, and change fields with struct-update syntax.
+
+Add every feed you built to a `BookFeedStreams` under its `PROTOCOL_SYSTEM` — `add` spawns it in its own task, and hands it back in an `Err` if that label already holds a feed — then read events until the set runs dry. The set is a `Stream`, so `StreamExt` applies to all of its feeds at once, and each event arrives with the provider it happened on:
 
 ```rust
-let rfq_stream_builder = RFQStreamBuilder::new()
-    .add_client::<BebopState>("bebop", Box::new(bebop_client))
-    .set_tokens(all_tokens.clone())
-    .await;
+let mut feeds = BookFeedStreams::new();
+feeds.add(bebop::PROTOCOL_SYSTEM, bebop_feed).expect("one feed per protocol system");
+// … one `add` per provider you have credentials for
+
+while let Some((provider, event)) = feeds.next().await {
+    match event {
+        BookFeedEvent::Published(snapshot) => {
+            // snapshot.books is the provider's complete current set of books
+        }
+        BookFeedEvent::Withdrawn => {
+            // the provider has nothing servable: stop quoting it until it publishes again
+        }
+        BookFeedEvent::Ended(BookFeedOutcome::Failed(error)) => {
+            // the feed gave up and is gone for good; `error` says why
+        }
+        BookFeedEvent::Ended(outcome) => {
+            // it ran out of books to serve, or its task panicked
+        }
+    }
+}
+// every provider has ended
 ```
 
-* Use `add_client()` for each RFQ provider.
-* Streams that return errors are removed automatically.
+A single feed reads the same way through `BookFeedStream::spawn(provider, feed)`. Dropping a `BookFeedStreams` or a `BookFeedStream` aborts the feed tasks it holds.
 
-RFQ streams are **timestamped**, not block-based. Each update provides the full known state from the provider at that moment (not just deltas). The `removed_pairs` field indicates any pairs that disappeared since the last update. The `new_pairs` field contains all the currently available pairs.
+If you price on demand rather than reacting to every update, read the feed as a `BookFeedWatch` instead: `BookFeedWatch::spawn(provider, feed)` runs it the same way and `receiver()` hands out `watch::Receiver` clones you read with `borrow()`, without awaiting and without slowing the venue's connection. `None` in the channel means nothing is servable — nothing yet, gone stale, or the feed is over — and since those look alike to a reader, `ended()` is what tells the last one apart: it resolves when the feed stops, with a `BookFeedOutcome` saying whether it gave up (and why), ran out, or panicked. Until then the venue is only quiet. `ended()` reports the outcome once and then stays pending, so it sits in a `select!` loop beside your other work without ever firing twice.
+
+Book snapshots are **timestamped**, not block-based: the snapshot's `anchor` is the feed's receipt time (`ReceivedAt`) and each `Book` carries the provider's `updated_at` where the provider reports one (Bebop, Liquorice, Metric). Every snapshot is the provider's full current state, so a pair missing from the current snapshot is one the provider has stopped serving. Because a watch channel only keeps the latest value, a consumer that falls behind skips straight to the freshest prices instead of working through a backlog. To track additions and removals, compare the snapshot's book ids against your previous view.
 
 ### Venue components
 
-By default, Hashflow, Liquorice, Bebop and Native stream one component per token pair, and a swap leaves the state unchanged. `.component_layout(ComponentLayout::AllPairs)` on the client builder makes the client stream one component for all token pairs instead. Register an all-pairs client with `HashflowAllPairsState`, `LiquoriceAllPairsState`, `BebopAllPairsState` or `NativeAllPairsState` under the name `<venue>_all_pairs`, for example `.add_client::<HashflowAllPairsState>("hashflow_all_pairs", Box::new(client))`. The two layouts stream under different names, so one stream builder can carry a per-pair and an all-pairs client of the same venue. `ComponentLayout` and `QuoteRule` are in `tycho_simulation::rfq::models`.
+A component names the directions it quotes in its `swap_directions` static attribute, 40 bytes each, the token sold followed by the token bought. It carries one where its token list does not already say which way round it trades: a book with levels on one side only quotes one direction, and one the venue has stopped pricing quotes none. Build your graph edges from that attribute where a component has it and from both orderings of its two tokens where it does not, and rebuild them when a snapshot changes it. `tycho_simulation::book::{SWAP_DIRECTIONS_ATTRIBUTE, decode_swap_directions}` read it.
 
-An all-pairs component has these properties. Its `tokens` are every token the venue quotes, and its `swap_directions` static attribute lists the directions it quotes, 40 bytes each: the token in, then the token out. Add graph edges from that attribute, not from every pair of `tokens`, and rebuild them when the component's `tokens` change between updates.
+By default a feed publishes a component per book — per pair, or per market maker and pair on the two venues that name their makers — and a swap against it leaves the state unchanged. `.all_pairs()` on the Bebop and Native builders, and `.all_pairs(rule)` on Hashflow's and Liquorice's, publishes the venue as a single component covering every pair it prices instead, which is what lets a route stay within the number of quotes the venue will sign for it. Only venues that name their market makers take a rule, because only there is there a choice to make; `QuoteRule` lives in `tycho_simulation::book::all_pairs`. Metric has no quote to sign and keeps one component per pool.
 
-A swap records what it used in the `new_state` it returns. How often one route may quote a venue is its quote rule, carried as the `quote_rule` static attribute:
+```rust
+let hashflow_feed = HashflowFeedBuilder::new(config, usd_quote_tokens, user, key)
+    .all_pairs(QuoteRule::OncePerMaker)
+    .build()
+    .expect("Failed to create Hashflow feed");
+```
 
-* Hashflow and Liquorice name their market makers. By default every maker quotes once per route (`once_per_maker`). `.quote_rule(QuoteRule::OncePerVenue)` on the client builder limits the venue to one quote per route.
-* Bebop and Native name no maker and quote once per route (`once_per_venue`).
+Such a component carries every token the venue quotes, and the pairs it prices are far fewer than every pair of those tokens, which is what makes `swap_directions` worth reading on it. Its state prices and quotes exactly as the per-pair states do — the books behind it are the same ones.
 
-The rule takes effect wherever your algorithm threads `new_state` between two uses of the component. A swap the rule refuses returns a recoverable `No liquidity` error.
+A swap records the book it used in the `new_state` it returns, and how often one route may quote the venue is its quote rule, carried as the `quote_rule` static attribute:
 
-Request the firm quote on the state the swap was simulated on, with the simulated amount. For Hashflow and Liquorice, that state picks the market maker the firm quote asks. On the `new_state` the swap returned, that maker is already used.
+* Hashflow and Liquorice name their market makers, so their builders take the rule: `QuoteRule::OncePerMaker` lets every maker quote once per route, since a maker's second quote prices as if the first had not happened, and `QuoteRule::OncePerVenue` holds the whole venue to one quote where that independence is not worth relying on.
+* Bebop and Native pick the makers behind a quote themselves and sign once per route (`once_per_venue`), so their builders take no rule.
+
+The rule takes effect wherever your algorithm threads `new_state` from one use of the component to the next; a swap it refuses returns a recoverable error saying every book pricing it has already quoted in this route.
+
+Request the firm quote on the state you simulated the swap on, with the simulated amount: that state picks the same book the swap went to, and asks the market maker behind it. On the `new_state` the swap returned, that book's turn is spent.
 
 ### Simulation
 
-You can simulate a swap against an RFQ state using:
+You can simulate a swap against a book state using:
 
 ```rust
 state.get_amount_out(amount_in, &sell_token, &buy_token)
@@ -178,19 +212,22 @@ let min_amount_out = &expected_amount * BigUint::from(9975u64) / BigUint::from(1
     .with_user_transfer_type(UserTransferType::TransferFromPermit2);
 </code></pre>
 
-When working with RFQs, two fields are **required** in Swap:
+For the RFQ venues, Swap **requires** two fields (Metric needs neither — its encoder works from the component and the tokens alone, because there is no quote to request):
 
 *   `protocol_state`: This is needed to enable the runtime generation of a binding quote at encoding time—for example:
 
     ```rust
-    state.request_binding_quote(&GetAmountOutParams { ... }).await
+    state
+        .as_indicatively_priced()?
+        .request_signed_quote(GetAmountOutParams { ... })
+        .await
     ```
 * `estimated_amount_in` : This represents the estimaed input amount for the quote request. It’s especially important when the swap path is complex (e.g., involving multiple hops), where the actual input amount may differ slightly because of slippage. We recommend setting `estimated_amount_in` a bit higher than your expected value. Many RFQs enforce that execution can only occur for amounts **less than or equal to** the quoted base amount—so setting it conservatively helps avoid dropping funds. If the actual required input exceeds your estimate, any leftover tokens will remain in the Tycho Router.
 
 This mechanism also makes RFQs composable with other on-chain swaps. That enables hybrid routing strategies, such as a path like **Uniswap → RFQ → Curve**, seamlessly combining RFQ-based and traditional on-chain routes.
 
 {% hint style="warning" %}
-After encoding, quotes are valid for only 1–3 seconds. Execution must follow immediately, otherwise the transaction will revert.
+After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution must follow immediately, otherwise the transaction will revert.
 {% endhint %}
 
 #### Encode solution
@@ -241,7 +278,7 @@ This gives you full control over execution. And it protects you from MEV and sli
 This step allows you to test or perform real transactions based on the best available swap options. It needs the `PRIVATE_KEY` environment variable from [Quickstart](#quickstart). Handle that key securely and never expose it publicly.
 
 ```bash
-cargo run --release --example rfq_quickstart
+cargo run --release --example book_quickstart
 ```
 
 Once the best swap is found you can:
@@ -262,24 +299,4 @@ Because the RFQ will only let you swap up to the amount of tokens specified in t
 
 ## pAMM Price Level Stream
 
-Besides the RFQ clients above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for a subset of the pAMMs Titan serves. It only serves Ethereum Mainnet.
-
-`PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream:
-
-```rust
-use tycho_simulation::price_level_stream::stream::PriceLevelStreamBuilder;
-
-let price_level_stream = PriceLevelStreamBuilder::new()
-    .with_known_pamms()       // serve the venues Tycho has measured
-    .auto_detect(true)        // also serve any other venue Titan streams
-    .with_tokens(all_tokens.clone())
-    .build();
-```
-
-Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. Each update carries the block its frame targets; that number only decreases after every component has been removed, when the stream re-anchors on the next frame. The stream never terminates — run it in its own task alongside your protocol stream.
-
-Frames are best effort, not complete snapshots: a venue or a pair can be absent from one frame and present in the next, so the stream never removes a component because a frame omits it. Instead it serves a component for `stale_after` (default 24 s) after the last frame that carried it, then lists the component in `removed_pairs`; the next frame that carries it adds it back in `new_pairs`. Every state also refuses to quote once its frame is 12 s old, so you cannot quote a ladder past the block it targeted even before the removal arrives. Treat a removal like any other: stop routing through the component until it reappears in `new_pairs`. If you quote states more than 12 s after they arrive by design (a batch simulator, a validation harness), `without_quote_guard()` emits states that never refuse; the 24 s removal still applies, and a quote from such a state may no longer be fillable.
-
-`with_known_pamms()` serves these venues: Bebop, FermiSwap, Kipseli, Metric, TaurusFi and Tempest. Titan does not stream every venue at all times, so the live set can be smaller.
-
-Components arrive as `fallback:{pamm}`, where `{pamm}` is the venue name for a known venue or its address for an auto-detected one: `tycho-execution` routes those swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback pool named in the swap's `user_data`. `without_fallback_router()` keeps every venue on the direct `pricelevelstream:{pamm}` path, where a stale quote reverts the route.
+Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.

@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use alloy::{
     eips::BlockNumberOrTag,
     hex,
-    primitives::{keccak256, Bytes, B256},
+    primitives::{keccak256, Bytes, B256, U256},
     rpc::{
         client::ClientBuilder,
-        types::{Block, BlockId},
+        types::{Block, BlockId, BlockOverrides},
     },
     sol_types::SolValue,
 };
@@ -156,6 +156,46 @@ impl SolidityError {
     }
 }
 
+/// The chain state a simulation runs on. A pending block, whose hash is zero, always simulates on
+/// the pending state, whichever variant is passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimulationBase {
+    /// The state after the block, in the block's own context.
+    AfterBlock,
+    /// The state the block was built on — its parent's — with the block's number and timestamp:
+    /// the call a client makes before the block exists, when those two are all it knows of it.
+    BeforeBlock,
+}
+
+impl SimulationBase {
+    /// The block whose state a simulation for `block` reads. The parent is named by its hash, so a
+    /// reorg between fetching `block` and simulating cannot move the call onto another parent.
+    pub(crate) fn state_block_id(self, block: &Block) -> BlockId {
+        // Pending (flashblock) blocks have a zero hash — simulate against the pending state
+        // so the RPC uses the sequencer's pre-confirmed block rather than a specific number.
+        if block.header.hash == B256::ZERO {
+            return BlockId::from(BlockNumberOrTag::Pending);
+        }
+        match self {
+            SimulationBase::AfterBlock => BlockId::from(block.number()),
+            SimulationBase::BeforeBlock => BlockId::from(block.header.parent_hash),
+        }
+    }
+
+    /// The block overrides a simulation for `block` runs with: `block`'s number and timestamp when
+    /// the state is its parent's, and none otherwise.
+    fn block_overrides(self, block: &Block) -> Option<BlockOverrides> {
+        if block.header.hash == B256::ZERO || self == SimulationBase::AfterBlock {
+            return None;
+        }
+        Some(BlockOverrides {
+            number: Some(U256::from(block.number())),
+            time: Some(block.header.timestamp),
+            ..Default::default()
+        })
+    }
+}
+
 /// Simulated the execution with meaningful revert reason decoding.
 pub struct ExecutionSimulator {
     rpc_url: String,
@@ -180,11 +220,13 @@ impl ExecutionSimulator {
         }
     }
 
-    /// Simulate a transaction with trace and return the SimulationResult.
+    /// Simulate a transaction with trace on the state `base` names (see [`SimulationBase`]), and
+    /// return the SimulationResult.
     pub async fn batch_simulate_with_trace(
         &mut self,
         inputs: HashMap<String, SimulationInput>,
         block: &Block,
+        base: SimulationBase,
     ) -> Result<HashMap<String, SimulationResult>, Box<dyn std::error::Error>> {
         // Configure tracing options - use callTracer for better formatted results
         let tracing_options = GethDebugTracingOptions {
@@ -199,13 +241,8 @@ impl ExecutionSimulator {
         let (simulation_ids, simulation_inputs): (Vec<String>, Vec<SimulationInput>) =
             inputs.into_iter().unzip();
 
-        // Pending (flashblock) blocks have a zero hash — simulate against the pending state
-        // so the RPC uses the sequencer's pre-confirmed block rather than a specific number.
-        let block_id = if block.header.hash == B256::ZERO {
-            BlockId::from(BlockNumberOrTag::Pending)
-        } else {
-            BlockId::from(block.number())
-        };
+        let block_id = base.state_block_id(block);
+        let block_overrides = base.block_overrides(block);
 
         let client = ClientBuilder::default().http(self.rpc_url.parse()?);
 
@@ -216,7 +253,7 @@ impl ExecutionSimulator {
             let trace_options = GethDebugTracingCallOptions {
                 tracing_options: tracing_options.clone(),
                 state_overrides: input.state_overwrites.clone(),
-                block_overrides: None,
+                block_overrides: block_overrides.clone(),
                 tx_index: None,
             };
             let fut =

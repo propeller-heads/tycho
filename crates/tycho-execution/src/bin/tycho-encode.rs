@@ -107,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "interacting_with": format!("0x{}", hex::encode(encoded_solutions[0].interacting_with())),
         "function_signature": encoded_solutions[0].function_signature(),
         "n_tokens": encoded_solutions[0].n_tokens().to_string(),
+        "subsidy_signing_hash": encoded_solutions[0].subsidy_signing_hash(),
+        "subsidy_signature_offset_in_swaps": encoded_solutions[0].subsidy_signature_offset_in_swaps(),
     });
     // Output the encoded result as JSON to stdout
     println!(

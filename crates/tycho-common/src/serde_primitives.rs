@@ -248,6 +248,14 @@ pub mod hex_bytes_vec {
     }
 }
 
+/// The length of an iterator when it is known, as a map serializer wants it.
+fn exact_len<I: Iterator>(iter: &I) -> Option<usize> {
+    match iter.size_hint() {
+        (low, Some(high)) if low == high => Some(low),
+        _ => None,
+    }
+}
+
 /// serde functions for handling HashMap with bytes value
 pub mod hex_hashmap_value {
     use std::collections::HashMap;
@@ -262,9 +270,22 @@ pub mod hex_hashmap_value {
         S: Serializer,
         K: Serialize,
     {
+        serialize_iter(x, s)
+    }
+
+    /// Writes the pairs as one map. Needs no `HashMap`, so a caller can write borrowed pairs.
+    /// With an iterator whose length is not exact, the map length is `None`, which formats that
+    /// need a length reject.
+    pub fn serialize_iter<'a, S, K, I>(pairs: I, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + 'a,
+        I: IntoIterator<Item = (&'a K, &'a Bytes)>,
+    {
+        let pairs = pairs.into_iter();
         let mut value_hex = HexBuffer::default();
-        let mut map = s.serialize_map(Some(x.len()))?;
-        for (k, v) in x.iter() {
+        let mut map = s.serialize_map(super::exact_len(&pairs))?;
+        for (k, v) in pairs {
             map.serialize_entry(k, value_hex.encode(v)?)?;
         }
         map.end()
@@ -292,9 +313,21 @@ pub mod hex_hashmap_key_value {
     where
         S: Serializer,
     {
+        serialize_iter(x, s)
+    }
+
+    /// Writes the pairs as one map. Needs no `HashMap`, so a caller can write borrowed pairs.
+    /// With an iterator whose length is not exact, the map length is `None`, which formats that
+    /// need a length reject.
+    pub fn serialize_iter<'a, S, I>(pairs: I, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        I: IntoIterator<Item = (&'a Bytes, &'a Bytes)>,
+    {
+        let pairs = pairs.into_iter();
         let (mut key_hex, mut value_hex) = (HexBuffer::default(), HexBuffer::default());
-        let mut map = s.serialize_map(Some(x.len()))?;
-        for (k, v) in x.iter() {
+        let mut map = s.serialize_map(super::exact_len(&pairs))?;
+        for (k, v) in pairs {
             map.serialize_entry(key_hex.encode(k)?, value_hex.encode(v)?)?;
         }
         map.end()
@@ -327,6 +360,52 @@ mod tests {
 
         #[serde(with = "hex_bytes_vec")]
         bytes_vec: Vec<Vec<u8>>,
+    }
+
+    #[derive(Serialize)]
+    struct IterMaps {
+        #[serde(serialize_with = "key_value_via_iter")]
+        key_value: HashMap<Bytes, Bytes>,
+        #[serde(serialize_with = "value_via_iter")]
+        value: HashMap<String, Bytes>,
+    }
+
+    #[derive(Serialize)]
+    struct DirectMaps {
+        #[serde(with = "hex_hashmap_key_value")]
+        key_value: HashMap<Bytes, Bytes>,
+        #[serde(with = "hex_hashmap_value")]
+        value: HashMap<String, Bytes>,
+    }
+
+    fn key_value_via_iter<S: serde::Serializer>(
+        x: &HashMap<Bytes, Bytes>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        hex_hashmap_key_value::serialize_iter(x.iter().filter(|_| true), s)
+    }
+
+    fn value_via_iter<S: serde::Serializer>(
+        x: &HashMap<String, Bytes>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        hex_hashmap_value::serialize_iter(x.iter().filter(|_| true), s)
+    }
+
+    #[test]
+    fn hex_hashmap_serialize_iter_matches_serialize() {
+        let key_value = HashMap::from([(Bytes::from(vec![1, 2]), Bytes::from(vec![0xAB]))]);
+        let value = HashMap::from([("a".to_string(), Bytes::from(vec![0xFF, 0x00]))]);
+
+        let direct = serde_json::to_string(&DirectMaps {
+            key_value: key_value.clone(),
+            value: value.clone(),
+        })
+        .unwrap();
+        let via_iter = serde_json::to_string(&IterMaps { key_value, value }).unwrap();
+
+        assert_eq!(via_iter, direct);
+        assert_eq!(direct, r#"{"key_value":{"0x0102":"0xab"},"value":{"a":"0xff00"}}"#);
     }
 
     #[test]
