@@ -229,7 +229,9 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                         .transport()
                         .as_any()
                         .downcast_ref::<RpcTransport>()
-                        .ok_or(MetadataError::UnknownError("Not RpcTransport".to_string()))?;
+                        .ok_or_else(|| {
+                            MetadataError::UnknownError("Not RpcTransport".to_string())
+                        })?;
 
                     let params = &request.params()[0];
 
@@ -238,9 +240,9 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                         .get("hooks")
                         .expect("Hooks attribute not found");
 
-                    let calldata = params["data"]
-                        .as_str()
-                        .ok_or(MetadataError::UnknownError("calldata not found".to_string()))?;
+                    let calldata = params["data"].as_str().ok_or_else(|| {
+                        MetadataError::UnknownError("calldata not found".to_string())
+                    })?;
 
                     Ok(EntryPointWithTracingParams {
                         entry_point: EntryPoint {

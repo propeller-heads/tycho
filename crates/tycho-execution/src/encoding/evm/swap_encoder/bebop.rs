@@ -78,17 +78,21 @@ impl SwapEncoder for BebopSwapEncoder {
             let estimated_amount_in = swap
                 .estimated_amount_in()
                 .clone()
-                .ok_or(EncodingError::FatalError(
-                    "Estimated amount in is mandatory for a Bebop swap".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Estimated amount in is mandatory for a Bebop swap".to_string(),
+                    )
+                })?;
             let token_in = swap.token_in().address.clone();
             let token_out = swap.token_out().address.clone();
             let router_address = encoding_context
                 .router_address
                 .clone()
-                .ok_or(EncodingError::FatalError(
-                    "The router address is needed to perform a Bebop swap".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "The router address is needed to perform a Bebop swap".to_string(),
+                    )
+                })?;
 
             let params = GetAmountOutParams {
                 amount_in: estimated_amount_in,
@@ -109,21 +113,25 @@ impl SwapEncoder for BebopSwapEncoder {
             let bebop_calldata = signed_quote
                 .quote_attributes
                 .get("calldata")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a calldata attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Bebop quote must have a calldata attribute".to_string(),
+                    )
+                })?;
             let partial_fill_offset = signed_quote
                 .quote_attributes
                 .get("partial_fill_offset")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a partial_fill_offset attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "Bebop quote must have a partial_fill_offset attribute".to_string(),
+                    )
+                })?;
             let target = signed_quote
                 .quote_attributes
                 .get("tx_to")
-                .ok_or(EncodingError::FatalError(
-                    "Bebop quote must have a tx_to attribute".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError("Bebop quote must have a tx_to attribute".to_string())
+                })?;
             let partial_fill_offset = parse_partial_fill_offset(partial_fill_offset)?;
             // The executor compares this with runtime amountIn, so both values must use taker/input
             // units.

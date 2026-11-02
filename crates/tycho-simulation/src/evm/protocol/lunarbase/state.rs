@@ -587,7 +587,7 @@ mod tests {
                         constraint,
                     );
                     let swap = state.query_pool_swap(&params).unwrap();
-                    let expected = max.unwrap_or(1_000_000u32.into());
+                    let expected = max.unwrap_or_else(|| 1_000_000u32.into());
                     assert_eq!(swap.amount_in(), &expected);
                     assert_eq!(swap.amount_out(), &expected);
                 }

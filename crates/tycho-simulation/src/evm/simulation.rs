@@ -123,12 +123,14 @@ where
             ..Default::default()
         };
 
-        let mut block =
-            self.state
-                .get_current_block()
-                .ok_or(SimulationEngineError::StorageError(
+        let mut block = self
+            .state
+            .get_current_block()
+            .ok_or_else(|| {
+                SimulationEngineError::StorageError(
                     "Current block not set in SimulationEngine.".into(),
-                ))?;
+                )
+            })?;
 
         if let Some(overrides) = &params.block_overrides {
             if let Some(number) = overrides.number {

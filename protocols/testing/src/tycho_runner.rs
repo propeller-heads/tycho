@@ -44,8 +44,11 @@ impl TychoRunner {
         info!("Running Tycho indexer from block {start_block} to {end_block}...");
 
         let mut cmd = Command::new("tycho-indexer");
-        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()))
-            .env("AUTH_API_KEY", "dummy");
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
+        )
+        .env("AUTH_API_KEY", "dummy");
 
         let all_accounts = self.initialized_accounts.clone();
 
@@ -139,7 +142,7 @@ impl TychoRunner {
                 .stderr(Stdio::piped())
                 .env(
                     "RUST_LOG",
-                    std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()),
+                    std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
                 )
                 .env("AUTH_API_KEY", "dummy")
                 .spawn()
@@ -217,8 +220,11 @@ impl TychoRunner {
             .ok_or_else(|| miette::miette!("Invalid temp file path"))?;
 
         let mut cmd = Command::new("tycho-indexer");
-        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()))
-            .env("AUTH_API_KEY", "dummy");
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
+        )
+        .env("AUTH_API_KEY", "dummy");
 
         cmd.args([
             "--database-url",

@@ -639,7 +639,13 @@ mod test {
             .await
             .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone().unwrap_or(Bytes::zero(32))))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.clone()
+                        .unwrap_or_else(|| Bytes::zero(32)),
+                )
+            })
             .collect();
         assert_eq!(slots, exp_slots);
 

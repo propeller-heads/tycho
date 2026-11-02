@@ -167,7 +167,7 @@ impl TryFromMessage for ProtocolComponent {
         let protocol_type = msg
             .protocol_type
             .clone()
-            .ok_or(DecodeError::Decode("Missing protocol type".to_owned()))?;
+            .ok_or_else(|| DecodeError::Decode("Missing protocol type".to_owned()))?;
 
         if !protocol_types.contains_key(&protocol_type.name) {
             return Err(DecodeError::Decode(format!(
@@ -368,9 +368,9 @@ impl TryFromMessage for TxWithChanges {
             let component_id = msg_entrypoint_params
                 .component_id
                 .clone()
-                .ok_or(DecodeError::Decode(
-                    "Entrypoint params should have a component id".to_owned(),
-                ))?;
+                .ok_or_else(|| {
+                    DecodeError::Decode("Entrypoint params should have a component id".to_owned())
+                })?;
             let tracing_data = TracingParams::try_from_message(msg_entrypoint_params)?;
             entrypoint_params
                 .entry(entrypoint_id)

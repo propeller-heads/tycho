@@ -147,35 +147,35 @@ pub fn encode_tycho_router_call(
     // ABI tuple matching ClientFeeParams: (uint32, address, uint256, uint256, bytes)
     let client_fee_params =
         (client_fee_bps, client_fee_receiver, max_client_contribution, deadline, client_signature);
-    let (permit, signature) = if *solution.user_transfer_type() ==
-        UserTransferType::TransferFromPermit2
-    {
-        let permit2 = Permit2::new()?;
-        let permit_single = permit2.get_permit(
-            encoded_solution.interacting_with(),
-            solution.sender(),
-            solution.token_in(),
-            solution.amount_in(),
-        )?;
-        let permit = Some(
-            PermitSingle::try_from(&permit_single)
-                .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
-        );
-        let signer = signer
-            .ok_or(EncodingError::FatalError("Signer must be set to use permit2".to_string()))?;
-        let signature = sign_permit(chain_id, &permit_single, signer)?;
-        (permit, signature.as_bytes().to_vec())
-    } else {
-        (None, vec![])
-    };
+    let (permit, signature) =
+        if *solution.user_transfer_type() == UserTransferType::TransferFromPermit2 {
+            let permit2 = Permit2::new()?;
+            let permit_single = permit2.get_permit(
+                encoded_solution.interacting_with(),
+                solution.sender(),
+                solution.token_in(),
+                solution.amount_in(),
+            )?;
+            let permit = Some(
+                PermitSingle::try_from(&permit_single)
+                    .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
+            );
+            let signer = signer.ok_or_else(|| {
+                EncodingError::FatalError("Signer must be set to use permit2".to_string())
+            })?;
+            let signature = sign_permit(chain_id, &permit_single, signer)?;
+            (permit, signature.as_bytes().to_vec())
+        } else {
+            (None, vec![])
+        };
 
     let function_signature = encoded_solution.function_signature();
     let swaps = encoded_solution.swaps().to_vec();
 
     let method_calldata = if function_signature.contains("Permit2") {
-        let permit = permit.ok_or(EncodingError::FatalError(
-            "permit2 object must be set to use permit2".to_string(),
-        ))?;
+        let permit = permit.ok_or_else(|| {
+            EncodingError::FatalError("permit2 object must be set to use permit2".to_string())
+        })?;
         if function_signature.contains("splitSwap") {
             (
                 given_amount,

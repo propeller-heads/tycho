@@ -770,7 +770,7 @@ mod benchmark {
                         })
                 })
             })
-            .map_or("n/a".to_string(), |kib| format!("{:.0} MiB", kib / 1024.0))
+            .map_or_else(|| "n/a".to_string(), |kib| format!("{:.0} MiB", kib / 1024.0))
     }
 
     fn time_queries(index: &ComponentIndex, chain: Chain, system_id: i64, min_tvl: Option<f64>) {

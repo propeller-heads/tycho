@@ -465,7 +465,7 @@ fn build_stableswap_ng(state: &RawPoolState) -> Result<Pool, BuildError> {
     // offpeg_fee_multiplier: None for these pools — this default handles it.
     let offpeg = state
         .offpeg_fee_multiplier
-        .unwrap_or(U256::from(10_000_000_000u64));
+        .unwrap_or_else(|| U256::from(10_000_000_000u64));
 
     for (i, &d) in state.token_decimals.iter().enumerate() {
         if d > 36 {

@@ -1178,14 +1178,14 @@ where
         let last_processed_block_number = self
             .get_last_processed_block()
             .await
-            .map_or("None".to_string(), |b| b.number.to_string());
+            .map_or_else(|| "None".to_string(), |b| b.number.to_string());
         let current_partial_block_index = self
             .partial_block_buffer
             .lock()
             .await
             .as_ref()
             .and_then(|b| b.partial_block_index)
-            .map_or("None".to_string(), |i| i.to_string());
+            .map_or_else(|| "None".to_string(), |i| i.to_string());
 
         tracing::Span::current().record("current_block", &last_processed_block_number);
         tracing::Span::current()

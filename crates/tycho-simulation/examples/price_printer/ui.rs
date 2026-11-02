@@ -384,7 +384,7 @@ impl App {
                     self.quote_amount = self
                         .quote_amount
                         .checked_sub(&BigUint::from(10u64).pow(decimals))
-                        .unwrap_or(BigUint::one());
+                        .unwrap_or_else(BigUint::one);
                 }
             }
         }

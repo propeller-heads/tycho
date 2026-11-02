@@ -413,16 +413,18 @@ impl PostgresGateway {
                     &ps,
                     protocol_type_names_by_id
                         .get(&pc.protocol_type_id)
-                        .ok_or(PostgresError(StorageError::NotFound(
-                            "ProtocolType".into(),
-                            pc.protocol_type_id.to_string(),
-                        )))?,
+                        .ok_or_else(|| {
+                            PostgresError(StorageError::NotFound(
+                                "ProtocolType".into(),
+                                pc.protocol_type_id.to_string(),
+                            ))
+                        })?,
                     *chain,
                     tokens_by_pc,
                     contracts_by_pc,
                     static_attributes,
                     ChangeType::Creation,
-                    tx_hash.unwrap_or(Bytes::from(&[0; 32])),
+                    tx_hash.unwrap_or_else(|| Bytes::from(&[0; 32])),
                     pc.created_at,
                 ))
             })
@@ -496,7 +498,7 @@ impl PostgresGateway {
         for pc in new {
             let txh = tx_hash_id_mapping
                 .get::<TxHash>(&pc.creation_tx.clone())
-                .ok_or(StorageError::DecodeError("TxHash not found".to_string()))?;
+                .ok_or_else(|| StorageError::DecodeError("TxHash not found".to_string()))?;
 
             let new_pc = orm::NewProtocolComponent::new(
                 &pc.id,
@@ -608,7 +610,9 @@ impl PostgresGateway {
             .map(|(pc_id, t_address, token_idx)| {
                 let t_id = token_add_by_id
                     .get(t_address)
-                    .ok_or(StorageError::NotFound("Token".to_string(), t_address.to_string()))?;
+                    .ok_or_else(|| {
+                        StorageError::NotFound("Token".to_string(), t_address.to_string())
+                    })?;
                 Ok(orm::NewProtocolComponentHoldsToken {
                     protocol_component_id: *pc_id,
                     token_id: *t_id,
@@ -679,7 +683,9 @@ impl PostgresGateway {
             .map(|(pc_id, t_address)| {
                 let t_id = contract_add_by_id
                     .get(t_address)
-                    .ok_or(StorageError::NotFound("Account".to_string(), t_address.to_string()))?;
+                    .ok_or_else(|| {
+                        StorageError::NotFound("Account".to_string(), t_address.to_string())
+                    })?;
                 Ok(orm::NewProtocolComponentHoldsContract {
                     protocol_component_id: *pc_id,
                     contract_code_id: *t_id,
@@ -883,22 +889,23 @@ impl PostgresGateway {
 
         let mut state_data = Vec::new();
         for state in new {
-            let tx = state
-                .tx
-                .as_ref()
-                .ok_or(StorageError::Unexpected(
+            let tx = state.tx.as_ref().ok_or_else(|| {
+                StorageError::Unexpected(
                     "Could not reference tx in ProtocolStateDelta object".to_string(),
-                ))?;
+                )
+            })?;
             let (tx_id, tx_index, tx_ts) = txns
                 .get(tx)
-                .ok_or(StorageError::NotFound("Tx id".to_string(), tx.to_string()))?;
+                .ok_or_else(|| StorageError::NotFound("Tx id".to_string(), tx.to_string()))?;
 
             let component_db_id = *components
                 .get(&state.component_id)
-                .ok_or(StorageError::NotFound(
-                    "Component id".to_string(),
-                    state.component_id.to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    StorageError::NotFound(
+                        "Component id".to_string(),
+                        state.component_id.to_string(),
+                    )
+                })?;
 
             state_data.extend(
                 state

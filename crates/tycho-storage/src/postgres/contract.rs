@@ -1920,7 +1920,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(1, 5), (2, 1), (0, 1)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(100u64).lpad(32, 0),
                 vec![
@@ -1975,7 +1975,7 @@ mod test {
                 "account0".to_owned(),
                 contract_slots([(6, 30), (5, 25), (1, 3), (2, 1), (0, 2)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(101u64).lpad(32, 0),
                 vec![
@@ -2049,7 +2049,7 @@ mod test {
                 "c1".to_owned(),
                 contract_slots([(1, 255), (0, 128)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(50u64).lpad(32, 0),
                 HashMap::new(),
@@ -2077,7 +2077,7 @@ mod test {
                 "c2".to_owned(),
                 contract_slots([(1, 2), (2, 4)])
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap_or(Bytes::from("0x00"))))
+                    .map(|(k, v)| (k, v.unwrap_or_else(|| Bytes::from("0x00"))))
                     .collect(),
                 Bytes::from(25u64).lpad(32, 0),
                 HashMap::new(),

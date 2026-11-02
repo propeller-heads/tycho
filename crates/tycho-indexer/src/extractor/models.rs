@@ -150,7 +150,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(attr, _)| keys_set.contains(&(component_id, attr)))
                 {
                     res.entry((component_id.clone(), attr.clone()))
-                        .or_insert(val.clone());
+                        .or_insert_with(|| val.clone());
                 }
             }
         }
@@ -174,7 +174,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(slot, _)| keys_set.contains(&(address, *slot)))
                 {
                     res.entry((address.clone(), slot.clone()))
-                        .or_insert(val.clone().unwrap_or_default());
+                        .or_insert_with(|| val.clone().unwrap_or_default());
                 }
             }
         }
@@ -199,7 +199,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(token, _)| keys_set.contains(&(component_id, token)))
                 {
                     res.entry((component_id.clone(), token.clone()))
-                        .or_insert(value.clone());
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
@@ -224,7 +224,7 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(token, _)| keys_set.contains(&(account, token)))
                 {
                     res.entry((account.clone(), token.clone()))
-                        .or_insert(value.clone());
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
@@ -1049,7 +1049,7 @@ mod test {
         other_block.partial_block_index = Some(1);
 
         other_block.extractor =
-            extractor_override.unwrap_or(original_partial_block.extractor.clone());
+            extractor_override.unwrap_or_else(|| original_partial_block.extractor.clone());
         other_block.chain = chain_override.unwrap_or(original_partial_block.chain);
         other_block.block.number =
             block_num_override.unwrap_or(original_partial_block.block.number);

@@ -270,23 +270,29 @@ impl BlockMetadataOrchestrator {
             for (dedup_id, result) in results {
                 let request = ids_to_requests
                     .get(&dedup_id)
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "Received result for unknown deduplication id: {dedup_id}"
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "Received result for unknown deduplication id: {dedup_id}"
+                        ))
+                    })?;
 
                 let parser = self
                     .response_parser_registry
                     .get_parser(request.get_generator_name())
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "No parser found for {}",
-                        request.get_generator_name()
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "No parser found for {}",
+                            request.get_generator_name()
+                        ))
+                    })?;
 
                 let component_ids = component_ids_by_dedup_id
                     .get(&dedup_id)
-                    .ok_or(MetadataError::UnknownError(format!(
-                        "Received result for unknown deduplication id: {dedup_id}"
-                    )))?;
+                    .ok_or_else(|| {
+                        MetadataError::UnknownError(format!(
+                            "Received result for unknown deduplication id: {dedup_id}"
+                        ))
+                    })?;
 
                 for comp_id in component_ids {
                     let component = all_components

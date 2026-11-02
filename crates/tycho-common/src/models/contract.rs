@@ -249,7 +249,7 @@ impl AccountDelta {
         if let Some(balance) = other.balance {
             self.balance = Some(balance)
         }
-        self.code = other.code.or(self.code.take());
+        self.code = other.code.or_else(|| self.code.take());
         if other.change == ChangeType::Creation {
             self.change = ChangeType::Creation;
         }

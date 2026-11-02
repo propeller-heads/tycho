@@ -84,16 +84,20 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         let estimated_amount_in = swap
             .estimated_amount_in()
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a Liquorice swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Estimated amount in is mandatory for a Liquorice swap".to_string(),
+                )
+            })?;
 
         let router_address = encoding_context
             .router_address
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a Liquorice swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "The router address is needed to perform a Liquorice swap".to_string(),
+                )
+            })?;
 
         let params = GetAmountOutParams {
             amount_in: estimated_amount_in,
@@ -121,9 +125,11 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         let settlement = signed_quote
             .quote_attributes
             .get("settlement")
-            .ok_or(EncodingError::FatalError(
-                "Liquorice quote must have a settlement attribute".to_string(),
-            ))
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Liquorice quote must have a settlement attribute".to_string(),
+                )
+            })
             .and_then(bytes_to_address)?;
         if settlement != self.settlement_address {
             return Err(EncodingError::InvalidInput(format!(
@@ -135,9 +141,11 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         let allowances = signed_quote
             .quote_attributes
             .get("allowances")
-            .ok_or(EncodingError::FatalError(
-                "Liquorice quote must have an allowances attribute".to_string(),
-            ))
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Liquorice quote must have an allowances attribute".to_string(),
+                )
+            })
             .and_then(|allowances| {
                 <Vec<(Address, Address, U256)> as SolValue>::abi_decode_validate(allowances)
                     .map_err(|e| {
@@ -170,17 +178,21 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         let liquorice_calldata = signed_quote
             .quote_attributes
             .get("calldata")
-            .ok_or(EncodingError::FatalError(
-                "Liquorice quote must have a calldata attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Liquorice quote must have a calldata attribute".to_string(),
+                )
+            })?;
 
         // LiquoriceExecutor.swap reverts with LiquoriceExecutor__InvalidSelector on anything else.
         let selector: [u8; 4] = liquorice_calldata
             .get(..4)
             .and_then(|s| s.try_into().ok())
-            .ok_or(EncodingError::InvalidInput(
-                "Liquorice quote calldata is shorter than a selector".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::InvalidInput(
+                    "Liquorice quote calldata is shorter than a selector".to_string(),
+                )
+            })?;
         if selector != SETTLE_SINGLE_SELECTOR && selector != SETTLE_SELECTOR {
             return Err(EncodingError::InvalidInput(format!(
                 "Liquorice quote calls unsupported settlement entrypoint 0x{}",
@@ -191,9 +203,11 @@ impl SwapEncoder for LiquoriceSwapEncoder {
         let base_token_amount = signed_quote
             .quote_attributes
             .get("base_token_amount")
-            .ok_or(EncodingError::FatalError(
-                "Liquorice quote must have a base_token_amount attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Liquorice quote must have a base_token_amount attribute".to_string(),
+                )
+            })?;
 
         // Defaults to 0 if not present (partial fill not available)
         let partial_fill_offset: [u8; 4] = signed_quote

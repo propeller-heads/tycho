@@ -47,16 +47,20 @@ impl SwapEncoder for HashflowSwapEncoder {
         let amount_in = swap
             .estimated_amount_in()
             .as_ref()
-            .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a Hashflow swap".to_string(),
-            ))?
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Estimated amount in is mandatory for a Hashflow swap".to_string(),
+                )
+            })?
             .clone();
         let router_address = encoding_context
             .router_address
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a Hashflow swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "The router address is needed to perform a Hashflow swap".to_string(),
+                )
+            })?;
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
                 protocol_state
@@ -95,9 +99,11 @@ impl SwapEncoder for HashflowSwapEncoder {
             let value = signed_quote
                 .quote_attributes
                 .get(*field)
-                .ok_or(EncodingError::FatalError(format!(
-                    "Hashflow quote must have a {field} attribute"
-                )))?;
+                .ok_or_else(|| {
+                    EncodingError::FatalError(format!(
+                        "Hashflow quote must have a {field} attribute"
+                    ))
+                })?;
             hashflow_calldata.extend_from_slice(value);
         }
         let args = (&hashflow_calldata[..],);

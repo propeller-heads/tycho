@@ -31,12 +31,16 @@ impl LiquidityPartySwapEncoder {
         let token_in_idx = token_addresses
             .iter()
             .position(|addr| addr == token_in)
-            .ok_or(EncodingError::FatalError("Token in not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token in not found in pool tokens".to_string())
+            })?;
 
         let token_out_idx = token_addresses
             .iter()
             .position(|addr| addr == token_out)
-            .ok_or(EncodingError::FatalError("Token out not found in pool tokens".to_string()))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Token out not found in pool tokens".to_string())
+            })?;
 
         Ok((token_in.clone(), token_out.clone(), token_in_idx as u8, token_out_idx as u8))
     }

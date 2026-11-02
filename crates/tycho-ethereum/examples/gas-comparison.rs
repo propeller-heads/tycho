@@ -208,13 +208,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             est_avg,
             p50_raw
                 .map(|p| p.to_string())
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             p50_adj
                 .map(|p| p.to_string())
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             delta_pct
                 .map(|d| format!("{d:+}%"))
-                .unwrap_or("n/a".to_string()),
+                .unwrap_or_else(|| "n/a".to_string()),
             on_chain_gas.len(),
         );
     }

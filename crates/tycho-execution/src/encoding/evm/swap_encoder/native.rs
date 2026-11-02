@@ -87,17 +87,21 @@ impl SwapEncoder for NativeSwapEncoder {
         let amount_in = swap
             .estimated_amount_in()
             .as_ref()
-            .ok_or(EncodingError::FatalError(
-                "Estimated amount in is mandatory for a Native swap".to_string(),
-            ))?
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Estimated amount in is mandatory for a Native swap".to_string(),
+                )
+            })?
             .clone();
 
         let sender = encoding_context
             .router_address
             .clone()
-            .ok_or(EncodingError::FatalError(
-                "The router address is needed to perform a Native swap".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "The router address is needed to perform a Native swap".to_string(),
+                )
+            })?;
 
         let signed_quote = on_blocking_thread(|| {
             self.runtime_handle.block_on(async {
@@ -122,9 +126,9 @@ impl SwapEncoder for NativeSwapEncoder {
         let target_bytes = signed_quote
             .quote_attributes
             .get("target")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a target attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Native quote must have a target attribute".to_string())
+            })?;
 
         let target = bytes_to_address(target_bytes)?;
         if target != self.router_v6 {
@@ -136,16 +140,18 @@ impl SwapEncoder for NativeSwapEncoder {
         let calldata = signed_quote
             .quote_attributes
             .get("calldata")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a calldata attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("Native quote must have a calldata attribute".to_string())
+            })?;
 
         let deadline_timestamp = signed_quote
             .quote_attributes
             .get("deadline_timestamp")
-            .ok_or(EncodingError::FatalError(
-                "Native quote must have a deadline_timestamp attribute".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(
+                    "Native quote must have a deadline_timestamp attribute".to_string(),
+                )
+            })?;
         let deadline = u64::from_be_bytes(
             deadline_timestamp
                 .as_ref()

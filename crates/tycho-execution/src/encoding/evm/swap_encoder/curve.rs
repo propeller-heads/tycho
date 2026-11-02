@@ -97,15 +97,19 @@ impl CurveSwapEncoder {
         let i = coins
             .iter()
             .position(|&addr| addr == token_in)
-            .ok_or(EncodingError::FatalError(format!(
-                "Token in address {token_in} not found in curve pool coins"
-            )))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "Token in address {token_in} not found in curve pool coins"
+                ))
+            })?;
         let j = coins
             .iter()
             .position(|&addr| addr == token_out)
-            .ok_or(EncodingError::FatalError(format!(
-                "Token in address {token_out} not found in curve pool coins"
-            )))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError(format!(
+                    "Token in address {token_out} not found in curve pool coins"
+                ))
+            })?;
         Ok((U8::from(i), U8::from(j)))
     }
 }

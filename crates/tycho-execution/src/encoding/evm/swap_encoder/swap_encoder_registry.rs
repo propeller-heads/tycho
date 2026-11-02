@@ -76,15 +76,15 @@ impl SwapEncoderRegistry {
         let config: HashMap<Chain, HashMap<String, String>> = serde_json::from_str(&config_str)?;
         let executors = config
             .get(&self.chain)
-            .ok_or(EncodingError::FatalError("No executors found for chain".to_string()))?;
+            .ok_or_else(|| EncodingError::FatalError("No executors found for chain".to_string()))?;
 
         let protocol_specific_config: HashMap<Chain, HashMap<String, HashMap<String, String>>> =
             serde_json::from_str(PROTOCOL_SPECIFIC_CONFIG)?;
         let protocol_specific_config = protocol_specific_config
             .get(&self.chain)
-            .ok_or(EncodingError::FatalError(
-                "No protocol specific config found for chain".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                EncodingError::FatalError("No protocol specific config found for chain".to_string())
+            })?;
         for (protocol, executor_address) in executors {
             let executor_address = Bytes::from_str(executor_address).map_err(|_| {
                 EncodingError::FatalError(format!(

@@ -821,7 +821,7 @@ mod tests {
             let response_msg = timeout(Duration::from_secs(5), connection.next())
                 .await
                 .map_err(|_| "Failed to receive message".to_string())?
-                .ok_or("Connection closed".to_string())?
+                .ok_or_else(|| "Connection closed".to_string())?
                 .map_err(|_| "Failed to receive message".to_string())?;
 
             if criteria(&response_msg) {

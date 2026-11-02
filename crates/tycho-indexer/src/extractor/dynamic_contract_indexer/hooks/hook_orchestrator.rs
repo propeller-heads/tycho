@@ -208,11 +208,13 @@ where
                             let tx_delta_state_updates = tx_delta
                                 .state_updates
                                 .entry(component_id.clone())
-                                .or_insert(ProtocolComponentStateDelta::new(
-                                    component_id,
-                                    HashMap::new(),
-                                    HashSet::new(),
-                                ));
+                                .or_insert_with(|| {
+                                    ProtocolComponentStateDelta::new(
+                                        component_id,
+                                        HashMap::new(),
+                                        HashSet::new(),
+                                    )
+                                });
 
                             tx_delta_state_updates
                                 .merge(pc_delta)

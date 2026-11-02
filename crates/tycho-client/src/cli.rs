@@ -314,7 +314,7 @@ async fn run(exchanges: Vec<(String, Option<String>)>, args: CliArgs) -> Result<
 
     Err(format!(
         "{failed_task} task terminated: {}",
-        shutdown_reason.unwrap_or("unknown reason".to_string())
+        shutdown_reason.unwrap_or_else(|| "unknown reason".to_string())
     ))
 }
 
