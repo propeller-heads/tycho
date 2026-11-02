@@ -733,8 +733,10 @@ mod tests {
 
             // Spawn a task that sends messages every 100ms
             tokio::spawn(async move {
-                // clippy thinks applying `instrument` to a loop block is a mistake
-                #[expect(clippy::unit_arg)]
+                #[expect(
+                    clippy::unit_arg,
+                    reason = "the `()`-typed loop block is the receiver of `.instrument`"
+                )]
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     debug!("Sending DummyMessage");
@@ -833,7 +835,7 @@ mod tests {
 
     #[derive(Deserialize)]
     struct DummyDelta {
-        #[expect(dead_code)]
+        #[expect(dead_code, reason = "deserialized to check the message shape but never read")]
         subscription_id: Uuid,
         deltas: dto::BlockAggregatedChanges,
     }

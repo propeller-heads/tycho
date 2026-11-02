@@ -25,7 +25,10 @@ use crate::{
     substreams::SubstreamsEndpoint,
 };
 
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "values are moved straight through the stream, so boxing the large variant would only add an allocation"
+)]
 pub enum BlockResponse {
     New(BlockScopedData),
     Undo(BlockUndoSignal),
@@ -37,7 +40,10 @@ pub struct SubstreamsStream {
 }
 
 impl SubstreamsStream {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwards the stream parameters one-to-one to `stream_blocks`"
+    )]
     pub fn new(
         endpoint: Arc<SubstreamsEndpoint>,
         cursor: Option<String>,
@@ -123,7 +129,10 @@ async fn wait_for_next_retry(
 // `latest_cursor` is populated from the response. On any subsequent reconnection
 // (hot reconnect within the same process), `latest_cursor` is sent as
 // `start_cursor` which takes precedence over `start_block_num`.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent Substreams request parameter"
+)]
 fn stream_blocks(
     endpoint: Arc<SubstreamsEndpoint>,
     cursor: Option<String>,

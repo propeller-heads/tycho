@@ -43,13 +43,19 @@ pub struct HookCreationParams<'a> {
     hook_address: Address,
     account_balances: &'a HashMap<Bytes, HashMap<Bytes, Bytes>>,
     all_tokens: &'a HashMap<Bytes, Token>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "carried in the params for hook handlers; no registered handler reads the decoded state"
+    )]
     state: UniswapV4State,
     /// Attributes of the component. If an attribute's value is a `bigint`,
     /// it will be encoded as a big endian signed hex string. See ResponseProtocolState for more
     /// details.
     pub(crate) attributes: &'a HashMap<String, Bytes>,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "carried in the params for hook handlers; no registered handler reads the component balances"
+    )]
     /// Mapping from token address to big-endian encoded balance for this component.
     balances: &'a HashMap<Bytes, Bytes>,
     /// Show vm traces in simulations or not

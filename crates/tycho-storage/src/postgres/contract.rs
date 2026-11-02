@@ -1093,7 +1093,6 @@ impl PostgresGateway {
             chain_id,
             creation_tx: creation_tx_id,
             created_at: Some(created_ts),
-            deleted_at: None,
         };
         let hex_addr = hex::encode(&new.address);
 

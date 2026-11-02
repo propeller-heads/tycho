@@ -125,7 +125,7 @@ where
         call_data
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one parameter per simulation input")]
     pub fn call(
         &self,
         selector: &str,

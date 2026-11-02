@@ -97,7 +97,10 @@ const CLIENT_FEE_RECEIVER_PK: &str =
 /// # Errors
 /// - Returns `EncodingError::FatalError` if the function signature is unsupported or required
 ///   fields (e.g., permit or signature) are missing.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "passes through every input of the router call, including the client fee terms"
+)]
 pub fn encode_tycho_router_call(
     chain_id: u64,
     encoded_solution: EncodedSolution,
@@ -261,7 +264,10 @@ pub fn encode_tycho_router_call(
 /// `clientFeeReceiver` field passed in.
 ///
 /// Uses `deadline = U256::MAX` so signatures never expire in fork tests.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per field of the signed ClientFee typed data"
+)]
 fn sign_client_fee(
     chain_id: u64,
     router_address: Address,

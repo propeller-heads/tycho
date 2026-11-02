@@ -4,7 +4,10 @@
 //! be very simple and ideally not contain any business logic.
 //!
 //! Structs in here implement utoipa traits so they can be used to derive an OpenAPI schema.
-#![allow(deprecated)]
+#![expect(
+    deprecated,
+    reason = "DTOs that are deprecated for consumers are still defined and used within this module"
+)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
@@ -262,7 +265,10 @@ pub enum Response {
 }
 
 /// A message sent from the server to the client
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "untagged wire type; boxing the variant would change the public enum"
+)]
 #[derive(Serialize, Deserialize, Debug, Display, Clone)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
@@ -357,7 +363,10 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -1033,7 +1042,10 @@ pub struct ResponseAccount {
 }
 
 impl ResponseAccount {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         chain: Chain,
         address: Bytes,
@@ -1152,7 +1164,10 @@ impl VersionParam {
         Self::new(
             None,
             Some({
-                #[expect(deprecated)]
+                #[expect(
+                    deprecated,
+                    reason = "BlockParam is deprecated for consumers but still constructed by this crate"
+                )]
                 BlockParam { hash: None, chain: Some(chain), number: Some(block_number as i64) }
             }),
         )

@@ -710,7 +710,7 @@ fn refreshed_base(
 }
 
 /// Assembles the fields every pool family shares.
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "one parameter per field of the shared pool state")]
 fn base_state(
     pool: &AlloyAddress,
     pool_type: BalancerPoolType,

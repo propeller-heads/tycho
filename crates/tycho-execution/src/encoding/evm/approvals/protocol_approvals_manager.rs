@@ -20,7 +20,10 @@ use crate::encoding::{
 pub struct ProtocolApprovalsManager {
     client: EVMProvider,
     runtime_handle: Handle,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 impl ProtocolApprovalsManager {

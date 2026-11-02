@@ -751,7 +751,10 @@ mod test {
 
     /// Stops compiling when a DTO gains a field: the view `Serialize` impls must then write it.
     #[test]
-    #[expect(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "destructures every field of the DTOs, including deprecated ones"
+    )]
     fn views_write_every_dto_field() {
         let _ = |dto::ResponseAccount {
                      chain: _,

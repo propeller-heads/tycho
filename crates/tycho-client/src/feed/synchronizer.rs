@@ -445,7 +445,10 @@ where
     D: DeltasClient + Clone + Send + Sync + 'static,
 {
     /// Creates a new state synchronizer.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking each synchronizer setting individually"
+    )]
     pub fn new(
         extractor_id: ExtractorIdentity,
         retrieve_balances: bool,

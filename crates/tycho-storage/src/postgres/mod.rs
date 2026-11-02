@@ -1220,7 +1220,7 @@ pub mod db_fixtures {
     }
 
     // Insert a new Component Balance
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per column of the inserted row")]
     pub async fn insert_component_balance(
         conn: &mut AsyncPgConnection,
         balance: Balance,
@@ -1305,7 +1305,7 @@ pub mod db_fixtures {
             .unwrap()
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per column of the inserted row")]
     // Insert a new Protocol Component
     pub async fn insert_protocol_component(
         conn: &mut AsyncPgConnection,

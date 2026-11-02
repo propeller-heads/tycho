@@ -188,7 +188,10 @@ pub struct BlockTransactionDeltas<T> {
     pub deltas: Vec<TransactionDeltaGroup<T>>,
 }
 
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "named by the public BlockTransactionDeltas::deltas field but never constructed; removing it is a breaking change"
+)]
 pub struct TransactionDeltaGroup<T> {
     changes: T,
     protocol_component: HashMap<String, ProtocolComponent>,
@@ -220,7 +223,10 @@ pub struct BlockAggregatedChanges {
 }
 
 impl BlockAggregatedChanges {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         extractor: &str,
         chain: Chain,
@@ -601,7 +607,10 @@ pub struct TxWithChanges {
 }
 
 impl TxWithChanges {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         tx: Transaction,
         protocol_components: HashMap<ComponentId, ProtocolComponent>,

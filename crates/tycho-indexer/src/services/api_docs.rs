@@ -1,3 +1,5 @@
+#![expect(deprecated, reason = "the OpenAPI schema still documents the deprecated ProtocolId DTO")]
+
 use tycho_common::dto::{
     AccountOverrides, AccountUpdate, BlockParam, Chain, ChangeType, ComponentTvlRequestBody,
     ComponentTvlRequestResponse, ContractId, EntryPoint, EntryPointWithTracingParams, Health,

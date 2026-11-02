@@ -130,7 +130,10 @@ impl From<SwapError> for SimulationError {
     }
 }
 impl FluidV1 {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+    )]
     pub(super) fn new(
         pool_address: &Bytes,
         token0: &Token,
@@ -604,7 +607,10 @@ where
     (best, best_result)
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+)]
 fn swap_in_adjusted(
     swap0_to_1: bool,
     amount_to_swap: U256,
@@ -823,7 +829,10 @@ fn swap_in_adjusted(
     Ok(from_adjusted_amount(amount_out_collateral + amount_out_debt, out_decimals))
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parameters mirror the Fluid liquidity-layer swap inputs"
+)]
 #[cfg(test)]
 fn swap_out_adjusted(
     swap0_to_1: bool,
@@ -2040,7 +2049,10 @@ mod test {
     /// - `out_decimals`: Decimals for the output token.
     /// - `limits`: Dex limits.
     /// - `sync_time`: Timestamp for syncing.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper takes every input and expected output of a swap case"
+    )]
     fn assert_swap_in_result(
         swap0_to_1: bool,
         amount_in: U256,
@@ -2072,7 +2084,10 @@ mod test {
         assert_eq!(expected_amount_out, out_amt.to_string(), "Amount out mismatch");
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper takes every input and expected output of a swap case"
+    )]
     fn assert_swap_out_result(
         swap0_to_1: bool,
         amount_out: U256,

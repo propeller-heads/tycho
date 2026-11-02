@@ -27,7 +27,10 @@ pub struct NativeSwapEncoder {
     executor_address: Bytes,
     router_v6: Address,
     runtime_handle: Handle,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 

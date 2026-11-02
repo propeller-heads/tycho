@@ -369,7 +369,7 @@ impl Executor {
     }
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L23>
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "mirrors the parameters of IExecutor.swap")]
     pub fn swap(
         &self,
         params: &Params,

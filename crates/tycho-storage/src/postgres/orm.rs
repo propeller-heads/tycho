@@ -14,13 +14,9 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
 use tycho_common::{
     models::{
-        self,
-        blockchain::{
-            EntryPointWithTracingParams as EntryPointWithTracingParamsCommon,
-            TracingParams as EntryPointTracingParamsCommon,
-        },
-        Address, AttrStoreKey, Balance, BlockHash, Code, CodeHash, ComponentId, ContractId,
-        EntryPointId, PaginationParams, StoreVal, TxHash,
+        self, blockchain::TracingParams as EntryPointTracingParamsCommon, Address, AttrStoreKey,
+        Balance, BlockHash, Code, CodeHash, ComponentId, ContractId, EntryPointId,
+        PaginationParams, StoreVal, TxHash,
     },
     storage::{BlockIdentifier, StorageError, WithTotal},
     Bytes,
@@ -1661,8 +1657,6 @@ pub struct NewContract {
     pub chain_id: i64,
     pub creation_tx: Option<i64>,
     pub created_at: Option<NaiveDateTime>,
-    #[expect(dead_code)]
-    pub deleted_at: Option<NaiveDateTime>,
 }
 
 impl NewContract {
@@ -1822,7 +1816,10 @@ impl From<NewSlot> for NewSlotLatest {
 pub struct ProtocolHoldsToken {
     protocol_component_id: i64,
     token_id: i64,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Queryable maps columns by position, so the struct lists every column of the table"
+    )]
     token_index: i16,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
@@ -1931,24 +1928,6 @@ impl EntryPoint {
             .map(|(ep_id, ext_id)| (ext_id, ep_id))
             .collect::<HashMap<_, _>>())
     }
-
-    /// Retrieves the database id of an entry point from a target address and function signature.
-    #[expect(dead_code)]
-    pub(crate) async fn id_by_target_and_signature(
-        target_: &Bytes,
-        signature_: &String,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<i64, StorageError> {
-        use crate::postgres::schema::entry_point::dsl::*;
-
-        Ok(entry_point
-            .select(id)
-            .filter(target.eq(target_))
-            .filter(signature.eq(signature_))
-            .first::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?)
-    }
 }
 
 #[derive(Insertable, AsChangeset, Eq, Hash, PartialEq)]
@@ -1986,43 +1965,6 @@ impl From<&EntryPointTracingParams> for models::blockchain::TracingParams {
 }
 
 impl EntryPointTracingParams {
-    /// Retrieves the database id of an entry point tracing params from an
-    /// `EntryPointWithTracingParams`.
-    #[expect(dead_code)]
-    pub(crate) async fn id_from_entry_point_with_tracing_params(
-        entry_point: &EntryPointWithTracingParamsCommon,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<i64, StorageError> {
-        let tracing_type = EntryPointTracingType::from(&entry_point.params);
-        let data = match &entry_point.params {
-            EntryPointTracingParamsCommon::RPCTracer(rpc_tracer) => {
-                serde_json::to_value(rpc_tracer).map_err(|e| {
-                    StorageError::Unexpected(format!(
-                        "Failed to serialize RPCTracerEntryPoint: {e}"
-                    ))
-                })?
-            }
-        };
-
-        let id_ = super::schema::entry_point_tracing_params::table
-            .inner_join(super::schema::entry_point::table)
-            .filter(super::schema::entry_point::target.eq(entry_point.entry_point.target.clone()))
-            .filter(
-                super::schema::entry_point::signature.eq(entry_point
-                    .entry_point
-                    .signature
-                    .clone()),
-            )
-            .filter(super::schema::entry_point_tracing_params::tracing_type.eq(tracing_type))
-            .filter(super::schema::entry_point_tracing_params::data.eq(data))
-            .select(super::schema::entry_point_tracing_params::id)
-            .first::<i64>(conn)
-            .await
-            .map_err(PostgresError::from)?;
-
-        Ok(id_)
-    }
-
     // Retrieves the database ids of an entry point tracing params (linked to the entrypoint id)
     // from a list of entry points ids and tracing params.
     pub(crate) async fn ids_by_entry_point_with_tracing_params(

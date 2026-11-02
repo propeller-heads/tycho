@@ -29,7 +29,10 @@ pub struct Account {
 }
 
 impl Account {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         chain: Chain,
         address: Address,
@@ -383,7 +386,7 @@ impl From<dto::AccountUpdate> for AccountDelta {
     }
 }
 
-#[expect(deprecated)] // creation_tx field on ResponseAccount is deprecated
+#[expect(deprecated, reason = "reads the deprecated creation_tx field of ResponseAccount")]
 impl From<dto::ResponseAccount> for Account {
     fn from(value: dto::ResponseAccount) -> Self {
         // Snapshot responses don't carry per-balance modify_tx; use zero as placeholder.

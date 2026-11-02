@@ -1,4 +1,7 @@
-#![allow(dead_code)] // TODO: Remove when implementation is complete
+#![expect(
+    dead_code,
+    reason = "metadata framework (TVL/limits generators, HTTP transport, provider and parser registries) is only partly wired into the hook DCI"
+)]
 
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 

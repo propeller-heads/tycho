@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO: Remove this
-#![allow(dead_code)] // TODO: Remove this
-
 use std::{collections::HashMap, slice};
 
 use deepsize::DeepSizeOf;
@@ -294,11 +291,6 @@ where
     ) -> Result<(), ExtractionError> {
         let mut failed_components = 0;
         let mut total_errors = 0;
-        let tx_map: HashMap<TxHash, Transaction> = block_changes
-            .txs_with_update
-            .iter()
-            .map(|tx_with_changes| (tx_with_changes.tx.hash.clone(), tx_with_changes.tx.clone()))
-            .collect();
 
         for (component, metadata) in component_metadata {
             let mut errors = Vec::new();
@@ -595,7 +587,6 @@ pub(super) enum ProcessingStatus {
 #[derive(Clone, Debug, DeepSizeOf)]
 pub(super) enum ProcessingError {
     MetadataError(String), // Before entrypoint generation
-    TracingError(String),  // During/after entrypoint generation
 }
 
 #[async_trait]
@@ -742,7 +733,7 @@ where
         // TODO: Redesign to process batches of components by orchestrator type
         // We need to be able to sort components by orchestrator and then process them in batches if
         // they have the same orchestrator.
-        for (component_id, (tx_hash, component)) in hook_components {
+        for (_, (_, component)) in hook_components {
             let needs_entrypoints = full_processing_ids.contains(&component.id);
             let orchestrator_span = span!(
                 Level::INFO,
@@ -916,7 +907,7 @@ mod tests {
                 Block, EntryPoint, EntryPointWithTracingParams, RPCTracerParams, TracingParams,
                 Transaction, TxWithChanges,
             },
-            protocol::{ProtocolComponent, ProtocolComponentState, ProtocolComponentStateDelta},
+            protocol::{ProtocolComponent, ProtocolComponentStateDelta},
             Address, Chain, ChangeType, TxHash,
         },
         storage::WithTotal,
@@ -1187,7 +1178,7 @@ mod tests {
         // Should only extract component with swap hooks
         assert_eq!(components.len(), 1);
         assert!(components.contains_key("comp1"));
-        let (tx_hash, component) = components.get("comp1").unwrap();
+        let (_, component) = components.get("comp1").unwrap();
         assert_eq!(component.id, "comp1");
     }
 
@@ -1270,7 +1261,7 @@ mod tests {
         // Should extract the mutated component with swap hooks
         assert_eq!(components.len(), 1);
         assert!(components.contains_key("existing_comp"));
-        let (tx_hash, component) = components.get("existing_comp").unwrap();
+        let (_, component) = components.get("existing_comp").unwrap();
         assert_eq!(component.id, "existing_comp");
     }
 
@@ -1348,7 +1339,7 @@ mod tests {
         // Should extract the component with balance changes that has swap hooks
         assert_eq!(components.len(), 1);
         assert!(components.contains_key("balance_comp"));
-        let (tx_hash, component) = components.get("balance_comp").unwrap();
+        let (_, component) = components.get("balance_comp").unwrap();
         assert_eq!(component.id, "balance_comp");
     }
 
@@ -1388,20 +1379,6 @@ mod tests {
         let hook_address = create_hook_address_with_swap_permissions();
         let component = create_hook_component("comp1", hook_address);
         let tx_hash = TxHash::from([1u8; 32]);
-
-        let block_changes = BlockChanges::new(
-            "test".to_string(),
-            Chain::Ethereum,
-            get_test_block(1),
-            1,
-            false,
-            vec![TxWithChanges {
-                tx: get_test_transaction(1),
-                protocol_components: HashMap::from([("comp1".to_string(), component.clone())]),
-                ..Default::default()
-            }],
-            Vec::new(),
-        );
 
         // Test component not in cache (needs full processing)
         let mut components_map = HashMap::new();
@@ -1867,42 +1844,6 @@ mod tests {
             }
         }
 
-        // Create initial component state based on provided data
-        fn create_test_component_state() -> ProtocolComponentState {
-            let mut attributes = HashMap::new();
-            attributes.insert(
-                "sqrt_price_x96".to_string(),
-                Bytes::from_str("0x01000000000000000000000000").unwrap(),
-            );
-            attributes
-                .insert("protocol_fees/zero2one".to_string(), Bytes::from_str("0x00").unwrap());
-            attributes.insert("tick".to_string(), Bytes::from_str("0x00").unwrap());
-            attributes.insert("liquidity".to_string(), Bytes::from_str("0x00").unwrap());
-            attributes.insert(
-                "balance_owner".to_string(),
-                Bytes::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap(),
-            );
-            attributes
-                .insert("protocol_fees/one2zero".to_string(), Bytes::from_str("0x00").unwrap());
-
-            let mut balances = HashMap::new();
-            balances.insert(
-                Address::from("0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"),
-                Bytes::from_str("0x00").unwrap(),
-            );
-            balances.insert(
-                Address::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
-                Bytes::from_str("0x00").unwrap(),
-            );
-
-            ProtocolComponentState {
-                component_id: "0x156c3163f4cabc00f83d2bfad9ee341aebc85a5bcb566c0ba8fc4358a1023166"
-                    .to_string(),
-                attributes,
-                balances,
-            }
-        }
-
         fn create_test_block(block_number: u64) -> Block {
             Block::new(
                 block_number,
@@ -1970,8 +1911,6 @@ mod tests {
             let mut generator_registry = MetadataGeneratorRegistry::new();
             let mut parser_registry = MetadataResponseParserRegistry::new();
             let mut provider_registry = ProviderRegistry::new();
-
-            let hook_address = Address::from("0x55dcf9455eee8fd3f5eed17606291272cde428a8");
 
             register_integrations(
                 &mut generator_registry,

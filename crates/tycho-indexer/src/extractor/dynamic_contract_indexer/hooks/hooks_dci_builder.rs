@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove this once the setup is fully implemented
-
 use std::sync::Arc;
 
 use tycho_common::{
@@ -96,6 +94,7 @@ where
     }
 
     /// Sets the RPC batch size limit
+    #[cfg(test)]
     pub(super) fn rpc_batch_size(mut self, batch_size: usize) -> Self {
         self.rpc_batch_size = batch_size;
         self

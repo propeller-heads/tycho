@@ -63,7 +63,10 @@ pub struct RocketpoolState {
 }
 
 impl RocketpoolState {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per field of the on-chain Rocket Pool state"
+    )]
     pub fn new(
         reth_supply: U256,
         total_eth: U256,

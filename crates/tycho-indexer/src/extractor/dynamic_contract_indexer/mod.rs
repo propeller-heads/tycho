@@ -3,7 +3,7 @@ pub(super) mod dci;
 pub(super) mod hooks;
 
 enum PausingReason {
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "discriminant 1 is part of the stored pausing encoding")]
     Substreams,
     TracingError,
     MetadataError,

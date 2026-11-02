@@ -50,7 +50,7 @@ pub struct TraceCallDetector {
     pub settlement_contract: Address,
 }
 
-#[expect(deprecated)]
+#[expect(deprecated, reason = "implements the analyzer for the deprecated TraceCallDetector")]
 #[async_trait::async_trait]
 impl TokenAnalyzer for TraceCallDetector {
     type Error = String;
@@ -77,7 +77,7 @@ enum TraceRequestType {
     DoubleTransfer(U256),
 }
 
-#[expect(deprecated)]
+#[expect(deprecated, reason = "implements the deprecated TraceCallDetector")]
 impl TraceCallDetector {
     pub fn new(
         rpc: &EthereumRpcClient,
@@ -410,7 +410,7 @@ fn ensure_transaction_ok_and_get_gas(trace: &TraceResults) -> Result<Result<U256
 }
 
 #[cfg(test)]
-#[expect(deprecated)]
+#[expect(deprecated, reason = "tests the deprecated TraceCallDetector")]
 mod tests {
     use std::{str::FromStr, sync::Arc};
 

@@ -774,7 +774,7 @@ impl PostgresGateway {
     }
 
     // Gets all protocol states from the db filtered by chain, component ids and/or protocol system.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     #[instrument(level = Level::DEBUG, skip(self, ids, conn))]
     pub async fn get_protocol_states(
         &self,

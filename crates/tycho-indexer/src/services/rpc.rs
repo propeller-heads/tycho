@@ -1854,11 +1854,13 @@ mod tests {
             .version
             .timestamp
             .unwrap()
+            .and_utc()
             .timestamp_millis() -
             result
                 .version
                 .timestamp
                 .unwrap()
+                .and_utc()
                 .timestamp_millis();
 
         // Allowing a small time delta (1 second)
@@ -2959,7 +2961,10 @@ mod tests {
     }
 
     /// Helper used to make tracing results comparisons deterministic.
-    #[expect(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn normalize_tracing_result(
         result: &dto::TracingResult,
     ) -> (Vec<(Bytes, dto::AddressStorageLocation)>, Vec<(Bytes, Vec<Bytes>)>) {
@@ -2993,7 +2998,10 @@ mod tests {
         });
     }
 
-    #[expect(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "test helper returning several parallel collections"
+    )]
     fn get_add_entry_point_test_data(
         block_hash: Bytes,
         component_id: ComponentId,

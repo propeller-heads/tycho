@@ -194,8 +194,7 @@ pub enum BlockOrTimestamp {
     Timestamp(NaiveDateTime),
 }
 
-// TODO: remove once deprecated chain field is removed from VersionParam
-#[expect(deprecated)]
+#[expect(deprecated, reason = "reads the deprecated chain field of BlockParam")]
 impl TryFrom<&dto::VersionParam> for BlockOrTimestamp {
     type Error = anyhow::Error;
 

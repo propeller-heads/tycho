@@ -57,7 +57,10 @@ where
 {
     /// `caller` sets the simulation's `tx.origin`/`msg.sender`; `None` defaults to
     /// `EXTERNAL_ACCOUNT`.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per argument of the adapter contract call"
+    )]
     pub fn price(
         &self,
         pair_id: &str,
@@ -92,7 +95,10 @@ where
         Ok(price)
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per argument of the adapter contract call"
+    )]
     pub fn swap(
         &self,
         pair_id: &str,

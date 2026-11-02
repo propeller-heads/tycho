@@ -1,4 +1,7 @@
-#![allow(deprecated)]
+#![expect(
+    deprecated,
+    reason = "reads and writes the deprecated balance_owner field of EVMPoolState"
+)]
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
@@ -234,7 +237,7 @@ where
     /// simulate a protocol-agnostic transaction.
     ///
     /// See struct definition of `EVMPoolState` for attribute explanations.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one parameter per field of the pool state")]
     pub fn new(
         id: String,
         tokens: Vec<Bytes>,

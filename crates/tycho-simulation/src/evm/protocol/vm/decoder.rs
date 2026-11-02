@@ -28,7 +28,10 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for EVMPoolState<PreCache
     /// an `EVMPoolState`.
     ///
     /// Errors with a `InvalidSnapshotError`.
-    #[expect(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "indexed snapshots may carry a balance_owner, which only the deprecated builder setter accepts"
+    )]
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         _block: BlockHeader,

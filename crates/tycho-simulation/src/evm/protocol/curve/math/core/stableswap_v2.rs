@@ -86,7 +86,10 @@ pub fn get_y(i: usize, j: usize, x_new: U256, xp: &[U256], d: U256, amp: U256) -
     let mut s_prime = U256::ZERO;
     let mut c = d;
 
-    #[expect(clippy::needless_range_loop)]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "index k is compared against the swap indices, mirroring the Curve contract loop"
+    )]
     for k in 0..n_coins {
         let x_k = if k == i {
             x_new

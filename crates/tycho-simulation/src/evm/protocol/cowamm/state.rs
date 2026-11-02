@@ -60,7 +60,10 @@ impl CowAMMState {
     ///
     /// # Returns
     /// A new `CowAMMState` with token states initialized.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per field of the on-chain pool state"
+    )]
     pub fn new(
         address: Bytes,
         token_a_addr: Bytes,

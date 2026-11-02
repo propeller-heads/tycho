@@ -41,7 +41,10 @@ impl ComponentFilter {
     ///
     /// * `min_tvl` - The minimum TVL required for a component to be tracked. This is denominated in
     ///   native token of the chain.
-    #[expect(non_snake_case)] // for backwards compatibility
+    #[expect(
+        non_snake_case,
+        reason = "constructor-style name mirrors the enum variant it replaces in the public API"
+    )]
     #[deprecated(since = "0.9.2", note = "Please use with_tvl_range instead")]
     pub fn MinimumTVL(min_tvl: f64) -> ComponentFilter {
         ComponentFilter {
@@ -82,7 +85,10 @@ impl ComponentFilter {
     ///
     /// * `ids` - A vector of component IDs to include in the filter. Only components with these IDs
     ///   will be tracked.
-    #[expect(non_snake_case)] // for backwards compatibility
+    #[expect(
+        non_snake_case,
+        reason = "constructor-style name mirrors the enum variant it replaces in the public API"
+    )]
     pub fn Ids(ids: Vec<ComponentId>) -> ComponentFilter {
         ComponentFilter {
             variant: ComponentFilterVariant::Ids(

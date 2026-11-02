@@ -162,7 +162,10 @@ impl ResolvedFee {
 /// before any other on the pool), while the default quotes the worse of the initial and dynamic
 /// fees so the output is never over-quoted. Once the pool has been touched in the execution
 /// block, position is a known fact and the flag has no effect.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inputs mirror the on-chain dynamic fee module and pool state"
+)]
 pub(crate) fn get_dynamic_fee(
     dfc: &DynamicFeeConfig,
     default_base_fee: u32,
@@ -221,7 +224,10 @@ pub(crate) fn get_dynamic_fee(
 }
 
 /// The dynamic branch of the module: base fee plus the TWAP-deviation component, capped.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inputs mirror the on-chain dynamic fee module and pool state"
+)]
 fn resolve_dynamic_fee(
     dfc: &DynamicFeeConfig,
     base_fee: u32,

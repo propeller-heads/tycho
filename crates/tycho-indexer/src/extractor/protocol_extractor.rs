@@ -100,7 +100,10 @@ where
     T: TokenPreProcessor,
     E: ExtractorExtension,
 {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "takes each dependency of the extractor as a separate argument"
+    )]
     pub async fn new(
         gateway: G,
         database_insert_batch_size: usize,

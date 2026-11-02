@@ -46,7 +46,10 @@ impl<T> ProtocolComponent<T>
 where
     T: Into<Address> + Clone,
 {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "public constructor taking one argument per field"
+    )]
     pub fn new(
         id: &str,
         protocol_system: &str,
@@ -270,7 +273,7 @@ impl QualityRange {
         Self { min: Some(min), max: None }
     }
 
-    #[expect(non_snake_case)]
+    #[expect(non_snake_case, reason = "constructor named after the Option::None it stands for")]
     pub fn None() -> Self {
         Self { min: None, max: None }
     }

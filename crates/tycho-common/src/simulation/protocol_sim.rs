@@ -402,8 +402,7 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
     /// * `Err(SimulationError)` - If:
     ///   - The calculation encounters numerical issues
     ///   - The method is not implemented for this protocol
-    #[expect(unused)]
-    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+    fn query_pool_swap(&self, _params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
         Err(SimulationError::FatalError("query_pool_swap not implemented".into()))
     }
 
@@ -494,7 +493,7 @@ where
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        #[expect(deprecated)]
+        #[expect(deprecated, reason = "implements the deprecated get_amount_out on top of quote")]
         self.quote(
             QuoteParams::fixed_in(&token_in.address, &token_out.address, amount_in)?
                 .with_new_state(),
@@ -548,7 +547,10 @@ where
                 }
             }
         };
-        #[expect(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "implements the deprecated query_pool_swap on top of query_swap"
+        )]
         self.query_swap(swap::QuerySwapParams::new(
             &params.token_in.address,
             &params.token_out.address,
@@ -576,7 +578,10 @@ where
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
-        #[expect(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "to_protocol_sim is deprecated for consumers but is the clone implementation here"
+        )]
         self.to_protocol_sim()
     }
 

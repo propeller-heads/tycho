@@ -144,8 +144,11 @@ pub struct ProtocolComponent {
 }
 
 impl ProtocolComponent {
-    #[expect(deprecated)]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        deprecated,
+        reason = "fills the deprecated address field so consumers still reading it get a value"
+    )]
+    #[expect(clippy::too_many_arguments, reason = "one parameter per field of the component")]
     pub fn new(
         id: Bytes,
         protocol_system: String,

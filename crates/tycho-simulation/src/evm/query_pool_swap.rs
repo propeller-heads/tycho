@@ -836,7 +836,10 @@ mod tests {
                 alloy::primitives::Address::from_str("0xA2C5C98A892fD6656a7F39A2f63228C0Bc846270")
                     .unwrap();
 
-            #[expect(deprecated)]
+            #[expect(
+                deprecated,
+                reason = "the Balancer V2 vault holds the pool balances and is set through the deprecated balance_owner setter"
+            )]
             EVMPoolStateBuilder::new(pool_id, tokens, adapter_address)
                 .balances(balances)
                 .balance_owner(

@@ -676,7 +676,10 @@ async fn create_indexing_tasks(
     Ok((supervisor_tasks, vec![server_task, shutdown_task]))
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the process-wide dependencies of every extractor"
+)]
 async fn build_all_extractors(
     config: &ExtractorConfigs,
     chains: &[Chain],

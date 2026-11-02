@@ -1,5 +1,8 @@
 //! <https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/TychoRouterV3.sol>
-#![allow(clippy::too_many_arguments)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "functions mirror the Solidity entry points of TychoRouterV3, whose signatures are fixed by the ABI"
+)]
 use crate::{
     address::Address,
     error::Error,

@@ -123,7 +123,7 @@ pub struct ProtocolStreamProcessor {
 }
 
 impl ProtocolStreamProcessor {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "one argument per stream setting")]
     pub fn new(
         chain: Chain,
         tycho_url: String,

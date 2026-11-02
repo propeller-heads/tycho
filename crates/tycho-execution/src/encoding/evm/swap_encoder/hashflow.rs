@@ -18,7 +18,10 @@ use crate::encoding::{
 pub struct HashflowSwapEncoder {
     executor_address: Bytes,
     runtime_handle: Handle,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 

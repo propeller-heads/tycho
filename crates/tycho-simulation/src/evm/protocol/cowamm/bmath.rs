@@ -249,7 +249,6 @@ pub fn calculate_out_given_in(
 /// wO = token_weight_out                          ( 1 - sF )
 /// sF = swap_fee
 /// ```
-#[expect(clippy::disallowed_names)]
 pub fn calculate_in_given_out(
     token_balance_in: U256,
     token_weight_in: U256,
@@ -261,9 +260,9 @@ pub fn calculate_in_given_out(
     let weight_ratio = bdiv(token_weight_out, token_weight_in)?;
     let diff = bsub(token_balance_out, token_amount_out)?;
     let y = bdiv(token_balance_out, diff)?;
-    let mut foo = bpow(y, weight_ratio)?;
-    foo = bsub(foo, BONE)?;
+    let mut pow_term = bpow(y, weight_ratio)?;
+    pow_term = bsub(pow_term, BONE)?;
     let mut token_amount_in = bsub(BONE, swap_fee)?;
-    token_amount_in = bdiv(bmul(token_balance_in, foo)?, token_amount_in)?;
+    token_amount_in = bdiv(bmul(token_balance_in, pow_term)?, token_amount_in)?;
     Ok(token_amount_in)
 }

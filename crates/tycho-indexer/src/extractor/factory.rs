@@ -87,7 +87,10 @@ pub struct ExtractorConfig {
 }
 
 impl ExtractorConfig {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor takes one argument per field of the extractor YAML config"
+    )]
     pub fn new(
         name: String,
         chain: Chain,
@@ -184,7 +187,10 @@ impl ExtractorFactory {
     /// must pass one shared, already populated instance to every factory on the chain instead
     /// of populating one per extractor. Both `chain_state` and the cache are reused across all
     /// subsequent restarts.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "wires every dependency of an extractor; the dependencies are distinct and owned by the caller"
+    )]
     pub async fn create(
         config: ExtractorConfig,
         endpoint_url: String,

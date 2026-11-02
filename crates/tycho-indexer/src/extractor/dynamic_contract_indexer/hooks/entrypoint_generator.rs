@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove this
-
 // This module provides hook entrypoint generation for Uniswap V4 hooks.
 
 use std::collections::{BTreeMap, HashMap};
@@ -52,10 +50,6 @@ const ACTION_SWAP_EXACT_IN_SINGLE: u8 = 6; // SWAP_EXACT_IN_SINGLE = 0x06
 const ACTION_SETTLE_ALL: u8 = 12; // SETTLE_ALL = 0x0c
 const ACTION_TAKE_ALL: u8 = 15; // TAKE_ALL = 0x0f
 
-// V4Router function selector for execute(bytes calldata params)
-// This is the keccak256 hash of "execute(bytes)" truncated to 4 bytes: 0x09c5eabe
-const EXECUTE_FUNCTION_SELECTOR: [u8; 4] = [0x09, 0xc5, 0xea, 0xbe];
-
 sol! {
     struct PoolKey {
         address currency0;
@@ -91,6 +85,10 @@ pub(super) struct HookEntrypointConfig {
     router_address: Option<Address>,
     /// Sender address for transactions. If not provided, uses a default address.
     /// Could be defined by a custom Hook Orchestrator.
+    #[expect(
+        dead_code,
+        reason = "accepted from the config but not applied to generated entrypoints"
+    )]
     sender: Option<Address>,
     /// Router bytecode to use for state overrides. If not provided, uses V4MiniRouter bytecode.
     router_code: Option<Bytes>,
@@ -217,6 +215,10 @@ fn get_storage_slot_index_at_key(
 #[derive(Debug, PartialEq, Copy, Clone)]
 enum ContractCompiler {
     Solidity,
+    #[expect(
+        dead_code,
+        reason = "storage layout for Vyper contracts is supported but no ERC6909 token uses it"
+    )]
     Vyper,
 }
 
@@ -250,7 +252,9 @@ impl ContractCompiler {
 }
 struct ERC6909Overwrites {
     balance_of_slot: SlotId,
+    #[expect(dead_code, reason = "only the balance slot is overridden when simulating")]
     operator_slot: SlotId,
+    #[expect(dead_code, reason = "only the balance slot is overridden when simulating")]
     allowance_slot: SlotId,
 }
 
@@ -285,6 +289,10 @@ pub(super) enum EstimationMethod {
     /// Prefer limits for estimation (if available)
     Limits,
     /// Prefer balances for estimation (if available)
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests construct a balances-first estimator")
+    )]
     Balances,
 }
 
@@ -306,6 +314,7 @@ impl DefaultSwapAmountEstimator {
     }
 
     /// Create an estimator that prefers balances
+    #[cfg(test)]
     pub(super) fn with_balances() -> Self {
         Self::new(EstimationMethod::Balances)
     }

@@ -56,9 +56,7 @@ where
             if header_value == required_key.as_str() {
                 let fut = self.service.call(req);
 
-                // More problems occur if we try to fix this warning
-                #[expect(clippy::redundant_async_block)]
-                return Box::pin(async move { fut.await });
+                return Box::pin(fut);
             }
         }
 

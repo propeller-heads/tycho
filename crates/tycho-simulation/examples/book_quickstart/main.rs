@@ -843,7 +843,10 @@ fn format_price_ratios(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input of the solution; a struct would only be used here"
+)]
 fn create_solution(
     component: ProtocolComponent,
     state: Arc<dyn ProtocolSim>,

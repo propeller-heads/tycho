@@ -71,9 +71,12 @@ impl SubstreamsEndpoint {
             .map(|token| token.as_str().try_into())
             .transpose()?;
 
-        // This is a large error defined in tonic API, so we can't avoid the lint error. Fortunately
-        // we only use it when creating the stream so it's acceptable performance wise.
-        #[expect(clippy::result_large_err)]
+        // The interceptor's error type is tonic's `Status`, which is large; it is only built once
+        // when the stream is created.
+        #[expect(
+            clippy::result_large_err,
+            reason = "tonic's interceptor closure must return `Result<_, tonic::Status>`"
+        )]
         let mut client = StreamClient::with_interceptor(
             self.channel.clone(),
             move |mut r: tonic::Request<()>| {

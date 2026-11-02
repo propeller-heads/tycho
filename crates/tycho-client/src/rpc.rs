@@ -2013,7 +2013,10 @@ mod tests {
     // Dummy implementation of `get_protocol_states_paginated` for backwards compatibility testing
     // purposes
     impl MockRPCClient {
-        #[expect(clippy::too_many_arguments)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "mirrors the parameters of the paginated RPC method it records calls for"
+        )]
         async fn test_get_protocol_states_paginated<T>(
             &self,
             chain: Chain,

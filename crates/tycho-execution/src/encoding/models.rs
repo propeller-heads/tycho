@@ -157,7 +157,10 @@ pub struct Solution {
 }
 
 impl Solution {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field of the solution; public constructor"
+    )]
     pub fn new(
         sender: Bytes,
         receiver: Bytes,

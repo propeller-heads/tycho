@@ -42,7 +42,10 @@ pub struct LiquoriceSwapEncoder {
     settlement_address: Address,
     balance_manager_address: Address,
     runtime_handle: Handle,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "owns the runtime behind `runtime_handle`; dropping it would shut the runtime down"
+    )]
     runtime: SafeRuntime,
 }
 

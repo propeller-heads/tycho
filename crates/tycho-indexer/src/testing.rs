@@ -58,7 +58,11 @@ mod gateway_mock {
         }
 
         impl EntryPointGateway for Gateway {
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn insert_entry_points<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 entry_points: &'life1 HashMap<ComponentId, HashSet<EntryPoint>>,
@@ -74,7 +78,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn insert_entry_point_tracing_params<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 entry_points_params: &'life1 HashMap<
@@ -93,7 +101,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn get_entry_points<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 filter: EntryPointFilter,
@@ -114,7 +126,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn get_entry_points_tracing_params<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 filter: EntryPointFilter,
@@ -135,7 +151,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn upsert_traced_entry_points<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 traced_entry_points: &'life1 [TracedEntryPoint],
@@ -151,7 +171,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn get_traced_entry_points<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 entry_points: &'life1 HashSet<EntryPointId>,
@@ -171,7 +195,11 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
+            #[allow(
+                clippy::type_complexity,
+                clippy::type_repetition_in_bounds,
+                reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`"
+            )]
             fn get_traced_entry_points_by_component<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 filter: EntryPointFilter,
@@ -209,7 +237,7 @@ mod gateway_mock {
                 'life2: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_contracts<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -314,7 +342,7 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_account_balances<'life0, 'life1, 'life2, 'life3, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -337,7 +365,7 @@ mod gateway_mock {
         }
 
         impl ProtocolGateway for Gateway {
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_protocol_components<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -362,7 +390,7 @@ mod gateway_mock {
                 'life4: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_token_owners<'life0, 'life1, 'life2, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -430,7 +458,7 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_protocol_states<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -471,7 +499,7 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_tokens<'life0, 'life1, 'life2, 'life3, 'async_trait>(
                 &'life0 self,
                 chain: Chain,
@@ -582,7 +610,7 @@ mod gateway_mock {
                 'life3: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_component_balances<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -603,7 +631,7 @@ mod gateway_mock {
                 'life4: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_token_prices<'life0, 'life1, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -636,7 +664,7 @@ mod gateway_mock {
                 'life2: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_protocol_systems<'life0, 'life1, 'life2, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
@@ -654,7 +682,7 @@ mod gateway_mock {
                 'life2: 'async_trait,
                 Self: 'async_trait;
 
-            #[allow(clippy::type_complexity)]
+            #[allow(clippy::type_complexity, reason = "signature expanded from `async_trait` inside `mock!` input, which does not accept `expect`")]
             fn get_component_tvls<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,

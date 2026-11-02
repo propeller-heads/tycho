@@ -136,7 +136,10 @@ pub struct StakingState {
 }
 
 impl LidoV4State {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per field of the on-chain Lido state"
+    )]
     pub fn new(
         execution_block_number: u64,
         total_shares: U256,
