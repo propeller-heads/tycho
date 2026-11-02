@@ -55,9 +55,7 @@ impl DynamicFeeConfig {
     /// An absent or unsupported `dynamic_fee_module` marker yields the default config, whose
     /// `base_fee == 0` makes `get_dynamic_fee` fall back to the pool's static `default_fee`. Only
     /// errors when a supported marker is present but a dynamic-fee attribute is missing.
-    pub(crate) fn from_attributes(
-        attributes: &HashMap<String, Bytes>,
-    ) -> Result<Self, &'static str> {
+    pub(crate) fn from_attributes(attributes: &HashMap<String, Bytes>) -> Result<Self, String> {
         if !attributes
             .get(DYNAMIC_FEE_MODULE_ATTRIBUTE)
             .is_some_and(|module| is_supported_dynamic_fee_module(module))
@@ -66,31 +64,36 @@ impl DynamicFeeConfig {
         }
 
         Ok(Self {
-            base_fee: u32::from(
+            base_fee: u32::try_from(
                 attributes
                     .get("dfc_baseFee")
                     .ok_or("missing dynamic fee attribute `dfc_baseFee`")?
                     .clone(),
-            ),
-            fee_cap: u32::from(
+            )
+            .map_err(|err| err.to_string())?,
+            fee_cap: u32::try_from(
                 attributes
                     .get("dfc_feeCap")
                     .ok_or("missing dynamic fee attribute `dfc_feeCap`")?
                     .clone(),
-            ),
-            scaling_factor: u64::from(
+            )
+            .map_err(|err| err.to_string())?,
+            scaling_factor: u64::try_from(
                 attributes
                     .get("dfc_scalingFactor")
                     .ok_or("missing dynamic fee attribute `dfc_scalingFactor`")?
                     .clone(),
-            ),
+            )
+            .map_err(|err| err.to_string())?,
             initial_fee_enabled: attributes
                 .get("dfc_initialFeeEnabled")
                 .is_some_and(|value| value.iter().any(|byte| *byte != 0)),
             initial_fee: attributes
                 .get("dfc_initialFee")
                 .cloned()
-                .map(u32::from)
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|err| err.to_string())?
                 .unwrap_or_default(),
         })
     }
@@ -102,20 +105,21 @@ impl DynamicFeeConfig {
     pub(crate) fn update_from_attributes(
         &mut self,
         attributes: &HashMap<String, Bytes>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         if attributes.contains_key(DYNAMIC_FEE_MODULE_ATTRIBUTE) {
             *self = Self::from_attributes(attributes)?;
             return Ok(());
         }
 
         if let Some(base_fee) = attributes.get("dfc_baseFee") {
-            self.base_fee = u32::from(base_fee.clone());
+            self.base_fee = u32::try_from(base_fee.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(fee_cap) = attributes.get("dfc_feeCap") {
-            self.fee_cap = u32::from(fee_cap.clone());
+            self.fee_cap = u32::try_from(fee_cap.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(scaling_factor) = attributes.get("dfc_scalingFactor") {
-            self.scaling_factor = u64::from(scaling_factor.clone());
+            self.scaling_factor =
+                u64::try_from(scaling_factor.clone()).map_err(|err| err.to_string())?;
         }
         if let Some(initial_fee_enabled) = attributes.get("dfc_initialFeeEnabled") {
             self.initial_fee_enabled = initial_fee_enabled
@@ -123,7 +127,7 @@ impl DynamicFeeConfig {
                 .any(|byte| *byte != 0);
         }
         if let Some(initial_fee) = attributes.get("dfc_initialFee") {
-            self.initial_fee = u32::from(initial_fee.clone());
+            self.initial_fee = u32::try_from(initial_fee.clone()).map_err(|err| err.to_string())?;
         }
         Ok(())
     }

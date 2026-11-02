@@ -186,7 +186,7 @@ impl ProtocolSim for EkuboV3State {
             .updated_attributes
             .get("liquidity")
         {
-            self.set_liquidity(liquidity.clone().into());
+            self.set_liquidity(liquidity.clone().try_into()?);
         }
 
         if let Some(sqrt_price) = delta

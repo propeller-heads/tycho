@@ -168,6 +168,18 @@ pub fn fill_result(
     }
 }
 
+/// The price of the next input unit of `levels` once `filled` atomic units went in, or the
+/// recoverable error of a ladder with nothing left.
+pub fn marginal_price(
+    levels: &Levels,
+    filled: &BigUint,
+    in_decimals: u32,
+) -> Result<f64, SimulationError> {
+    levels
+        .marginal_price(to_human(filled, in_decimals))
+        .ok_or_else(|| SimulationError::RecoverableError("No liquidity".into()))
+}
+
 /// Refuses a swap of nothing, which a ladder would otherwise report as an amount fully
 /// consumed — a fill of zero that reads as a swap that worked.
 pub fn require_positive_amount(amount_in: &BigUint) -> Result<(), SimulationError> {

@@ -477,10 +477,11 @@ mod tests {
                 &tokens[&usdc],
             )
             .unwrap();
+        // A hundred USDC the other way round is another direction, not more of the same swap.
         let second = swap.new_state.get_amount_out(
-            num_bigint::BigUint::from(10u64).pow(17),
-            &tokens[&weth],
+            num_bigint::BigUint::from(10u64).pow(8),
             &tokens[&usdc],
+            &tokens[&weth],
         );
         assert!(
             matches!(
