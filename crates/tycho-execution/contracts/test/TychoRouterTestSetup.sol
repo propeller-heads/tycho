@@ -343,8 +343,7 @@ contract TychoRouterTestSetup is
         // Deployed last so the other executors keep their addresses.
         bool supportsTessera = block.chainid == 8453;
         if (supportsTessera) {
-            tesseraExecutor =
-                new TesseraExecutor(0x55555522005BcAE1c2424D474BfD5ed477749E3e);
+            tesseraExecutor = new TesseraExecutor(TESSERA_SWAP);
         }
         address[] memory executors = new address[](
             30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)

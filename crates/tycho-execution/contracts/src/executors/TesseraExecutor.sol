@@ -19,6 +19,16 @@ error TesseraExecutor__ZeroTesseraSwapAddress();
 error TesseraExecutor__InvalidDataLength();
 error TesseraExecutor__AmountTooLarge();
 
+/// @title TesseraExecutor
+/// @notice Swaps exact-in on Tessera through its `TesseraSwap` router.
+/// @dev Swap data is `tokenIn ++ tokenOut`, packed, exactly 40 bytes; any
+/// other length reverts with `TesseraExecutor__InvalidDataLength`, and an
+/// `amountIn` above `int256.max` with `TesseraExecutor__AmountTooLarge`.
+/// TesseraSwap pulls the input from its caller (the router, which approves it
+/// for `amountIn`) into Tessera's treasury, and the treasury pays the output
+/// straight to `receiver`. TesseraSwap prices the swap for both its caller and
+/// `tx.origin`, and the pair scans the caller's code on every swap, which costs
+/// about 2M gas when the caller is the router.
 contract TesseraExecutor is IExecutor {
     ITesseraSwap public immutable tesseraSwap;
 
@@ -53,7 +63,8 @@ contract TesseraExecutor is IExecutor {
         // amountIn is checked above against int256.max.
         // forge-lint: disable-next-line(unsafe-typecast)
         int256 amountSpecified = int256(amountIn);
-        // Empty swapData selects TesseraSwap's default fee tag.
+        // The pair reads swapData's first byte as a fee tag and charges that
+        // tag's fee; empty swapData selects tag 0.
         tesseraSwap.tesseraSwapWithAllowances(
             tokenIn, tokenOut, amountSpecified, 0, receiver, ""
         );

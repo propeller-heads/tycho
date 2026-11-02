@@ -80,6 +80,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    "pamm:tessera",
 ];
 
 /// Whether the router must approve the protocol before swapping (see
@@ -494,9 +495,11 @@ mod tests {
         assert_eq!(gas, BigUint::from(460_000u64));
     }
 
-    #[test]
-    fn test_single_transfer_from_with_approval() {
-        let solution = make_solution(vec![make_swap("ring_swap_v2")]);
+    #[rstest]
+    #[case::ring_swap_v2("ring_swap_v2")]
+    #[case::tessera("pamm:tessera")]
+    fn test_single_transfer_from_with_approval(#[case] protocol_system: &str) {
+        let solution = make_solution(vec![make_swap(protocol_system)]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS

@@ -10,7 +10,6 @@ import {
 import {TransferManager} from "../../src/TransferManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-address constant TESSERA_SWAP = 0x55555522005BcAE1c2424D474BfD5ed477749E3e;
 uint256 constant TESSERA_FORK_BLOCK = 50_548_423;
 
 interface ITesseraQuote {
@@ -94,7 +93,8 @@ contract TesseraExecutorTest is TestUtils, Constants {
         deal(BASE_WETH, address(executor), amountIn);
         vm.prank(address(executor));
         IERC20(BASE_WETH).approve(TESSERA_SWAP, amountIn);
-        // TesseraSwap quotes for its caller; quote as the executor.
+        // TesseraSwap quotes for its caller and tx.origin; quote as the
+        // executor with the test's default origin.
         vm.prank(address(executor));
         (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
             .tesseraSwapViewAmounts(BASE_WETH, BASE_USDC, int256(amountIn));
@@ -134,7 +134,8 @@ contract TesseraRouterTest is TychoRouterTestSetup {
         address tokenOut,
         uint256 amountIn
     ) internal {
-        // TesseraSwap quotes for its caller, which in a swap is the router.
+        // TesseraSwap quotes for its caller and tx.origin; in a swap the caller
+        // is the router.
         vm.prank(tychoRouterAddr);
         (, uint256 quote) = ITesseraQuote(TESSERA_SWAP)
             .tesseraSwapViewAmounts(tokenIn, tokenOut, int256(amountIn));
