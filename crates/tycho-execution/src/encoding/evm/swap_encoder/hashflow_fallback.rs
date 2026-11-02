@@ -42,9 +42,9 @@ impl SwapEncoder for HashflowFallbackSwapEncoder {
                      protocol_specific_addresses.json"
                 ))
             })?;
-        let fallback_router = Bytes::from_str(fallback_router).map_err(|_| {
+        let fallback_router = Bytes::from_str(fallback_router).map_err(|e| {
             EncodingError::FatalError(format!(
-                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}"
+                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}: {e}"
             ))
         })?;
         let hashflow = HashflowSwapEncoder::new(executor_address.clone(), chain, None)?;

@@ -1176,6 +1176,10 @@ mod tests {
                             response
                         );
 
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the mock server may lose the client before the reply is written"
+                        )]
                         let _ = socket
                             .write_all(http_response.as_bytes())
                             .await;

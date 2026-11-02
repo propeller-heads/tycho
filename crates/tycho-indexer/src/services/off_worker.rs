@@ -345,7 +345,7 @@ mod tests {
             pool.run(move || {
                 released
                     .recv_timeout(Duration::from_secs(2))
-                    .ok();
+                    .expect("test releases the job within 2s");
             }),
         )
         .await;
@@ -366,7 +366,7 @@ mod tests {
                 pool.run(move || {
                     released
                         .recv_timeout(Duration::from_secs(2))
-                        .ok();
+                        .expect("test releases the job within 2s");
                 })
                 .await
             }

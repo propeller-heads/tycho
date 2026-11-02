@@ -43,7 +43,7 @@ impl SwapEncoder for UniswapV3SwapEncoder {
 
         let zero_to_one = Self::get_zero_to_one(token_in_address, token_out_address);
         let component_id = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid USV3 component id".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid USV3 component id: {e}")))?;
         let pool_fee_bytes = get_static_attribute(swap, "fee")?;
 
         let pool_fee_u24 = pad_or_truncate_to_size::<3>(&pool_fee_bytes);

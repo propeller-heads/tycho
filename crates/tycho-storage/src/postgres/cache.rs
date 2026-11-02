@@ -450,6 +450,10 @@ impl DBCacheWriteExecutor {
         }
 
         // Forward the result to the sender
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the caller may have stopped waiting for the result; the write has been executed either way"
+        )]
         let _ = new_db_tx
             .tx
             .send(res.map_err(Into::into));
@@ -686,8 +690,10 @@ impl CachedGateway {
                             .send(DBCacheMessage::Write(db_txn))
                             .await
                             .expect("Send message to receiver ok");
-                        rx.await
-                            .map_err(|_| StorageError::WriteCacheGoneAway())??;
+                        rx.await.map_err(|_closed| {
+                            error!("Write cache dropped the result channel");
+                            StorageError::WriteCacheGoneAway()
+                        })??;
 
                         Ok::<(), StorageError>(())
                     }

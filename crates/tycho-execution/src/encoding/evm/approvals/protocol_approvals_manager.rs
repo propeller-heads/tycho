@@ -55,8 +55,10 @@ impl ProtocolApprovalsManager {
         })?;
         match output {
             Ok(response) => {
-                let allowance: U256 = U256::abi_decode(&response).map_err(|_| {
-                    EncodingError::FatalError("Failed to decode response for allowance".to_string())
+                let allowance: U256 = U256::abi_decode(&response).map_err(|e| {
+                    EncodingError::FatalError(format!(
+                        "Failed to decode response for allowance: {e}"
+                    ))
                 })?;
 
                 if allowance < U256::MAX / U256::from(2) {

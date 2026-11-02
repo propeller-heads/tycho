@@ -106,8 +106,9 @@ impl Permit2 {
         let (handle, runtime) = create_encoding_runtime()?;
         let client = on_blocking_thread(|| handle.block_on(get_client()))??;
         Ok(Self {
-            address: Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-                .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?,
+            address: Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3").map_err(
+                |e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")),
+            )?,
             client,
             runtime_handle: handle,
             runtime,
@@ -135,10 +136,10 @@ impl Permit2 {
         })?;
         match output {
             Ok(response) => {
-                let allowance: Allowance = Allowance::abi_decode(&response).map_err(|_| {
-                    EncodingError::FatalError(
-                        "Failed to decode response for permit2 allowance".to_string(),
-                    )
+                let allowance: Allowance = Allowance::abi_decode(&response).map_err(|e| {
+                    EncodingError::FatalError(format!(
+                        "Failed to decode response for permit2 allowance: {e}"
+                    ))
                 })?;
                 Ok(allowance)
             }
@@ -155,8 +156,8 @@ impl Permit2 {
         token: &Bytes,
         amount: &BigUint,
     ) -> Result<models::PermitSingle, EncodingError> {
-        let current_time = u64::try_from(Utc::now().timestamp()).map_err(|_| {
-            EncodingError::FatalError("System clock is before the Unix epoch".into())
+        let current_time = u64::try_from(Utc::now().timestamp()).map_err(|e| {
+            EncodingError::FatalError(format!("System clock is before the Unix epoch: {e}"))
         })?;
 
         let (_, _, nonce) = self.get_existing_allowance(owner, spender, token)?;
@@ -290,7 +291,7 @@ mod tests {
         signer: PrivateKeySigner,
     ) -> Result<Signature, EncodingError> {
         let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-            .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
         let domain = eip712_domain! {
             name: "Permit2",
             chain_id: chain_id,
@@ -319,15 +320,15 @@ mod tests {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string();
 
         let pk = B256::from_str(&anvil_private_key)
-            .map_err(|_| {
-                EncodingError::FatalError(
-                    "Failed to convert swapper private key to B256".to_string(),
-                )
+            .map_err(|e| {
+                EncodingError::FatalError(format!(
+                    "Failed to convert swapper private key to B256: {e}"
+                ))
             })
             .unwrap();
         let signer = PrivateKeySigner::from_bytes(&pk)
-            .map_err(|_| {
-                EncodingError::FatalError("Failed to create signer from private key".to_string())
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Failed to create signer from private key: {e}"))
             })
             .unwrap();
         let permit2 = Permit2::new().expect("Failed to create Permit2");

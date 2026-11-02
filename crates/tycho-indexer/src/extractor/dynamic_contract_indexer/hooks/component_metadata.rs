@@ -496,8 +496,8 @@ impl MetadataGeneratorRegistry {
             {
                 Some(hook_identifier_bytes) => {
                     let identifier =
-                        String::from_utf8(hook_identifier_bytes.to_vec()).map_err(|_| {
-                            MetadataError::UnknownError("Invalid hook identifier".to_string())
+                        String::from_utf8(hook_identifier_bytes.to_vec()).map_err(|e| {
+                            MetadataError::UnknownError(format!("Invalid hook identifier: {e}"))
                         })?;
                     match self.hook_identifiers.get(&identifier) {
                         Some(generator) => Ok(Some(generator.as_ref())),

@@ -205,8 +205,8 @@ static DEFAULT_HANDLER: LazyLock<Box<dyn HookHandlerCreator>> =
 /// Calling it more than once is harmless: each registration replaces the previous one for the
 /// same chain and hook.
 pub fn initialize_hook_handlers() -> Result<(), SimulationError> {
-    let angstrom_hook_address = Address::from_str(ANGSTROM_HOOK_ADDRESS).map_err(|_| {
-        SimulationError::FatalError("Failed to parse Angstrom hook address".to_string())
+    let angstrom_hook_address = Address::from_str(ANGSTROM_HOOK_ADDRESS).map_err(|e| {
+        SimulationError::FatalError(format!("Failed to parse Angstrom hook address: {e}"))
     })?;
     // Angstrom's attributes are only produced by the Ethereum manifest, so the same address on
     // another chain is not an Angstrom pool.

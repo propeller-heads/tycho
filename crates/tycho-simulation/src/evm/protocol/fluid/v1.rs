@@ -300,7 +300,7 @@ fn decode_block_timestamp(attributes: &HashMap<String, Bytes>) -> Result<u64, Tr
         .ok_or_else(|| {
             TransitionError::MissingAttribute(vm::BLOCK_TIMESTAMP_ATTRIBUTE.to_string())
         })?;
-    let timestamp = <[u8; 8]>::try_from(bytes.as_ref()).map_err(|_| {
+    let timestamp = <[u8; 8]>::try_from(bytes.as_ref()).map_err(|_wrong_length| {
         TransitionError::DecodeError(format!(
             "{} must be an 8-byte big-endian u64, got {} bytes",
             vm::BLOCK_TIMESTAMP_ATTRIBUTE,
@@ -503,7 +503,7 @@ impl ProtocolSim for FluidV1 {
                 vm::decode_reserves(reserves, sync_time)?
             }
             None => {
-                let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+                let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
                 vm::fetch_pool_state(&self.pool_address, RESERVES_RESOLVER, &engine)?
             }
         };

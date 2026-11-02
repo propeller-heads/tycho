@@ -319,8 +319,10 @@ impl BlockAggregatedChanges {
         for (k, v) in other.account_deltas {
             match self.account_deltas.entry(k) {
                 Entry::Occupied(mut e) => {
-                    // best-effort: ignore merge errors (address mismatch is a bug)
-                    let _ = e.get_mut().merge(v);
+                    // The entry is keyed by address, so a merge error is an address mismatch bug.
+                    if let Err(err) = e.get_mut().merge(v) {
+                        warn!("failed to merge account delta: {err}");
+                    }
                 }
                 Entry::Vacant(e) => {
                     e.insert(v);
@@ -331,7 +333,9 @@ impl BlockAggregatedChanges {
         for (k, v) in other.state_deltas {
             match self.state_deltas.entry(k) {
                 Entry::Occupied(mut e) => {
-                    let _ = e.get_mut().merge(v);
+                    if let Err(err) = e.get_mut().merge(v) {
+                        warn!("failed to merge protocol state delta: {err}");
+                    }
                 }
                 Entry::Vacant(e) => {
                     e.insert(v);

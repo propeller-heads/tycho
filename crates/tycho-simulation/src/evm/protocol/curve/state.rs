@@ -347,7 +347,7 @@ impl ProtocolSim for CurveState {
                 state
             }
             None => {
-                let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+                let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
                 let pool_address = AlloyAddress::from_slice(self.pool_address.as_ref());
                 vm::read_raw_pool_state(
                     &engine,

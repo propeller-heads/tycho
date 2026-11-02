@@ -57,9 +57,9 @@ impl SwapEncoder for NativeFallbackSwapEncoder {
                      protocol_specific_addresses.json"
                 ))
             })?;
-        let fallback_router = Bytes::from_str(fallback_router).map_err(|_| {
+        let fallback_router = Bytes::from_str(fallback_router).map_err(|e| {
             EncodingError::FatalError(format!(
-                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}"
+                "Invalid {FALLBACK_ROUTER_CONFIG_KEY} address for {chain}: {fallback_router}: {e}"
             ))
         })?;
         let native = NativeSwapEncoder::new(executor_address.clone(), chain, config)?;
@@ -98,7 +98,7 @@ impl SwapEncoder for NativeFallbackSwapEncoder {
             .encode_swap(swap, &self.quote_context(encoding_context))?;
         let (head, rest) = native.split_at(NATIVE_HEAD_LENGTH);
         let native_data = &rest[NATIVE_TARGET_LENGTH..];
-        let native_data_length = u32::try_from(native_data.len()).map_err(|_| {
+        let native_data_length = u32::try_from(native_data.len()).map_err(|_out_of_range| {
             EncodingError::FatalError(format!(
                 "Native swap data of {} bytes does not fit the uint32 length prefix",
                 native_data.len()

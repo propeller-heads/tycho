@@ -72,7 +72,10 @@ fn attribute<'a>(attributes: &'a HashMap<String, Bytes>, name: &str) -> Result<&
         .ok_or_else(|| format!("missing hook fee attribute `{name}`"))
 }
 
-fn number<T: TryFrom<u128>>(value: &Bytes, name: &str) -> Result<T, String> {
+fn number<T: TryFrom<u128, Error: std::fmt::Display>>(
+    value: &Bytes,
+    name: &str,
+) -> Result<T, String> {
     let bytes = value.as_ref();
     let significant = bytes
         .iter()
@@ -84,7 +87,7 @@ fn number<T: TryFrom<u128>>(value: &Bytes, name: &str) -> Result<T, String> {
     let raw = bytes
         .iter()
         .fold(0u128, |acc, byte| (acc << 8) | u128::from(*byte));
-    T::try_from(raw).map_err(|_| format!("hook fee attribute `{name}` does not fit: {value}"))
+    T::try_from(raw).map_err(|e| format!("hook fee attribute `{name}` does not fit: {value}: {e}"))
 }
 
 impl AeroHookFee {

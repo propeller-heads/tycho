@@ -291,15 +291,15 @@ impl PreCachedDB {
     }
 
     fn read_inner(&self) -> Result<RwLockReadGuard<'_, PreCachedDBInner>, PreCachedDBError> {
-        self.inner
-            .read()
-            .map_err(|_| PreCachedDBError::Fatal("Tycho state db lock poisoned".into()))
+        self.inner.read().map_err(|_poisoned| {
+            PreCachedDBError::Fatal("Tycho state db lock poisoned".to_string())
+        })
     }
 
     fn write_inner(&self) -> Result<RwLockWriteGuard<'_, PreCachedDBInner>, PreCachedDBError> {
-        self.inner
-            .write()
-            .map_err(|_| PreCachedDBError::Fatal("Tycho state db lock poisoned".into()))
+        self.inner.write().map_err(|_poisoned| {
+            PreCachedDBError::Fatal("Tycho state db lock poisoned".to_string())
+        })
     }
 }
 
@@ -471,6 +471,7 @@ mod tests {
     }
 
     #[rstest]
+    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
     fn test_account_storage(mock_db: PreCachedDB) -> Result<(), Box<dyn Error>> {
         let mock_acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
         let storage_address = U256::from(1);
@@ -489,6 +490,7 @@ mod tests {
     }
 
     #[rstest]
+    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
     fn test_account_storage_zero(mock_db: PreCachedDB) -> Result<(), Box<dyn Error>> {
         let mock_acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;
         let storage_address = U256::from(1);
@@ -543,6 +545,7 @@ mod tests {
     /// must end up at the snapshot values, otherwise the DB is left mixed-epoch and VM-based
     /// protocols quote against a state that never existed on-chain.
     #[rstest]
+    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
     fn test_creation_reapply_overwrites_existing_account(
         mock_db: PreCachedDB,
     ) -> Result<(), Box<dyn Error>> {
@@ -577,6 +580,7 @@ mod tests {
     /// Contrast case: the continuously-connected path. Per-block deltas arrive as
     /// `ChangeType::Update` and must refresh slots on existing accounts.
     #[rstest]
+    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
     fn test_delta_update_refreshes_existing_slot(
         mock_db: PreCachedDB,
     ) -> Result<(), Box<dyn Error>> {

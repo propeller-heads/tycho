@@ -280,15 +280,16 @@ impl Inner {
                 self.sender.insert(subscription_id, tx);
                 self.subscriptions
                     .insert(subscription_id, SubscriptionInfo::Active);
-                let _ = ready_tx
+                if ready_tx
                     .send(Ok((subscription_id, rx)))
-                    .map_err(|_| {
-                        warn!(
-                            ?extractor_id,
-                            ?subscription_id,
-                            "Subscriber for has gone away. Ignoring."
-                        )
-                    });
+                    .is_err()
+                {
+                    warn!(
+                        ?extractor_id,
+                        ?subscription_id,
+                        "Subscriber for has gone away. Ignoring."
+                    );
+                }
             } else {
                 error!(
                     ?extractor_id,
@@ -352,9 +353,9 @@ impl Inner {
         {
             let info = e.remove();
             if let SubscriptionInfo::RequestedUnsubscription(tx) = info {
-                let _ = tx.send(()).map_err(|_| {
-                    debug!(?subscription_id, "failed to notify about removed subscription")
-                });
+                if tx.send(()).is_err() {
+                    debug!(?subscription_id, "failed to notify about removed subscription");
+                }
                 self.sender
                     .remove(&subscription_id)
                     .ok_or_else(|| DeltasError::Fatal("Inconsistent internal client state: `sender` state drifted from `info` while removing a subscription.".to_string()))?;
@@ -382,11 +383,14 @@ impl Inner {
         if let Some(sub_info) = self.pending.remove(&extractor_id) {
             match sub_info {
                 SubscriptionInfo::RequestedSubscription(tx) => {
-                    let _ = tx
+                    if tx
                         .send(Err(DeltasError::ServerError(format!(
                             "Subscription failed: {error}"
                         ))))
-                        .map_err(|_| debug!("Cancel pending failed: receiver deallocated!"));
+                        .is_err()
+                    {
+                        debug!("Cancel pending failed: receiver deallocated!");
+                    }
                 }
                 _ => {
                     error!(?extractor_id, "Pending subscription in wrong state")
@@ -835,12 +839,12 @@ impl DeltasClient for WsDeltasClient {
         trace!("Waiting for subscription response");
         let res = tokio::time::timeout(Duration::from_secs(30), ready_rx)
             .await
-            .map_err(|_| {
+            .map_err(|_elapsed| {
                 DeltasError::TransportError(
                     "Subscribe confirmation timed out after 30s".to_string(),
                 )
             })?
-            .map_err(|_| {
+            .map_err(|_closed| {
                 DeltasError::TransportError("Subscription channel closed unexpectedly".to_string())
             })??;
         trace!("Subscription successful");
@@ -861,13 +865,13 @@ impl DeltasClient for WsDeltasClient {
         }
         tokio::time::timeout(Duration::from_secs(5), ready_rx)
             .await
-            .map_err(|_| {
+            .map_err(|_elapsed| {
                 warn!(?subscription_id, "Unsubscribe confirmation timed out after 5s");
                 DeltasError::TransportError(
                     "Unsubscribe confirmation timed out after 5s".to_string(),
                 )
             })?
-            .map_err(|_| {
+            .map_err(|_closed| {
                 DeltasError::TransportError("Unsubscribe channel closed unexpectedly".to_string())
             })?;
 
@@ -1122,6 +1126,10 @@ mod tests {
                     info!("Mock communication completed");
                     sleep(Duration::from_millis(100)).await;
                     // Close the WebSocket connection
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the mock server may close a connection the client has already closed"
+                    )]
                     let _ = websocket.close(None).await;
                     info!("Mock server closed connection");
                 }
@@ -1666,6 +1674,10 @@ mod tests {
                 let stream = tokio_tungstenite::accept_async(stream)
                     .await
                     .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
                 let _ = accepted_tx.send(std::time::Instant::now());
                 sleep(hold).await;
                 drop(stream);
@@ -1916,8 +1928,12 @@ mod tests {
         jh.abort();
         server_thread.abort();
 
-        let _ = jh.await;
-        let _ = server_thread.await;
+        if let Err(e) = jh.await {
+            assert!(e.is_cancelled(), "task panicked instead of being aborted: {e}");
+        }
+        if let Err(e) = server_thread.await {
+            assert!(e.is_cancelled(), "task panicked instead of being aborted: {e}");
+        }
     }
 
     #[tokio::test]
@@ -2060,6 +2076,10 @@ mod tests {
             .expect("connect failed");
 
         // Subscribe successfully
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the server answers the subscription with the error under test, so it may fail"
+        )]
         let _ = timeout(
             Duration::from_millis(100),
             client.subscribe(extractor_id, SubscriptionOptions::new().with_compression(false)),
@@ -2110,6 +2130,10 @@ mod tests {
             .expect("connect failed");
 
         // Subscribe successfully with compression disabled
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the server answers the subscription with the error under test, so it may fail"
+        )]
         let _ = timeout(
             Duration::from_millis(100),
             client.subscribe(extractor_id, SubscriptionOptions::new()),
@@ -2305,10 +2329,20 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Close may fail if client disconnected after unsubscribe, which is fine
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "closing may fail when the client already disconnected after unsubscribing"
+        )]
         let _ = timeout(Duration::from_millis(100), client.close()).await;
 
         // Wait for tasks to complete
-        let _ = jh.await;
-        let _ = server_thread.await;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the forced unsubscribe closes the connection, so the client task ends with an error"
+        )]
+        let _ = jh.await.expect("client task panicked");
+        server_thread
+            .await
+            .expect("mock server panicked");
     }
 }

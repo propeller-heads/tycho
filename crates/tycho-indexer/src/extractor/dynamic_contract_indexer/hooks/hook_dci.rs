@@ -1931,6 +1931,10 @@ mod tests {
         #[ignore] // This test requires real DB and RPC connections
         async fn test_hook_dci_process_block_update_integration() {
             // Initialize tracing for tests
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "another test may already have installed the global subscriber"
+            )]
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
                 .try_init();

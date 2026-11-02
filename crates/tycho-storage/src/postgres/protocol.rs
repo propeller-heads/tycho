@@ -402,8 +402,10 @@ impl PostgresGateway {
                     .unwrap_or_default();
 
                 let static_attributes: HashMap<String, StoreVal> = if let Some(v) = pc.attributes {
-                    serde_json::from_value(v).map_err(|_| {
-                        StorageError::DecodeError("Failed to decode static attributes.".to_string())
+                    serde_json::from_value(v).map_err(|e| {
+                        StorageError::DecodeError(format!(
+                            "Failed to decode static attributes: {e}"
+                        ))
                     })?
                 } else {
                     Default::default()

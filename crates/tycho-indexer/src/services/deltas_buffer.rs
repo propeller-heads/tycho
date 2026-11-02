@@ -312,7 +312,7 @@ impl PendingDeltas {
         // Send the start signal to the startup task
         start_tx
             .send(())
-            .map_err(|_| anyhow::anyhow!("Failed to send PendingDeltas start signal"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send PendingDeltas start signal: {e}"))?;
 
         // Start a reporting task to log buffer sizes every 60 seconds
         let self_clone = self.clone();
@@ -895,7 +895,7 @@ mod test {
         fn fold(&self, block: &BlockAggregatedChanges) -> std::result::Result<(), StorageError> {
             self.folded
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(block.block.number);
             Ok(())
         }

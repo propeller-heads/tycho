@@ -382,7 +382,9 @@ impl TestRunner {
         .into_diagnostic()
         .wrap_err("Failed to load tokens from Tycho RPC")?;
 
-        let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
+        tycho_simulation::evm::engine_db::SHARED_TYCHO_DB
+            .clear()
+            .into_diagnostic()?;
 
         let protocol_stream_builder =
             ProtocolStreamBuilder::new(&format!("{}/", self.tycho_host()), chain)
@@ -1031,7 +1033,9 @@ impl TestRunner {
     ) -> miette::Result<Update> {
         // Clear the shared database state to ensure test isolation
         // This prevents state from previous tests from affecting the current test
-        let _ = tycho_simulation::evm::engine_db::SHARED_TYCHO_DB.clear();
+        tycho_simulation::evm::engine_db::SHARED_TYCHO_DB
+            .clear()
+            .into_diagnostic()?;
 
         let protocol_stream_builder =
             ProtocolStreamBuilder::new("", self.chain).skip_state_decode_failures(true);
@@ -1571,8 +1575,9 @@ impl TestRunner {
                         id, token.symbol
                     );
                     let token_address = bytes_to_address(&token.address).into_diagnostic()?;
-                    let component_address =
-                        Address::from_str(id.as_str()).expect("Failed to parse component address");
+                    let component_address = Address::from_str(id.as_str())
+                        .into_diagnostic()
+                        .wrap_err("Failed to parse component address")?;
                     let node_balance =
                         self.runtime
                             .block_on(self.rpc_provider.get_token_balance(
@@ -1888,7 +1893,11 @@ mod tests {
     }
 
     fn get_mocked_runner() -> TestRunner {
-        dotenv().ok();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a missing .env file is normal; the variables may come from the environment"
+        )]
+        let _ = dotenv();
         let rpc_url = env::var("RPC_URL").unwrap();
         get_mocked_runner_for(Chain::Ethereum, "test-protocol", rpc_url)
     }
@@ -2011,7 +2020,11 @@ mod tests {
         let mut protocol_states_by_id = HashMap::new();
         protocol_states_by_id.insert(component_id, protocol_state);
 
-        dotenv().ok();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a missing .env file is normal; the variables may come from the environment"
+        )]
+        let _ = dotenv();
         let result =
             runner.validate_token_balances(&component_tokens, &protocol_states_by_id, block_number);
         assert!(

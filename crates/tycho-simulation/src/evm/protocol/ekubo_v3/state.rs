@@ -151,9 +151,14 @@ impl ProtocolSim for EkuboV3State {
             token: Address::try_from(&token_in.address[..]).map_err(|err| {
                 SimulationError::InvalidInput(format!("token_in invalid: {err}"), None)
             })?,
-            amount: amount_in.try_into().map_err(|_| {
-                SimulationError::InvalidInput("amount in must fit into a i128".to_string(), None)
-            })?,
+            amount: amount_in
+                .try_into()
+                .map_err(|_out_of_range| {
+                    SimulationError::InvalidInput(
+                        "amount in must fit into a i128".to_string(),
+                        None,
+                    )
+                })?,
         };
 
         let quote = self.quote(token_amount, None)?;
@@ -250,7 +255,7 @@ impl ProtocolSim for EkuboV3State {
 
         // TODO Update once exact out is supported
         Ok((
-            BigUint::try_from(consumed_amount).map_err(|_| {
+            BigUint::try_from(consumed_amount).map_err(|_out_of_range| {
                 SimulationError::FatalError(format!(
                     "Failed to convert consumed amount `{consumed_amount}` into BigUint"
                 ))

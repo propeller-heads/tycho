@@ -234,8 +234,7 @@ pub fn get_tick_at_sqrt_ratio(sqrt_price: U256) -> Result<i32, SimulationError> 
         fraction |= (f as u64) << (63 - i);
         r = if f == 1 { high } else { (high << 1) | (low >> 127) };
     }
-    let log_2 = I256::try_from(((msb as i128 - 128) << 64) | fraction as i128)
-        .expect("an i128 always fits in an I256");
+    let log_2 = I256::unchecked_from(((msb as i128 - 128) << 64) | fraction as i128);
 
     let log_sqrt10001 =
         log_2 * I256::from_raw(U256::from_limbs([11745905768312294533u64, 13863u64, 0, 0]));

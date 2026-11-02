@@ -162,12 +162,9 @@ impl MessageSender for ExtractorHandle {
         )
         .await;
 
-        match send_result {
-            Ok(Ok(())) => Ok(rx),
-            Ok(Err(e)) => Err(e),
-            // TODO: use a better error type that lets us return this as an error.
-            Err(_) => panic!("Subscription timed out!"),
-        }
+        // TODO: use a better error type that lets us return this as an error.
+        send_result.unwrap_or_else(|_elapsed| panic!("Subscription timed out!"))?;
+        Ok(rx)
     }
 }
 
@@ -515,8 +512,9 @@ pub(crate) fn compute_start_block(
                 .number
                 .checked_add(1)
                 .ok_or_else(|| ExtractionError::Setup("block number overflow".to_string()))?;
-            i64::try_from(next)
-                .map_err(|_| ExtractionError::Setup("block number exceeds i64".to_string()))
+            i64::try_from(next).map_err(|_out_of_range| {
+                ExtractionError::Setup("block number exceeds i64".to_string())
+            })
         }
     }
 }

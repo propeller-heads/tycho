@@ -201,7 +201,11 @@ impl Display for Version {
 }
 
 fn main() -> miette::Result<()> {
-    dotenv().ok();
+    match dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(miette::miette!("Failed to load .env file: {e}")),
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

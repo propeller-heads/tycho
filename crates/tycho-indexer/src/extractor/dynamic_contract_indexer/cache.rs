@@ -712,7 +712,7 @@ where
         let mut found = false;
         for (index, layer) in self.pending.iter().enumerate().rev() {
             if layer.block.hash == *block {
-                let _ = self.pending.split_off(index + 1); // +1 to keep the target block
+                self.pending.truncate(index + 1); // +1 to keep the target block
                 found = true;
                 break;
             }

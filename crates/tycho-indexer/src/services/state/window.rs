@@ -762,7 +762,10 @@ mod test {
             if self.fail_at == Some(number) {
                 return Err(StorageError::Unexpected(format!("fold failed at {number}")));
             }
-            self.folded.lock().unwrap().push(number);
+            self.folded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(number);
             Ok(())
         }
     }

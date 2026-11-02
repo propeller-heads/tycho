@@ -232,6 +232,10 @@ async fn main() {
             .await
     });
     let tasks = [tycho_message_processor, terminal_app];
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the first finished task ends the example; its join result is not reported"
+    )]
     let _ = select_all(tasks).await;
     ratatui::restore();
 }

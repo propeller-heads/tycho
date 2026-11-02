@@ -774,9 +774,9 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
                 if let Ok(idx) = idx_str.parse::<i32>() {
-                    let _ = self
-                        .observations
-                        .upsert_observation(idx, value);
+                    self.observations
+                        .upsert_observation(idx, value)
+                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
                 }
             }
         }
@@ -798,9 +798,9 @@ impl ProtocolSim for AerodromeSlipstreamsState {
             // observations keys are in the format "observations/{observation_index}"
             if let Some(idx_str) = key.strip_prefix("observations/") {
                 if let Ok(idx) = idx_str.parse::<i32>() {
-                    let _ = self
-                        .observations
-                        .upsert_observation(idx, &[]);
+                    self.observations
+                        .upsert_observation(idx, &[])
+                        .map_err(|err| TransitionError::DecodeError(err.to_string()))?;
                 }
             }
         }
@@ -1657,6 +1657,10 @@ mod step_cache_tests {
         // WETH needs a far larger amount to leave its first tick.
         for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
             let cached = test_pool();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the quote may run out of liquidity; only the step cache it fills is used"
+            )]
             let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
             let boundaries = cached.step_cache.min_inputs(sell < buy);
             assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());

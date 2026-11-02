@@ -820,7 +820,7 @@ pub trait RPCClient: Send + Sync {
                 let _permit = sem
                     .acquire()
                     .await
-                    .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                    .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                 self.get_contract_state(base_params)
                     .await
             });
@@ -870,25 +870,25 @@ pub trait RPCClient: Send + Sync {
         match component_ids {
             Some(ids) => {
                 // The server pages within the requested ids, so every chunk is page 0.
-                let tasks: Vec<_> =
-                    ids.chunks(chunk_size)
-                        .map(|chunk| {
-                            let sem = semaphore.clone();
-                            let mut base =
-                                ProtocolComponentsParams::new(chain, protocol_system.as_str())
-                                    .with_component_ids(chunk.to_vec())
-                                    .with_pagination(0, page_size);
-                            if let Some(tvl) = tvl_gt {
-                                base = base.with_tvl_gt(tvl);
-                            }
-                            async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
-                                    RPCError::Fatal("Semaphore dropped".to_string())
-                                })?;
-                                self.get_protocol_components(base).await
-                            }
-                        })
-                        .collect();
+                let tasks: Vec<_> = ids
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        let sem = semaphore.clone();
+                        let mut base =
+                            ProtocolComponentsParams::new(chain, protocol_system.as_str())
+                                .with_component_ids(chunk.to_vec())
+                                .with_pagination(0, page_size);
+                        if let Some(tvl) = tvl_gt {
+                            base = base.with_tvl_gt(tvl);
+                        }
+                        async move {
+                            let _permit = sem.acquire().await.map_err(|_closed| {
+                                RPCError::Fatal("Semaphore dropped".to_string())
+                            })?;
+                            self.get_protocol_components(base).await
+                        }
+                    })
+                    .collect();
 
                 try_join_all(tasks)
                     .await
@@ -928,7 +928,7 @@ pub trait RPCClient: Send + Sync {
                                 p = p.with_tvl_gt(tvl);
                             }
                             async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
+                                let _permit = sem.acquire().await.map_err(|_closed| {
                                     RPCError::Fatal("Semaphore dropped".to_string())
                                 })?;
                                 self.get_protocol_components(p).await
@@ -985,7 +985,7 @@ pub trait RPCClient: Send + Sync {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_protocol_states(p).await
                 }
             })
@@ -1043,7 +1043,7 @@ pub trait RPCClient: Send + Sync {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_tokens(p).await
                 }
             })
@@ -1088,24 +1088,24 @@ pub trait RPCClient: Send + Sync {
         match params.component_ids {
             Some(ids) => {
                 // The server pages within the requested ids, so every chunk is page 0.
-                let tasks: Vec<_> =
-                    ids.chunks(chunk_size)
-                        .map(|chunk| {
-                            let sem = semaphore.clone();
-                            let mut p = ComponentTvlParams::new(params.chain)
-                                .with_component_ids(chunk.to_vec())
-                                .with_pagination(0, page_size);
-                            if let Some(ref ps) = params.protocol_system {
-                                p = p.with_protocol_system(ps.as_str());
-                            }
-                            async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
-                                    RPCError::Fatal("Semaphore dropped".to_string())
-                                })?;
-                                self.get_component_tvl(p).await
-                            }
-                        })
-                        .collect();
+                let tasks: Vec<_> = ids
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        let sem = semaphore.clone();
+                        let mut p = ComponentTvlParams::new(params.chain)
+                            .with_component_ids(chunk.to_vec())
+                            .with_pagination(0, page_size);
+                        if let Some(ref ps) = params.protocol_system {
+                            p = p.with_protocol_system(ps.as_str());
+                        }
+                        async move {
+                            let _permit = sem.acquire().await.map_err(|_closed| {
+                                RPCError::Fatal("Semaphore dropped".to_string())
+                            })?;
+                            self.get_component_tvl(p).await
+                        }
+                    })
+                    .collect();
 
                 let pages = try_join_all(tasks).await?;
 
@@ -1144,7 +1144,7 @@ pub trait RPCClient: Send + Sync {
                                 p = p.with_protocol_system(ps.as_str());
                             }
                             async move {
-                                let _permit = sem.acquire().await.map_err(|_| {
+                                let _permit = sem.acquire().await.map_err(|_closed| {
                                     RPCError::Fatal("Semaphore dropped".to_string())
                                 })?;
                                 self.get_component_tvl(p).await
@@ -1207,7 +1207,7 @@ pub trait RPCClient: Send + Sync {
                     let _permit = sem
                         .acquire()
                         .await
-                        .map_err(|_| RPCError::Fatal("Semaphore dropped".to_string()))?;
+                        .map_err(|_closed| RPCError::Fatal("Semaphore dropped".to_string()))?;
                     self.get_traced_entry_points(params)
                         .await
                 }

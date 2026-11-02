@@ -154,20 +154,22 @@ impl SwapEncoder for CurveSwapEncoder {
         };
 
         let component_address = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid curve pool address".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid curve pool address: {e}")))?;
 
         let factory_bytes = get_static_attribute(swap, "factory")?.to_vec();
         // the conversion to Address is necessary to checksum the address
         let factory_address =
-            Address::from_str(std::str::from_utf8(&factory_bytes).map_err(|_| {
-                EncodingError::FatalError(
-                    "Failed to convert curve factory address to string".to_string(),
-                )
+            Address::from_str(std::str::from_utf8(&factory_bytes).map_err(|e| {
+                EncodingError::FatalError(format!(
+                    "Failed to convert curve factory address to string: {e}"
+                ))
             })?)
-            .map_err(|_| EncodingError::FatalError("Invalid curve factory address".to_string()))?;
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Invalid curve factory address: {e}"))
+            })?;
 
         let pool_address = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid curve pool address".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid curve pool address: {e}")))?;
         let pool_type =
             self.get_pool_type(&pool_address.to_string(), &factory_address.to_string())?;
 

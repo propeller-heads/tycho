@@ -126,7 +126,9 @@ impl LiquoriceClient {
     ) -> Result<SignedQuote, RFQError> {
         let expiry = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".into()))?
+            .map_err(|_before_epoch| {
+                RFQError::ParsingError("SystemTime before UNIX EPOCH".to_string())
+            })?
             .as_secs() +
             self.quote_expiry_secs;
 
@@ -324,9 +326,9 @@ impl LiquoriceClient {
         let LiquoriceQuoteLevel { tx, base_token_amount, allowances, partial_fill, .. } =
             quote_level;
 
-        let amount_in = BigUint::from_str(&base_token_amount).map_err(|_| {
+        let amount_in = BigUint::from_str(&base_token_amount).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse base token amount: {base_token_amount}"
+                "Failed to parse base token amount: {base_token_amount} ({e})"
             ))
         })?;
         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
@@ -376,9 +378,9 @@ impl LiquoriceClient {
                 "min_base_token_amount".to_string(),
                 Bytes::from(
                     biguint_to_u256(&BigUint::from_str(&pf.min_base_token_amount).map_err(
-                        |_| {
+                        |e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse min_base_token_amount: {}",
+                                "Failed to parse min_base_token_amount: {} ({e})",
                                 pf.min_base_token_amount
                             ))
                         },
@@ -793,6 +795,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Liquorice's live API; requires LIQUORICE_USER and LIQUORICE_KEY"]
     async fn live_liquorice_api_refuses_a_chain_it_does_not_price() {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv().ok();
         let auth_solver = std::env::var("LIQUORICE_USER").expect("LIQUORICE_USER not set");
         let auth_key = std::env::var("LIQUORICE_KEY").expect("LIQUORICE_KEY not set");

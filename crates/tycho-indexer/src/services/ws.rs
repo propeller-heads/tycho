@@ -822,9 +822,9 @@ mod tests {
         loop {
             let response_msg = timeout(Duration::from_secs(5), connection.next())
                 .await
-                .map_err(|_| "Failed to receive message".to_string())?
+                .map_err(|_elapsed| "Timed out receiving a message".to_string())?
                 .ok_or_else(|| "Connection closed".to_string())?
-                .map_err(|_| "Failed to receive message".to_string())?;
+                .map_err(|e| format!("Failed to receive message: {e}"))?;
 
             if criteria(&response_msg) {
                 return Ok(response_msg);
@@ -908,6 +908,7 @@ mod tests {
     }
 
     #[actix_rt::test]
+    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_subscribe_and_unsubscribe() -> Result<(), String> {
         tracing_subscriber::fmt()
             .with_test_writer()
@@ -1060,6 +1061,7 @@ mod tests {
     }
 
     #[actix_rt::test]
+    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_subscribe_with_compression() -> Result<(), String> {
         tracing_subscriber::fmt()
             .with_test_writer()
@@ -1644,10 +1646,13 @@ mod tests {
         );
 
         // Clean up
-        connection
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort close at the end of the test; the server may have closed first"
+        )]
+        let _ = connection
             .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
-            .await
-            .ok();
+            .await;
     }
 
     #[test_log::test(actix_rt::test)]
@@ -1820,10 +1825,13 @@ mod tests {
             .await
             .expect("Live extractor should still send messages after peer subscription ended");
 
-        connection
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort close at the end of the test; the server may have closed first"
+        )]
+        let _ = connection
             .send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })))
-            .await
-            .ok();
+            .await;
 
         Ok(())
     }
@@ -1846,9 +1854,17 @@ mod tests {
             let name = self.extractor_id.name.clone();
             tokio::spawn(async move {
                 let block = MyMessageSender::default_block(&name);
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the subscriber may have dropped its receiver already; the task only has to outlive it"
+                )]
                 let _ = tx
                     .send(DeltaCommand::Block(Arc::new(block)))
                     .await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the subscriber may have dropped its receiver already; the task only has to outlive it"
+                )]
                 let _ = tx
                     .send(DeltaCommand::ExtractorRestarted(name))
                     .await;
@@ -1927,6 +1943,7 @@ mod tests {
     /// Verifies that when the last subscription's channel closes, the WS connection itself
     /// is closed — an idle connection with no subscriptions wastes a client connection slot.
     #[actix_rt::test]
+    #[expect(clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_connection_closed_when_last_subscription_ends() -> Result<(), String> {
         tracing_subscriber::fmt()
             .with_test_writer()

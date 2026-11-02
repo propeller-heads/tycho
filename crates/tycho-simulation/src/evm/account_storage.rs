@@ -285,6 +285,7 @@ mod tests {
     use crate::evm::account_storage::{Account, AccountStorage};
 
     #[test]
+    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
     fn test_insert_account() -> Result<(), Box<dyn Error>> {
         let mut account_storage = AccountStorage::default();
         let expected_nonce = 100;
@@ -319,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::panic_in_result_fn, clippy::unwrap_in_result, reason = "test assertions")]
     fn test_update_account_info() -> Result<(), Box<dyn Error>> {
         let mut account_storage = AccountStorage::default();
         let acc_address = Address::from_str("0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")?;

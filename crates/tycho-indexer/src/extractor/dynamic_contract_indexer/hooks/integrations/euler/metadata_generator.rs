@@ -185,7 +185,12 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                 let token_0 = &sorted_tokens[0];
                 let token_1 = &sorted_tokens[1];
 
-                let res_string = serde_json::from_value::<String>(response.clone()).unwrap();
+                let res_string =
+                    serde_json::from_value::<String>(response.clone()).map_err(|e| {
+                        MetadataError::GenerationFailed(format!(
+                            "Balance response is not a string: {e}"
+                        ))
+                    })?;
                 let res_str = res_string
                     .strip_prefix("0x")
                     .unwrap_or(&res_string);
@@ -209,7 +214,12 @@ impl MetadataResponseParser for EulerMetadataResponseParser {
                 Ok(res)
             }
             MetadataRequestType::Limits { token_pair } => {
-                let res_string = serde_json::from_value::<String>(response.clone()).unwrap();
+                let res_string =
+                    serde_json::from_value::<String>(response.clone()).map_err(|e| {
+                        MetadataError::GenerationFailed(format!(
+                            "Limits response is not a string: {e}"
+                        ))
+                    })?;
                 let res_str = res_string
                     .strip_prefix("0x")
                     .unwrap_or(&res_string);

@@ -605,6 +605,13 @@ fn _settle_output(
     Ok(amount_out)
 }
 
+/// Converts a non-negative model value into a vector index.
+fn to_index(value: i64) -> Result<usize, Error> {
+    usize::try_from(value).map_err(|_out_of_range| {
+        Error::warning(format!("index {value} is not a valid vector index"))
+    })
+}
+
 /// <https://github.com/propeller-heads/tycho-execution/blob/d27e2a6f4d9ea6f4cba53b2fc1f54cd6676b60d2/foundry/src/TychoRouter.sol#L862>
 fn _split_swap(
     params: &Params,
@@ -617,11 +624,11 @@ fn _split_swap(
     is_cyclical: bool,
 ) -> Result<i64, Error> {
     // assumption: reverts if `swap_count = 0`
-    let swap_count =
-        u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?).unwrap();
+    let swap_count = u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?)
+        .map_err(|_out_of_range| Error::warning("swap_count does not fit u8".to_string()))?;
 
-    let mut remaining_amounts = vec![0i64; usize::try_from(n_tokens).unwrap()];
-    let mut amounts = vec![0i64; usize::try_from(n_tokens).unwrap()];
+    let mut remaining_amounts = vec![0i64; to_index(n_tokens)?];
+    let mut amounts = vec![0i64; to_index(n_tokens)?];
     let mut cyclic_swap_amount_out: i64 = 0;
     amounts[0] = amount_in;
     remaining_amounts[0] = amount_in;
@@ -641,9 +648,9 @@ fn _split_swap(
 
         // TODO check overflow for multiplication
         let current_amount_in = if split > 0 {
-            amounts[usize::try_from(token_in_index).unwrap()] * split / 0xffffff
+            amounts[to_index(token_in_index)?] * split / 0xffffff
         } else {
-            remaining_amounts[usize::try_from(token_in_index).unwrap()]
+            remaining_amounts[to_index(token_in_index)?]
         };
 
         let mut swap_receiver = Address::Router;
@@ -669,18 +676,16 @@ fn _split_swap(
         if token_out_index == 0 {
             cyclic_swap_amount_out += current_amount_out;
         } else {
-            amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
+            amounts[to_index(token_out_index)?] += current_amount_out;
         }
-        remaining_amounts[usize::try_from(token_out_index).unwrap()] += current_amount_out;
-        remaining_amounts[usize::try_from(token_in_index).unwrap()] = checked_subtract(
-            remaining_amounts[usize::try_from(token_in_index).unwrap()],
-            current_amount_in,
-        )?;
+        remaining_amounts[to_index(token_out_index)?] += current_amount_out;
+        remaining_amounts[to_index(token_in_index)?] =
+            checked_subtract(remaining_amounts[to_index(token_in_index)?], current_amount_in)?;
     }
     Ok(if is_cyclical {
         cyclic_swap_amount_out
     } else {
-        amounts[usize::try_from(checked_subtract(n_tokens, 1)?).unwrap()]
+        amounts[to_index(checked_subtract(n_tokens, 1)?)?]
     })
 }
 
@@ -696,8 +701,8 @@ fn _sequential_swap(
     let mut calculated_amount = amount_in;
 
     // assumption: reverts if `swap_count = 0`
-    let swap_count =
-        u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?).unwrap();
+    let swap_count = u8::try_from(params.request("swap_count", [crate::config::SWAP_COUNT])?)
+        .map_err(|_out_of_range| Error::warning("swap_count does not fit u8".to_string()))?;
 
     for swap_index in 0..swap_count {
         let is_last_swap = swap_index == swap_count - 1;

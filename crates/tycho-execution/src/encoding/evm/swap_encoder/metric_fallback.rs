@@ -100,8 +100,7 @@ mod tests {
             origin: None,
         };
 
-        MetricFallbackSwapEncoder::new(Bytes::default(), chain, None)
-            .unwrap()
+        MetricFallbackSwapEncoder::new(Bytes::default(), chain, None)?
             .encode_swap(&swap, &encoding_context)
             .map(|encoded| encode(&encoded))
     }

@@ -887,7 +887,7 @@ where
         let n_days_ago = if let Some(days) = traded_n_days_ago {
             i64::try_from(days)
                 .map(|days| Some(Utc::now().naive_utc() - Duration::days(days)))
-                .map_err(|_| RpcError::Parse("traded_n_days_ago is too big.".to_string()))?
+                .map_err(|e| RpcError::Parse(format!("traded_n_days_ago is too big: {e}")))?
         } else {
             None
         };

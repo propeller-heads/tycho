@@ -732,9 +732,9 @@ where
             // Merge delta balances with existing balances instead of replacing them
             // Prevents errors when delta balance changes do not affect all the pool tokens.
             for (token, bal) in bals {
-                let addr = bytes_to_address(token).map_err(|_| {
+                let addr = bytes_to_address(token).map_err(|e| {
                     SimulationError::FatalError(format!(
-                        "Invalid token address in balance update: {token:?}"
+                        "Invalid token address in balance update: {token:?}: {e}"
                     ))
                 })?;
                 self.balances
@@ -751,9 +751,9 @@ where
                     .entry(*contract)
                     .or_default();
                 for (token, bal) in bals {
-                    let addr = bytes_to_address(token).map_err(|_| {
+                    let addr = bytes_to_address(token).map_err(|e| {
                         SimulationError::FatalError(format!(
-                            "Invalid token address in balance update: {token:?}"
+                            "Invalid token address in balance update: {token:?}: {e}"
                         ))
                     })?;
                     contract_entry.insert(addr, U256::from_be_slice(bal));
@@ -851,10 +851,10 @@ where
         let address = match self.balance_owner {
             Some(owner) => Some(owner),
             None if !self.contract_balances.is_empty() => None,
-            None => Some(self.id.parse().map_err(|_| {
-                SimulationError::FatalError(
-                    "Failed to get balance overwrites: Pool ID is not an address".into(),
-                )
+            None => Some(self.id.parse().map_err(|e| {
+                SimulationError::FatalError(format!(
+                    "Failed to get balance overwrites: Pool ID is not an address: {e}"
+                ))
             })?),
         };
 
@@ -993,11 +993,11 @@ where
                     .entry(address)
                     .or_default();
                 for (slot, value) in storage {
-                    let slot = U256::from_str(&slot.to_string()).map_err(|_| {
-                        SimulationError::FatalError("Failed to decode slot index".to_string())
+                    let slot = U256::from_str(&slot.to_string()).map_err(|e| {
+                        SimulationError::FatalError(format!("Failed to decode slot index: {e}"))
                     })?;
-                    let value = U256::from_str(&value.to_string()).map_err(|_| {
-                        SimulationError::FatalError("Failed to decode slot overwrite".to_string())
+                    let value = U256::from_str(&value.to_string()).map_err(|e| {
+                        SimulationError::FatalError(format!("Failed to decode slot overwrite: {e}"))
                     })?;
                     block_overwrites.insert(slot, value);
                 }
@@ -1013,7 +1013,9 @@ where
                 (token_in.address.clone(), token_in.clone()),
                 (token_out.address.clone(), token_out.clone()),
             ]);
-            let _ = new_state.set_spot_prices(&tokens);
+            if let Err(error) = new_state.set_spot_prices(&tokens) {
+                warn!(pool = %new_state.id, %error, "failed to warm spot prices of the returned state");
+            }
         }
 
         let buy_amount = trade.received_amount;
@@ -1189,7 +1191,7 @@ where
         {
             let number = <[u8; 8]>::try_from(block_number.as_ref())
                 .map(u64::from_be_bytes)
-                .map_err(|_| {
+                .map_err(|_wrong_length| {
                     TransitionError::DecodeError(
                         "override_block_number attribute must be an 8-byte big-endian u64"
                             .to_string(),
@@ -1206,7 +1208,7 @@ where
         {
             let timestamp = <[u8; 8]>::try_from(block_timestamp.as_ref())
                 .map(u64::from_be_bytes)
-                .map_err(|_| {
+                .map_err(|_wrong_length| {
                     TransitionError::DecodeError(
                         "override_block_timestamp attribute must be an 8-byte big-endian u64"
                             .to_string(),
@@ -1488,7 +1490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_amount_out() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_get_amount_out() {
         let pool_state = setup_pool_state().await;
 
         let result = pool_state
@@ -1512,7 +1514,6 @@ mod tests {
         assert!(pool_state
             .block_lasting_overwrites
             .is_empty());
-        Ok(())
     }
 
     #[tokio::test]
@@ -2046,6 +2047,10 @@ mod tests {
 
         // The spot-price refresh inside update_pool_state may fail in offline test
         // environments; the balance bookkeeping this test guards happens before it.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the offline spot-price refresh may fail; the assertions below cover the earlier bookkeeping"
+        )]
         let _ = pool_state.delta_transition(delta, &HashMap::new(), &balances);
 
         // Contract balance refreshed even though component balances are non-empty (the old

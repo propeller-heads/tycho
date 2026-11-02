@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{self, Receiver},
+        mpsc::{self, error::SendError, Receiver},
         oneshot,
     },
     task::JoinHandle,
@@ -726,6 +726,10 @@ where
     ) {
         // Send close signals to all remaining synchronizers
         for close_sender in sync_close_senders {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a synchronizer that already ended has dropped its close receiver"
+            )]
             let _ = close_sender.send(());
         }
 
@@ -923,7 +927,9 @@ where
 
                 if let Err(e) = res {
                     // Communicate error to clients, then end the loop
-                    let _ = sync_tx.send(Err(e)).await;
+                    if let Err(SendError(Err(e))) = sync_tx.send(Err(e)).await {
+                        warn!(error = ?e, "consumer is gone; dropping the error that ends the task");
+                    }
                     return;
                 }
             }
@@ -935,11 +941,11 @@ where
         // channel to the user.
         let nanny_jh = tokio::spawn(async move {
             // report any panics
-            let _ = main_loop_jh.await.map_err(|e| {
+            if let Err(e) = main_loop_jh.await {
                 if e.is_panic() {
-                    error!("BlockSynchornizer main loop panicked: {e}")
+                    error!("BlockSynchornizer main loop panicked: {e}");
                 }
-            });
+            }
             debug!("Main loop exited. Closing synchronizers");
             Self::cleanup_synchronizers(state_sync_tasks, sync_close_senders).await;
             debug!("Shutdown complete");
@@ -1298,6 +1304,10 @@ mod tests {
         // For testing: trigger a close signal to make the synchronizer exit
         async fn trigger_close(&self) {
             if let Some(close_tx) = self.close_tx.lock().await.take() {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the synchronizer may already have exited and dropped its receiver"
+                )]
                 let _ = close_tx.send(());
             }
         }
@@ -1354,6 +1364,10 @@ mod tests {
                     MockBehavior::Normal => {
                         // Wait for close signal from either handle or test, then respond based on
                         // behavior
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "a dropped close sender also ends the synchronizer"
+                        )]
                         let _ = tokio::select! {
                             result = close_rx => result,
                             result = close_rx_for_test => result,
@@ -1512,12 +1526,14 @@ mod tests {
 
         // Send initial messages to both synchronizers
         let block1_msg = header_message(1);
-        let _ = v2_sync
+        v2_sync
             .send_header(block1_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block1_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         // Start the block synchronizer
         let (nanny_handle, mut rx) = block_sync
@@ -1907,9 +1923,10 @@ mod tests {
         let block1_msg = header_message(1);
         let block2_msg = header_message(2);
 
-        let _ = v2_sync
+        v2_sync
             .send_header(block1_msg.clone())
-            .await;
+            .await
+            .unwrap();
         v3_sync
             .send_header(block2_msg.clone())
             .await
@@ -1940,9 +1957,10 @@ mod tests {
 
         // Both advance to block 3
         let block3_msg = header_message(3);
-        let _ = v2_sync
+        v2_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
         v3_sync
             .send_header(block3_msg.clone())
             .await
@@ -2033,9 +2051,10 @@ mod tests {
 
         // Send block 2 only to v3, v2 will timeout and become delayed
         let block2_msg = header_message(2);
-        let _ = v3_sync
+        v3_sync
             .send_header(block2_msg.clone())
-            .await;
+            .await
+            .unwrap();
         // Don't send to v2_sync - it will timeout
 
         // Consume second message - v2 should be delayed, v3 ready
@@ -2072,9 +2091,10 @@ mod tests {
 
         // Continue sending blocks only to v3 to keep it healthy while v2 goes stale
         let block3_msg = header_message(3);
-        let _ = v3_sync
+        v3_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(40)).await;
 
@@ -2563,9 +2583,10 @@ mod tests {
         // Send second messages to v2 only, shortly before both would go stale
         tokio::time::sleep(Duration::from_millis(50)).await;
         let block2_msg = header_message(2);
-        let _ = v2_sync
+        v2_sync
             .send_header(block2_msg.clone())
-            .await;
+            .await
+            .unwrap();
 
         // we should get two messages here
         for _ in 0..2 {
@@ -2594,9 +2615,10 @@ mod tests {
         // Now v3 should be stale
         tokio::time::sleep(Duration::from_millis(15)).await;
         let block3_msg = header_message(3);
-        let _ = v2_sync
+        v2_sync
             .send_header(block3_msg.clone())
-            .await;
+            .await
+            .unwrap();
         let third_msg = receive_message(&mut rx).await;
         dbg!(&third_msg);
         assert!(matches!(
@@ -2615,18 +2637,22 @@ mod tests {
         ));
 
         let block4_msg = header_message(4);
-        let _ = v3_sync
+        v3_sync
             .send_header(block2_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block3_msg.clone())
-            .await;
-        let _ = v3_sync
+            .await
+            .unwrap();
+        v3_sync
             .send_header(block4_msg.clone())
-            .await;
-        let _ = v2_sync
+            .await
+            .unwrap();
+        v2_sync
             .send_header(block4_msg.clone())
-            .await;
+            .await
+            .unwrap();
         let fourth_msg = receive_message(&mut rx).await;
         assert!(matches!(
             fourth_msg

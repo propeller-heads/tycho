@@ -231,14 +231,16 @@ impl UniswapV4State {
         tick_spacing: i32,
         ticks: Vec<TickInfo>,
     ) -> Result<Self, SimulationError> {
-        let tick_spacing_u16 = tick_spacing.try_into().map_err(|_| {
-            // even though it's given as int24, tick_spacing must be positive, see here:
-            // https://github.com/Uniswap/v4-core/blob/a22414e4d7c0d0b0765827fe0a6c20dfd7f96291/src/libraries/TickMath.sol#L25-L28
-            SimulationError::FatalError(format!(
-                "tick_spacing {} must be positive (int24 -> u16 conversion failed)",
-                tick_spacing
-            ))
-        })?;
+        let tick_spacing_u16 = tick_spacing
+            .try_into()
+            .map_err(|_out_of_range| {
+                // even though it's given as int24, tick_spacing must be positive, see here:
+                // https://github.com/Uniswap/v4-core/blob/a22414e4d7c0d0b0765827fe0a6c20dfd7f96291/src/libraries/TickMath.sol#L25-L28
+                SimulationError::FatalError(format!(
+                    "tick_spacing {} must be positive (int24 -> u16 conversion failed)",
+                    tick_spacing
+                ))
+            })?;
         let tick_list = TickList::from(tick_spacing_u16, ticks)?;
         Ok(UniswapV4State {
             liquidity,
@@ -597,6 +599,10 @@ impl ProtocolSim for UniswapV4State {
         &mut self,
         overrides: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), SimulationError> {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the downcast error is the original `Arc<dyn Any>`, which has no message"
+        )]
         let overrides = overrides
             .downcast::<PendingOverrides>()
             .map_err(|_| {
@@ -1565,6 +1571,10 @@ mod tests {
             self.address
         }
 
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "test mock; a poisoned lock means a test already failed"
+        )]
         fn before_swap(
             &self,
             _params: BeforeSwapParameters,
@@ -1588,6 +1598,10 @@ mod tests {
             })
         }
 
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "test mock; a poisoned lock means a test already failed"
+        )]
         fn after_swap(
             &self,
             _params: AfterSwapParameters,
@@ -2760,8 +2774,8 @@ mod tests {
         let fees = UniswapV4Fees { zero_for_one: 100, one_for_zero: 100, lp_fee: 100 };
         let tick_spacing = 60;
         let ticks = vec![
-            TickInfo::new(-600, i128::try_from((liquidity / 4)).unwrap()).unwrap(),
-            TickInfo::new(600, -(i128::try_from((liquidity / 4)).unwrap())).unwrap(),
+            TickInfo::new(-600, i128::try_from(liquidity / 4).unwrap()).unwrap(),
+            TickInfo::new(600, -(i128::try_from(liquidity / 4).unwrap())).unwrap(),
         ];
 
         let usv4_state = UniswapV4State::new(
@@ -3622,6 +3636,10 @@ mod step_cache_tests {
         // WETH needs a far larger amount to leave its first tick.
         for (sell, buy, doublings) in [(&wbtc, &weth, 30u32), (&weth, &wbtc, 70)] {
             let cached = test_pool();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the quote may run out of liquidity; only the step cache it fills is used"
+            )]
             let _ = cached.get_amount_out(BigUint::from(10u32) << doublings, sell, buy);
             let boundaries = cached.step_cache.min_inputs(sell < buy);
             assert!(boundaries.len() > 2, "only {} steps cached", boundaries.len());

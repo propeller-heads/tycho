@@ -22,12 +22,13 @@ fn parse_partial_fill_offset(partial_fill_offset: &Bytes) -> Result<u8, Encoding
     let offset_bytes: [u8; 8] = partial_fill_offset
         .as_ref()
         .try_into()
-        .map_err(|_| {
+        .map_err(|_wrong_length| {
             EncodingError::FatalError("Bebop partial_fill_offset must be a u64".to_string())
         })?;
     let offset = u64::from_be_bytes(offset_bytes);
-    u8::try_from(offset)
-        .map_err(|_| EncodingError::FatalError("Bebop partial_fill_offset exceeds u8".to_string()))
+    u8::try_from(offset).map_err(|_out_of_range| {
+        EncodingError::FatalError("Bebop partial_fill_offset exceeds u8".to_string())
+    })
 }
 
 /// Encodes a swap on Bebop (PMM RFQ) through the given executor address.
@@ -207,7 +208,7 @@ mod tests {
         let error = parse_partial_fill_offset(&encoded_partial_fill_offset(256)).unwrap_err();
         assert!(matches!(
             error,
-            EncodingError::FatalError(message) if message == "Bebop partial_fill_offset exceeds u8"
+            EncodingError::FatalError(message) if message == "Bebop partial_fill_offset exceeds u8: out of range integral type conversion attempted"
         ));
     }
 
@@ -216,7 +217,7 @@ mod tests {
         let error = parse_partial_fill_offset(&Bytes::from(vec![12u8])).unwrap_err();
         assert!(matches!(
             error,
-            EncodingError::FatalError(message) if message == "Bebop partial_fill_offset must be a u64"
+            EncodingError::FatalError(message) if message == "Bebop partial_fill_offset must be a u64: could not convert slice to array"
         ));
     }
 

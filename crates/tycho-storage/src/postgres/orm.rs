@@ -1983,13 +1983,26 @@ pub struct EntryPointTracingParams {
     pub modified_ts: NaiveDateTime,
 }
 
-impl From<&EntryPointTracingParams> for models::blockchain::TracingParams {
-    fn from(value: &EntryPointTracingParams) -> Self {
+impl TryFrom<&EntryPointTracingParams> for models::blockchain::TracingParams {
+    type Error = StorageError;
+
+    fn try_from(value: &EntryPointTracingParams) -> Result<Self, Self::Error> {
         match value.tracing_type {
             EntryPointTracingType::RpcTracer => {
-                let rpc_tracer: models::blockchain::RPCTracerParams =
-                    serde_json::from_value(value.data.clone().unwrap()).unwrap();
-                models::blockchain::TracingParams::RPCTracer(rpc_tracer)
+                let data = value.data.clone().ok_or_else(|| {
+                    StorageError::DecodeError(format!(
+                        "Missing data for RPC tracing params {}",
+                        value.id
+                    ))
+                })?;
+                let rpc_tracer: models::blockchain::RPCTracerParams = serde_json::from_value(data)
+                    .map_err(|e| {
+                        StorageError::DecodeError(format!(
+                            "Failed to decode RPC tracing params {}: {e}",
+                            value.id
+                        ))
+                    })?;
+                Ok(models::blockchain::TracingParams::RPCTracer(rpc_tracer))
             }
         }
     }

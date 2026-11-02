@@ -254,13 +254,13 @@ pub(super) fn decode_attribute(name: &str, value: &[u8]) -> Result<U256, String>
 /// `decode_attribute` for the `uint64` bucket fields.
 pub(super) fn decode_u64_attribute(name: &str, value: &[u8]) -> Result<u64, String> {
     let value = decode_attribute(name, value)?;
-    u64::try_from(value).map_err(|_| format!("{name} does not fit in 64 bits"))
+    u64::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 64 bits"))
 }
 
 /// `decode_attribute` for the `uint16` basis-point fields.
 pub(super) fn decode_u16_attribute(name: &str, value: &[u8]) -> Result<u16, String> {
     let value = decode_attribute(name, value)?;
-    u16::try_from(value).map_err(|_| format!("{name} does not fit in 16 bits"))
+    u16::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 16 bits"))
 }
 
 impl EtherfiState {

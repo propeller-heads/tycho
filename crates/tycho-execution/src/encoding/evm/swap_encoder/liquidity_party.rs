@@ -43,7 +43,7 @@ impl LiquidityPartySwapEncoder {
             })?;
 
         let to_u8 = |idx: usize| {
-            u8::try_from(idx).map_err(|_| {
+            u8::try_from(idx).map_err(|_out_of_range| {
                 EncodingError::InvalidInput(format!("Pool token index {idx} exceeds u8"))
             })
         };
@@ -65,8 +65,8 @@ impl SwapEncoder for LiquidityPartySwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let pool_addr = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("LiqP swap encoder: invalid component id".to_string())
+        let pool_addr = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("LiqP swap encoder: invalid component id: {e}"))
         })?;
 
         let (token_in, token_out, token_in_idx, token_out_idx) = self.get_token_indexes(swap)?;

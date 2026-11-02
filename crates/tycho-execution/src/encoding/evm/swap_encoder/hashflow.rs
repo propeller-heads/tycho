@@ -223,8 +223,7 @@ mod test {
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Ethereum,
             Some(hashflow_config()),
-        )
-        .unwrap()
+        )?
         .encode_swap(swap, &encoding_context)
     }
 

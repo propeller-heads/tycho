@@ -1015,7 +1015,12 @@ mod tests {
             token_in: &Token,
             _token_out: &Token,
         ) -> Result<GetAmountOutResult, SimulationError> {
-            assert_eq!(token_in.address, self.base.address, "a book is given its own tokens");
+            if token_in.address != self.base.address {
+                return Err(SimulationError::InvalidInput(
+                    format!("token {} is not the book's base token", token_in.address),
+                    None,
+                ));
+            }
             let filled = amount_in.clone().min(whole(self.depth));
             let result = GetAmountOutResult {
                 amount: &filled * BigUint::from(self.out_per_in),

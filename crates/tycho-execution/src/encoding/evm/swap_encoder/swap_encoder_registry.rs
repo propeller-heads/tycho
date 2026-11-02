@@ -86,9 +86,9 @@ impl SwapEncoderRegistry {
                 EncodingError::FatalError("No protocol specific config found for chain".to_string())
             })?;
         for (protocol, executor_address) in executors {
-            let executor_address = Bytes::from_str(executor_address).map_err(|_| {
+            let executor_address = Bytes::from_str(executor_address).map_err(|e| {
                 EncodingError::FatalError(format!(
-                    "Invalid executor address for protocol {}",
+                    "Invalid executor address for protocol {}: {e}",
                     protocol
                 ))
             })?;

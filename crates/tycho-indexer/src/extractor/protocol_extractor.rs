@@ -2717,7 +2717,7 @@ mod test {
         match res {
             Ok(Some(_)) => panic!("Expected Ok(None) but got Ok(Some(..))"),
             Ok(None) => (), // This is the expected case
-            Err(_) => panic!("Expected Ok(None) but got Err(..)"),
+            Err(e) => panic!("Expected Ok(None) but got Err({e:?})"),
         }
         assert_eq!(extractor.get_cursor().await, "cursor@420");
     }

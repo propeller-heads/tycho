@@ -8,7 +8,7 @@ use std::{
 
 use miette::{IntoDiagnostic, WrapErr};
 use tempfile::NamedTempFile;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tycho_simulation::tycho_common::models::Chain;
 pub struct TychoRunner {
     chain: Chain,
@@ -59,7 +59,7 @@ impl TychoRunner {
             &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
-                .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
+                .ok_or_else(|| miette::miette!("Unknown endpoint for chain {}", self.chain))?
                 .as_str(),
             "run",
             "--chain",
@@ -155,12 +155,18 @@ impl TychoRunner {
                     debug!("Received termination message, stopping RPC server...");
                     cmd.kill()
                         .expect("Failed to kill RPC server");
-                    let _ = cmd.wait();
+                    if let Err(e) = cmd.wait() {
+                        warn!("Failed to wait for RPC server exit: {e}");
+                    }
                 }
                 Err(_) => {
                     // Channel closed, terminate anyway
-                    let _ = cmd.kill();
-                    let _ = cmd.wait();
+                    if let Err(e) = cmd.kill() {
+                        warn!("Failed to kill RPC server: {e}");
+                    }
+                    if let Err(e) = cmd.wait() {
+                        warn!("Failed to wait for RPC server exit: {e}");
+                    }
                 }
             }
         });
@@ -233,7 +239,7 @@ impl TychoRunner {
             &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
-                .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
+                .ok_or_else(|| miette::miette!("Unknown endpoint for chain {}", self.chain))?
                 .as_str(),
             "index",
             "--extractors-config",

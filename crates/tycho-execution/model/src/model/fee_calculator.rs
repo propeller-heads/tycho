@@ -118,7 +118,9 @@ pub fn must_output_through_router(params: &Params, client_fee_bps: i64) -> Resul
 /// Narrows an intermediate 128-bit fee amount to the `i64` fee type, reverting when it does not
 /// fit.
 fn fee_to_i64(amount: i128) -> Result<i64, Error> {
-    i64::try_from(amount).map_err(|_| Error::revert("_calculate_fee: fee amount overflows i64"))
+    i64::try_from(amount).map_err(|_out_of_range| {
+        Error::revert(format!("_calculate_fee: fee amount {amount} overflows i64"))
+    })
 }
 
 /// Mirrors `FeeCalculator._calculateFee` in Solidity.

@@ -421,7 +421,7 @@ impl ExecutionSimulator {
         }
 
         // Parse signature like "Error(string)" or "Panic(uint256)"
-        let re = regex::Regex::new(r"(.*?)\((.*?)\)").unwrap();
+        let re = regex::Regex::new(r"(.*?)\((.*?)\)")?;
         let captures = re
             .captures(signature)
             .ok_or("Failed to parse signature")?;

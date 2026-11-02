@@ -33,9 +33,9 @@ impl SwapEncoder for FluidV1SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let dex_address = Address::from_str(&swap.component().id).map_err(|_| {
+        let dex_address = Address::from_str(&swap.component().id).map_err(|e| {
             EncodingError::FatalError(format!(
-                "Failed parsing FluidV1 component id as ethereum address: {}",
+                "Failed parsing FluidV1 component id as ethereum address: {}: {e}",
                 swap.component().id
             ))
         })?;

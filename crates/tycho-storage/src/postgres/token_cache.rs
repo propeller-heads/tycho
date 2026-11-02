@@ -457,6 +457,10 @@ impl TokenCache {
         Ok((store, max_modified_ts))
     }
 
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a poisoned lock means a writer panicked mid-update, so the store cannot be trusted"
+    )]
     pub(crate) fn query_tokens(
         &self,
         query: &TokenQuery,
@@ -1611,12 +1615,24 @@ mod refresh_task_topology_test {
                 }
             }
             // Cleanup so other tests see a clean DB.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "best-effort test cleanup; a failure leaves rows that the next test resets"
+            )]
             let _ = diesel::delete(schema::token::table)
                 .execute(&mut conn)
                 .await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "best-effort test cleanup; a failure leaves rows that the next test resets"
+            )]
             let _ = diesel::delete(schema::account::table)
                 .execute(&mut conn)
                 .await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "best-effort test cleanup; a failure leaves rows that the next test resets"
+            )]
             let _ = diesel::delete(schema::chain::table)
                 .execute(&mut conn)
                 .await;

@@ -431,12 +431,14 @@ fn quote_limit(
 }
 
 fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
-    value.try_into().map_err(|_| {
-        SimulationError::InvalidInput(
-            format!("expected 20-byte address, got {}", value.len()),
-            None,
-        )
-    })
+    value
+        .try_into()
+        .map_err(|_wrong_length| {
+            SimulationError::InvalidInput(
+                format!("expected 20-byte address, got {}", value.len()),
+                None,
+            )
+        })
 }
 
 fn biguint_to_u256(value: &BigUint) -> Result<U256, SimulationError> {

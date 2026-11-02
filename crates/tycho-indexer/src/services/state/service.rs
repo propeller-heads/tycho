@@ -621,11 +621,11 @@ mod test {
         let before = harness.service.straddle_token(SYSTEM);
         let window = harness.window.clone();
 
-        let _ = std::thread::spawn(move || {
+        let poisoner = std::thread::spawn(move || {
             let _guard = window.lock().unwrap();
             panic!("cache path bug");
-        })
-        .join();
+        });
+        assert!(poisoner.join().is_err());
 
         assert_ne!(harness.service.straddle_token(SYSTEM), before);
     }

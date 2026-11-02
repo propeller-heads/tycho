@@ -66,12 +66,15 @@ impl SubsidyEncoder {
                      is missing from its subsidy protocol config"
                 ))
             })?;
-        let invalid_payer =
-            || EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}"));
-        let payer_address = Bytes::from_str(payer).map_err(|_| invalid_payer())?;
-        bytes_to_address(&payer_address).map_err(|_| invalid_payer())?;
+        let payer_address = Bytes::from_str(payer).map_err(|e| invalid_payer(payer, e))?;
+        bytes_to_address(&payer_address).map_err(|e| invalid_payer(payer, e))?;
         Ok(Self::new(executor_address, payer_address, chain))
     }
+}
+
+/// The error for a configured payer address that is not a valid address.
+fn invalid_payer(payer: &str, error: impl std::fmt::Display) -> EncodingError {
+    EncodingError::FatalError(format!("Invalid subsidy {PAYER_CONFIG_KEY}: {payer}: {error}"))
 }
 
 /// The swap group that carries a solution's subsidy.

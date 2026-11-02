@@ -214,7 +214,10 @@ impl PendingBlockProcessor {
 
         if msg_block > self.current_confirmed_block {
             self.current_confirmed_block = msg_block;
-            // Receivers that have been dropped are silently ignored.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the confirmed-block receivers are optional; having none is normal"
+            )]
             let _ = self.confirmed_block_tx.send(msg_block);
         }
         Ok(())

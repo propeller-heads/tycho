@@ -33,8 +33,8 @@ impl SwapEncoder for BalancerV3SwapEncoder {
         swap: &Swap,
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let pool = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("Invalid pool address for Balancer v3".to_string())
+        let pool = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("Invalid pool address for Balancer v3: {e}"))
         })?;
 
         let args = (

@@ -314,9 +314,9 @@ where
                         })?));
                     (Some(code.clone()), code.hash_slow())
                 };
-                let account_address: Address = addr_str.parse().map_err(|_| {
+                let account_address: Address = addr_str.parse().map_err(|e| {
                     SimulationError::FatalError(format!(
-                        "Failed to get default engine: Couldn't parse address string {address}"
+                        "Failed to get default engine: Couldn't parse address string {address}: {e}"
                     ))
                 })?;
                 engine.state.init_account(
@@ -417,9 +417,9 @@ where
                 )
             })?;
 
-        let parsed_address: Address = to_address.parse().map_err(|_| {
+        let parsed_address: Address = to_address.parse().map_err(|e| {
             SimulationError::FatalError(format!(
-                "Failed to get address from call: Invalid address format: {to_address}"
+                "Failed to get address from call: Invalid address format: {to_address}: {e}"
             ))
         })?;
 

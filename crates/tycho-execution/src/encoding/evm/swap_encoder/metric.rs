@@ -35,9 +35,9 @@ impl SwapEncoder for MetricSwapEncoder {
         let pool_address = component
             .id
             .parse::<Bytes>()
-            .map_err(|_| {
+            .map_err(|e| {
                 EncodingError::FatalError(format!(
-                    "Metric component id is not a pool address: {}",
+                    "Metric component id is not a pool address: {}: {e}",
                     component.id
                 ))
             })?;

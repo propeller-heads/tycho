@@ -169,8 +169,7 @@ mod tests {
             Bytes::from("0xe54a55121A47451c5727ADBAF9b9FC1643477e25"),
             Chain::Base,
             None,
-        )
-        .unwrap();
+        )?;
         let context = EncodingContext {
             router_address: Some(Bytes::from("0x5615deb798bb3e4dfa0139dfa1b3d433cc23b72f")),
             group_token_in: swap.token_in().address.clone(),

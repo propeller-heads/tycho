@@ -22,7 +22,8 @@ impl TraceRenderer {
     pub fn render_arena(&self, arena: &CallTraceArena) -> String {
         let mut output = String::new();
         if !arena.nodes().is_empty() {
-            self.render_node(&mut output, arena, 0, 0);
+            self.render_node(&mut output, arena, 0, 0)
+                .expect("writing to a String cannot fail");
         }
         output
     }
@@ -34,36 +35,42 @@ impl TraceRenderer {
         arena: &CallTraceArena,
         node_index: usize,
         depth: usize,
-    ) {
+    ) -> std::fmt::Result {
         // Check max depth
         if let Some(max_depth) = self.max_depth {
             if depth >= max_depth {
-                return;
+                return Ok(());
             }
         }
 
         let nodes = arena.nodes();
         if node_index >= nodes.len() {
-            return;
+            return Ok(());
         }
 
         let node = &nodes[node_index];
 
         // Write indentation
         let indent = "  ".repeat(depth);
-        let _ = write!(output, "{}", indent);
+        write!(output, "{}", indent)?;
 
         // Render the trace
-        self.render_trace(output, node, depth == 0);
+        self.render_trace(output, node, depth == 0)?;
 
         // Render children
         for &child_index in &node.children {
-            self.render_node(output, arena, child_index, depth + 1);
+            self.render_node(output, arena, child_index, depth + 1)?;
         }
+        Ok(())
     }
 
     /// Render a single trace line
-    fn render_trace(&self, output: &mut String, node: &CallTraceNode, _is_root: bool) {
+    fn render_trace(
+        &self,
+        output: &mut String,
+        node: &CallTraceNode,
+        _is_root: bool,
+    ) -> std::fmt::Result {
         let trace = &node.trace;
 
         // Get the decoded trace if available
@@ -111,74 +118,78 @@ impl TraceRenderer {
         };
 
         // Build the line
-        let _ = write!(output, "[{}] {}::{}", trace.depth, address_str, call_str);
+        write!(output, "[{}] {}::{}", trace.depth, address_str, call_str)?;
 
         // Add gas info if requested
         if self.include_gas {
-            let _ = write!(output, " [gas: {}]", trace.gas_used);
+            write!(output, " [gas: {}]", trace.gas_used)?;
         }
 
         // Add success/failure indicator
         if trace.success {
-            let _ = write!(output, " ✓");
+            write!(output, " ✓")?;
         } else {
-            let _ = write!(output, " ✗");
+            write!(output, " ✗")?;
         }
 
-        let _ = writeln!(output);
+        writeln!(output)?;
 
         // Add return data if requested and available (on a new line with indentation)
         if self.include_return_data {
             if let Some(decoded) = decoded {
                 if let Some(return_data) = &decoded.return_data {
                     let return_indent = "  ".repeat(trace.depth + 1);
-                    let _ = writeln!(output, "{}→ {}", return_indent, return_data);
+                    writeln!(output, "{}→ {}", return_indent, return_data)?;
                 }
             } else if !trace.output.is_empty() {
                 let return_indent = "  ".repeat(trace.depth + 1);
-                let _ = writeln!(output, "{}→ 0x{}", return_indent, hex::encode(&trace.output));
+                writeln!(output, "{}→ 0x{}", return_indent, hex::encode(&trace.output))?;
             }
         }
 
         // Render logs for this trace
         for log in &node.logs {
-            self.render_log(output, log);
+            self.render_log(output, log)?;
         }
+        Ok(())
     }
 
     /// Render a log entry
-    fn render_log(&self, output: &mut String, log: &revm_inspectors::tracing::types::CallLog) {
+    fn render_log(
+        &self,
+        output: &mut String,
+        log: &revm_inspectors::tracing::types::CallLog,
+    ) -> std::fmt::Result {
         let indent = "    "; // Extra indentation for logs
-        let _ = write!(output, "{}├─ ", indent);
+        write!(output, "{}├─ ", indent)?;
 
         if let Some(decoded) = &log.decoded {
             if let Some(name) = &decoded.name {
-                let _ = write!(output, "emit {}(", name);
+                write!(output, "emit {}(", name)?;
                 if let Some(params) = &decoded.params {
                     let param_strs: Vec<String> = params
                         .iter()
                         .map(|(name, value)| format!("{}: {}", name, value))
                         .collect();
-                    let _ = write!(output, "{}", param_strs.join(", "));
+                    write!(output, "{}", param_strs.join(", "))?;
                 }
-                let _ = write!(output, ")");
+                write!(output, ")")?;
             } else {
-                let _ = write!(output, "emit <unknown>");
+                write!(output, "emit <unknown>")?;
             }
         } else {
             // Raw log data
             if !log.raw_log.topics().is_empty() {
-                let _ =
-                    write!(output, "emit 0x{}", hex::encode(log.raw_log.topics()[0].as_slice()));
+                write!(output, "emit 0x{}", hex::encode(log.raw_log.topics()[0].as_slice()))?;
                 if log.raw_log.topics().len() > 1 {
-                    let _ = write!(output, " (+ {} topics)", log.raw_log.topics().len() - 1);
+                    write!(output, " (+ {} topics)", log.raw_log.topics().len() - 1)?;
                 }
             } else {
-                let _ = write!(output, "emit <no topics>");
+                write!(output, "emit <no topics>")?;
             }
         }
 
-        let _ = writeln!(output);
+        writeln!(output)
     }
 }
 

@@ -412,7 +412,15 @@ mod tests {
                 connections_clone.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     let Ok(mut ws_stream) = accept_async(stream).await else { return };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(snapshot_frame()).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(fatal_frame()).await;
                     std::future::pending::<()>().await;
                 });
@@ -505,9 +513,17 @@ mod tests {
                 tokio::spawn(async move {
                     if let Ok(ws_stream) = accept_async(stream).await {
                         let (mut ws_sender, _ws_receiver) = ws_stream.split();
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the fake peer may already be gone; that is not a test failure"
+                        )]
                         let _ = ws_sender.send(snapshot_frame()).await;
                         if count == 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "the fake peer may already be gone; that is not a test failure"
+                            )]
                             let _ = ws_sender.close().await;
                         } else {
                             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -539,6 +555,10 @@ mod tests {
         tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
                 if let Ok(mut ws_stream) = accept_async(stream).await {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(snapshot_frame()).await;
                     loop {
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -585,7 +605,15 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let ws_stream = accept_async(stream).await.unwrap();
             let (mut ws_sender, _ws_receiver) = ws_stream.split();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.close().await;
             // Further connects complete at the TCP level from the backlog and then hang.
             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -627,8 +655,20 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let ws_stream = accept_async(stream).await.unwrap();
             let (mut ws_sender, _ws_receiver) = ws_stream.split();
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = resume_rx.await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = ws_sender.send(snapshot_frame()).await;
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
@@ -682,7 +722,15 @@ mod tests {
                     } else {
                         Message::Text("notice".into())
                     };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(frame).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.close(None).await;
                 });
             }
@@ -789,13 +837,25 @@ mod tests {
                         match disconnect {
                             Disconnect::IdleTimeout => {}
                             Disconnect::CloseFrame => {
+                                #[expect(
+                                    clippy::let_underscore_must_use,
+                                    reason = "the fake peer may already be gone; that is not a test failure"
+                                )]
                                 let _ = ws_stream.close(None).await;
                             }
                             Disconnect::UndecodableFrame => {
+                                #[expect(
+                                    clippy::let_underscore_must_use,
+                                    reason = "the fake peer may already be gone; that is not a test failure"
+                                )]
                                 let _ = ws_stream.send(bad_frame()).await;
                             }
                         }
                     } else {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "the fake peer may already be gone; that is not a test failure"
+                        )]
                         let _ = ws_stream.send(snapshot_frame()).await;
                     }
                     // Hold the connection so the client, not a server-side drop, ends it.
@@ -830,6 +890,10 @@ mod tests {
             while let Ok((stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
                     let Ok(mut ws_stream) = accept_async(stream).await else { return };
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = ws_stream.send(bad_frame()).await;
                 });
             }

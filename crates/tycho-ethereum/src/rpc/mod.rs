@@ -1198,6 +1198,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_ethereum_rpc_client_creation() -> Result<(), RPCError> {
         let url = std::env::var("RPC_URL").expect("RPC_URL must be set for testing");
 
@@ -1246,6 +1247,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_get_block_number() -> Result<(), RPCError> {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
@@ -1425,6 +1427,7 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_fetch_account_storage_without_specific_slots() -> Result<(), RPCError> {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
@@ -1490,6 +1493,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_trace_call_many() -> Result<(), RPCError> {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(false);
@@ -1540,6 +1544,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_eth_call() -> Result<(), RPCError> {
         use alloy::{
             primitives::U256,
@@ -2200,6 +2205,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, clippy::panic_in_result_fn, reason = "test assertions")]
     async fn test_get_gas_price() -> Result<(), RPCError> {
         use tycho_common::traits::FeePriceGetter;
 
@@ -2285,6 +2291,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "require RPC connection"]
+    #[expect(clippy::unwrap_in_result, reason = "test assertions")]
     async fn test_simulate_txs_with_trace_state_override() -> Result<(), RPCError> {
         let fixture = TestFixture::new();
         let client = fixture.create_rpc_client(true);

@@ -406,7 +406,8 @@ pub(crate) fn swap_request(
     block: &Block,
 ) -> miette::Result<TransactionRequest> {
     let (max_fee_per_gas, max_priority_fee_per_gas) = calculate_gas_fees(block)?;
-    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let user_address = Address::from_str(USER_ADDR)
+        .map_err(|e| miette!("Invalid user address {USER_ADDR}: {e}"))?;
     Ok(TransactionRequest::default()
         .to(Address::from_slice(&transaction.to()[..20]))
         .input(transaction.data().clone().into())
@@ -530,8 +531,9 @@ pub async fn setup_fermiswap_overwrites(
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(FERMISWAP_REGISTRY_ADDRESS).into_diagnostic()?;
     let target_address = Address::from_str(FERMISWAP_TARGET_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for &(base_asset, quote_asset) in pairs {
@@ -603,8 +605,9 @@ pub async fn setup_bopamm_overwrites(
 ) -> miette::Result<AddressHashMap<AccountOverride>> {
     let registry_address = Address::from_str(BOPAMM_REGISTRY_ADDRESS).into_diagnostic()?;
     let module_address = Address::from_str(BOPAMM_MODULE_ADDRESS).into_diagnostic()?;
-    let timestamp = u32::try_from(block.header.timestamp)
-        .map_err(|_| miette!("Block timestamp {} exceeds uint32", block.header.timestamp))?;
+    let timestamp = u32::try_from(block.header.timestamp).map_err(|_out_of_range| {
+        miette!("Block timestamp {} exceeds uint32", block.header.timestamp)
+    })?;
 
     let mut state_diff = Vec::new();
     for asset_id in asset_ids {

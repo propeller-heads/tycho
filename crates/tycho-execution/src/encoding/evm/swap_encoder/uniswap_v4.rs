@@ -59,8 +59,8 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         let angstrom = match hook_address {
             None => None,
             Some(address) => {
-                let hook_address = Bytes::from_str(address).map_err(|_| {
-                    EncodingError::FatalError("Invalid Angstrom hook address".to_string())
+                let hook_address = Bytes::from_str(address).map_err(|e| {
+                    EncodingError::FatalError(format!("Invalid Angstrom hook address: {e}"))
                 })?;
                 // Starting the cache here warms it up while the encoder is built, so that the
                 // first encoded Angstrom swap does not wait on the Angstrom API.
@@ -105,7 +105,7 @@ impl SwapEncoder for UniswapV4SwapEncoder {
         };
 
         let hook_data_length = u16::try_from(hook_data.len())
-            .map_err(|_| {
+            .map_err(|_out_of_range| {
                 EncodingError::InvalidInput(format!(
                     "Hook data of {} bytes exceeds the u16 length prefix",
                     hook_data.len()

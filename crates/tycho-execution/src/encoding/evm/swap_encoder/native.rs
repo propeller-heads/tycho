@@ -159,7 +159,7 @@ impl SwapEncoder for NativeSwapEncoder {
             deadline_timestamp
                 .as_ref()
                 .try_into()
-                .map_err(|_| {
+                .map_err(|_wrong_length| {
                     EncodingError::InvalidInput(format!(
                         "Native deadline_timestamp must be 8 bytes, got {}",
                         deadline_timestamp.len()
@@ -168,7 +168,9 @@ impl SwapEncoder for NativeSwapEncoder {
         );
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| EncodingError::FatalError("SystemTime before UNIX EPOCH".to_string()))?
+            .map_err(|_before_epoch| {
+                EncodingError::FatalError("SystemTime before UNIX EPOCH".to_string())
+            })?
             .as_secs();
         if deadline <= now {
             return Err(EncodingError::RecoverableError(format!(

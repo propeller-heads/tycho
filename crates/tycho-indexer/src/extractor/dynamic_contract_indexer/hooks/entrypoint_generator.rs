@@ -802,7 +802,7 @@ where
 
             for (amount_idx, amount_bytes) in amounts_to_use.iter().enumerate() {
                 let amount_u256 = U256::from_be_slice(amount_bytes.as_ref());
-                let amount_in = u128::try_from(amount_u256).map_err(|_| {
+                let amount_in = u128::try_from(amount_u256).map_err(|_out_of_range| {
                     error!(
                         token0 = %token_in,
                         token1 = %token_out,

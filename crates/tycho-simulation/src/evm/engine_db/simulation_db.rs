@@ -259,7 +259,9 @@ impl<P: Provider + Debug + 'static> SimulationDB<P> {
     ) -> Result<RwLockReadGuard<'_, AccountStorage>, SimulationDBError> {
         self.account_storage
             .read()
-            .map_err(|_| SimulationDBError::Internal("Account storage read lock poisoned".into()))
+            .map_err(|_poisoned| {
+                SimulationDBError::Internal("Account storage read lock poisoned".to_string())
+            })
     }
 
     fn write_account_storage(
@@ -267,7 +269,9 @@ impl<P: Provider + Debug + 'static> SimulationDB<P> {
     ) -> Result<RwLockWriteGuard<'_, AccountStorage>, SimulationDBError> {
         self.account_storage
             .write()
-            .map_err(|_| SimulationDBError::Internal("Account storage write lock poisoned".into()))
+            .map_err(|_poisoned| {
+                SimulationDBError::Internal("Account storage write lock poisoned".to_string())
+            })
     }
 
     fn block_on<F: core::future::Future>(&self, f: F) -> F::Output {
@@ -509,6 +513,7 @@ mod tests {
     use crate::evm::engine_db::utils::{get_client, get_runtime};
 
     #[rstest]
+    #[expect(clippy::unwrap_in_result, reason = "test assertions")]
     fn test_query_storage_latest_block() -> Result<(), Box<dyn Error>> {
         let db = SimulationDB::new(
             get_client(None).expect("Failed to create test client"),

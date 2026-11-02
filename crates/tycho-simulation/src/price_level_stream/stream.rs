@@ -620,6 +620,10 @@ mod tests {
     /// Sends one fresh message on the first connection only; later connections stay silent.
     async fn first_connection_sends_one_message(index: usize, mut socket: FakeConnection) {
         if index == 0 {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = socket.send(fresh_message()).await;
         }
         std::future::pending::<()>().await;
@@ -647,9 +651,17 @@ mod tests {
     async fn repeated_immediate_closes_remove_within_stale_after() {
         let fake = FakeTitan::spawn(|index, mut socket| async move {
             if index == 0 {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(fresh_message()).await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = socket.close(None).await;
         })
         .await;
@@ -668,8 +680,16 @@ mod tests {
     fn refused_reconnects_remove_within_stale_after() {
         let (removal, snapshot) = record_async(async {
             let mut fake = FakeTitan::spawn(|_, mut socket| async move {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(fresh_message()).await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.close(None).await;
             })
             .await;
@@ -725,8 +745,16 @@ mod tests {
     #[tokio::test]
     async fn fresh_message_after_removal_re_adds_the_component() {
         let fake = FakeTitan::spawn(|_, mut socket| async move {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = socket.send(fresh_message()).await;
             tokio::time::sleep(STALE_AFTER + Duration::from_millis(500)).await;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = socket
                 .send(Message::Text(message_text(101, wall_nanos_now()).into()))
                 .await;
@@ -788,6 +816,10 @@ mod tests {
             FakeTitan::spawn(move |_, mut socket| {
                 let server_saw_close = server_saw_close.clone();
                 async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = socket.send(fresh_message()).await;
                     // Read until the client goes away.
                     while let Some(Ok(message)) = socket.next().await {
@@ -1053,6 +1085,10 @@ mod tests {
     async fn first_connection_sends_captured_books(index: usize, mut socket: FakeConnection) {
         if index == 0 {
             let message = captured_message_text("Kipseli", 100, wall_nanos_now());
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the fake peer may already be gone; that is not a test failure"
+            )]
             let _ = socket
                 .send(Message::Text(message.into()))
                 .await;
@@ -1183,6 +1219,10 @@ mod tests {
             Box::pin(async move {
                 if index == 0 {
                     tokio::time::sleep(delay).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = socket.send(message).await;
                 }
                 std::future::pending::<()>().await;
@@ -1249,8 +1289,16 @@ mod tests {
             FakeTitan::spawn(send_once_after(SOCKET_HEAD_START, quote_stream_message())).await;
         let prices = FakeTitan::spawn(move |index, mut socket| async move {
             if index == 0 {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(matching_message()).await;
                 tokio::time::sleep(2 * SOCKET_HEAD_START).await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the fake peer may already be gone; that is not a test failure"
+                )]
                 let _ = socket.send(matching_message()).await;
             }
             std::future::pending::<()>().await;
@@ -1445,6 +1493,10 @@ mod tests {
                 let closed = closed.clone();
                 let first = first.clone();
                 async move {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the fake peer may already be gone; that is not a test failure"
+                    )]
                     let _ = socket.send(first).await;
                     while let Some(Ok(message)) = socket.next().await {
                         if matches!(message, Message::Close(_)) {

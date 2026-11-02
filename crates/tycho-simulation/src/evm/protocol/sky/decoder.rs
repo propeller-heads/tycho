@@ -53,9 +53,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for SkyState {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let [a, b] = tokens.try_into().map_err(|_| {
-            InvalidSnapshotError::ValueError("sky components have exactly two tokens".to_string())
-        })?;
+        let [a, b] = tokens
+            .try_into()
+            .map_err(|tokens: Vec<_>| {
+                InvalidSnapshotError::ValueError(format!(
+                    "sky components have exactly two tokens, got {}",
+                    tokens.len()
+                ))
+            })?;
 
         // Token roles come from the `gem` static attribute (also the swap encoder's
         // direction source), so the token list order does not matter.

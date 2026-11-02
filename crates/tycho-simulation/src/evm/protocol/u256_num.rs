@@ -44,7 +44,7 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
     let mut significant = if n_shifts >= 0 {
         let shift = n_shifts.unsigned_abs();
         let shifted = x << shift;
-        u64::try_from(shifted).map_err(|_| {
+        u64::try_from(shifted).map_err(|_out_of_range| {
             SimulationError::FatalError(format!(
                 "Unable to convert shifted U256 value `{shifted}` into u64 when converting {x}"
             ))
@@ -77,7 +77,7 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
         };
 
         let rounded_towards_zero_u256 = x >> shift;
-        let rounded_towards_zero: u64 = rounded_towards_zero_u256.try_into().map_err(|_| {
+        let rounded_towards_zero: u64 = rounded_towards_zero_u256.try_into().map_err(|_out_of_range| {
             SimulationError::FatalError(format!(
                 "Unable to convert rounded U256 value `{rounded_towards_zero_u256}` into u64 when converting {x}"
             ))

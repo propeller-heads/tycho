@@ -2817,7 +2817,11 @@ fn test_sequential_encoding_strategy_lido_v4_submit_then_wrap() {
 fn test_single_swap_with_univ4_angstrom() {
     //  USDC ─── (USV4-angstrom) ──> WETH
 
-    dotenvy::dotenv().ok();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a missing .env file is normal; the variables may come from the environment"
+    )]
+    let _ = dotenvy::dotenv();
 
     let weth = weth();
     let usdc = usdc();

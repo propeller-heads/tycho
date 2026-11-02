@@ -251,10 +251,10 @@ impl HashflowClient {
                         } else {
                             quote_attributes.insert(
                                 "external_account".to_string(),
-                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|_| {
-                                    RFQError::ParsingError(
-                                        "Failed to parse zero address".to_string(),
-                                    )
+                                Bytes::from_str(&Address::ZERO.to_string()).map_err(|e| {
+                                    RFQError::ParsingError(format!(
+                                        "Failed to parse zero address: {e}"
+                                    ))
                                 })?,
                             );
                         }
@@ -270,9 +270,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.base_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse base token amount: {}",
+                                                "Failed to parse base token amount: {} ({e})",
                                                 quote.quote_data.base_token_amount
                                             ))
                                         })?,
@@ -286,9 +286,9 @@ impl HashflowClient {
                             Bytes::from(
                                 biguint_to_u256(
                                     &BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                        .map_err(|_| {
+                                        .map_err(|e| {
                                             RFQError::ParsingError(format!(
-                                                "Failed to parse quote token amount: {}",
+                                                "Failed to parse quote token amount: {} ({e})",
                                                 quote.quote_data.quote_token_amount
                                             ))
                                         })?,
@@ -320,16 +320,16 @@ impl HashflowClient {
                             base_token: params.token_in.clone(),
                             quote_token: params.token_out.clone(),
                             amount_in: BigUint::from_str(&quote.quote_data.base_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount in string: {}",
+                                        "Failed to parse amount in string: {} ({e})",
                                         quote.quote_data.base_token_amount
                                     ))
                                 })?,
                             amount_out: BigUint::from_str(&quote.quote_data.quote_token_amount)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     RFQError::ParsingError(format!(
-                                        "Failed to parse amount out string: {}",
+                                        "Failed to parse amount out string: {} ({e})",
                                         quote.quote_data.quote_token_amount
                                     ))
                                 })?,
@@ -822,6 +822,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Hashflow's live API; requires HASHFLOW_USER and HASHFLOW_KEY"]
     async fn live_hashflow_api_refuses_a_chain_it_does_not_price() {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv().ok();
         let source = std::env::var("HASHFLOW_USER").expect("HASHFLOW_USER not set");
         let auth_key = std::env::var("HASHFLOW_KEY").expect("HASHFLOW_KEY not set");

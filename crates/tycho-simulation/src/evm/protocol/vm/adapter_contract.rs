@@ -123,9 +123,9 @@ where
             None,
         )?;
 
-        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|_| {
+        let decoded: SwapReturn = SwapReturn::abi_decode(&res.return_value).map_err(|e| {
             SimulationError::FatalError(format!(
-                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}",
+                "Adapter swap call failed: Failed to decode return value. Expected amount, gas, and price elements in the format (U256, U256, (U256, U256)). Found {:?}: {e}",
                         &res.return_value[..],
             ))
         })?;
@@ -208,9 +208,9 @@ where
                 "Adapter min gas usage call failed: Failed to decode return value: {e:?}"
             ))
         })?;
-        decoded
-            .try_into()
-            .map_err(|_| SimulationError::FatalError("Decoded value exceeds u64 range".to_string()))
+        decoded.try_into().map_err(|e| {
+            SimulationError::FatalError(format!("Decoded value exceeds u64 range: {e}"))
+        })
     }
 
     fn calculate_price(&self, fractions: Vec<(U256, U256)>) -> Result<Vec<f64>, SimulationError> {

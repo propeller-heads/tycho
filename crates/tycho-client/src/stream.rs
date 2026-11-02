@@ -72,6 +72,10 @@ pub struct ConstantRetryConfiguration {
 fn validate_chain_config() -> Result<(), StreamError> {
     let registry = ChainConfigRegistry::load_default()
         .map_err(|e| StreamError::SetUpError(format!("failed to load custom chain config: {e}")))?;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an already-installed registry is the intended outcome of a prior lazy access"
+    )]
     let _ = init_chain_registry(registry);
     Ok(())
 }
@@ -519,7 +523,11 @@ impl TychoStreamBuilder {
         let handle = tokio::spawn(async move {
             tokio::select! {
                 res = &mut ws_jh => {
-                    let _ = res.map_err(|e| StreamError::WebSocketConnectionError(e.to_string()));
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(?e, "WebSocket task ended with an error"),
+                        Err(e) => warn!(?e, "WebSocket task panicked"),
+                    }
                     // The task has ended, so its handle must not be polled again.
                     if let Err(e) = ws_client.close().await {
                         warn!(?e, "Failed to close WebSocket client");
@@ -684,6 +692,10 @@ mod tests {
                     break;
                 }
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have dropped the receiver before the connection closes"
+            )]
             let _ = closed_tx.send(());
         });
         (addr, closed_rx)

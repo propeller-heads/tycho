@@ -458,7 +458,7 @@ plans:
         std::fs::write(&path, "not: [valid: yaml: plans").unwrap();
         let result = PlansConfig::from_yaml(path.to_str().unwrap());
         assert!(result.is_err());
-        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

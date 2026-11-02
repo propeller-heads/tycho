@@ -358,15 +358,12 @@ impl PostgresGateway {
                 )
             })?;
 
-        let res: HashMap<String, HashSet<EntryPointWithTracingParams>> =
-            results
-                .into_iter()
-                .fold(HashMap::new(), |mut acc, (pc_ext_id, ep, params)| {
-                    acc.entry(pc_ext_id)
-                        .or_default()
-                        .insert(EntryPointWithTracingParams::new(ep.into(), (&params).into()));
-                    acc
-                });
+        let mut res: HashMap<String, HashSet<EntryPointWithTracingParams>> = HashMap::new();
+        for (pc_ext_id, ep, params) in results {
+            res.entry(pc_ext_id)
+                .or_default()
+                .insert(EntryPointWithTracingParams::new(ep.into(), (&params).try_into()?));
+        }
 
         Ok(WithTotal { entity: res, total: count })
     }
@@ -718,7 +715,7 @@ impl PostgresGateway {
             results_by_entry_point
                 .entry(ep_ext_id.clone())
                 .or_insert_with(HashMap::new)
-                .insert((&tracing_params).into(), converted_tracing_result);
+                .insert((&tracing_params).try_into()?, converted_tracing_result);
         }
 
         Ok(results_by_entry_point)

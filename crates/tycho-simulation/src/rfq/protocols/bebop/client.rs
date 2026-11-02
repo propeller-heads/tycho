@@ -272,15 +272,15 @@ impl BebopClient {
                     BebopOrderToSign::Single(ref single) => SignedQuote {
                         base_token: params.token_in.clone(),
                         quote_token: params.token_out.clone(),
-                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|_| {
+                        amount_in: BigUint::from_str(&single.taker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount in string: {}",
+                                "Failed to parse amount in string: {} ({e})",
                                 single.taker_amount
                             ))
                         })?,
-                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|_| {
+                        amount_out: BigUint::from_str(&single.maker_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
-                                "Failed to parse amount out string: {}",
+                                "Failed to parse amount out string: {} ({e})",
                                 single.maker_amount
                             ))
                         })?,

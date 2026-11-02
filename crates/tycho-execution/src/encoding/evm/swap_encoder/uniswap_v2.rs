@@ -38,7 +38,7 @@ impl SwapEncoder for UniswapV2SwapEncoder {
         let token_in_address = bytes_to_address(&swap.token_in().address)?;
         let token_out_address = bytes_to_address(&swap.token_out().address)?;
         let component_id = Address::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid USV2 component id".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid USV2 component id: {e}")))?;
 
         Ok((component_id, token_in_address, token_out_address).abi_encode_packed())
     }

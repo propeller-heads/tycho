@@ -124,7 +124,7 @@ pub(super) fn decode_attribute(name: &str, value: &[u8]) -> Result<U256, String>
 /// `decode_attribute` for the two 32-bit block counters in `StakeLimitUtils`.
 pub(super) fn decode_u32_attribute(name: &str, value: &[u8]) -> Result<u32, String> {
     let value = decode_attribute(name, value)?;
-    u32::try_from(value).map_err(|_| format!("{name} does not fit in 32 bits"))
+    u32::try_from(value).map_err(|_out_of_range| format!("{name} does not fit in 32 bits"))
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

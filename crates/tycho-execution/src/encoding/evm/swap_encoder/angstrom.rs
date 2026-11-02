@@ -152,8 +152,8 @@ impl ApiConfig {
     /// which is how consumers that do not route over Angstrom opt out, or when
     /// `ANGSTROM_BLOCKS_IN_FUTURE` is set to something that is not a block count.
     fn from_env() -> Result<Self, String> {
-        let key = env::var("ANGSTROM_API_KEY").map_err(|_| {
-            "ANGSTROM_API_KEY environment variable is required for Angstrom swaps".to_string()
+        let key = env::var("ANGSTROM_API_KEY").map_err(|e| {
+            format!("ANGSTROM_API_KEY environment variable is required for Angstrom swaps: {e}")
         })?;
 
         let client = reqwest::blocking::Client::builder()
@@ -188,10 +188,19 @@ impl ApiConfig {
             scope
                 .spawn(|| self.fetch())
                 .join()
-                .map_err(|_| {
-                    EncodingError::RecoverableError(
-                        "Angstrom attestation fetch panicked".to_string(),
-                    )
+                .map_err(|payload| {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| {
+                            payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                        })
+                        .unwrap_or("non-string panic payload");
+                    EncodingError::RecoverableError(format!(
+                        "Angstrom attestation fetch panicked: {message}"
+                    ))
                 })
         })?
     }

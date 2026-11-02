@@ -161,7 +161,7 @@ pub fn encode_tycho_router_call(
             )?;
             let permit = Some(
                 PermitSingle::try_from(&permit_single)
-                    .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?,
+                    .map_err(|e| EncodingError::InvalidInput(format!("Invalid permit: {e}")))?,
             );
             let signer = signer.ok_or_else(|| {
                 EncodingError::FatalError("Signer must be set to use permit2".to_string())
@@ -286,7 +286,12 @@ fn sign_client_fee(
     let signer = PrivateKeySigner::from_str(CLIENT_FEE_RECEIVER_PK)
         .map_err(|e| EncodingError::FatalError(format!("Invalid CLIENT_FEE_RECEIVER_PK: {e}")))?;
 
-    assert_eq!(signer.address(), client_fee_receiver);
+    if signer.address() != client_fee_receiver {
+        return Err(EncodingError::FatalError(format!(
+            "CLIENT_FEE_RECEIVER_PK controls {}, not the client fee receiver {client_fee_receiver}",
+            signer.address()
+        )));
+    }
     // Must match CLIENT_FEE_TYPEHASH in TychoRouterV3.sol.
     let type_hash: B256 = keccak256(
         b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
@@ -358,7 +363,7 @@ fn sign_permit(
     signer: PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-        .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
     let domain = eip712_domain! {
         name: "Permit2",
         chain_id: chain_id,

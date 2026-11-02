@@ -236,8 +236,9 @@ pub(crate) async fn get_code_for_contract(
         ))
     };
 
-    let addr = Address::from_str(address)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid address format: {address}")))?;
+    let addr = Address::from_str(address).map_err(|e| {
+        SimulationError::FatalError(format!("Invalid address format: {address}: {e}"))
+    })?;
     // Call eth_getCode to get the bytecode of the contract
     match sync_get_code(&connection_string, addr) {
         Ok(code) if code.is_empty() => {
@@ -350,15 +351,15 @@ pub fn string_to_bytes32(pool_id: &str) -> Result<[u8; 32], SimulationError> {
 /// ```
 pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 result.push(bytes);
             } else {
@@ -405,15 +406,15 @@ pub fn json_deserialize_address_list(input: &[u8]) -> Result<Vec<Vec<u8>>, Simul
 /// ```
 pub fn json_deserialize_be_bigint_list(input: &[u8]) -> Result<Vec<BigInt>, SimulationError> {
     let json_value: Value = serde_json::from_slice(input)
-        .map_err(|_| SimulationError::FatalError(format!("Invalid JSON: {input:?}")))?;
+        .map_err(|e| SimulationError::FatalError(format!("Invalid JSON: {input:?}: {e}")))?;
 
     if let Value::Array(hex_strings) = json_value {
         let mut result = Vec::new();
 
         for val in hex_strings {
             if let Value::String(hexstring) = val {
-                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|_| {
-                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}"))
+                let bytes = hex::decode(hexstring.trim_start_matches("0x")).map_err(|e| {
+                    SimulationError::FatalError(format!("Invalid hex string: {hexstring}: {e}"))
                 })?;
                 let bigint = BigInt::from_signed_bytes_be(&bytes);
                 result.push(bigint);
@@ -466,9 +467,9 @@ where
                 (resolved, code)
             }
         };
-        let account: Address = account.parse().map_err(|_| {
+        let account: Address = account.parse().map_err(|e| {
             SimulationError::FatalError(format!(
-                "stateless contract has an invalid address {account}"
+                "stateless contract has an invalid address {account}: {e}"
             ))
         })?;
         engine
@@ -518,9 +519,9 @@ where
             ))
         })?
         .parse()
-        .map_err(|_| {
+        .map_err(|e| {
             SimulationError::FatalError(format!(
-                "stateless call directive has an invalid target {directive}"
+                "stateless call directive has an invalid target {directive}: {e}"
             ))
         })?;
     let mut hasher = Keccak256::new();

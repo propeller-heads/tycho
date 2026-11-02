@@ -911,7 +911,7 @@ fn encode_tycho_router_call(
         solution.amount_in(),
     )?;
     let permit = PermitSingle::try_from(&p)
-        .map_err(|_| EncodingError::InvalidInput("Invalid permit".to_string()))?;
+        .map_err(|e| EncodingError::InvalidInput(format!("Invalid permit: {e}")))?;
     let signature = sign_permit(chain_id, &p, signer)?;
 
     // The router's singleSwapPermit2 expects a ClientFeeParams struct after `receiver`.
@@ -962,7 +962,7 @@ fn sign_permit(
     signer: PrivateKeySigner,
 ) -> Result<Signature, EncodingError> {
     let permit2_address = Address::from_str("0x000000000022D473030F116dDEE9F6B43aC78BA3")
-        .map_err(|_| EncodingError::FatalError("Permit2 address not valid".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Permit2 address not valid: {e}")))?;
     let domain = eip712_domain! {
         name: "Permit2",
         chain_id: chain_id,

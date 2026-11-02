@@ -81,19 +81,26 @@ impl SwapEncoder for EkuboV3SwapEncoder {
             u64::from_be_bytes(
                 get_static_attribute(swap, "fee")?
                     .try_into()
-                    .map_err(|_| EncodingError::FatalError("fee should be an u64".to_string()))?,
+                    .map_err(|e: Vec<u8>| {
+                        EncodingError::FatalError(format!(
+                            "fee should be an u64, got {} bytes",
+                            e.len()
+                        ))
+                    })?,
             )
         };
 
         let pool_type_config = B32::try_from(&get_static_attribute(swap, "pool_type_config")?[..])
-            .map_err(|_| {
+            .map_err(|_wrong_length| {
                 EncodingError::FatalError("pool_type_config should be 4 bytes long".to_string())
             })?;
 
         let extension: Address = get_static_attribute(swap, "extension")?
             .as_slice()
             .try_into()
-            .map_err(|_| EncodingError::FatalError("extension should be an address".to_string()))?;
+            .map_err(|_wrong_length| {
+                EncodingError::FatalError("extension should be an address".to_string())
+            })?;
 
         let mut encoded = vec![];
 
@@ -111,7 +118,7 @@ impl SwapEncoder for EkuboV3SwapEncoder {
         // absent the hop is byte-identical to a normal hop, preserving existing behavior.
         if let Some(tail) = signed_tail {
             // Wire format: meta(32) | minBalanceUpdate(32) | sigLen(u16 be) | signature(N)
-            let sig_len = u16::try_from(tail.signature.len()).map_err(|_| {
+            let sig_len = u16::try_from(tail.signature.len()).map_err(|_out_of_range| {
                 EncodingError::FatalError("signature length exceeds u16::MAX".to_string())
             })?;
 

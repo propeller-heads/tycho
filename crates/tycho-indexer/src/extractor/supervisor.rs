@@ -160,6 +160,10 @@ impl ExtractorSupervisor {
                         match ctrl {
                             ControlMessage::Stop => {
                                 info!(extractor = %self.id, "Stop signal received by supervisor");
+                                #[expect(
+                                    clippy::let_underscore_must_use,
+                                    reason = "the runner drops its stop receiver once it has finished on its own; awaiting its result below reports that outcome"
+                                )]
                                 let _ = stop_tx.send(());
                                 let result = run_handle.await;
                                 return match result {

@@ -43,8 +43,8 @@ impl SwapEncoder for SlipstreamsSwapEncoder {
         let token_out_address = bytes_to_address(&swap.token_out().address)?;
 
         let zero_to_one = Self::get_zero_to_one(token_in_address, token_out_address);
-        let component_id = Address::from_str(&swap.component().id).map_err(|_| {
-            EncodingError::FatalError("Invalid Slipstreams component id".to_string())
+        let component_id = Address::from_str(&swap.component().id).map_err(|e| {
+            EncodingError::FatalError(format!("Invalid Slipstreams component id: {e}"))
         })?;
         let tick_spacing_bytes = get_static_attribute(swap, "tick_spacing")?;
 

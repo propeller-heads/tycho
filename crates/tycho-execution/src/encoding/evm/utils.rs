@@ -142,8 +142,8 @@ pub(crate) fn create_encoding_runtime() -> Result<(Handle, SafeRuntime), Encodin
             .worker_threads(1)
             .enable_all()
             .build()
-            .map_err(|_| {
-                EncodingError::FatalError("Failed to create encoding runtime".to_string())
+            .map_err(|e| {
+                EncodingError::FatalError(format!("Failed to create encoding runtime: {e}"))
             })?,
     );
     let handle = rt.handle().clone();
@@ -268,13 +268,19 @@ pub(crate) type EVMProvider = Arc<
 
 /// Gets the client used for interacting with the EVM-compatible network.
 pub(crate) async fn get_client() -> Result<EVMProvider, EncodingError> {
-    dotenvy::dotenv().ok();
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => {
+            return Err(EncodingError::FatalError(format!("Failed to load .env file: {e}")));
+        }
+    }
     let eth_rpc_url = env::var("RPC_URL")
-        .map_err(|_| EncodingError::FatalError("Missing RPC_URL in environment".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Missing RPC_URL in environment: {e}")))?;
     let client = ProviderBuilder::new()
         .connect(&eth_rpc_url)
         .await
-        .map_err(|_| EncodingError::FatalError("Failed to build provider".to_string()))?;
+        .map_err(|e| EncodingError::FatalError(format!("Failed to build provider: {e}")))?;
     Ok(Arc::new(client))
 }
 
@@ -392,7 +398,7 @@ pub(crate) fn ple_encode(action_data_array: Vec<Vec<u8>>) -> Result<Vec<u8>, Enc
     let mut encoded_action_data: Vec<u8> = Vec::new();
 
     for action_data in action_data_array {
-        let length = u16::try_from(action_data.len()).map_err(|_| {
+        let length = u16::try_from(action_data.len()).map_err(|_out_of_range| {
             EncodingError::InvalidInput(format!(
                 "Action data of {} bytes exceeds the u16 length prefix",
                 action_data.len()

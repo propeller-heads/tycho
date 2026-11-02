@@ -695,7 +695,7 @@ impl ProtocolSim for BalancerV3State {
             self.block_timestamp = timestamp;
         }
 
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+        let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
         let pool = AlloyAddress::from_slice(self.pool_address.as_ref());
         self.state = vm::refresh_pool_state(&engine, &pool, &self.state, self.block_timestamp)
             .map_err(TransitionError::SimulationError)?;

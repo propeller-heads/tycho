@@ -89,7 +89,7 @@ impl ChainTokenConfig {
             .map_err(|e| ChainConfigError::InvalidAddress(address_hex.to_owned(), e.to_string()))?;
         let address = ChainAddress::new(&raw)?;
         let symbol = ArrayString::from(symbol)
-            .map_err(|_| ChainConfigError::SymbolTooLong(symbol.to_owned()))?;
+            .map_err(|e| ChainConfigError::SymbolTooLong(e.element().to_owned()))?;
         Ok(Self { address, symbol, decimals })
     }
 }
@@ -141,8 +141,8 @@ impl CustomChainConfig {
         wrapped_native: ChainTokenConfig,
         default_tvl_thresholds: TvlThresholds,
     ) -> Result<Self, ChainConfigError> {
-        let name =
-            ArrayString::from(name).map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))?;
+        let name = ArrayString::from(name)
+            .map_err(|e| ChainConfigError::NameTooLong(e.element().to_owned()))?;
         Ok(Self { name, chain_id, block_time_secs, native, wrapped_native, default_tvl_thresholds })
     }
 
@@ -178,7 +178,7 @@ impl CustomChainId {
         }
         ArrayString::from(name)
             .map(Self)
-            .map_err(|_| ChainConfigError::NameTooLong(name.to_owned()))
+            .map_err(|e| ChainConfigError::NameTooLong(e.element().to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
