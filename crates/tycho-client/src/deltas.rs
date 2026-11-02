@@ -1000,12 +1000,11 @@ impl DeltasClient for WsDeltasClient {
                                 "Connection dropped unexpectedly; Reconnecting..."
                             );
                             break;
-                        } else {
-                            // Other errors are considered fatal
-                            error!(?error, "Fatal error; Exiting");
-                            result = Err(error);
-                            break 'retry;
                         }
+                        // Other errors are considered fatal
+                        error!(?error, "Fatal error; Exiting");
+                        result = Err(error);
+                        break 'retry;
                     }
                 }
             }

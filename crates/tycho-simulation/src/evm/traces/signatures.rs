@@ -219,9 +219,8 @@ impl SignaturesIdentifier {
                         sleep(Duration::from_secs(1)).await;
                         retries -= 1;
                         continue;
-                    } else {
-                        return Ok(response);
                     }
+                    return Ok(response);
                 }
                 Err(_e) if retries > 0 => {
                     sleep(Duration::from_millis(500)).await;

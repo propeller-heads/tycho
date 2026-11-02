@@ -826,9 +826,8 @@ mod tests {
 
             if criteria(&response_msg) {
                 return Ok(response_msg);
-            } else {
-                debug!("Message did not meet criteria, waiting for the correct message");
             }
+            debug!("Message did not meet criteria, waiting for the correct message");
         }
     }
 
@@ -1626,9 +1625,8 @@ mod tests {
                     if serde_json::from_str::<DummyDelta>(&text).is_ok() {
                         received = true;
                         break;
-                    } else {
-                        panic!("Unexpected text message: {text}");
                     }
+                    panic!("Unexpected text message: {text}");
                 }
                 Ok(Some(Ok(_))) => continue, // Ping/pong, continue
                 Ok(Some(Err(e))) => panic!("Connection error: {e}"),

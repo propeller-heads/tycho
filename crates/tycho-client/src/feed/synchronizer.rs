@@ -764,9 +764,8 @@ where
                         removed_components: HashMap::new(),
                     };
                     break 'init (snapshot_msg.merge(deltas_msg), header);
-                } else {
-                    break 'init (deltas_msg, header);
                 }
+                break 'init (deltas_msg, header);
             };
 
             block_tx.send(Ok(msg)).await?;
@@ -1314,10 +1313,9 @@ where
                                 );
                                 let _ = tx.send(Err(e)).await;
                                 return;
-                            } else {
-                                // Store error in case this is our last retry
-                                final_error = Some(e);
                             }
+                            // Store error in case this is our last retry
+                            final_error = Some(e);
                         } else {
                             // Close signal was received, exit cleanly
                             info!(extractor_id=%&self.extractor_id, "Received close signal, exiting.");

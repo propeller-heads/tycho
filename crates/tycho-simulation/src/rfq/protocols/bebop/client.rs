@@ -208,9 +208,8 @@ impl BebopClient {
                     )));
                     if attempt < MAX_RETRIES - 1 {
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -234,9 +233,8 @@ impl BebopClient {
                     if attempt < MAX_RETRIES - 1 {
                         sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 

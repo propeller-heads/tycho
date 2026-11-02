@@ -799,10 +799,9 @@ async fn main() {
                                         buy_symbol = buy_token.symbol,
                                     );
                                     return; // Exit the program after successful execution
-                                } else {
-                                    eprintln!("\nSwap transaction failed!\n");
-                                    continue;
                                 }
+                                eprintln!("\nSwap transaction failed!\n");
+                                continue;
                             }
                             "skip" => {
                                 println!("\nSkipping this swap...\n");

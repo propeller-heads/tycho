@@ -312,11 +312,10 @@ impl App {
                                     KeyCode::Char('q') | KeyCode::Esc => {
                                         if !self.show_popup && !self.show_details && !self.filter_mode {
                                             return Ok(())
-                                        } else {
-                                            self.show_popup = false;
-                                            self.show_details = false;
-                                            self.filter_mode = false;
                                         }
+                                        self.show_popup = false;
+                                        self.show_details = false;
+                                        self.filter_mode = false;
                                     },
                                     KeyCode::Char('j') | KeyCode::Down => self.move_row(1),
                                     KeyCode::Char('+') => {

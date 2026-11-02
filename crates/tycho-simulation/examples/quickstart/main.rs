@@ -536,10 +536,9 @@ async fn main() {
                                         continue;
                                     }
                                 }
-                            } else {
-                                println!("\nSkipping this swap...\n");
-                                continue;
                             }
+                            println!("\nSkipping this swap...\n");
+                            continue;
                         }
                     }
                 }

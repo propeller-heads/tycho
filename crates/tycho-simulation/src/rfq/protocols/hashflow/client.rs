@@ -171,9 +171,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
                 Err(_) => {
                     return Err(RFQError::ConnectionError(format!(
@@ -195,9 +194,8 @@ impl HashflowClient {
                         if attempt < MAX_RETRIES - 1 {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
-                        } else {
-                            return Err(last_error.unwrap());
                         }
+                        return Err(last_error.unwrap());
                     }
                 };
                 // The venue answering a quote request at all means the request reached it,
@@ -210,9 +208,8 @@ impl HashflowClient {
                     warn!(attempt = attempt + 1, max_attempts = MAX_RETRIES, error = %err_msg, "returned non-200 status");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
-                } else {
-                    return Err(last_error.unwrap());
                 }
+                return Err(last_error.unwrap());
             }
 
             let quote_response = match response
@@ -228,9 +225,8 @@ impl HashflowClient {
                     if attempt < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
-                    } else {
-                        return Err(last_error.unwrap());
                     }
+                    return Err(last_error.unwrap());
                 }
             };
 
@@ -340,12 +336,11 @@ impl HashflowClient {
                             quote_attributes,
                         };
                         return Ok(signed_quote);
-                    } else {
-                        return Err(RFQError::QuoteNotFound(format!(
-                            "Hashflow quote not found for {} {} ->{}",
-                            params.amount_in, params.token_in, params.token_out,
-                        )));
                     }
+                    return Err(RFQError::QuoteNotFound(format!(
+                        "Hashflow quote not found for {} {} ->{}",
+                        params.amount_in, params.token_in, params.token_out,
+                    )));
                 }
                 "fail" => {
                     let Some(error) = quote_response.error else {

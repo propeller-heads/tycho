@@ -747,10 +747,9 @@ where
                                     warn!(pool = id, error = %e, "StateDecodingFailure");
                                     msg_failed_components.insert(id.clone());
                                     continue 'snapshot_loop;
-                                } else {
-                                    error!(pool = id, error = %e, "StateDecodingFailure");
-                                    return Err(StreamDecodeError::Fatal(format!("{e}")));
                                 }
+                                error!(pool = id, error = %e, "StateDecodingFailure");
+                                return Err(StreamDecodeError::Fatal(format!("{e}")));
                             }
                         }
                     } else if self.skip_state_decode_failures {

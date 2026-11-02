@@ -945,9 +945,8 @@ where
                             let all_found = component_ids.len() == res.pagination.total as usize;
                             if all_found {
                                 return (res, true);
-                            } else {
-                                return (res, false);
                             }
+                            return (res, false);
                         }
                         // Otherwise check if request is for the last page (shouldn't cache)
                         let last_page = res.pagination.total_pages() - 1;
