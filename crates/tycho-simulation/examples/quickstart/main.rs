@@ -485,7 +485,6 @@ async fn main() {
                                 }
                             }
                             println!(); // Add empty line after simulation results
-                            continue;
                         }
                         Err(e) => {
                             eprintln!("\nSimulation failed: {e:?}");
@@ -538,7 +537,6 @@ async fn main() {
                                 }
                             }
                             println!("\nSkipping this swap...\n");
-                            continue;
                         }
                     }
                 }
@@ -576,17 +574,14 @@ async fn main() {
                         }
                         Err(e) => {
                             eprintln!("\nFailed to execute transaction: {e:?}\n");
-                            continue;
                         }
                     }
                 }
                 "skip" => {
                     println!("\nSkipping this swap...\n");
-                    continue;
                 }
                 _ => {
                     println!("\nInvalid input. Please choose 'simulate', 'execute' or 'skip'.\n");
-                    continue;
                 }
             }
         }

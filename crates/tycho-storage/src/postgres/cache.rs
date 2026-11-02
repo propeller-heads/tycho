@@ -256,7 +256,7 @@ impl DBTransaction {
                     l.extend(r.iter().cloned());
                     return Ok(());
                 }
-                _ => continue,
+                _ => {}
             }
         }
         // not quite accurate but currently all WriteOps are created with a single entry.
@@ -423,7 +423,6 @@ impl DBCacheWriteExecutor {
                             e
                         );
                         tokio::time::sleep(delay).await;
-                        continue;
                     }
                 }
                 _ => break,

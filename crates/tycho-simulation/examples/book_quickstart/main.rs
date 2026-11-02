@@ -622,7 +622,6 @@ async fn main() {
                                             println!("Consider adjusting parameters and re-simulating before execution.");
                                         }
                                         println!();
-                                        continue;
                                     }
                                     Err(e) => {
                                         eprintln!("\n❌ Simulation failed: {e:?}");
@@ -801,15 +800,12 @@ async fn main() {
                                     return; // Exit the program after successful execution
                                 }
                                 eprintln!("\nSwap transaction failed!\n");
-                                continue;
                             }
                             "skip" => {
                                 println!("\nSkipping this swap...\n");
-                                continue;
                             }
                             _ => {
                                 println!("\nInvalid input. Please choose 'simulate', 'execute' or 'skip'.\n");
-                                continue;
                             }
                         }
                     }

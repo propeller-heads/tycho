@@ -538,7 +538,6 @@ impl TestRunner {
                 Err(e) => {
                     error!("Stream error: {:#}", e);
                     // Continue processing instead of breaking - streams can have temporary errors
-                    continue;
                 }
             }
         }

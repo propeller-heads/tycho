@@ -1628,7 +1628,7 @@ mod tests {
                     }
                     panic!("Unexpected text message: {text}");
                 }
-                Ok(Some(Ok(_))) => continue, // Ping/pong, continue
+                Ok(Some(Ok(_))) => {} // Ping/pong, continue
                 Ok(Some(Err(e))) => panic!("Connection error: {e}"),
                 Ok(None) => panic!("Connection closed"),
                 Err(_) => break, // Timeout - no message received

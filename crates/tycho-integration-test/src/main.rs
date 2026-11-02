@@ -1644,35 +1644,31 @@ fn select_components_to_process(
         // update, which carries the per-protocol sync states.
         if let StreamUpdatePayload::Protocol(protocol_update) = &update.payload {
             for (protocol, component_ids) in &current_state.component_ids_by_protocol {
-                let protocol_sync_state = protocol_update
+                if let Some(SynchronizerState::Ready(_)) = protocol_update
                     .sync_states
-                    .get(protocol);
-                match protocol_sync_state {
-                    None => continue,
-                    Some(SynchronizerState::Ready(_)) => {
-                        let available_ids: Vec<_> = component_ids
-                            .iter()
-                            .filter(|id| {
-                                !protocol_update
-                                    .states
-                                    .keys()
-                                    .contains(id) &&
-                                    !all_selected_ids.contains(id)
-                            })
-                            .cloned()
-                            .collect();
+                    .get(protocol)
+                {
+                    let available_ids: Vec<_> = component_ids
+                        .iter()
+                        .filter(|id| {
+                            !protocol_update
+                                .states
+                                .keys()
+                                .contains(id) &&
+                                !all_selected_ids.contains(id)
+                        })
+                        .cloned()
+                        .collect();
 
-                        let protocol_selected_ids: Vec<_> = available_ids
-                            .choose_multiple(
-                                &mut rand::rng(),
-                                (cli.max_simulations_stale as usize).min(available_ids.len()),
-                            )
-                            .cloned()
-                            .collect();
+                    let protocol_selected_ids: Vec<_> = available_ids
+                        .choose_multiple(
+                            &mut rand::rng(),
+                            (cli.max_simulations_stale as usize).min(available_ids.len()),
+                        )
+                        .cloned()
+                        .collect();
 
-                        all_selected_ids.extend(protocol_selected_ids);
-                    }
-                    _ => continue,
+                    all_selected_ids.extend(protocol_selected_ids);
                 }
             }
         }

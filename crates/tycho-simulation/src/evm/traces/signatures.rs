@@ -225,7 +225,6 @@ impl SignaturesIdentifier {
                 Err(_e) if retries > 0 => {
                     sleep(Duration::from_millis(500)).await;
                     retries -= 1;
-                    continue;
                 }
                 Err(e) => return Err(e),
             }
