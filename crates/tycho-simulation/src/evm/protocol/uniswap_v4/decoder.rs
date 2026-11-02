@@ -15,7 +15,7 @@ use crate::{
                 },
                 utils::{has_permission, HookOptions},
             },
-            state::UniswapV4Fees,
+            state::{SwapGasCosts, UniswapV4Fees},
         },
         utils::{
             bytes_to_address,
@@ -31,6 +31,16 @@ use crate::{
 /// The protocol system whose pool manager reads hook permissions from the pool key rather than
 /// the hook address, and which only emits pools whose hook takes part in swaps.
 const POOL_KEY_PERMISSION_SYSTEM: &str = "pancakeswap_infinity_cl_hooks";
+
+/// The gas costs of the pool manager behind `protocol_system`.
+fn gas_costs_for(protocol_system: &str) -> SwapGasCosts {
+    match protocol_system {
+        "pancakeswap_infinity_cl" | "pancakeswap_infinity_cl_hooks" => {
+            SwapGasCosts::PANCAKESWAP_INFINITY_CL
+        }
+        _ => SwapGasCosts::UNISWAP_V4,
+    }
+}
 
 /// Whether a hook can take part in a swap at all, which it can exactly when its address carries
 /// the `beforeSwap` or the `afterSwap` permission bit. Uniswap V4 encodes a hook's permissions in
@@ -180,6 +190,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 );
                 InvalidSnapshotError::ValueError(err.to_string())
             })?;
+        state.set_gas_costs(gas_costs_for(&snapshot.component.protocol_system));
 
         // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
         // about whether the pool has a hook: the zero address is what "no hook" looks like on the
@@ -789,7 +800,8 @@ mod tests {
             .expect("an open CLAlphaHook pool decodes on BSC");
         assert!(decoded.hook.is_some(), "the registered handler is installed despite the bits");
 
-        let reference = reference_hookless_state();
+        let mut reference = reference_hookless_state();
+        reference.set_gas_costs(SwapGasCosts::PANCAKESWAP_INFINITY_CL);
         let (t0, t1) = (token0(), token1());
         assert_eq!(decoded.spot_price(&t0, &t1).unwrap(), reference.spot_price(&t0, &t1).unwrap());
         assert_eq!(
@@ -962,6 +974,36 @@ mod tests {
             panic!("a 19-byte hooks attribute must not decode");
         };
         assert!(message.contains("hooks"), "{message}");
+    }
+
+    #[rstest]
+    #[case::uniswap_v4("uniswap_v4", SwapGasCosts::UNISWAP_V4)]
+    #[case::infinity_cl("pancakeswap_infinity_cl", SwapGasCosts::PANCAKESWAP_INFINITY_CL)]
+    #[tokio::test]
+    async fn test_decoded_pool_prices_gas_for_its_protocol_system(
+        #[case] protocol_system: &str,
+        #[case] gas_costs: SwapGasCosts,
+    ) {
+        let mut snapshot = hookless_snapshot_with_hook(ZERO_HOOK);
+        snapshot.component.protocol_system = protocol_system.to_string();
+        let decoded = decode_with_chain(snapshot, Some(Chain::Bsc))
+            .await
+            .expect("a hookless pool decodes");
+        let mut reference = reference_hookless_state();
+        reference.set_gas_costs(gas_costs);
+
+        let amount_in = BigUint::from(1_000_000_000_000_000_u64);
+        let (t0, t1) = (token0(), token1());
+        assert_eq!(
+            decoded
+                .get_amount_out(amount_in.clone(), &t0, &t1)
+                .unwrap()
+                .gas,
+            reference
+                .get_amount_out(amount_in, &t0, &t1)
+                .unwrap()
+                .gas
+        );
     }
 
     #[tokio::test]
