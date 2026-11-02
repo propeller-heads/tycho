@@ -520,7 +520,10 @@ mod tests {
         super::{attributes::reserve_attributes, math::constants::REAL_ID_SHIFT},
         *,
     };
-    use crate::evm::protocol::test_utils::try_decode_snapshot_with_defaults;
+    use crate::evm::protocol::{
+        pancakeswap_infinity_bin::attributes::decode_u32_attribute,
+        test_utils::try_decode_snapshot_with_defaults,
+    };
 
     /// Pool with `bin_step` 10 and a 100-pip LP fee, no protocol fee, so `swap_fee` is 100 pips
     /// and the expectations below reuse the `math::bin` vectors.
@@ -1401,7 +1404,10 @@ mod tests {
             currency1: address(&snapshot.component.tokens[1]),
             hooks: Address::ZERO,
             poolManager: address(&statics["pool_manager"]),
-            fee: U24::from(u32::from(statics["key_lp_fee"].clone())),
+            fee: U24::from(
+                decode_u32_attribute("key_lp_fee", &statics["key_lp_fee"])
+                    .expect("key_lp_fee is a u24"),
+            ),
             parameters: FixedBytes::from_slice(statics["parameters"].as_ref()),
         }
     }
