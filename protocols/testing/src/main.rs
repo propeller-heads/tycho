@@ -1,6 +1,7 @@
 mod adapter_builder;
 mod config;
 mod execution;
+mod report;
 mod rpc;
 mod state_registry;
 mod test_runner;
@@ -64,11 +65,16 @@ pub struct RangeTestCommand {
     /// If provided, only run the tests with a matching name
     #[arg(long)]
     match_test: Option<String>,
+
+    /// Write every check's outcome, per test, to this file as JSON
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 impl RangeTestCommand {
     fn run(self) -> miette::Result<()> {
-        let test_type = TestType::Range(TestTypeRange { match_test: self.match_test });
+        let test_type =
+            TestType::Range(TestTypeRange { match_test: self.match_test, report: self.report });
         TestRunner::new(
             self.common_args
                 .into_config(test_type)?,

@@ -25,6 +25,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 postgres         = "0.19.10"
 tokio-postgres   = "0.7.18"
 serde_yaml       = "0.9.34"
+serde_ignored    = "0.1"
 dotenv           = { workspace = true }
 colored          = "3.0.0"
 similar          = "2.7.0"
