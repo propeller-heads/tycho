@@ -1,3 +1,12 @@
+## [0.497.1](https://github.com/propeller-heads/tycho/compare/0.497.0...0.497.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **testing:** build the test-runner image from the lib submodules ([10f55f9](https://github.com/propeller-heads/tycho/commit/10f55f996078a6688db24a2fe1cdd0757984280f))
+* **testing:** build the test-runner image from the lib submodules ([#1666](https://github.com/propeller-heads/tycho/issues/1666)) ([5fd2fd0](https://github.com/propeller-heads/tycho/commit/5fd2fd0e65854778e5f9c3d14022cf3414371828))
+* **testing:** pin forge libs in the test-runner image ([9183669](https://github.com/propeller-heads/tycho/commit/918366942198804ccdc3bbe0c0b6be9666515827))
+
 ## [0.497.0](https://github.com/propeller-heads/tycho/compare/0.496.2...0.497.0) (2026-11-03)
 
 
