@@ -19,12 +19,7 @@ COPY . .
 WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
 COPY --from=foundry-builder /root/.foundry/bin/forge /usr/local/bin/forge
 RUN chmod +x /usr/local/bin/forge
-# Fetch forge lib submodules (not present in Docker context due to .dockerignore
-# excluding .git/ and CI checkout not always fetching submodules).
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    git init && \
-    forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git && \
-    apt-get purge -y git && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+# The forge libraries come from the lib/ submodules in the build context.
 RUN forge build
 
 # Build substreams (wasm targets only - source not needed in final image)

@@ -127,6 +127,10 @@ export RPC_URL=..
 export SUBSTREAMS_API_TOKEN=..
 export PROTOCOLS="ethereum-balancer-v2=weighted_legacy_creation ethereum-ekubo-v2"
 
+# The test-runner image compiles the EVM adapter against its lib/ submodules, so initialize them
+# first
+git submodule update --init --recursive ../adapter-integration/evm/lib
+
 # Build both images (test-runner + db) and run the tests. --abort-on-container-exit stops the
 # stack when the one-shot test-runner finishes.
 docker compose up --build --abort-on-container-exit
