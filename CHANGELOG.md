@@ -1,3 +1,17 @@
+## [0.497.0](https://github.com/propeller-heads/tycho/compare/0.496.2...0.497.0) (2026-11-03)
+
+
+### Features
+
+* **router-trades:** add volume and swaps by protocol panels ([8a3ba87](https://github.com/propeller-heads/tycho/commit/8a3ba87db5877ebcb9f3802680d480b36eff774e))
+* **router-trades:** add volume and swaps by protocol panels ([#1723](https://github.com/propeller-heads/tycho/issues/1723)) ([b5266a6](https://github.com/propeller-heads/tycho/commit/b5266a6ae1e1823b8c5ce17d92360e4887e6894f))
+
+
+### Bug Fixes
+
+* **ekubo-v3:** recognise SignedExclusiveSwap v3.3 on Ethereum ([ff3bdb5](https://github.com/propeller-heads/tycho/commit/ff3bdb58a2e63459d456bb4dbd7e6d2001002e75))
+* **ekubo-v3:** recognise SignedExclusiveSwap v3.3 on Ethereum ([#1724](https://github.com/propeller-heads/tycho/issues/1724)) ([7e40529](https://github.com/propeller-heads/tycho/commit/7e4052968d4a145095fbd2ef6bd53ae9c2e5900b))
+
 ## [0.496.2](https://github.com/propeller-heads/tycho/compare/0.496.1...0.496.2) (2026-11-03)
 
 ## [0.496.1](https://github.com/propeller-heads/tycho/compare/0.496.0...0.496.1) (2026-11-02)

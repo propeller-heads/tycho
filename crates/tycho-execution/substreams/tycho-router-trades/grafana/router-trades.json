@@ -2196,12 +2196,244 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "USD volume that went through each protocol, per interval.\n\nSingle and sequential routes send the whole trade through every hop, so a two-hop trade counts its full volume on both protocols and the protocols add up to more than the trade volume. On split routes each hop gets its share, worked out from the route's splits the way TychoRouterV3 applies them: a split above 0 takes split/0xffffff of the token's total amount, and 0 takes what is left. A hop's input is valued as a share of the trade's USD volume, so a hop on an intermediate token is priced at the trade's rate, not the pool's.\n\nProtocols come from the hop's executor, so an executor that serves several protocols shows as one label (for example \"pancakeswap_v3 / uniswap_v3\"). Hops on the prop-AMM fallback executor show as \"pamm:<name>\", named from the prop-AMM address in the hop's data; that executor quotes the prop-AMM and a backup pool and runs the better one, so some of this volume may have filled on the backup pool. Native wrap and unwrap hops are left out.\n\nSettled trades only, and only trades the pricer has stamped (see Priced coverage).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 106
+      },
+      "id": 110,
+      "maxDataPoints": 60,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "sortBy": "Total",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH RECURSIVE t AS (\n  SELECT id, block_time, strategy, n_tokens, volume_usd\n  FROM trades_settled\n  WHERE $__timeFilter(block_time) AND chain IN (${chain:sqlstring}) AND volume_usd IS NOT NULL\n),\n-- Split routes: each hop takes split/0xffffff of the token's total amount, or the rest when split\n-- is 0 (TychoRouterV3._splitSwap). Amounts are shares of the trade's input value.\nwalk AS (\n  SELECT t.id AS trade_id, -1 AS hop_index, 0::float8 AS share,\n         ARRAY[1::float8] || array_fill(0::float8, ARRAY[t.n_tokens - 1]) AS total,\n         ARRAY[1::float8] || array_fill(0::float8, ARRAY[t.n_tokens - 1]) AS remaining\n  FROM t WHERE t.strategy = 'split'\n  UNION ALL\n  SELECT w.trade_id, h.hop_index, x.share,\n         (SELECT array_agg(v + CASE WHEN i = h.token_out_index + 1 AND h.token_out_index > 0\n                                    THEN x.share ELSE 0 END ORDER BY i)\n          FROM unnest(w.total) WITH ORDINALITY u(v, i)),\n         (SELECT array_agg(v + CASE WHEN i = h.token_out_index + 1 THEN x.share ELSE 0 END\n                             - CASE WHEN i = h.token_in_index + 1 THEN x.share ELSE 0 END ORDER BY i)\n          FROM unnest(w.remaining) WITH ORDINALITY u(v, i))\n  FROM walk w\n    JOIN trade_hops h ON h.trade_id = w.trade_id AND h.hop_index = w.hop_index + 1\n    CROSS JOIN LATERAL (\n      SELECT CASE WHEN h.split > 0 THEN w.total[h.token_in_index + 1] * h.split / 16777215.0\n                  ELSE w.remaining[h.token_in_index + 1] END AS share\n    ) x\n),\n-- Single and sequential routes send the whole amount through every hop.\nflow AS (\n  SELECT trade_id, hop_index, share FROM walk WHERE hop_index >= 0\n  UNION ALL\n  SELECT h.trade_id, h.hop_index, 1.0\n  FROM trade_hops h JOIN t ON t.id = h.trade_id\n  WHERE t.strategy <> 'split'\n),\n-- Prop-AMMs the fallback executor calls, from tycho-simulation's price_level_stream/config.rs.\npamm (address, name) AS (\n  VALUES ('0x5979458912f80b96d30d4220af8e2e4925a33320', 'fermiswap'),\n         ('0x71e790dd841c8a9061487cb3e78c288e75ce0b3d', 'kipseli'),\n         ('0x99ab7c1c5eab47801f7937075998527a550fba8a', 'metric'),\n         ('0xb09aaa8933626d7e4c48d65dad2d77021cfbca9a', 'bebop'),\n         ('0x20861433d9119b866eeb398cb1ad46652a3cf953', 'taurusfi'),\n         ('0x00000003f1ec2379e79f58e12ec6c4f51ee92149', 'tempest'),\n         ('0x4367985a63063fc970b009c6e599e9225181f551', 'goliath'),\n         ('0x77047af6cd8f7f84d96a020a2833d24916b75fde', 'stelaxis'),\n         ('0xcf211b4dd0d2be5c173ea57bcf938fc61d1d3bd3', 'elzorro')\n),\n-- The fallback executor's data is [tokenIn: 20][tokenOut: 20][pAMM: 20][fallback pool...].\nhop_label AS (\n  SELECT h.trade_id, h.hop_index, p.protocol_systems,\n         CASE WHEN p.protocol_systems = '{fallback}'\n              THEN 'pamm:' || coalesce(m.name, left(x.pamm, 10))\n              ELSE coalesce(nullif(array_to_string(p.protocol_systems, ' / '), ''),\n                            '(unknown executor)') END AS label\n  FROM trade_hops h\n    JOIN t ON t.id = h.trade_id\n    JOIN trade_hop_protocols p ON p.trade_id = h.trade_id AND p.hop_index = h.hop_index\n    CROSS JOIN LATERAL (SELECT '0x' || substring(h.protocol_data FROM 83 FOR 40) AS pamm) x\n    LEFT JOIN pamm m ON m.address = x.pamm\n)\nSELECT $__timeGroupAlias(t.block_time, $__interval),\n       l.label AS metric,\n       sum(t.volume_usd * f.share) AS volume_usd\nFROM flow f\n  JOIN t ON t.id = f.trade_id\n  JOIN hop_label l ON l.trade_id = f.trade_id AND l.hop_index = f.hop_index\nWHERE l.protocol_systems <> '{native_wrapper}'\nGROUP BY 1, 2\nORDER BY 1",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Volume routed (USD) by protocol",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "description": "Swaps (route hops) on each protocol, per interval, in settled trades. Unpriced trades count too.\n\nProtocols come from the hop's executor, so an executor that serves several protocols shows as one label (for example \"pancakeswap_v3 / uniswap_v3\"). Hops on the prop-AMM fallback executor show as \"pamm:<name>\", named from the prop-AMM address in the hop's data; that executor quotes the prop-AMM and a backup pool and runs the better one, so some of this volume may have filled on the backup pool. Native wrap and unwrap hops are left out.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 106
+      },
+      "id": 111,
+      "maxDataPoints": 60,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "sortBy": "Total",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.4.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH t AS (\n  SELECT id, block_time\n  FROM trades_settled\n  WHERE $__timeFilter(block_time) AND chain IN (${chain:sqlstring})\n),\n-- Prop-AMMs the fallback executor calls, from tycho-simulation's price_level_stream/config.rs.\npamm (address, name) AS (\n  VALUES ('0x5979458912f80b96d30d4220af8e2e4925a33320', 'fermiswap'),\n         ('0x71e790dd841c8a9061487cb3e78c288e75ce0b3d', 'kipseli'),\n         ('0x99ab7c1c5eab47801f7937075998527a550fba8a', 'metric'),\n         ('0xb09aaa8933626d7e4c48d65dad2d77021cfbca9a', 'bebop'),\n         ('0x20861433d9119b866eeb398cb1ad46652a3cf953', 'taurusfi'),\n         ('0x00000003f1ec2379e79f58e12ec6c4f51ee92149', 'tempest'),\n         ('0x4367985a63063fc970b009c6e599e9225181f551', 'goliath'),\n         ('0x77047af6cd8f7f84d96a020a2833d24916b75fde', 'stelaxis'),\n         ('0xcf211b4dd0d2be5c173ea57bcf938fc61d1d3bd3', 'elzorro')\n),\n-- The fallback executor's data is [tokenIn: 20][tokenOut: 20][pAMM: 20][fallback pool...].\nhop_label AS (\n  SELECT h.trade_id, h.hop_index, p.protocol_systems,\n         CASE WHEN p.protocol_systems = '{fallback}'\n              THEN 'pamm:' || coalesce(m.name, left(x.pamm, 10))\n              ELSE coalesce(nullif(array_to_string(p.protocol_systems, ' / '), ''),\n                            '(unknown executor)') END AS label\n  FROM trade_hops h\n    JOIN t ON t.id = h.trade_id\n    JOIN trade_hop_protocols p ON p.trade_id = h.trade_id AND p.hop_index = h.hop_index\n    CROSS JOIN LATERAL (SELECT '0x' || substring(h.protocol_data FROM 83 FOR 40) AS pamm) x\n    LEFT JOIN pamm m ON m.address = x.pamm\n)\nSELECT $__timeGroupAlias(t.block_time, $__interval),\n       l.label AS metric,\n       count(*) AS swaps\nFROM hop_label l\n  JOIN t ON t.id = l.trade_id\nWHERE l.protocol_systems <> '{native_wrapper}'\nGROUP BY 1, 2\nORDER BY 1",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Swaps by protocol",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 118
       },
       "id": 1054,
       "panels": [],
@@ -2301,7 +2533,7 @@
         "h": 11,
         "w": 17,
         "x": 0,
-        "y": 107
+        "y": 119
       },
       "id": 20,
       "options": {
@@ -2382,7 +2614,7 @@
         "h": 7,
         "w": 4,
         "x": 17,
-        "y": 107
+        "y": 119
       },
       "id": 17,
       "options": {
@@ -2465,7 +2697,7 @@
         "h": 7,
         "w": 4,
         "x": 17,
-        "y": 114
+        "y": 126
       },
       "id": 18,
       "options": {
@@ -2580,7 +2812,7 @@
         "h": 10,
         "w": 17,
         "x": 0,
-        "y": 118
+        "y": 130
       },
       "id": 25,
       "options": {
@@ -2663,7 +2895,7 @@
         "h": 7,
         "w": 4,
         "x": 17,
-        "y": 121
+        "y": 133
       },
       "id": 16,
       "options": {
@@ -2778,7 +3010,7 @@
         "h": 10,
         "w": 17,
         "x": 0,
-        "y": 128
+        "y": 140
       },
       "id": 26,
       "options": {
@@ -2989,7 +3221,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 138
+        "y": 150
       },
       "id": 21,
       "options": {
@@ -3089,7 +3321,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 157
       },
       "id": 22,
       "options": {
@@ -3265,7 +3497,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 154
+        "y": 166
       },
       "id": 23,
       "options": {
@@ -3389,7 +3621,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 163
+        "y": 175
       },
       "id": 24,
       "options": {
@@ -3505,7 +3737,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 172
+        "y": 184
       },
       "id": 28,
       "options": {
@@ -3612,7 +3844,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 180
+        "y": 192
       },
       "id": 1055,
       "options": {
@@ -3675,7 +3907,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 190
+        "y": 202
       },
       "id": 1060,
       "panels": [],
@@ -3712,7 +3944,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 191
+        "y": 203
       },
       "id": 61,
       "options": {
@@ -3795,7 +4027,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 191
+        "y": 203
       },
       "id": 62,
       "options": {
@@ -3878,7 +4110,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 191
+        "y": 203
       },
       "id": 63,
       "options": {
@@ -3961,7 +4193,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 191
+        "y": 203
       },
       "id": 64,
       "options": {
@@ -4066,7 +4298,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 195
+        "y": 207
       },
       "id": 65,
       "interval": "1h",
@@ -4179,7 +4411,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 195
+        "y": 207
       },
       "id": 66,
       "interval": "1h",
@@ -4338,7 +4570,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 204
+        "y": 216
       },
       "id": 67,
       "options": {
@@ -4453,7 +4685,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 204
+        "y": 216
       },
       "id": 68,
       "options": {
@@ -4508,7 +4740,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 213
+        "y": 225
       },
       "id": 1070,
       "panels": [],
@@ -4545,7 +4777,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 214
+        "y": 226
       },
       "id": 71,
       "options": {
@@ -4628,7 +4860,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 214
+        "y": 226
       },
       "id": 72,
       "options": {
@@ -4711,7 +4943,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 214
+        "y": 226
       },
       "id": 73,
       "options": {
@@ -4794,7 +5026,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 214
+        "y": 226
       },
       "id": 74,
       "options": {
@@ -4898,7 +5130,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 218
+        "y": 230
       },
       "id": 75,
       "options": {
@@ -5018,7 +5250,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 218
+        "y": 230
       },
       "id": 76,
       "options": {
@@ -5168,7 +5400,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 227
+        "y": 239
       },
       "id": 77,
       "options": {
@@ -5331,7 +5563,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 227
+        "y": 239
       },
       "id": 78,
       "options": {
@@ -5386,7 +5618,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 236
+        "y": 248
       },
       "id": 1080,
       "panels": [],
@@ -5456,7 +5688,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 237
+        "y": 249
       },
       "id": 83,
       "interval": "1h",
@@ -5573,7 +5805,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 237
+        "y": 249
       },
       "id": 84,
       "interval": "1h",
@@ -5633,7 +5865,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 245
+        "y": 257
       },
       "id": 1100,
       "panels": [],
@@ -5704,7 +5936,7 @@
         "h": 11,
         "w": 12,
         "x": 0,
-        "y": 246
+        "y": 258
       },
       "id": 1102,
       "interval": "1h",
@@ -5858,7 +6090,7 @@
         "h": 11,
         "w": 12,
         "x": 12,
-        "y": 246
+        "y": 258
       },
       "id": 1101,
       "options": {
@@ -5976,7 +6208,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 257
+        "y": 269
       },
       "id": 1090,
       "panels": [],
@@ -6033,7 +6265,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 258
+        "y": 270
       },
       "id": 91,
       "options": {
@@ -6133,7 +6365,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 269
+        "y": 281
       },
       "id": 92,
       "options": {
