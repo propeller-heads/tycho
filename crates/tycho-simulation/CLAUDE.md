@@ -243,9 +243,11 @@ fallback for protocols too complex to port, not a default.
 1. **Native** — pure Rust math; fastest. Use whenever the protocol logic can be expressed in Rust.
 2. **Hybrid** — native Rust math for swap calculation, but reads/updates pool state via the local
    VM (`SimulationDB`). Use when the swap logic can be ported but state is complex to track
-   independently. Examples: Fluid V1, Balancer V3, Curve. Note that a hybrid protocol keeps its
-   VM-shaped indexing — component keys stay `vm:*` and the indexer still tracks full contract
-   storage; only the quote path changes.
+   independently. Examples: Fluid V1, Balancer V3, Curve. A hybrid keeps VM-shaped indexing (the
+   indexer tracks full contract storage); only the quote path changes. The `vm:` prefix of a
+   `protocol_system` tells users that quotes run through the VM, so a new hybrid that quotes
+   natively takes a key without it. An existing `vm:` protocol whose quotes move to native keeps
+   its key until a deliberate rename, which ships as a deployment-breaking change of its own.
 3. **VM** — Solidity adapter in `revm`; works for any EVM protocol but is slower and requires an
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
