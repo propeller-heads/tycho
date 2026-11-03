@@ -238,3 +238,111 @@ impl IntegrationTestsConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal package config, with `extra` inserted as top-level keys and `component_extra` as
+    /// keys of the one expected component.
+    fn yaml(extra: &str, component_extra: &str) -> String {
+        format!(
+            r#"{extra}
+substreams_yaml_path: ./substreams.yaml
+skip_balance_check: false
+protocol_type_names: ["foo_pool"]
+protocol_system: vm:foo
+tests:
+  - name: test_foo
+    start_block: 100
+    stop_block: 200
+    expected_components:
+      - id: "0xAbC"
+        tokens: ["0x01", "0x02"]
+        creation_tx: "0x03"
+{component_extra}
+"#
+        )
+    }
+
+    fn parse(yaml: &str) -> miette::Result<IntegrationTestsConfig> {
+        IntegrationTestsConfig::from_yaml(yaml.as_bytes(), "test.yaml")
+    }
+
+    #[test]
+    fn a_config_without_harness_is_legacy_with_defaults() {
+        let config = parse(&yaml("", "")).unwrap();
+        assert_eq!(config.harness, Harness::Legacy);
+        assert_eq!(config.protocol_system, "vm:foo");
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(component.base.id, "0xAbC");
+        assert_eq!(component.base.tokens.len(), 2);
+        assert!(component
+            .base
+            .static_attributes
+            .is_empty());
+        assert!(!component.skip_simulation);
+        assert!(!component.skip_execution);
+        assert!(config.tests[0]
+            .excluded_components
+            .is_empty());
+    }
+
+    #[test]
+    fn component_keys_reach_the_component() {
+        let config = parse(&yaml(
+            "harness: strict",
+            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: true\n        skip_execution: true",
+        ))
+        .unwrap();
+        assert_eq!(config.harness, Harness::Strict);
+        let component = &config.tests[0].expected_components[0];
+        assert_eq!(component.base.static_attributes["fee"], Bytes::from("0x0bb8"));
+        assert!(component.skip_simulation);
+        assert!(component.skip_execution);
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_keys_and_names_each() {
+        let err = parse(&yaml(
+            "harness: strict\nskip_balance_checks: true",
+            "        skip_simulaton: true",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("test.yaml"), "{err}");
+        assert!(err.contains("skip_balance_checks"), "{err}");
+        assert!(err.contains("skip_simulaton"), "{err}");
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_keys_in_a_test() {
+        let config = yaml("harness: strict", "")
+            .replace("    stop_block: 200\n", "    stop_block: 200\n    expected_state: {}\n");
+        let err = parse(&config).unwrap_err().to_string();
+        assert!(err.contains("expected_state"), "{err}");
+    }
+
+    #[test]
+    fn legacy_mode_accepts_unknown_keys() {
+        let config =
+            parse(&yaml("skip_balance_checks: true", "        skip_simulaton: true")).unwrap();
+        assert_eq!(config.harness, Harness::Legacy);
+        assert!(!config.tests[0].expected_components[0].skip_simulation);
+    }
+
+    #[test]
+    fn an_unknown_harness_is_an_error() {
+        let err = parse(&yaml("harness: strikt", "")).unwrap_err();
+        assert!(format!("{err:?}").contains("strikt"), "{err:?}");
+    }
+
+    #[test]
+    fn a_missing_required_key_names_the_source() {
+        let config = yaml("", "").replace("protocol_system: vm:foo\n", "");
+        let err = parse(&config).unwrap_err();
+        let message = format!("{err:?}");
+        assert!(message.contains("test.yaml"), "{message}");
+        assert!(message.contains("protocol_system"), "{message}");
+    }
+}
