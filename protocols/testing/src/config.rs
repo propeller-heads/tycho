@@ -123,12 +123,13 @@ impl<'de> Deserialize<'de> for Skip {
         impl<'de> Visitor<'de> for SkipVisitor {
             type Value = Skip;
 
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("`false`, `true`, or `{reason: ..., until: ..., evidence: ...}`")
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter
+                    .write_str("`false`, `true`, or `{reason: ..., until: ..., evidence: ...}`")
             }
 
-            fn visit_bool<E: de::Error>(self, skipped: bool) -> Result<Skip, E> {
-                Ok(if skipped {
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Skip, E> {
+                Ok(if v {
                     Skip::Yes { reason: None, until: None, evidence: None }
                 } else {
                     Skip::No
@@ -447,8 +448,8 @@ tests:
             .base
             .static_attributes
             .is_empty());
-        assert!(!component.skip_simulation);
-        assert!(!component.skip_execution);
+        assert_eq!(component.skip_simulation, Skip::No);
+        assert_eq!(component.skip_execution, Skip::No);
         assert!(config.tests[0]
             .excluded_components
             .is_empty());
@@ -458,14 +459,14 @@ tests:
     fn component_keys_reach_the_component() {
         let config = parse(&yaml(
             "harness: strict",
-            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: true\n        skip_execution: true",
+            "        static_attributes: {fee: \"0x0bb8\"}\n        skip_simulation: {reason: \"r\"}\n        skip_execution: {reason: \"r\"}",
         ))
         .unwrap();
         assert_eq!(config.harness, Harness::Strict);
         let component = &config.tests[0].expected_components[0];
         assert_eq!(component.base.static_attributes["fee"], Bytes::from("0x0bb8"));
-        assert!(component.skip_simulation);
-        assert!(component.skip_execution);
+        assert!(component.skip_simulation.is_skipped());
+        assert!(component.skip_execution.is_skipped());
     }
 
     #[test]
@@ -494,7 +495,7 @@ tests:
         let config =
             parse(&yaml("skip_balance_checks: true", "        skip_simulaton: true")).unwrap();
         assert_eq!(config.harness, Harness::Legacy);
-        assert!(!config.tests[0].expected_components[0].skip_simulation);
+        assert_eq!(config.tests[0].expected_components[0].skip_simulation, Skip::No);
     }
 
     #[test]
@@ -510,5 +511,75 @@ tests:
         let message = format!("{err:?}");
         assert!(message.contains("test.yaml"), "{message}");
         assert!(message.contains("protocol_system"), "{message}");
+    }
+
+    #[test]
+    fn a_skip_object_carries_its_reason_until_and_evidence() {
+        let config = parse(&yaml(
+            "harness: strict",
+            "        skip_execution: {reason: \"no fork state\", until: \"TICKET-1\", evidence: \"cast call reverts\"}",
+        ))
+        .unwrap();
+        let skip = &config.tests[0].expected_components[0].skip_execution;
+        assert_eq!(
+            skip,
+            &Skip::Yes {
+                reason: Some("no fork state".to_string()),
+                until: Some("TICKET-1".to_string()),
+                evidence: Some("cast call reverts".to_string()),
+            }
+        );
+        assert_eq!(skip.reason(), Some("no fork state"));
+    }
+
+    #[test]
+    fn legacy_mode_accepts_a_bare_skip() {
+        let config = parse(&yaml("", "        skip_simulation: true")).unwrap();
+        let skip = &config.tests[0].expected_components[0].skip_simulation;
+        assert!(skip.is_skipped());
+        assert_eq!(skip.reason(), Some("no reason given"));
+    }
+
+    #[test]
+    fn strict_mode_rejects_a_bare_skip_and_names_the_flag_and_component() {
+        let config = yaml("harness: strict", "        skip_simulation: true")
+            .replace("skip_balance_check: false", "skip_balance_check: true");
+        let err = parse(&config).unwrap_err().to_string();
+        assert!(err.contains("skip_balance_check (package)"), "{err}");
+        assert!(err.contains("skip_simulation (test `test_foo`, component 0xAbC)"), "{err}");
+    }
+
+    #[test]
+    fn a_skip_object_needs_a_non_empty_reason_and_known_keys() {
+        for (component_extra, expected) in [
+            ("        skip_execution: {until: \"later\"}", "reason"),
+            ("        skip_execution: {reason: \"  \"}", "empty"),
+            ("        skip_execution: {reason: \"r\", because: \"x\"}", "because"),
+        ] {
+            for harness in ["", "harness: strict"] {
+                let err = format!("{:?}", parse(&yaml(harness, component_extra)).unwrap_err());
+                assert!(err.contains(expected), "{component_extra} ({harness}): {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn execution_skips_without_evidence_lists_each_component() {
+        let config =
+            parse(&yaml("harness: strict", "        skip_execution: {reason: \"not deployed\"}"))
+                .unwrap();
+        assert_eq!(
+            config.execution_skips_without_evidence(),
+            vec!["test `test_foo`, component 0xAbC".to_string()]
+        );
+
+        let config = parse(&yaml(
+            "harness: strict",
+            "        skip_execution: {reason: \"r\", evidence: \"trace\"}",
+        ))
+        .unwrap();
+        assert!(config
+            .execution_skips_without_evidence()
+            .is_empty());
     }
 }
