@@ -4,6 +4,7 @@ pub(crate) mod utils;
 
 #[path = "2_store_pools.rs"]
 mod store_pools;
+pub(crate) use store_pools::POOL_IDS_KEY;
 
 #[path = "3_map_balance_changes.rs"]
 mod map_balance_changes;

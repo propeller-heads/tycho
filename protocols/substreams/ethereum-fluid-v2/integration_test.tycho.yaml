@@ -24,6 +24,7 @@ tests:
           tick_spacing: "0x01"
           controller: "0x0000000000000000000000000000000000000000"
           resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+          liquidity: "0x52aa899454998be5b000ad077a46bbe360f4e497"
         creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         skip_simulation: false
         skip_execution: false
@@ -37,6 +38,7 @@ tests:
           tick_spacing: "0x01"
           controller: "0x0000000000000000000000000000000000000000"
           resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+          liquidity: "0x52aa899454998be5b000ad077a46bbe360f4e497"
         creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         skip_simulation: false
         skip_execution: false
@@ -50,6 +52,7 @@ tests:
           tick_spacing: "0x0a"
           controller: "0x0000000000000000000000000000000000000000"
           resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+          liquidity: "0x52aa899454998be5b000ad077a46bbe360f4e497"
         creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         skip_simulation: false
         skip_execution: false
@@ -63,6 +66,7 @@ tests:
           tick_spacing: "0x0a"
           controller: "0x0000000000000000000000000000000000000000"
           resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+          liquidity: "0x52aa899454998be5b000ad077a46bbe360f4e497"
         creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         # Its single range takes only ~0.011 WBTC before the price leaves it, so 0.1% of that
         # limit is below Fluid's minimum amount of 1e4 and the harness swap is rejected.

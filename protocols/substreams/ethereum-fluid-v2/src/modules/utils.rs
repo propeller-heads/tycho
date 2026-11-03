@@ -12,7 +12,10 @@ pub const SUPPORTED_DEX_TYPES: [u64; 2] = [3, 4];
 #[derive(Debug, Deserialize)]
 pub struct Params {
     pub dex_v2_address: String,
+    /// The implementation behind the DEX v2 proxy that this package and the simulation mirror.
+    pub dex_v2_implementation: String,
     pub resolver_address: String,
+    pub liquidity_address: String,
 }
 
 impl Params {
@@ -24,8 +27,16 @@ impl Params {
         decode_address("dex_v2_address", &self.dex_v2_address)
     }
 
+    pub fn dex_v2_implementation(&self) -> Result<Vec<u8>> {
+        decode_address("dex_v2_implementation", &self.dex_v2_implementation)
+    }
+
     pub fn resolver_address(&self) -> Result<Vec<u8>> {
         decode_address("resolver_address", &self.resolver_address)
+    }
+
+    pub fn liquidity_address(&self) -> Result<Vec<u8>> {
+        decode_address("liquidity_address", &self.liquidity_address)
     }
 }
 

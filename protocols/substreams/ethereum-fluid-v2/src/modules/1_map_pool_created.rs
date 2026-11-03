@@ -18,8 +18,9 @@ pub fn map_pools_created(
     let params = Params::parse_from_query(&params)?;
     let dex_v2_address = Address::from_slice(&params.dex_v2_address()?);
     let resolver_address = params.resolver_address()?;
+    let liquidity_address = params.liquidity_address()?;
     let mut new_pools: Vec<TransactionChanges> = vec![];
-    get_new_pools(&block, &mut new_pools, dex_v2_address, &resolver_address);
+    get_new_pools(&block, &mut new_pools, dex_v2_address, &resolver_address, &liquidity_address);
     Ok(BlockChanges { block: Some((&block).into()), changes: new_pools, ..Default::default() })
 }
 
@@ -28,6 +29,7 @@ fn get_new_pools(
     new_pools: &mut Vec<TransactionChanges>,
     dex_v2_address: Address,
     resolver_address: &[u8],
+    liquidity_address: &[u8],
 ) {
     // Every DEX v2 pool, D3 and D4 alike, emits LogInitialize from the proxy. D1 and D2 pools are
     // a different pool model and are not indexed.
@@ -56,6 +58,7 @@ fn get_new_pools(
                         static_attribute("tick_spacing", event.dex_key.3.to_signed_bytes_be()),
                         static_attribute("controller", event.dex_key.4),
                         static_attribute("resolver", resolver_address.to_vec()),
+                        static_attribute("liquidity", liquidity_address.to_vec()),
                     ],
                     change: i32::from(ChangeType::Creation),
                     protocol_type: Some(ProtocolType {

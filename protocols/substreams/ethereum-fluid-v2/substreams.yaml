@@ -25,13 +25,16 @@ networks:
     initialBlock:
       map_pools_created: 26243693
       store_pools: 26243693
+      store_pool_ids: 26243693
       map_balance_changes: 26243693
       store_pools_balances: 26243693
       map_protocol_changes: 26243693
+    # dex_v2_implementation is the implementation this package and the simulation were verified
+    # against; a write of any other one to the proxy pauses every pool.
     params:
-      map_pools_created: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
-      map_balance_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
-      map_protocol_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
+      map_pools_created: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&dex_v2_implementation=81F4036b479D3A99c35577F2A090AE13A8115E19&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      map_balance_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&dex_v2_implementation=81F4036b479D3A99c35577F2A090AE13A8115E19&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      map_protocol_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&dex_v2_implementation=81F4036b479D3A99c35577F2A090AE13A8115E19&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
 
 modules:
   - name: map_pools_created
@@ -46,6 +49,13 @@ modules:
     kind: store
     updatePolicy: set_if_not_exists
     valueType: proto:tycho.evm.fluid_v2.Pool
+    inputs:
+      - map: map_pools_created
+
+  - name: store_pool_ids
+    kind: store
+    updatePolicy: append
+    valueType: string
     inputs:
       - map: map_pools_created
 
@@ -75,5 +85,6 @@ modules:
       - store: store_pools_balances
         mode: deltas
       - map: map_balance_changes
+      - store: store_pool_ids
     output:
       type: proto:tycho.evm.v1.BlockChanges
