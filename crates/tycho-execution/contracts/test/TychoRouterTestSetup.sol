@@ -323,8 +323,7 @@ contract TychoRouterTestSetup is
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
         aeroBasicExecutor = new AeroBasicExecutor();
-        fluidV2Executor =
-            new FluidV2Executor(0x7822B3944B1a68B231a6e7F55B57967F28BB369e);
+        fluidV2Executor = new FluidV2Executor(FLUID_DEX_V2, FLUIDV1_LIQUIDITY);
 
         address[] memory executors = new address[](
             31 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)

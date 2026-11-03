@@ -146,7 +146,7 @@ Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
 Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Bebop (RFQ),
-Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
+Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, FluidV2, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH and other
 native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM` interface;
 the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see "Protocol
 fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see "Subsidies").
@@ -385,7 +385,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
-| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
+| **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, FluidV2, BopAMM, FermiSwap, LunarBase, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
 | **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
@@ -393,7 +393,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 **Direct-transfer** (UniswapV2, BalancerV2, Curve): Dispatcher staticcalls `getTransferData()` to get
 the `TransferType`, receiver, tokenIn, tokenOut, and outputToRouter. Performs the transfer, then delegatecalls `swap()`.
 
-**Callback-based** (UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, Metric): Also implement `ICallback`. Flow:
+**Callback-based** (UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV3, Ekubo, EkuboV3, Slipstreams, FluidV1, FluidV2, Metric): Also implement `ICallback`. Flow:
 
 1. `getTransferData()` returns `None` (no pre-swap transfer)
 2. `swap()` calls the protocol pool

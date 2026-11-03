@@ -216,6 +216,9 @@ contract Constants is
     // Fluid liquidity contract on mainnet
     address FLUIDV1_LIQUIDITY = 0x52Aa899454998Be5b000Ad077a46Bbe360F4e497;
 
+    // Fluid DEX v2 proxy on mainnet; it settles through FLUIDV1_LIQUIDITY
+    address FLUID_DEX_V2 = 0xaBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261;
+
     // Ekubo V3 SignedExclusiveSwap extension on mainnet
     address EKUBO_V3_SIGNED_EXCLUSIVE_SWAP =
         0x55b703eED01b35641963da2FB2E14885993605A3;

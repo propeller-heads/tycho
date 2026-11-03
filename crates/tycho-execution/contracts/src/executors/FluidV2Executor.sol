@@ -1,14 +1,14 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
 pragma solidity ^0.8.26;
 
 import {IExecutor} from "@interfaces/IExecutor.sol";
 import {ICallback} from "@interfaces/ICallback.sol";
 import {TransferManager} from "../TransferManager.sol";
+import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 interface IFluidDexV2 {
     function startOperation(bytes calldata data)
         external
-        payable
         returns (bytes memory result);
 
     function operate(
@@ -27,10 +27,21 @@ interface IFluidDexV2 {
     ) external payable;
 }
 
+interface IFluidDexV2Callbacks {
+    function startOperationCallback(bytes calldata data)
+        external
+        returns (bytes memory);
+
+    function dexCallback(address token, address to, uint256 amount) external;
+}
+
+/// @dev `fee` is the static LP fee in pips, or 0xFFFFFF for a dynamic-fee
+/// pool. The same key addresses a D3 and a D4 pool; the dex type tells them
+/// apart.
 struct DexKey {
     address token0;
     address token1;
-    uint24 fee; // The fee here tells the fee if its a static fee pool or acts as a dynamic fee flag, i.e, type(uint24).max or 0xFFFFFF for dynamic fee pools.
+    uint24 fee;
     uint24 tickSpacing;
     address controller;
 }
@@ -43,38 +54,45 @@ struct SwapInParams {
     bytes controllerData;
 }
 
+interface IFluidDexV2SwapModule {
+    function swapIn(SwapInParams calldata params)
+        external
+        returns (
+            uint256 amountOut,
+            uint256 protocolFeeAccrued,
+            uint256 lpFeeAccrued
+        );
+}
+
+error FluidV2Executor__ZeroAddress();
 error FluidV2Executor__InvalidDataLength();
 error FluidV2Executor__InvalidCallback();
 error FluidV2Executor__UnknownCallback(bytes4 selector);
-error FluidV2Executor__UnknownDexType(uint8 dexType);
-error FluidV2Executor__ZeroDexV2Address();
+error FluidV2Executor__UnexpectedCallbackToken(address token);
+error FluidV2Executor__UnexpectedCallbackRecipient(address to);
 
+/// @title FluidV2Executor
+/// @notice Swaps exact input on a Fluid DEX v2 D3 or D4 pool.
+/// @dev The swap runs inside one dex operation: `startOperation` calls back
+/// `startOperationCallback`, which swaps through `operate` and settles both
+/// tokens. Each settle passes type(int128).max for supply and borrow, which
+/// the dex resolves to the router's whole pending amount of that token, so
+/// D3 and D4 settle the same way. The token in is pulled through
+/// `dexCallback`, paid by the Dispatcher to the dex or to Fluid Liquidity
+/// (the dex decides which at execution); native ETH goes in as msg.value.
 contract FluidV2Executor is IExecutor, ICallback {
-    uint256 private constant _DEX_V2_SWAP_MODULE_ID = 1;
-
-    bytes4 private constant _START_OPERATION_CALLBACK_SELECTOR =
-        bytes4(keccak256("startOperationCallback(bytes)"));
-    bytes4 private constant _DEX_CALLBACK_SELECTOR =
-        bytes4(keccak256("dexCallback(address,address,uint256)"));
-    bytes4 private constant _SWAP_IN_SELECTOR = bytes4(
-        keccak256(
-            "swapIn(((address,address,uint24,uint24,address),bool,uint256,uint256,bytes))"
-        )
-    );
-
-    uint8 private constant _D3_DEX_TYPE = 3;
-    uint8 private constant _D4_DEX_TYPE = 4;
-
-    address private constant _FLUID_NATIVE_TOKEN =
-        0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    uint256 private constant _SWAP_MODULE_ID = 1;
+    int256 private constant _ENTIRE_PENDING_AMOUNT = type(int128).max;
 
     IFluidDexV2 public immutable dexV2;
+    address public immutable liquidity;
 
-    constructor(address dexV2_) {
-        if (dexV2_ == address(0)) {
-            revert FluidV2Executor__ZeroDexV2Address();
+    constructor(address dexV2_, address liquidity_) {
+        if (dexV2_ == address(0) || liquidity_ == address(0)) {
+            revert FluidV2Executor__ZeroAddress();
         }
         dexV2 = IFluidDexV2(dexV2_);
+        liquidity = liquidity_;
     }
 
     function fundsExpectedAddress(
@@ -108,36 +126,30 @@ contract FluidV2Executor is IExecutor, ICallback {
     }
 
     function handleCallback(bytes calldata data)
-        external
+        public
         returns (bytes memory result)
     {
         verifyCallback(data);
 
-        bytes4 selector = bytes4(data[:4]);
-
-        if (selector == _START_OPERATION_CALLBACK_SELECTOR) {
-            return abi.encode(
-                _handleStartOperationCallback(abi.decode(data[4:], (bytes)))
-            );
+        if (
+            bytes4(data[:4])
+                == IFluidDexV2Callbacks.startOperationCallback.selector
+        ) {
+            // The router's fallback returns these bytes raw, and the dex
+            // decodes them as the callback's `bytes` return value.
+            return abi.encode(_swapAndSettle(abi.decode(data[4:], (bytes))));
         }
-
-        if (selector == _DEX_CALLBACK_SELECTOR) {
-            (address token, address to, uint256 amount) =
-                abi.decode(data[4:], (address, address, uint256));
-            dexCallback(token, to, amount);
-            return abi.encode("");
-        }
-
-        revert FluidV2Executor__UnknownCallback(selector);
+        // dexCallback: the Dispatcher already paid the token in.
+        return "";
     }
 
     function verifyCallback(bytes calldata data) public view {
         bytes4 selector = bytes4(data[:4]);
-
         if (
             msg.sender != address(dexV2)
-                || (selector != _START_OPERATION_CALLBACK_SELECTOR
-                    && selector != _DEX_CALLBACK_SELECTOR)
+                || (selector
+                        != IFluidDexV2Callbacks.startOperationCallback.selector
+                    && selector != IFluidDexV2Callbacks.dexCallback.selector)
         ) {
             revert FluidV2Executor__InvalidCallback();
         }
@@ -145,7 +157,7 @@ contract FluidV2Executor is IExecutor, ICallback {
 
     function getTransferData(bytes calldata data)
         external
-        payable
+        pure
         returns (
             TransferManager.TransferType transferType,
             address receiver,
@@ -155,64 +167,54 @@ contract FluidV2Executor is IExecutor, ICallback {
         )
     {
         (, DexKey memory dexKey, bool swap0To1,) = _decodeData(data);
+        (tokenIn, tokenOut) = swap0To1
+            ? (dexKey.token0, dexKey.token1)
+            : (dexKey.token1, dexKey.token0);
 
-        tokenIn = _toTychoToken(swap0To1 ? dexKey.token0 : dexKey.token1);
-        tokenOut = _toTychoToken(swap0To1 ? dexKey.token1 : dexKey.token0);
-
-        return (
-            TransferManager.TransferType.None,
-            address(0),
-            tokenIn,
-            tokenOut,
-            false
-        );
+        // Fluid's native token sentinel is ETH_ADDRESS, so native legs need no
+        // mapping. Native ETH goes in as msg.value of the token-in settle.
+        transferType = tokenIn == ETH_ADDRESS
+            ? TransferManager.TransferType.TransferNativeInExecutor
+            : TransferManager.TransferType.None;
+        return (transferType, address(0), tokenIn, tokenOut, false);
     }
 
-    function getCallbackTransferData(bytes calldata data, address tokenIn)
+    function getCallbackTransferData(
+        bytes calldata data,
+        address tokenIn,
+        address caller
+    )
         external
-        payable
+        view
         returns (TransferManager.TransferType transferType, address receiver)
     {
-        bytes4 selector = bytes4(data[:4]);
-
-        if (selector == _START_OPERATION_CALLBACK_SELECTOR) {
-            return (TransferManager.TransferType.None, address(0));
-        }
-
-        if (selector != _DEX_CALLBACK_SELECTOR) {
-            revert FluidV2Executor__UnknownCallback(selector);
-        }
-
-        address fluidToken;
-        (fluidToken, receiver,) =
-            abi.decode(data[4:], (address, address, uint256));
-
-        if (_toTychoToken(fluidToken) != tokenIn) {
+        if (caller != address(dexV2)) {
             revert FluidV2Executor__InvalidCallback();
         }
 
-        if (tokenIn == address(0)) {
-            return
-                (
-                    TransferManager.TransferType.TransferNativeInExecutor,
-                    receiver
-                );
+        bytes4 selector = bytes4(data[:4]);
+        if (selector == IFluidDexV2Callbacks.startOperationCallback.selector) {
+            return (TransferManager.TransferType.None, address(0));
+        }
+        if (selector != IFluidDexV2Callbacks.dexCallback.selector) {
+            revert FluidV2Executor__UnknownCallback(selector);
         }
 
-        return (TransferManager.TransferType.Transfer, receiver);
+        (address token, address to,) =
+            abi.decode(data[4:], (address, address, uint256));
+        if (token != tokenIn) {
+            revert FluidV2Executor__UnexpectedCallbackToken(token);
+        }
+        // The dex serves a settle from its own balance or from Liquidity.
+        if (to != address(dexV2) && to != liquidity) {
+            revert FluidV2Executor__UnexpectedCallbackRecipient(to);
+        }
+        return (TransferManager.TransferType.Transfer, to);
     }
 
-    function dexCallback(
-        address, /* token */
-        address, /* to */
-        uint256 /* amount */
-    )
-        public
-        pure {}
-
-    function _handleStartOperationCallback(bytes memory callbackData)
+    function _swapAndSettle(bytes memory callbackData)
         internal
-        returns (bytes memory)
+        returns (bytes memory swapResult)
     {
         (
             uint8 dexType,
@@ -225,120 +227,58 @@ contract FluidV2Executor is IExecutor, ICallback {
             callbackData, (uint8, DexKey, bool, uint256, address, bytes)
         );
 
-        SwapInParams memory params = SwapInParams({
-            dexKey: dexKey,
-            swap0To1: swap0To1,
-            amountIn: amountIn,
-            amountOutMin: 0,
-            controllerData: controllerData
-        });
-
-        bytes memory swapResult = dexV2.operate(
+        // amountOutMin is 0: the router enforces the route's minAmountOut.
+        swapResult = dexV2.operate(
             dexType,
-            _DEX_V2_SWAP_MODULE_ID,
-            abi.encodeWithSelector(_SWAP_IN_SELECTOR, params)
+            _SWAP_MODULE_ID,
+            abi.encodeCall(
+                IFluidDexV2SwapModule.swapIn,
+                (SwapInParams({
+                        dexKey: dexKey,
+                        swap0To1: swap0To1,
+                        amountIn: amountIn,
+                        amountOutMin: 0,
+                        controllerData: controllerData
+                    }))
+            )
         );
 
-        (uint256 amountOut, uint256 protocolFee, uint256 lpFee) =
-            abi.decode(swapResult, (uint256, uint256, uint256));
+        (address tokenIn, address tokenOut) = swap0To1
+            ? (dexKey.token0, dexKey.token1)
+            : (dexKey.token1, dexKey.token0);
 
-        _settleSwap(
-            dexType,
-            dexKey,
-            swap0To1,
-            amountIn,
-            amountOut,
-            protocolFee,
-            lpFee,
-            receiver
-        );
-
-        return swapResult;
-    }
-
-    function _settleSwap(
-        uint8 dexType,
-        DexKey memory dexKey,
-        bool swap0To1,
-        uint256 amountIn,
-        uint256 amountOut,
-        uint256 protocolFee,
-        uint256 lpFee,
-        address receiver
-    ) internal {
-        if (dexType == _D3_DEX_TYPE) {
-            _settleD3(dexKey, swap0To1, amountIn, amountOut, receiver);
-            return;
-        }
-
-        if (dexType == _D4_DEX_TYPE) {
-            _settleD4(
-                dexKey,
-                swap0To1,
-                amountIn,
-                amountOut,
-                protocolFee,
-                lpFee,
-                receiver
-            );
-            return;
-        }
-
-        revert FluidV2Executor__UnknownDexType(dexType);
-    }
-
-    function _settleD3(
-        DexKey memory dexKey,
-        bool swap0To1,
-        uint256 amountIn,
-        uint256 amountOut,
-        address receiver
-    ) internal {
-        address tokenIn = swap0To1 ? dexKey.token0 : dexKey.token1;
-        address tokenOut = swap0To1 ? dexKey.token1 : dexKey.token0;
-
-        if (tokenIn == _FLUID_NATIVE_TOKEN) {
+        if (tokenIn == ETH_ADDRESS) {
+            // slither-disable-next-line arbitrary-send-eth
             dexV2.settle{value: amountIn}(
-                tokenIn, int256(amountIn), 0, 0, receiver, true
+                tokenIn,
+                _ENTIRE_PENDING_AMOUNT,
+                _ENTIRE_PENDING_AMOUNT,
+                0,
+                address(0),
+                true
             );
         } else {
-            dexV2.settle(tokenIn, int256(amountIn), 0, 0, receiver, true);
-        }
-
-        dexV2.settle(tokenOut, -int256(amountOut), 0, 0, receiver, true);
-    }
-
-    function _settleD4(
-        DexKey memory dexKey,
-        bool swap0To1,
-        uint256 amountIn,
-        uint256 amountOut,
-        uint256 protocolFee,
-        uint256 lpFee,
-        address receiver
-    ) internal {
-        uint256 totalFee = protocolFee + lpFee;
-        address tokenIn = swap0To1 ? dexKey.token0 : dexKey.token1;
-        address tokenOut = swap0To1 ? dexKey.token1 : dexKey.token0;
-
-        if (tokenIn == _FLUID_NATIVE_TOKEN) {
-            dexV2.settle{value: amountIn}(
-                tokenIn, 0, -int256(amountIn), 0, receiver, true
+            dexV2.settle(
+                tokenIn,
+                _ENTIRE_PENDING_AMOUNT,
+                _ENTIRE_PENDING_AMOUNT,
+                0,
+                address(0),
+                true
             );
-        } else {
-            dexV2.settle(tokenIn, 0, -int256(amountIn), 0, receiver, true);
         }
-
         dexV2.settle(
             tokenOut,
-            int256(totalFee),
-            int256(amountOut + totalFee),
+            _ENTIRE_PENDING_AMOUNT,
+            _ENTIRE_PENDING_AMOUNT,
             0,
             receiver,
-            true
+            false
         );
     }
 
+    /// @dev Swap data: [dexType: 1][token0: 20][token1: 20][fee: 3]
+    /// [tickSpacing: 3][controller: 20][swap0To1: 1][controllerData: rest]
     function _decodeData(bytes calldata data)
         internal
         pure
@@ -361,13 +301,5 @@ contract FluidV2Executor is IExecutor, ICallback {
         dexKey.controller = address(bytes20(data[47:67]));
         swap0To1 = uint8(data[67]) > 0;
         controllerData = data[68:];
-    }
-
-    function _toTychoToken(address fluidToken)
-        internal
-        pure
-        returns (address token)
-    {
-        return fluidToken == _FLUID_NATIVE_TOKEN ? address(0) : fluidToken;
     }
 }

@@ -118,51 +118,149 @@ mod tests {
     use super::*;
     use crate::encoding::models::default_token;
 
-    #[test]
-    fn test_encode_fluid_v2() {
-        let component = ProtocolComponent {
+    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+    const USDT: &str = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+
+    fn pool(static_attributes: &[(&str, &str)]) -> ProtocolComponent {
+        ProtocolComponent {
             protocol_system: String::from("fluid_v2"),
-            static_attributes: HashMap::from([
-                ("dex_type".to_string(), Bytes::from(3_u8)),
-                ("fee".to_string(), Bytes::from(100_u32)),
-                ("tick_spacing".to_string(), Bytes::from(1_u32)),
-                ("controller".to_string(), Bytes::zero(20)),
-            ]),
+            static_attributes: static_attributes
+                .iter()
+                .map(|(name, value)| (name.to_string(), Bytes::from(*value)))
+                .collect(),
             ..Default::default()
-        };
-        let token_in = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
-        let token_out = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        }
+    }
+
+    fn encode_swap(
+        component: ProtocolComponent,
+        token_in: &str,
+        token_out: &str,
+    ) -> Result<String, EncodingError> {
+        let token_in = Bytes::from(token_in);
+        let token_out = Bytes::from(token_out);
         let swap = Swap::new(
             component,
             default_token(token_in.clone()),
             default_token(token_out.clone()),
             BigUint::ZERO,
-        )
-        .with_user_data(Bytes::from("0x1234"));
-
+        );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
             group_token_in: token_in,
             group_token_out: token_out,
+            origin: None,
         };
+        let encoder = FluidV2SwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None)?;
+        encoder
+            .encode_swap(&swap, &encoding_context)
+            .map(encode)
+    }
 
+    #[test]
+    fn test_encode_orders_tokens_by_address() {
+        let component = pool(&[
+            ("dex_type", "0x04"),
+            ("fee", "0x64"),
+            ("tick_spacing", "0x01"),
+            ("controller", "0x0000000000000000000000000000000000000000"),
+        ]);
+
+        let encoded = encode_swap(component, USDT, USDC).unwrap();
+
+        assert_eq!(
+            encoded,
+            String::from(concat!(
+                "04",                                       // dex type
+                "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // token0
+                "dac17f958d2ee523a2206206994597c13d831ec7", // token1
+                "000064",                                   // fee
+                "000001",                                   // tick spacing
+                "0000000000000000000000000000000000000000", // controller
+                "00",                                       // swap0To1
+            ))
+        );
+    }
+
+    #[test]
+    fn test_encode_native_token_as_fluid_sentinel() {
+        let component = pool(&[("dex_type", "0x03"), ("fee", "0x01f4"), ("tick_spacing", "0x0a")]);
+
+        let encoded =
+            encode_swap(component, USDC, "0x0000000000000000000000000000000000000000").unwrap();
+
+        assert_eq!(&encoded[2..42], &USDC[2..]);
+        assert_eq!(&encoded[42..82], "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        assert_eq!(&encoded[82..88], "0001f4");
+        assert_eq!(&encoded[134..136], "01");
+    }
+
+    #[test]
+    fn test_encode_dynamic_fee_from_signed_bytes() {
+        // Substreams writes the uint24 0xFFFFFF as a signed big-endian integer.
+        let component =
+            pool(&[("dex_type", "0x03"), ("fee", "0x00ffffff"), ("tick_spacing", "0x0a")]);
+
+        let encoded = encode_swap(component, USDC, USDT).unwrap();
+
+        assert_eq!(&encoded[82..88], "ffffff");
+    }
+
+    #[test]
+    fn test_encode_appends_controller_data() {
+        let component = pool(&[
+            ("dex_type", "0x03"),
+            ("fee", "0x64"),
+            ("tick_spacing", "0x01"),
+            ("controller", "0x0000000000000000000000000000000000000001"),
+        ]);
+        let dai = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+        let usdc = Bytes::from(USDC);
+        let swap = Swap::new(
+            component,
+            default_token(dai.clone()),
+            default_token(usdc.clone()),
+            BigUint::ZERO,
+        )
+        .with_user_data(Bytes::from("0x1234"));
+        let encoding_context = EncodingContext {
+            router_address: Some(Bytes::default()),
+            group_token_in: dai,
+            group_token_out: usdc,
+            origin: None,
+        };
         let encoder = FluidV2SwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).unwrap();
-        let encoded_swap = encoder
+
+        let encoded = encoder
             .encode_swap(&swap, &encoding_context)
             .unwrap();
 
         assert_eq!(
-            encode(encoded_swap),
+            encode(encoded),
             concat!(
                 "03",
                 "6b175474e89094c44da98b954eedeac495271d0f",
                 "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
                 "000064",
                 "000001",
-                "0000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000001",
                 "01",
                 "1234"
             )
         );
+    }
+
+    #[test]
+    fn test_encode_without_dex_type_fails() {
+        let component = pool(&[("fee", "0x64"), ("tick_spacing", "0x01")]);
+
+        assert!(encode_swap(component, USDC, USDT).is_err());
+    }
+
+    #[test]
+    fn test_encode_same_token_fails() {
+        let component = pool(&[("dex_type", "0x03"), ("fee", "0x64"), ("tick_spacing", "0x01")]);
+
+        assert!(encode_swap(component, USDC, USDC).is_err());
     }
 }
