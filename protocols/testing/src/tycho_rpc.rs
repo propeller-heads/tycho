@@ -91,7 +91,6 @@ impl TychoClient {
 
         let concurrency = 1;
 
-        #[allow(clippy::mutable_key_type)]
         let mut params = AllTokensParams::new(chain, concurrency).with_chunk_size(3_000);
         if let Some(q) = min_quality {
             params = params.with_min_quality(q);

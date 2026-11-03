@@ -27,9 +27,9 @@ struct SignedSwapTail {
 ///
 /// Expected byte layout: `fee(8) | meta(32) | minBalanceUpdate(32) | signature(N)`.
 fn parse_signed_user_data(
-    user_data: &Option<Bytes>,
+    user_data: Option<&Bytes>,
 ) -> Result<Option<SignedSwapTail>, EncodingError> {
-    let Some(data) = user_data.as_ref() else {
+    let Some(data) = user_data else {
         return Ok(None);
     };
     if data.len() <= SIGNED_USER_DATA_MIN_LEN {
@@ -73,7 +73,7 @@ impl SwapEncoder for EkuboV3SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let signed_tail = parse_signed_user_data(swap.user_data())?;
+        let signed_tail = parse_signed_user_data(swap.user_data().as_ref())?;
 
         let fee = if let Some(ref tail) = signed_tail {
             tail.fee
@@ -81,19 +81,26 @@ impl SwapEncoder for EkuboV3SwapEncoder {
             u64::from_be_bytes(
                 get_static_attribute(swap, "fee")?
                     .try_into()
-                    .map_err(|_| EncodingError::FatalError("fee should be an u64".to_string()))?,
+                    .map_err(|e: Vec<u8>| {
+                        EncodingError::FatalError(format!(
+                            "fee should be an u64, got {} bytes",
+                            e.len()
+                        ))
+                    })?,
             )
         };
 
         let pool_type_config = B32::try_from(&get_static_attribute(swap, "pool_type_config")?[..])
-            .map_err(|_| {
+            .map_err(|_wrong_length| {
                 EncodingError::FatalError("pool_type_config should be 4 bytes long".to_string())
             })?;
 
         let extension: Address = get_static_attribute(swap, "extension")?
             .as_slice()
             .try_into()
-            .map_err(|_| EncodingError::FatalError("extension should be an address".to_string()))?;
+            .map_err(|_wrong_length| {
+                EncodingError::FatalError("extension should be an address".to_string())
+            })?;
 
         let mut encoded = vec![];
 
@@ -111,7 +118,7 @@ impl SwapEncoder for EkuboV3SwapEncoder {
         // absent the hop is byte-identical to a normal hop, preserving existing behavior.
         if let Some(tail) = signed_tail {
             // Wire format: meta(32) | minBalanceUpdate(32) | sigLen(u16 be) | signature(N)
-            let sig_len = u16::try_from(tail.signature.len()).map_err(|_| {
+            let sig_len = u16::try_from(tail.signature.len()).map_err(|_out_of_range| {
                 EncodingError::FatalError("signature length exceeds u16::MAX".to_string())
             })?;
 
@@ -147,7 +154,7 @@ mod tests {
     #[test]
     fn test_parse_signed_user_data_too_short() {
         let data = Some(Bytes::from(vec![0u8; 71]));
-        let err = parse_signed_user_data(&data).unwrap_err();
+        let err = parse_signed_user_data(data.as_ref()).unwrap_err();
         assert!(matches!(err, EncodingError::InvalidInput(_)));
     }
 
@@ -158,7 +165,7 @@ mod tests {
         buf[8..40].fill(0x11);
         buf[40..72].fill(0x22);
 
-        let err = parse_signed_user_data(&Some(buf.into())).unwrap_err();
+        let err = parse_signed_user_data(Some(&buf.into())).unwrap_err();
         assert!(matches!(err, EncodingError::InvalidInput(_)));
     }
 
@@ -171,7 +178,7 @@ mod tests {
         buf[40..72].fill(0xBB);
         buf[72..].copy_from_slice(&sig);
 
-        let tail = parse_signed_user_data(&Some(buf.into()))
+        let tail = parse_signed_user_data(Some(&buf.into()))
             .unwrap()
             .expect("should parse");
         assert_eq!(tail.fee, 100);
@@ -201,8 +208,8 @@ mod tests {
         );
 
         let encoding_context = EncodingContext {
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             router_address: Some(Bytes::default()),
             origin: None,
         };
@@ -261,8 +268,8 @@ mod tests {
         .with_user_data(user_data);
 
         let encoding_context = EncodingContext {
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             router_address: Some(Bytes::default()),
             origin: None,
         };
@@ -421,8 +428,8 @@ mod tests {
         .with_user_data(Bytes::from(user_data_bytes));
 
         let encoding_context = EncodingContext {
-            group_token_in: usdc.clone(),
-            group_token_out: usdt.clone(),
+            group_token_in: usdc,
+            group_token_out: usdt,
             router_address: Some(Bytes::default()),
             origin: None,
         };
@@ -463,7 +470,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(group_token_in.clone()),
+            default_token(group_token_in),
             default_token(intermediary_token.clone()),
             BigUint::ZERO,
         );
@@ -477,8 +484,8 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            default_token(intermediary_token.clone()),
-            default_token(group_token_out.clone()),
+            default_token(intermediary_token),
+            default_token(group_token_out),
             BigUint::ZERO,
         );
 

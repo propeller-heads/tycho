@@ -33,6 +33,7 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
+#[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
 pub enum StreamError {
     #[error("Error during stream set up: {0}")]
     SetUpError(String),
@@ -71,6 +72,10 @@ pub struct ConstantRetryConfiguration {
 fn validate_chain_config() -> Result<(), StreamError> {
     let registry = ChainConfigRegistry::load_default()
         .map_err(|e| StreamError::SetUpError(format!("failed to load custom chain config: {e}")))?;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an already-installed registry is the intended outcome of a prior lazy access"
+    )]
     let _ = init_chain_registry(registry);
     Ok(())
 }
@@ -94,6 +99,7 @@ fn validate_subscription_buffer_size(subscription_buffer_size: usize) -> Result<
     Ok(())
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent feature toggle")]
 pub struct TychoStreamBuilder {
     tycho_url: String,
     chain: Chain,
@@ -174,7 +180,7 @@ impl TychoStreamBuilder {
             Chain::Plasma => (1, 10, 20, 100),   // ~1s block time
             Chain::Robinhood => (1, 5, 20, 100), // Typically closer to 0.1s
             Chain::Arc => (1, 5, 20, 100),       // Typically closer to 0.5s
-            _ => {
+            Chain::Custom(_) | _ => {
                 let block_time = chain.block_time_secs();
                 (block_time, block_time * 3, 50, block_time * 50)
             }
@@ -518,7 +524,11 @@ impl TychoStreamBuilder {
         let handle = tokio::spawn(async move {
             tokio::select! {
                 res = &mut ws_jh => {
-                    let _ = res.map_err(|e| StreamError::WebSocketConnectionError(e.to_string()));
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(?e, "WebSocket task ended with an error"),
+                        Err(e) => warn!(?e, "WebSocket task panicked"),
+                    }
                     // The task has ended, so its handle must not be polled again.
                     if let Err(e) = ws_client.close().await {
                         warn!(?e, "Failed to close WebSocket client");
@@ -683,6 +693,10 @@ mod tests {
                     break;
                 }
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the test may have dropped the receiver before the connection closes"
+            )]
             let _ = closed_tx.send(());
         });
         (addr, closed_rx)

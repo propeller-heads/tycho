@@ -4,7 +4,7 @@ use std::{
 };
 
 use chrono::DateTime;
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_common::Bytes;
 
 use crate::{
@@ -105,9 +105,23 @@ impl HttpSource for LiquoriceBookSource {
                 }
 
                 // Liquorice reports `updatedAt` per market maker, in milliseconds.
-                let updated_at = token_pair_price
-                    .updated_at
-                    .and_then(|millis| DateTime::from_timestamp_millis(millis as i64));
+                let updated_at = match token_pair_price.updated_at {
+                    None => None,
+                    Some(millis) => {
+                        let Some(at) = i64::try_from(millis)
+                            .ok()
+                            .and_then(DateTime::from_timestamp_millis)
+                        else {
+                            warn!(
+                                %component_id,
+                                updated_at = millis,
+                                "skipping pair, update timestamp out of range"
+                            );
+                            continue;
+                        };
+                        Some(at)
+                    }
+                };
                 let state = LiquoriceState::new(
                     base_token.clone(),
                     quote_token.clone(),
@@ -255,11 +269,11 @@ mod tests {
         assert_eq!(ids, vec![id("fresh_mm"), id("old_mm")]);
         assert_eq!(
             books[&id("fresh_mm")].updated_at,
-            DateTime::from_timestamp_millis(newest_ms as i64)
+            DateTime::from_timestamp_millis(i64::try_from(newest_ms).unwrap())
         );
         assert_eq!(
             books[&id("old_mm")].updated_at,
-            DateTime::from_timestamp_millis((newest_ms - 60_000) as i64)
+            DateTime::from_timestamp_millis(i64::try_from(newest_ms - 60_000).unwrap())
         );
         let expected = LiquoriceState::new(
             source.book_config.tokens[&weth].clone(),

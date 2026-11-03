@@ -22,6 +22,7 @@ use crate::{
         sim::{self, SwapDirection},
     },
     rfq::protocols::hashflow::{client::HashflowClient, models::HashflowMarketMakerLevels},
+    utils::decimals_scale,
 };
 
 /// Rough gas estimate for one Hashflow settlement.
@@ -68,7 +69,7 @@ impl HashflowState {
             .levels
             .first()
             .map_or(0.0, |level| level.quantity);
-        let scaled = first_level_quantity * 10f64.powi(self.base_token.decimals as i32);
+        let scaled = first_level_quantity * decimals_scale(self.base_token.decimals);
         // `BigUint::from_f64` truncates, which is the rounding this wants.
         BigUint::from_f64(scaled).unwrap_or_default()
     }
@@ -117,6 +118,10 @@ impl PricesAfterFill for HashflowState {
 
 #[typetag::serde]
 impl ProtocolSim for HashflowState {
+    #[expect(
+        clippy::todo,
+        reason = "the trait method returns no error, and a book has no separate fee to report"
+    )]
     fn fee(&self) -> f64 {
         todo!()
     }
@@ -179,7 +184,9 @@ impl ProtocolSim for HashflowState {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        todo!()
+        Err(TransitionError::DecodeError(
+            "Hashflow state is snapshot-based and does not support deltas".into(),
+        ))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -469,7 +476,7 @@ mod tests {
                 .get_amount_out(amount, &wbtc(), &usdc())
                 .map(|_| ()),
             state
-                .get_limits(wbtc().address.clone(), usdc().address.clone())
+                .get_limits(wbtc().address, usdc().address)
                 .map(|_| ()),
         ];
 
@@ -498,7 +505,7 @@ mod tests {
         );
         assert!(matches!(swap, Err(SimulationError::InvalidInput(_, None))), "{swap:?}");
         assert!(matches!(
-            state.get_limits(weth().address.clone(), usdc().address.clone()),
+            state.get_limits(weth().address, usdc().address),
             Err(SimulationError::RecoverableError(_))
         ));
     }
@@ -583,8 +590,8 @@ mod tests {
 
         // Total sell: 0.5 + 1.5 + 5.0 = 7.0 WETH (18 decimals)
         // Total buy: (0.5+1.5)*3000 + 5.0*2999 = 20995 USDC (6 decimals)
-        assert_eq!(sell_limit, BigUint::from((7.0 * 10f64.powi(18)) as u128));
-        assert_eq!(buy_limit, BigUint::from((20995.0 * 10f64.powi(6)) as u128));
+        assert_eq!(sell_limit, BigUint::from(7_000_000_000_000_000_000u128));
+        assert_eq!(buy_limit, BigUint::from(20_995_000_000u128));
     }
 
     /// The venue refuses a swap of nothing, so simulating one must not report a fill.

@@ -243,7 +243,7 @@ impl NativeClient {
                 }
             })?;
 
-        Self::process_quote_response(quote_response, params).map_err(QuoteAttemptError::Fatal)
+        Self::process_quote_response(&quote_response, params).map_err(QuoteAttemptError::Fatal)
     }
 
     // Native API error codes:
@@ -279,7 +279,7 @@ impl NativeClient {
     }
 
     fn process_quote_response(
-        quote_response: FirmQuoteResponse,
+        quote_response: &FirmQuoteResponse,
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
         if !quote_response.success {
@@ -344,7 +344,9 @@ impl NativeClient {
         // Reject already-expired quotes before building a SignedQuote.
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| RFQError::ParsingError("SystemTime before UNIX EPOCH!".to_string()))?
+            .map_err(|_before_epoch| {
+                RFQError::ParsingError("SystemTime before UNIX EPOCH".to_string())
+            })?
             .as_secs();
 
         if order.deadline_timestamp <= now {
@@ -357,9 +359,9 @@ impl NativeClient {
         // Bind Native's top-level amountIn and signed sellerTokenAmount to the requested quote
         // baseline. The encoder stores this baseline as signedAmountIn; the executor supplies
         // actualSellerAmount when execution receives a different amount from the preceding hop.
-        let quoted_amount_in = BigUint::from_str(&quote_response.amount_in).map_err(|_| {
+        let quoted_amount_in = BigUint::from_str(&quote_response.amount_in).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse amount_in: {}",
+                "Failed to parse amount_in: {} ({e})",
                 quote_response.amount_in
             ))
         })?;
@@ -370,9 +372,9 @@ impl NativeClient {
             )));
         }
 
-        let signed_amount_in = BigUint::from_str(&order.seller_token_amount).map_err(|_| {
+        let signed_amount_in = BigUint::from_str(&order.seller_token_amount).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse signed seller token amount: {}",
+                "Failed to parse signed seller token amount: {} ({e})",
                 order.seller_token_amount
             ))
         })?;
@@ -389,9 +391,9 @@ impl NativeClient {
         // Native requires txRequest.value for native-token quotes. Validate the quoted value here,
         // while it still describes the original signed amount. During execution, the preceding hop
         // may deliver either less or more; the executor handles that through actualSellerAmount.
-        let quoted_value = BigUint::from_str(&quote_response.tx_request.value).map_err(|_| {
+        let quoted_value = BigUint::from_str(&quote_response.tx_request.value).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse Native txRequest.value: {}",
+                "Failed to parse Native txRequest.value: {} ({e})",
                 quote_response.tx_request.value
             ))
         })?;
@@ -471,9 +473,9 @@ impl NativeClient {
             ));
         }
 
-        let target = Bytes::from_str(&quote_response.tx_request.target).map_err(|_| {
+        let target = Bytes::from_str(&quote_response.tx_request.target).map_err(|e| {
             RFQError::ParsingError(format!(
-                "Failed to parse router target address: {}",
+                "Failed to parse router target address: {} ({e})",
                 quote_response.tx_request.target
             ))
         })?;
@@ -495,9 +497,9 @@ impl NativeClient {
             base_token: params.token_in.clone(),
             quote_token: params.token_out.clone(),
             amount_in: quoted_amount_in,
-            amount_out: BigUint::from_str(&quote_response.amount_out).map_err(|_| {
+            amount_out: BigUint::from_str(&quote_response.amount_out).map_err(|e| {
                 RFQError::ParsingError(format!(
-                    "Failed to parse amount_out: {}",
+                    "Failed to parse amount_out: {} ({e})",
                     quote_response.amount_out
                 ))
             })?,
@@ -583,9 +585,9 @@ mod tests {
         serde_json::from_value(successful_quote_json(amount_in)).unwrap()
     }
 
-    fn create_test_client(endpoint: String) -> NativeClient {
+    fn create_test_client(endpoint: &str) -> NativeClient {
         NativeClient::new(
-            Some(&endpoint),
+            Some(endpoint),
             NativeSupportedChain::Ethereum,
             "secret_key".to_string(),
             Duration::from_secs(5),
@@ -605,7 +607,7 @@ mod tests {
 
     #[test]
     fn debug_output_omits_credentials() {
-        let rendered = format!("{:?}", create_test_client("https://native.example".to_string()));
+        let rendered = format!("{:?}", create_test_client("https://native.example"));
 
         assert!(!rendered.contains("secret_key"));
         assert!(rendered.contains("native.example"));
@@ -616,7 +618,7 @@ mod tests {
         let params = create_test_quote_params();
         let response = successful_quote_response(&params.amount_in.to_string());
 
-        let quote = NativeClient::process_quote_response(response, &params).unwrap();
+        let quote = NativeClient::process_quote_response(&response, &params).unwrap();
 
         assert_eq!(quote.amount_in, params.amount_in);
         assert_eq!(
@@ -636,7 +638,7 @@ mod tests {
         // Keep sellerTokenAmount correct so only the top-level amountIn check can reject this.
         response.amount_in = "2".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -650,7 +652,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.orders[0].seller_token_amount = "2".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -665,7 +667,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.orders[0].effective_seller_token_amount = "99".to_string();
 
-        let quote = NativeClient::process_quote_response(response, &params).unwrap();
+        let quote = NativeClient::process_quote_response(&response, &params).unwrap();
 
         assert_eq!(quote.amount_in, params.amount_in);
     }
@@ -683,7 +685,7 @@ mod tests {
             response.orders[0].buyer_token = mismatched_token;
         }
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -697,7 +699,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.orders[0].recipient = "0x5555555555555555555555555555555555555555".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -711,7 +713,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.tx_request.calldata.clear();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -725,7 +727,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.tx_request.calldata = format!("0x7083527c{}", "00".repeat(95));
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -748,7 +750,7 @@ mod tests {
         calldata[..4].copy_from_slice(&[0x09, 0x47, 0xc2, 0xd9]);
         response.tx_request.calldata = format!("0x{}", hex::encode(calldata));
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -765,7 +767,7 @@ mod tests {
         response.router_version = version.to_string();
 
         assert!(matches!(
-            NativeClient::process_quote_response(response, &params),
+            NativeClient::process_quote_response(&response, &params),
             Err(RFQError::FatalError(message)) if message.contains("Unexpected Native router version")
         ));
     }
@@ -782,7 +784,7 @@ mod tests {
         response.amount_in_offset = amount_in_offset;
         response.amount_out_minimum_offset = amount_out_minimum_offset;
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -811,7 +813,7 @@ mod tests {
         calldata[override_offset + 31] = 1;
         response.tx_request.calldata = format!("0x{}", hex::encode(calldata));
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -827,7 +829,7 @@ mod tests {
         response.orders[0].seller_token = "0x0000000000000000000000000000000000000000".to_string();
         response.tx_request.value = params.amount_in.to_string();
 
-        let quote = NativeClient::process_quote_response(response, &params).unwrap();
+        let quote = NativeClient::process_quote_response(&response, &params).unwrap();
 
         assert_eq!(quote.amount_in, params.amount_in);
     }
@@ -840,7 +842,7 @@ mod tests {
         response.orders[0].seller_token = "0x0000000000000000000000000000000000000000".to_string();
         response.tx_request.value = "2".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -854,7 +856,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.tx_request.value = "not-a-number".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -868,7 +870,7 @@ mod tests {
         let mut response = successful_quote_response(&params.amount_in.to_string());
         response.tx_request.value = "1".to_string();
 
-        let result = NativeClient::process_quote_response(response, &params);
+        let result = NativeClient::process_quote_response(&response, &params);
 
         assert!(matches!(
             result,
@@ -885,7 +887,7 @@ mod tests {
             Some(("200 OK", successful_quote_json("1").to_string()))
         })
         .await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
         let params = create_test_quote_params();
 
         let quote = client
@@ -931,7 +933,7 @@ mod tests {
             ))
         })
         .await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -954,7 +956,7 @@ mod tests {
         response["errorMessage"] = serde_json::Value::String("quote unavailable".to_string());
         let body = response.to_string();
         let server = spawn_http_server(move |_| Some(("200 OK", body.clone()))).await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -977,7 +979,7 @@ mod tests {
             ))
         })
         .await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -993,7 +995,7 @@ mod tests {
             Some(("503 Service Unavailable", "<html>upstream unavailable</html>".to_string()))
         })
         .await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1010,7 +1012,7 @@ mod tests {
     async fn retries_malformed_success_response() {
         let server =
             spawn_http_server(|_| Some(("200 OK", r#"{"unexpected":true}"#.to_string()))).await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1093,7 +1095,7 @@ mod tests {
             ))
         })
         .await;
-        let client = create_test_client(server.url());
+        let client = create_test_client(&server.url());
 
         let result = client
             .request_binding_quote(&create_test_quote_params())
@@ -1115,6 +1117,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits Native's live API; requires NATIVE_API_KEY"]
     async fn live_native_api_serves_every_chain_the_enum_names(#[case] chain: Chain) {
+        #[expect(
+            clippy::unused_result_ok,
+            reason = "a missing .env file is fine; the variables may come from the environment"
+        )]
         dotenv::dotenv().ok();
         let api_key = std::env::var("NATIVE_API_KEY").expect("NATIVE_API_KEY not set");
         let client = NativeClient::new(

@@ -49,11 +49,7 @@ impl SolidityError {
             return format!("{}()", self.name);
         }
 
-        // Try to decode the arguments
-        match self.decode_error_args(&data[4..]) {
-            Ok(args_str) => format!("{}({})", self.name, args_str),
-            Err(_) => format!("{}(<decode error>)", self.name),
-        }
+        format!("{}({})", self.name, self.decode_error_args(&data[4..]))
     }
 
     /// Decodes the actual arguments from the error using the previously-decoded arg types.
@@ -61,7 +57,7 @@ impl SolidityError {
     /// This ensures that we have as much information regarding the error as possible (for example,
     /// the values of the negative slippage as opposed to just the fact that there was
     /// NegativeSlippage.
-    pub fn decode_error_args(&self, data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn decode_error_args(&self, data: &[u8]) -> String {
         // This is a simplified version. For full ABI decoding, you'd need alloy-sol-types
         let mut args = Vec::new();
         let mut offset = 0;
@@ -113,7 +109,7 @@ impl SolidityError {
             }
         }
 
-        Ok(args.join(", "))
+        args.join(", ")
     }
 
     /// Decodes innermost error of recursive error string.
@@ -425,7 +421,7 @@ impl ExecutionSimulator {
         }
 
         // Parse signature like "Error(string)" or "Panic(uint256)"
-        let re = regex::Regex::new(r"(.*?)\((.*?)\)").unwrap();
+        let re = regex::Regex::new(r"(.*?)\((.*?)\)")?;
         let captures = re
             .captures(signature)
             .ok_or("Failed to parse signature")?;

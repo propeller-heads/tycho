@@ -190,7 +190,7 @@ impl EkuboPool for BasePool {
             self.state.active_tick_index = find_nearest_initialized_tick_index(
                 new_initialized_ticks
                     .as_ref()
-                    .unwrap_or(self.imp.get_sorted_ticks()),
+                    .unwrap_or_else(|| self.imp.get_sorted_ticks()),
                 self.active_tick.ok_or_else(|| {
                     TransitionError::MissingAttribute(
                         "base state should always have an active tick during transitions"

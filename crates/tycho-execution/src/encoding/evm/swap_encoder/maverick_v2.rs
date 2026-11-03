@@ -34,7 +34,7 @@ impl SwapEncoder for MaverickV2SwapEncoder {
         _encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
         let component_id = AlloyBytes::from_str(&swap.component().id)
-            .map_err(|_| EncodingError::FatalError("Invalid component ID".to_string()))?;
+            .map_err(|e| EncodingError::FatalError(format!("Invalid component ID: {e}")))?;
 
         let args = (
             component_id,
@@ -81,8 +81,8 @@ mod tests {
         );
         let encoding_context = EncodingContext {
             router_address: Some(Bytes::default()),
-            group_token_in: token_in.clone(),
-            group_token_out: token_out.clone(),
+            group_token_in: token_in,
+            group_token_out: token_out,
             origin: None,
         };
         let encoder = MaverickV2SwapEncoder::new(

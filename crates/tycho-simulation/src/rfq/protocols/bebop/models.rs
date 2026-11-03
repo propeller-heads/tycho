@@ -329,7 +329,13 @@ impl TryFrom<Chain> for BebopSupportedChain {
             Chain::Arbitrum => Ok(BebopSupportedChain::Arbitrum),
             // Optimism and HyperEVM answer to their chain id alone, since Tycho has no name
             // for either.
-            other => match other.try_id() {
+            other @ (Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Unichain |
+            Chain::Plasma |
+            Chain::Arc |
+            Chain::Custom(_) |
+            _) => match other.try_id() {
                 Ok(10) => Ok(BebopSupportedChain::Optimism),
                 Ok(999) => Ok(BebopSupportedChain::HyperEvm),
                 Ok(chain_id) => Err(format!("Bebop does not serve {chain} (chain id {chain_id})")),
@@ -396,7 +402,7 @@ mod tests {
             asks: vec![2001.0f32, 1.5f32, 2002.0f32, 1.0f32],
         };
 
-        let tvl = BebopBook::try_from(price_data.clone())
+        let tvl = BebopBook::try_from(price_data)
             .unwrap()
             .calculate_tvl(None);
 
@@ -522,7 +528,7 @@ mod tests {
         let dai_addr =
             Bytes::from(hex::decode("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap());
         assert_eq!(
-            BebopBook::try_from(price_data.clone())
+            BebopBook::try_from(price_data)
                 .unwrap()
                 .get_mid_price(100.0, &dai_addr),
             None
@@ -537,7 +543,7 @@ mod tests {
             asks: vec![2001.0f32, 3.0f32, 2002.0f32, 1.0f32],
         };
         assert_eq!(
-            BebopBook::try_from(price_data.clone())
+            BebopBook::try_from(price_data)
                 .unwrap()
                 .get_mid_price(3.0, &weth_addr),
             None
@@ -552,7 +558,7 @@ mod tests {
             asks: vec![],
         };
         assert_eq!(
-            BebopBook::try_from(price_data.clone())
+            BebopBook::try_from(price_data)
                 .unwrap()
                 .get_mid_price(3.0, &weth_addr),
             None
@@ -566,7 +572,7 @@ mod tests {
             bids: vec![2000.0f32, 2.0f32, 1999.0f32, 3.0f32],
             asks: vec![2001.0f32, 3.0f32, 2002.0f32, 1.0f32],
         };
-        let insufficient_mid = BebopBook::try_from(price_data.clone())
+        let insufficient_mid = BebopBook::try_from(price_data)
             .unwrap()
             .get_mid_price(10.0, &weth_addr);
         // With 10 WETH but only 5 WETH liquidity, we get partial fills

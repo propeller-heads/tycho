@@ -29,7 +29,6 @@ const U160_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX, u64::MAX >> 32, 0])
 ///
 /// # Returns
 /// A tuple containing (amount_in, amount_out, SwapResults)
-#[allow(clippy::too_many_arguments)]
 pub fn clmm_swap_to_price<F>(
     sqrt_price: U256,
     token_in: &Bytes,

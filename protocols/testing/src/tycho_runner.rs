@@ -8,7 +8,7 @@ use std::{
 
 use miette::{IntoDiagnostic, WrapErr};
 use tempfile::NamedTempFile;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tycho_simulation::tycho_common::models::Chain;
 pub struct TychoRunner {
     chain: Chain,
@@ -39,13 +39,16 @@ impl TychoRunner {
         end_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
+        module_name: Option<&str>,
     ) -> miette::Result<()> {
         info!("Running Tycho indexer from block {start_block} to {end_block}...");
 
         let mut cmd = Command::new("tycho-indexer");
-        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()))
-            .env("AUTH_API_KEY", "dummy");
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
+        )
+        .env("AUTH_API_KEY", "dummy");
 
         let all_accounts = self.initialized_accounts.clone();
 
@@ -56,7 +59,7 @@ impl TychoRunner {
             &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
-                .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
+                .ok_or_else(|| miette::miette!("Unknown endpoint for chain {}", self.chain))?
                 .as_str(),
             "run",
             "--chain",
@@ -64,9 +67,7 @@ impl TychoRunner {
             "--spkg",
             spkg_path,
             "--module",
-            module_name
-                .as_deref()
-                .unwrap_or("map_protocol_changes"),
+            module_name.unwrap_or("map_protocol_changes"),
             "--protocol-type-names",
             &protocol_type_names.join(","),
             "--protocol-system",
@@ -117,7 +118,7 @@ impl TychoRunner {
         Ok(())
     }
 
-    pub fn start_rpc_server(&self) -> miette::Result<TychoRpcServer> {
+    pub fn start_rpc_server(&self) -> TychoRpcServer {
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let db_url = self.db_url.clone();
         let server_port = self.server_port.to_string();
@@ -139,7 +140,7 @@ impl TychoRunner {
                 .stderr(Stdio::piped())
                 .env(
                     "RUST_LOG",
-                    std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()),
+                    std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
                 )
                 .env("AUTH_API_KEY", "dummy")
                 .spawn()
@@ -152,12 +153,18 @@ impl TychoRunner {
                     debug!("Received termination message, stopping RPC server...");
                     cmd.kill()
                         .expect("Failed to kill RPC server");
-                    let _ = cmd.wait();
+                    if let Err(e) = cmd.wait() {
+                        warn!("Failed to wait for RPC server exit: {e}");
+                    }
                 }
                 Err(_) => {
                     // Channel closed, terminate anyway
-                    let _ = cmd.kill();
-                    let _ = cmd.wait();
+                    if let Err(e) = cmd.kill() {
+                        warn!("Failed to kill RPC server: {e}");
+                    }
+                    if let Err(e) = cmd.wait() {
+                        warn!("Failed to wait for RPC server exit: {e}");
+                    }
                 }
             }
         });
@@ -165,10 +172,10 @@ impl TychoRunner {
         // Give the RPC server time to start
         thread::sleep(Duration::from_secs(3));
 
-        Ok(TychoRpcServer { sender: tx, thread_handle })
+        TychoRpcServer { sender: tx, thread_handle }
     }
 
-    pub fn stop_rpc_server(&self, server: TychoRpcServer) -> miette::Result<()> {
+    pub fn stop_rpc_server(server: TychoRpcServer) -> miette::Result<()> {
         server
             .sender
             .send(true)
@@ -189,7 +196,7 @@ impl TychoRunner {
         start_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
+        module_name: Option<&str>,
     ) -> miette::Result<()> {
         info!("Running Tycho indexer with Index command (continuous syncing + RPC server) from block {start_block}...");
 
@@ -200,7 +207,7 @@ impl TychoRunner {
             protocol_type_names,
             protocol_system,
             module_name,
-        )?;
+        );
 
         let mut temp_file = NamedTempFile::new()
             .into_diagnostic()
@@ -217,8 +224,11 @@ impl TychoRunner {
             .ok_or_else(|| miette::miette!("Invalid temp file path"))?;
 
         let mut cmd = Command::new("tycho-indexer");
-        cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or("tycho_indexer=info".to_string()))
-            .env("AUTH_API_KEY", "dummy");
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "tycho_indexer=info".to_string()),
+        )
+        .env("AUTH_API_KEY", "dummy");
 
         cmd.args([
             "--database-url",
@@ -227,7 +237,7 @@ impl TychoRunner {
             &self.server_port.to_string(),
             "--endpoint",
             get_default_endpoint(&self.chain)
-                .unwrap_or_else(|| panic!("Unknown endpoint for chain {}", self.chain))
+                .ok_or_else(|| miette::miette!("Unknown endpoint for chain {}", self.chain))?
                 .as_str(),
             "index",
             "--extractors-config",
@@ -269,8 +279,8 @@ impl TychoRunner {
         start_block: u64,
         protocol_type_names: &[String],
         protocol_system: &str,
-        module_name: Option<String>,
-    ) -> miette::Result<String> {
+        module_name: Option<&str>,
+    ) -> String {
         let protocol_types = protocol_type_names
             .iter()
             .map(|name| format!("    - name: \"{}\"\n      financial_type: Swap", name))
@@ -299,13 +309,11 @@ impl TychoRunner {
             start_block,
             protocol_types,
             spkg_path,
-            module_name
-                .as_deref()
-                .unwrap_or("map_protocol_changes"),
+            module_name.unwrap_or("map_protocol_changes"),
             initialized_accounts_section
         );
 
-        Ok(config)
+        config
     }
 
     // Helper method to handle process output in separate threads
@@ -339,6 +347,11 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Robinhood => Some("https://mainnet.robinhood.streamingfast.io:443".to_string()),
         Chain::Arc => Some("https://arc.substreams.pinax.network:443".to_string()),
         Chain::Bsc => Some("https://bnb.streamingfast.io:443".to_string()),
+        Chain::Starknet |
+        Chain::ZkSync |
+        Chain::Arbitrum |
+        Chain::Plasma |
+        Chain::Custom(_) |
         _ => None,
     }
 }

@@ -164,3 +164,6 @@ harness = false
 [[bench]]
 name = "concurrency_throughput"
 harness = false
+
+[lints]
+workspace = true

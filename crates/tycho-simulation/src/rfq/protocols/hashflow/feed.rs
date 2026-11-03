@@ -357,7 +357,8 @@ mod tests {
         let pairs = timeout(Duration::from_secs(10), async {
             loop {
                 rx.changed().await.expect("feed ended");
-                if let Some(snapshot) = rx.borrow_and_update().clone() {
+                let latest = rx.borrow_and_update().clone();
+                if let Some(snapshot) = latest {
                     assert!(snapshot.anchor.0.timestamp() > 0);
                     return snapshot.books;
                 }

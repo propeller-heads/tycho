@@ -293,6 +293,10 @@ impl TitanProvider {
                                                 // dropped; the check after this loop stops the
                                                 // task, so ignoring it here is safe.
                                                 Ok(Some(snapshot)) => {
+                                                    #[expect(
+                                                        clippy::let_underscore_must_use,
+                                                        reason = "a send error means every receiver is gone, which the check after this loop handles"
+                                                    )]
                                                     let _ = sender.send(snapshot);
                                                 }
                                                 // No alias present in this frame — nothing to do.

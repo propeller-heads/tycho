@@ -25,10 +25,12 @@ fn decimals(
     all_tokens: &HashMap<Bytes, Token>,
     address: &Bytes,
 ) -> Result<u8, InvalidSnapshotError> {
-    all_tokens
+    let token = all_tokens
         .get(address)
-        .map(|token| token.decimals as u8)
-        .ok_or_else(|| InvalidSnapshotError::ValueError(format!("Token {address} not found")))
+        .ok_or_else(|| InvalidSnapshotError::ValueError(format!("Token {address} not found")))?;
+    u8::try_from(token.decimals).map_err(|e| {
+        InvalidSnapshotError::ValueError(format!("Token {address} decimals out of range: {e}"))
+    })
 }
 
 impl TryFromWithBlock<ComponentWithState, BlockHeader> for AeroBasicState {

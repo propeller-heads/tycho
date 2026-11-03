@@ -236,9 +236,9 @@ impl ProtocolSim for AeroBasicState {
         let fee_bps = self.fee_bps()?;
         if self.stable {
             self.stable_pool()
-                .get_limits(sell_token, buy_token)
+                .get_limits(&sell_token, &buy_token)
         } else {
-            cpmm_get_limits(sell_token, buy_token, self.reserve0, self.reserve1, fee_bps)
+            cpmm_get_limits(&sell_token, &buy_token, self.reserve0, self.reserve1, fee_bps)
         }
     }
 

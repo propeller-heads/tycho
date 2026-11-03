@@ -149,7 +149,10 @@ pub struct FirmQuoteRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fields are deserialized to validate the response shape but never read"
+)]
 pub struct WidgetFee {
     pub signer: String,
     pub fee_recipient: String,
@@ -165,7 +168,10 @@ pub struct TxRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fields are deserialized to validate the response shape but never read"
+)]
 pub struct FirmQuoteOrder {
     pub pool: String,
     pub signer: String,
@@ -188,7 +194,10 @@ pub struct FirmQuoteOrder {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fields are deserialized to validate the response shape but never read"
+)]
 pub struct FirmQuoteResponse {
     pub success: bool,
     pub orders: Vec<FirmQuoteOrder>,
@@ -237,7 +246,14 @@ impl TryFrom<Chain> for NativeSupportedChain {
             Chain::Arbitrum => Ok(NativeSupportedChain::Arbitrum),
             Chain::Base => Ok(NativeSupportedChain::Base),
             Chain::Robinhood => Ok(NativeSupportedChain::Robinhood),
-            unserved => Err(format!("Native does not serve {unserved}")),
+            unserved @ (Chain::Starknet |
+            Chain::ZkSync |
+            Chain::Unichain |
+            Chain::Polygon |
+            Chain::Plasma |
+            Chain::Arc |
+            Chain::Custom(_) |
+            _) => Err(format!("Native does not serve {unserved}")),
         }
     }
 }

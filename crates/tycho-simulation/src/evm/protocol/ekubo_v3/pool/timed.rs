@@ -110,6 +110,10 @@ pub fn finish_transition(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the signature of the non-test current_timestamp, which reads the system clock"
+)]
 fn current_timestamp() -> Result<u64, SimulationError> {
     Ok(crate::evm::protocol::ekubo_v3::test_cases::TEST_TIMESTAMP)
 }

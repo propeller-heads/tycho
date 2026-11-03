@@ -80,7 +80,8 @@ async fn run_analysis_pass(
     // quality filter, which shifts OFFSET pages and would skip rows mid-run.
     let mut tokens = Vec::new();
     let mut page = 0;
-    let page_size = analyze_args.fetch_batch_size as i64;
+    let page_size = i64::try_from(analyze_args.fetch_batch_size)
+        .map_err(|err| anyhow::anyhow!("fetch batch size does not fit i64: {err}"))?;
     loop {
         let pagination_params = PaginationParams::new(page, page_size);
         let page_tokens = gw
@@ -96,7 +97,7 @@ async fn run_analysis_pass(
         let page_len = page_tokens.len();
         tokens.extend(page_tokens);
         page += 1;
-        if page_len < (page_size as usize) {
+        if page_len < analyze_args.fetch_batch_size {
             break;
         }
     }

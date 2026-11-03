@@ -818,12 +818,12 @@ mod tests {
     }
 
     /// The block's number and timestamp, the overrides of a simulation before a mined block.
-    fn number_and_time() -> Option<BlockOverrides> {
-        Some(BlockOverrides {
+    fn number_and_time() -> BlockOverrides {
+        BlockOverrides {
             number: Some(U256::from(NUMBER)),
             time: Some(TIMESTAMP),
             ..Default::default()
-        })
+        }
     }
 
     /// Simulates one input for `block(mined)` on `base` against a mock RPC, and returns the block
@@ -873,7 +873,7 @@ mod tests {
     async fn before_a_mined_block_the_simulation_reads_the_parent_in_its_context() {
         let call = traced_call(SimulationBase::BeforeBlock, true).await;
 
-        assert_eq!(call, (BlockId::from(PARENT_HASH), number_and_time()));
+        assert_eq!(call, (BlockId::from(PARENT_HASH), Some(number_and_time())));
     }
 
     /// A pending block reads the pending state, with no block overrides, whatever the base.

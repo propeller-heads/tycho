@@ -67,7 +67,14 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AerodromeV1State {
             .get(&snapshot.component.tokens[1])
             .ok_or_else(|| InvalidSnapshotError::ValueError("Token1 not found".to_string()))?;
 
-        Ok(Self::new(reserve0, reserve1, stable, fee, token0.decimals as u8, token1.decimals as u8))
+        let decimals0 = u8::try_from(token0.decimals).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("Token0 decimals out of range: {e}"))
+        })?;
+        let decimals1 = u8::try_from(token1.decimals).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!("Token1 decimals out of range: {e}"))
+        })?;
+
+        Ok(Self::new(reserve0, reserve1, stable, fee, decimals0, decimals1))
     }
 }
 
@@ -159,6 +166,7 @@ mod tests {
             "is_stable" => {
                 static_attributes.remove(missing_attribute);
             }
+            #[expect(clippy::unreachable, reason = "the test cases only name the attributes above")]
             _ => unreachable!("unexpected attribute under test: {missing_attribute}"),
         }
 
