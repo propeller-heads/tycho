@@ -93,7 +93,8 @@ contract CurveAdapterTest is Test, ISwapAdapterTypes, AdapterTest {
             } catch {
                 amounts[0] = ICurveCustomInt128Pool(
                         ADDITIONAL_POOLS_FOR_TESTING[i]
-                    ).balances(int128(0)) / 10;
+                    )
+                    .balances(int128(0)) / 10;
             }
 
             deal(tokens[0], address(this), amounts[0]);
