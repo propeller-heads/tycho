@@ -12,6 +12,7 @@ use substreams::{
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::{
     balances::aggregate_balances_changes,
+    block_storage::get_block_storage_changes,
     entrypoint::create_entrypoint,
     prelude::{entry_point_params::TraceData, *},
 };
@@ -111,7 +112,9 @@ pub fn map_protocol_changes(
             .sorted_unstable_by_key(|(index, _)| *index)
             .filter_map(|(_, builder)| builder.build())
             .collect::<Vec<_>>(),
-        storage_changes: vec![],
+        // The indexer keeps the contracts traced from the resolver entrypoints up to date from
+        // these, and only for contracts it tracks.
+        storage_changes: get_block_storage_changes(&block),
     })
 }
 
