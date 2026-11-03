@@ -58,11 +58,9 @@ impl SwapEncoder for FluidV2SwapEncoder {
             &get_static_attribute(swap, "tick_spacing")?,
         )?);
 
-        let controller = if let Ok(raw_controller) = get_static_attribute(swap, "controller") {
-            self.bytes_to_address(&Bytes::from(raw_controller))?
-        } else {
-            Address::ZERO
-        };
+        // The controller is part of the dex key, so a component without it names no pool.
+        let controller =
+            self.bytes_to_address(&Bytes::from(get_static_attribute(swap, "controller")?))?;
 
         let controller_data = swap
             .user_data()
@@ -184,7 +182,12 @@ mod tests {
 
     #[test]
     fn test_encode_native_token_as_fluid_sentinel() {
-        let component = pool(&[("dex_type", "0x03"), ("fee", "0x01f4"), ("tick_spacing", "0x0a")]);
+        let component = pool(&[
+            ("dex_type", "0x03"),
+            ("fee", "0x01f4"),
+            ("tick_spacing", "0x0a"),
+            ("controller", "0x0000000000000000000000000000000000000000"),
+        ]);
 
         let encoded =
             encode_swap(component, USDC, "0x0000000000000000000000000000000000000000").unwrap();
@@ -198,8 +201,12 @@ mod tests {
     #[test]
     fn test_encode_dynamic_fee_from_signed_bytes() {
         // Substreams writes the uint24 0xFFFFFF as a signed big-endian integer.
-        let component =
-            pool(&[("dex_type", "0x03"), ("fee", "0x00ffffff"), ("tick_spacing", "0x0a")]);
+        let component = pool(&[
+            ("dex_type", "0x03"),
+            ("fee", "0x00ffffff"),
+            ("tick_spacing", "0x0a"),
+            ("controller", "0x0000000000000000000000000000000000000000"),
+        ]);
 
         let encoded = encode_swap(component, USDC, USDT).unwrap();
 
@@ -250,11 +257,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_encode_without_dex_type_fails() {
-        let component = pool(&[("fee", "0x64"), ("tick_spacing", "0x01")]);
+    #[rstest::rstest]
+    #[case::dex_type("dex_type")]
+    #[case::fee("fee")]
+    #[case::tick_spacing("tick_spacing")]
+    #[case::controller("controller")]
+    fn test_encode_without_dex_key_attribute_fails(#[case] missing: &str) {
+        let attributes: Vec<_> = [
+            ("dex_type", "0x03"),
+            ("fee", "0x64"),
+            ("tick_spacing", "0x01"),
+            ("controller", "0x0000000000000000000000000000000000000000"),
+        ]
+        .into_iter()
+        .filter(|(name, _)| *name != missing)
+        .collect();
 
-        assert!(encode_swap(component, USDC, USDT).is_err());
+        assert!(encode_swap(pool(&attributes), USDC, USDT).is_err());
     }
 
     #[test]
