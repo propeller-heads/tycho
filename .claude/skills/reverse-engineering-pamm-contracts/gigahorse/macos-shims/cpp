@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# gigahorse runs `cpp -P spec -D ""`; Apple cpp rejects the empty -D, so drop it.
+set -euo pipefail
+args=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-D" ] && [ "${2-}" = "" ]; then
+    shift 2
+    continue
+  fi
+  args+=("$1")
+  shift
+done
+exec /usr/bin/clang -E -x c -w "${args[@]}"

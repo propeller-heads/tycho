@@ -1,0 +1,16 @@
+diff --git a/src/runners.py b/src/runners.py
+index 2f28574..fbd6856 100644
+--- a/src/runners.py
++++ b/src/runners.py
+@@ -60,7 +60,10 @@ class DecompilationException(Exception):
+ 
+ 
+ def set_memory_limit(memory_limit: int):
+-    resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
++    try:
++        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
++    except (ValueError, OSError):
++        pass  # macOS rejects RLIMIT_AS
+ 
+ 
+ def get_souffle_executable_path(cache_dir: str, dl_filename: str) -> str:

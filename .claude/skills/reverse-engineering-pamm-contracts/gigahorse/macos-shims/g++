@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Apple clang has no -fopenmp or -march=native (souffle-addon Makefile), and needs Homebrew paths.
+set -euo pipefail
+prefix=${HOMEBREW_PREFIX:-/opt/homebrew}
+args=()
+for a in "$@"; do
+  case "$a" in
+  -fopenmp | -march=native) ;;
+  *) args+=("$a") ;;
+  esac
+done
+exec /usr/bin/clang++ -I"$prefix/include/souffle" -I"$prefix/include" -L"$prefix/lib" "${args[@]}"

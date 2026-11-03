@@ -1,0 +1,13 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/memory_modeling/memory_modeling.dl"
+#include "../clientlib/storage_modeling/storage_modeling.dl"
+
+.output StorageVariableInfo
+.output StorageLoad
+.output StorageStore
+.output StorageStmtKindAndConstruct
+.output DataStructure_Type
+.output StorageVariable_Type
+.output Mapping_KeyType
+.output DataStructureValueIsStruct
+.output StructToString
