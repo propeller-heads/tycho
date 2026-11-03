@@ -1,3 +1,19 @@
+## [0.499.0](https://github.com/propeller-heads/tycho/compare/0.498.0...0.499.0) (2026-11-03)
+
+
+### Features
+
+* **client:** filter get_tokens by token address ([9335ede](https://github.com/propeller-heads/tycho/commit/9335ede795b6e25be30aac6c6ab9d4bd51240dbd))
+* **client:** filter get_tokens by token address ([#1717](https://github.com/propeller-heads/tycho/issues/1717)) ([49e1e23](https://github.com/propeller-heads/tycho/commit/49e1e231e791e4923e77b2793e38f4fd88074ddd))
+
+## [0.498.0](https://github.com/propeller-heads/tycho/compare/0.497.1...0.498.0) (2026-11-03)
+
+
+### Features
+
+* **test runner:** add opt-in strict mode and per-check report ([7b3d738](https://github.com/propeller-heads/tycho/commit/7b3d7386d5e6cb876401932ca94b7f69ba3067e0))
+* **test runner:** add opt-in strict mode and per-check report ([#1719](https://github.com/propeller-heads/tycho/issues/1719)) ([d86d764](https://github.com/propeller-heads/tycho/commit/d86d7647a7842466758d3919b700a54bf3a1f0fa))
+
 ## [0.497.1](https://github.com/propeller-heads/tycho/compare/0.497.0...0.497.1) (2026-11-03)
 
 
