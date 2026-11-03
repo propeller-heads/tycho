@@ -683,10 +683,12 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 2. `swap()` returns void -- just call the protocol. No balance tracking, no output transfers, no amount validation
    needed (the Dispatcher handles all of this via balance-diff). **Never use pool return values or callback arguments to
    determine transfer amounts** -- protocols can return arbitrary data. The Dispatcher's pre/post balance diff is the
-   only trusted source of truth.
-3. Hardcode the correct `TransferType`, `tokenOut`, and `outputToRouter` in `getTransferData()` -- do NOT make them
-   encodable. Set `outputToRouter = true` if the protocol sends output to `msg.sender` rather than accepting a receiver
-   param
+   only trusted source of truth. Nor does it compare `msg.value` with an amount, or revert on venue pricing
+   parameters that the simulation models: the simulation decides whether a quote is worth sending.
+3. Hardcode the correct `TransferType` and `outputToRouter` in `getTransferData()` -- do NOT make them encodable.
+   Set `outputToRouter = true` if the protocol sends output to `msg.sender` rather than accepting a receiver param.
+   Token and receiver addresses may come from the swap data; validate them on chain wherever the executor approves,
+   transfers to or calls them
 4. Return the correct `fundsExpectedAddress()` (pool address for direct-transfer protocols, `address(this)` for
    pull-based)
 5. Add Rust encoder in `src/encoding/evm/swap_encoder/` and register in `swap_encoder_registry.rs`
@@ -729,25 +731,21 @@ Executors run via `delegatecall` inside TychoRouterV3 — they have full access 
 - **Never write to state variables.** Any storage write in an executor writes to TychoRouterV3's storage.
 - **Do not execute `delegatecall`.** If unavoidable, ensure the caller cannot control the target address.
 - **Verify callback origin.** Call `verifyCallback` inside `handleCallback` to confirm `msg.sender` is a valid pool.
+- **Check the requested token.** A callback that pays from stored context checks the token the venue asks for against
+  that context and reverts with an error naming the mismatch.
 - **Allowlist selectors when the caller controls calldata.** If `swap()` forwards caller-supplied calldata to an external contract (e.g. RFQ settlement), validate the first 4 bytes against an explicit allowlist of safe function selectors before making the call. An unrestricted selector lets an attacker invoke arbitrary functions on that contract — including ones that could drain TychoRouterV3's balance at the settlement contract. See `LiquoriceExecutor` for the pattern.
 - `handleCallback`'s `data` argument is raw ABI-encoded calldata the executor must decode manually.
 - `handleCallback`'s return value must be raw ABI-encoded data the executor encodes manually.
 
 ## Conventions
 
-### Solidity
-
-- Prefix private/internal state with underscore: `_feeCalculator`, `_ALLOWED_DUST`
-- Transient storage slots use keccak256 of descriptive names
-- Custom errors with contract-prefixed names: `TychoRouter__EmptySwaps`, `Vault__AmountZero`
-- Format with `forge fmt` (80 char line length)
-- Suppress false positives with `// forge-lint: disable-next-line(<lint>)` or
-  `// slither-disable-next-line <detector>`, whichever tool owns the check (see `slither.md`)
+Coding rules for Solidity and Rust (naming, errors, tests) are in `.claude/knowledge/solidity.md`,
+`.claude/knowledge/rust.md` and `.claude/knowledge/execution.md`; `forge fmt` (80-character lines) and
+`forge lint` check formatting.
 
 ### Testing
 
-- Foundry tests use `TychoRouterTestSetup.sol` as the shared base
-- Test naming: `test_<description>` in Rust, `test<Description>` in Solidity
+- Router tests inherit `TychoRouterTestSetup.sol`; tests that don't use the router have their own test contract
 - **Cross-language integration tests**: Rust encoding tests
   call `write_calldata_to_file(test_identifier, hex_calldata)` (`src/encoding/evm/utils.rs`), which appends `name:hex`
   lines to `contracts/test/assets/calldata.txt`. Solidity tests then read that file
