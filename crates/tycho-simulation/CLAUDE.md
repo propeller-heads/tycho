@@ -280,8 +280,7 @@ math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent
 
 ## Conventions
 
-- CI pins a nightly toolchain for both `fmt` and `clippy` (see `.github/workflows/ci-rust.yaml`);
-  stable for builds and tests
+- `fmt` and `clippy` run on `+$RUST_NIGHTLY`, builds and tests on the `rust-toolchain.toml` stable
 - `rstest`: name each parametrised case with `#[case::descriptive_name(...)]`
 - A `tracing` span whose fields identify what an event is about (`snapshot_feed{provider}`,
   `quote_request{...}`) is `error`-level: a span the subscriber's filter rejects is never entered,
