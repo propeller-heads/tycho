@@ -57,10 +57,10 @@ brew install libpq
 export LIBRARY_PATH=<PATH-TO-LIB>:$LIBRARY_PATH
 ```
 
-2. Install the Diesel CLI:
+2. Install the Diesel CLI (pinned in the repository's `mise.toml`):
 
 ```bash
-cargo install diesel_cli --no-default-features --features postgres
+mise install github:diesel-rs/diesel
 ```
 
 3. Start the Postgres Service:

@@ -5,7 +5,7 @@
 ### Before committing or pushing
 
 1. Re-read your changes for unnecessary complexity and unclear naming
-2. Format: `cargo +nightly fmt --all` (and `forge fmt` from `crates/tycho-execution/contracts/` if you touched Solidity)
+2. Format: `cargo +"$RUST_NIGHTLY" fmt --all` (and `forge fmt` from `crates/tycho-execution/contracts/` if you touched Solidity)
 3. Run only the tests that cover what you changed, e.g. `cargo nextest run -p tycho-indexer` or
    `forge test --match-test testSwapSingle`. Do not run the whole workspace.
 4. Run the `sync-docs` skill if you changed behaviour that the docs describe.

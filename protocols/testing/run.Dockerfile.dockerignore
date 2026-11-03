@@ -16,3 +16,6 @@ target/
 .env
 docker-compose*.yml
 *.swp
+
+# mise's personal overrides (mise.local.toml, mise.<env>.local.toml, ...), which may hold secrets
+**/*.local.toml
