@@ -9,7 +9,7 @@ user-invocable: true
 Run the same checks that GitHub Actions CI runs, locally, to catch failures before they hit the
 remote pipeline. The canonical commands live in `.github/workflows/ci-rust.yaml`.
 
-This is the wide, slow check. For a routine commit or push, run `cargo +nightly fmt --all` and the
+This is the wide, slow check. For a routine commit or push, run `cargo +"$RUST_NIGHTLY" fmt --all` and the
 tests covering the change instead (see `.claude/knowledge/version_control.md`).
 
 ## Environment
@@ -111,12 +111,12 @@ or `Scope: full`.
 
 Run formatting first because it modifies source files that all subsequent checks depend on.
 
-CI runs `cargo +nightly-2026-06-28 fmt --all --check` (see `ci-rust.yaml` — the pinned nightly is
-the source of truth; if it has moved, use the workflow's value). Locally, write the fixes instead
+CI runs `cargo +$RUST_NIGHTLY fmt --all --check`. `RUST_NIGHTLY` is set in `mise.toml`; if mise is
+not active in the shell, prefix the commands with `mise exec --`. Locally, write the fixes instead
 of just checking:
 
 ```bash
-cargo +nightly-2026-06-28 fmt --all
+cargo +"$RUST_NIGHTLY" fmt --all
 ```
 
 Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
@@ -129,7 +129,7 @@ Same pinned nightly as Phase 1, and `-D warnings` — CI fails on any warning, s
 failures:
 
 ```bash
-cargo +nightly-2026-06-28 clippy --workspace --all-targets --all-features -- -D warnings
+cargo +"$RUST_NIGHTLY" clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Report pass/fail. If there are warnings or errors, list them.

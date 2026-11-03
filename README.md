@@ -39,9 +39,13 @@ Please submit pull requests (PRs) targeting the main branch. Ensure all PR and c
 Please ensure the following commands pass if you have changed the code:
 
 ```
-cargo clippy --workspace --lib --all-targets --all-features
-cargo +nightly fmt --check
+cargo +"$RUST_NIGHTLY" clippy --workspace --all-targets --all-features -- -D warnings
+cargo +"$RUST_NIGHTLY" fmt --all --check
 ```
+
+The versions CI uses are pinned in the repository: the Rust toolchain in `rust-toolchain.toml`,
+everything else — including `RUST_NIGHTLY`, the toolchain for `fmt` and `clippy` — in `mise.toml`.
+With [mise](https://mise.jdx.dev) installed, `mise install` sets them up.
 
 ### Join tycho.build
 
