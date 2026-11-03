@@ -580,15 +580,11 @@ contract SubsidyPayerTest is Test {
         Subsidy memory s = _subsidy(1);
         s.token = ETH_ADDRESS;
         bytes memory sig = _sign(s);
-        // Warm the payer's storage, so every measured call pays the same
-        // storage costs
-        _pay(s, sig, receivers[0]);
         uint256[3] memory gasUsed;
         for (uint256 i = 0; i < receivers.length; i++) {
             _expectSkip(1, ISubsidyPayer.SkipReason.TransferFailed);
-            uint256 gasBefore = gasleft();
             assertFalse(_pay(s, sig, receivers[i]));
-            gasUsed[i] = gasBefore - gasleft();
+            gasUsed[i] = vm.lastCallGas().gasTotalUsed;
 
             assertEq(receivers[i].balance, 0);
             assertEq(address(payer).balance, BUDGET);
