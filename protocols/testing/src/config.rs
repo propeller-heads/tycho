@@ -353,6 +353,50 @@ impl Limits {
     }
 }
 
+/// A package's declared tolerance between simulated and executed amounts:
+///
+/// ```yaml
+/// execution_tolerance:
+///   bps: 3
+///   cause: "the vault rounds shares down on deposit; the simulation rounds at the end"
+///   measured: "2.1 bps at most over blocks 21000000-21000100 (range --report)"
+/// ```
+///
+/// A tolerance can hide a fee or rounding bug as well as a known artifact, so it states why
+/// exact is out of reach and the drift a run measured.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTolerance {
+    /// The largest difference allowed, in basis points of the executed amount.
+    pub bps: u32,
+    /// Why simulation cannot match execution exactly.
+    pub cause: String,
+    /// The largest drift a run measured, and which run.
+    pub measured: String,
+}
+
+/// How far an executed amount out may differ from the simulated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tolerance {
+    Exact,
+    /// At most this many basis points of the executed amount.
+    Bps(u32),
+}
+
+impl Tolerance {
+    /// Legacy mode's tolerance for every package: 0.5%.
+    pub const LEGACY: Tolerance = Tolerance::Bps(50);
+}
+
+impl fmt::Display for Tolerance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Tolerance::Exact => f.write_str("exact"),
+            Tolerance::Bps(bps) => write!(f, "{bps} bps"),
+        }
+    }
+}
+
 /// A swap direction, as a `limits` declaration keys it: `"0x<token in>->0x<token out>"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Direction {
@@ -517,6 +561,10 @@ pub struct IntegrationTestsConfig {
     /// a declaration for every direction of every expected component, here or on the component.
     #[serde(default)]
     pub limits: Option<LimitsDeclaration>,
+    /// How far executions may differ from simulation, in strict mode. Without it, strict mode
+    /// requires an exact match.
+    #[serde(default)]
+    pub execution_tolerance: Option<ExecutionTolerance>,
     pub protocol_type_names: Vec<String>,
     pub protocol_system: String,
     pub module_name: Option<String>,
@@ -558,7 +606,44 @@ impl IntegrationTestsConfig {
             config.check_skips_have_reasons(source)?;
         }
         config.check_limits(source)?;
+        config.check_tolerance(source)?;
         Ok(config)
+    }
+
+    /// The tolerance executions are checked with: in strict mode, the declared one, or exact
+    /// without a declaration; in legacy mode, [`Tolerance::LEGACY`] whatever is declared.
+    pub fn tolerance(&self) -> Tolerance {
+        match (self.harness, &self.execution_tolerance) {
+            (Harness::Legacy, _) => Tolerance::LEGACY,
+            (Harness::Strict, None) => Tolerance::Exact,
+            (Harness::Strict, Some(declared)) => Tolerance::Bps(declared.bps),
+        }
+    }
+
+    /// A declared tolerance is at least 1 bps and below 100%, and states its cause and
+    /// measurement, in both modes.
+    fn check_tolerance(&self, source: &str) -> miette::Result<()> {
+        let Some(tolerance) = &self.execution_tolerance else {
+            return Ok(());
+        };
+        let mut problems = Vec::new();
+        if tolerance.bps == 0 {
+            problems.push(
+                "`bps: 0` is exact, which is the default: remove the declaration".to_string(),
+            );
+        }
+        if tolerance.bps >= 10_000 {
+            problems.push(format!("`bps: {}` allows any output", tolerance.bps));
+        }
+        for (field, value) in [("cause", &tolerance.cause), ("measured", &tolerance.measured)] {
+            if value.trim().is_empty() {
+                problems.push(format!("`{field}` is empty"));
+            }
+        }
+        if problems.is_empty() {
+            return Ok(());
+        }
+        Err(miette!("{source} has an invalid `execution_tolerance`: {}", problems.join("; ")))
     }
 
     /// The limit declared for `direction` of `component`, from the most specific declaration:
@@ -1036,5 +1121,60 @@ tests:
         let parsed = direction("0xAB->0x0c");
         assert_eq!(parsed.token_in, Bytes::from("0xab"));
         assert_eq!(parsed.to_string(), "0xab->0x0c");
+    }
+
+    const TOLERANCE: &str =
+        "execution_tolerance: {bps: 3, cause: \"vault rounding\", measured: \"2.1 bps over 100 blocks\"}";
+
+    #[test]
+    fn strict_mode_is_exact_unless_a_tolerance_is_declared() {
+        assert_eq!(
+            parse(&yaml(STRICT_WITH_LIMITS, ""))
+                .unwrap()
+                .tolerance(),
+            Tolerance::Exact
+        );
+        let declared = parse(&yaml(&format!("{STRICT_WITH_LIMITS}\n{TOLERANCE}"), "")).unwrap();
+        assert_eq!(declared.tolerance(), Tolerance::Bps(3));
+    }
+
+    #[test]
+    fn legacy_mode_keeps_half_a_percent_whatever_is_declared() {
+        assert_eq!(
+            parse(&yaml("", ""))
+                .unwrap()
+                .tolerance(),
+            Tolerance::LEGACY
+        );
+        assert_eq!(
+            parse(&yaml(TOLERANCE, ""))
+                .unwrap()
+                .tolerance(),
+            Tolerance::LEGACY
+        );
+    }
+
+    #[test]
+    fn a_tolerance_needs_a_cause_a_measurement_and_a_sensible_size() {
+        for (declaration, problem) in [
+            ("{bps: 0, cause: \"c\", measured: \"m\"}", "`bps: 0` is exact"),
+            ("{bps: 10000, cause: \"c\", measured: \"m\"}", "allows any output"),
+            ("{bps: 3, cause: \" \", measured: \"m\"}", "`cause` is empty"),
+            ("{bps: 3, cause: \"c\", measured: \"\"}", "`measured` is empty"),
+        ] {
+            for harness in ["", STRICT_WITH_LIMITS] {
+                let err =
+                    parse(&yaml(&format!("{harness}\nexecution_tolerance: {declaration}"), ""))
+                        .unwrap_err()
+                        .to_string();
+                assert!(err.contains(problem), "{declaration}: {err}");
+            }
+        }
+        for declaration in
+            ["{bps: 3, cause: \"c\"}", "{bps: 3, cause: \"c\", measured: \"m\", why: \"x\"}"]
+        {
+            let err = parse(&yaml(&format!("execution_tolerance: {declaration}"), "")).unwrap_err();
+            assert!(format!("{err:?}").contains("test.yaml"), "{declaration}: {err:?}");
+        }
     }
 }

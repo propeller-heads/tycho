@@ -142,6 +142,27 @@ limit, or one the cap replaced. A declaration missing a required field, or namin
 component does not have, is an error in both modes. Legacy mode reads the declarations but runs
 none of these checks.
 
+### Execution tolerance
+
+An execution matches its simulation when the executed amount out is within the tolerance, in basis
+points of the executed amount. Legacy mode allows 0.5% for every package. Strict mode requires an
+exact match: a simulation that ports the venue's math, or runs its bytecode, should not differ by
+a wei, and 0.5% hides rounding and fee bugs. Where exact is out of reach, the package declares a
+tolerance, with why and what a run measured:
+
+```yaml
+harness: strict
+execution_tolerance:
+  bps: 3
+  cause: "the vault rounds shares down on deposit; the simulation rounds once at the end"
+  measured: "2.1 bps at most, blocks 21000000-21000100 (range --report)"
+```
+
+A mismatch says whether the simulation over- or underquotes, since those are different defects.
+`bps` must be between 1 and 9999, and `cause` and `measured` are required, in both modes; legacy
+mode keeps 0.5% whatever is declared. The report's `drift` gives the largest difference of each
+test, within tolerance or not, so `measured` can be checked against a run.
+
 ### Test report
 
 `range --report <path>` writes every check's outcome, per test, as JSON, in either mode:
@@ -157,6 +178,9 @@ none of these checks.
     { "test": "first", "check": "sim.ladder", "outcome": "fail", "detail": "Error calculating amount out ..." },
     { "test": "first", "check": "exec.ladder", "outcome": "not_run", "reason": "sim.ladder failed" },
     { "test": "second", "check": "limits.past_limit", "component": "0x...", "direction": "0x...->0x...", "outcome": "pass" }
+  ],
+  "drift": [
+    { "test": "second", "simulation": "test_0x..._USDC_WETH_1000000", "component": "0x...", "simulated": "1003", "executed": "1000", "bps": -30.0 }
   ]
 }
 ```
@@ -169,13 +193,15 @@ none of these checks.
 | `balances` | indexed balances match `balanceOf` on chain |
 | `decode` | the snapshot decodes, and so does every expected component |
 | `sim.ladder` | limits, spot prices and quotes at 0.1%, 1% and 10% of the limit, every direction |
-| `exec.ladder` | executing each quote on chain matches the simulation |
+| `exec.ladder` | executing each quote on chain matches the simulation, within the tolerance |
 | `limits.at_limit` | strict: every direction quotes and executes at its limit |
 | `limits.past_limit` | strict: past a hard limit, the quote errors and the execution reverts |
 | `limits.max_output` | strict: the quote at the limit pays no more than the limit's max output |
 
 A skipped check is reported with its reason, per component for `skip_simulation` and
-`skip_execution`. In legacy mode the report ends at the first failed check of a test.
+`skip_execution`. In legacy mode the report ends at the first failed check of a test. `drift`
+has one entry per test that executed anything: its largest `(executed - simulated) / executed`, in
+bps, negative when the simulation overquotes.
 
 ## How to Run with Docker
 
