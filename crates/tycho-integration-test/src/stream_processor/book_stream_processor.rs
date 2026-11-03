@@ -249,6 +249,7 @@ pub struct BookStreamProcessor {
     /// Whether each venue publishes one component for all of its pairs rather than one each.
     all_pairs: bool,
     pamm_rpc: Option<(String, Option<String>, bool)>,
+    discover_elfomofi_tokens: bool,
 }
 
 impl BookStreamProcessor {
@@ -273,6 +274,7 @@ impl BookStreamProcessor {
             skip_messages_duration,
             all_pairs,
             pamm_rpc: None,
+            discover_elfomofi_tokens: false,
         }
     }
 
@@ -283,6 +285,11 @@ impl BookStreamProcessor {
         polling: bool,
     ) -> Self {
         self.pamm_rpc = Some((rpc_url, ws_rpc_url, polling));
+        self
+    }
+
+    pub fn with_elfomofi_token_discovery(mut self, enabled: bool) -> Self {
+        self.discover_elfomofi_tokens = enabled;
         self
     }
 
@@ -312,29 +319,25 @@ impl BookStreamProcessor {
             env::var(name).ok()
         })?;
         if !matches!(self.pamm, PammSelection::Disabled) {
-            if matches!(self.chain, Chain::Base | Chain::Bsc | Chain::Robinhood) {
+            if let Some((rpc_url, ws_rpc_url, polling)) = &self.pamm_rpc {
                 use tycho_simulation::pamm::protocols::elfomofi::{
                     self, feed::ElfomofiFeedBuilder,
                 };
 
-                if let Some((rpc_url, ws_rpc_url, polling)) = &self.pamm_rpc {
-                    let mut builder =
-                        ElfomofiFeedBuilder::new(book_config.clone(), rpc_url.clone());
-                    if *polling {
-                        builder = builder.polling();
-                    } else if let Some(ws_rpc_url) = ws_rpc_url {
-                        builder = builder.ws_rpc_url(ws_rpc_url.clone());
-                    }
-                    match builder.build() {
-                        Ok(feed) => {
-                            info!("Adding {} feed...", elfomofi::PROTOCOL_SYSTEM);
-                            feeds
-                                .add(elfomofi::PROTOCOL_SYSTEM, feed)
-                                .expect("each provider is added once");
-                        }
-                        Err(error) => warn!("Skipping ElFomoFi feed: {error}"),
-                    }
+                let mut builder = ElfomofiFeedBuilder::new(book_config.clone(), rpc_url.clone())
+                    .discover_tokens(self.discover_elfomofi_tokens);
+                if *polling {
+                    builder = builder.polling();
+                } else if let Some(ws_rpc_url) = ws_rpc_url {
+                    builder = builder.ws_rpc_url(ws_rpc_url.clone());
                 }
+                let feed = builder.build().into_diagnostic().wrap_err(
+                    "Cannot enable ElFomoFi; configure RPC_URL and WS_RPC_URL, or select --book-polling",
+                )?;
+                info!("Adding {} feed...", elfomofi::PROTOCOL_SYSTEM);
+                feeds
+                    .add(elfomofi::PROTOCOL_SYSTEM, feed)
+                    .expect("each provider is added once");
             }
         }
 
@@ -944,6 +947,56 @@ mod tests {
         handle
             .expect("the Bebop feed runs")
             .abort();
+    }
+
+    #[tokio::test]
+    async fn explicitly_requested_elfomofi_rejects_missing_websocket_configuration() {
+        let processor = BookStreamProcessor::new(
+            Chain::Base,
+            0.0,
+            1,
+            Duration::ZERO,
+            RfqSelection::Disabled,
+            PammSelection::Defaults,
+            "http://localhost:8545".into(),
+            false,
+        )
+        .with_pamm_rpc("http://localhost:8545".into(), None, false);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let error = processor
+            .run_stream(Arc::new(HashMap::new()), sender)
+            .await
+            .unwrap_err();
+        assert!(format_error(&error).contains("WebSocket"));
+    }
+
+    #[tokio::test]
+    async fn explicitly_requested_elfomofi_rejects_an_unsupported_chain() {
+        let processor = BookStreamProcessor::new(
+            Chain::Ethereum,
+            0.0,
+            1,
+            Duration::ZERO,
+            RfqSelection::Disabled,
+            PammSelection::Defaults,
+            "http://localhost:8545".into(),
+            false,
+        )
+        .with_pamm_rpc("http://localhost:8545".into(), None, true);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let error = processor
+            .run_stream(Arc::new(HashMap::new()), sender)
+            .await
+            .unwrap_err();
+        assert!(format_error(&error).contains("not configured"));
+    }
+
+    fn format_error(error: &miette::Report) -> String {
+        error
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ")
     }
 
     #[test]

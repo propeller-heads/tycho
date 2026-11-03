@@ -56,7 +56,7 @@ impl<T> Publisher<T> {
             .await
     }
 
-    /// Publishes snapshots or explicitly withdraws them when a trigger becomes unavailable.
+    /// Publishes snapshots or explicitly withdraws them when their source invalidates them.
     pub(crate) async fn publishing_updates<E>(
         mut self,
         max_age: Option<Duration>,
@@ -256,6 +256,27 @@ mod tests {
         .expect("no reader left is not a failure of the feed");
 
         assert!(!asked.load(Ordering::SeqCst), "the stream is not even asked for a snapshot");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_leaving_after_expiry_stops_a_pending_source() {
+        let (mut publisher, mut rx) = Publisher::channel();
+        publisher.publish(1);
+        rx.borrow_and_update();
+        let task = tokio::spawn(
+            publisher
+                .publishing(Some(Duration::from_secs(1)), stream::pending::<Result<u32, String>>()),
+        );
+        rx.changed()
+            .await
+            .expect("the snapshot must expire");
+        assert!(rx.borrow_and_update().is_none());
+        assert!(!task.is_finished());
+        drop(rx);
+        expect_to_finish("the expired feed kept waiting without receivers", task)
+            .await
+            .expect("publisher task panicked")
+            .expect("receiver shutdown is not a source error");
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 //! Helper-backed pAMM books, fetched through the shared snapshot-feed framework.
+pub mod all_pairs;
 mod client;
 pub mod feed;
 pub mod models;

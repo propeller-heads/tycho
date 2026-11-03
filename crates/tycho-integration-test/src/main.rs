@@ -119,6 +119,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     enable_elfomofi: bool,
 
+    /// Include helper tokens outside the configured token universe.
+    #[arg(long, default_value_t = false)]
+    discover_elfomofi_tokens: bool,
+
     /// Poll ElFomoFi books over HTTP instead of subscribing to new block heads.
     #[arg(long, default_value_t = false)]
     book_polling: bool,
@@ -569,11 +573,9 @@ async fn run(mut cli: Cli) -> miette::Result<()> {
         cli.rfq_all_pairs,
     );
     if cli.enable_elfomofi {
-        book_stream_processor = book_stream_processor.with_pamm_rpc(
-            cli.rpc_url.clone(),
-            cli.ws_rpc_url.clone(),
-            cli.book_polling,
-        );
+        book_stream_processor = book_stream_processor
+            .with_pamm_rpc(cli.rpc_url.clone(), cli.ws_rpc_url.clone(), cli.book_polling)
+            .with_elfomofi_token_discovery(cli.discover_elfomofi_tokens);
     }
     let mut book_handle = book_stream_processor
         .run_stream(Arc::clone(&all_tokens), book_tx)
@@ -2592,9 +2594,9 @@ mod tests {
 
     use super::{
         await_block_limit, book_swap_directions, categorize_error, executes_in_next_block,
-        is_oracle_stale_revert, is_stale_quote, pamm_venue, reached_max_blocks,
-        record_book_block, sample_swap_directions, should_fetch_block_by_number, Cli,
-        ErrorCategory, PammVenue, TestStatistics, TychoExecutionResult, TychoState,
+        is_oracle_stale_revert, is_stale_quote, pamm_venue, reached_max_blocks, record_book_block,
+        sample_swap_directions, should_fetch_block_by_number, Cli, ErrorCategory, PammVenue,
+        TestStatistics, TychoExecutionResult, TychoState,
     };
 
     #[test]

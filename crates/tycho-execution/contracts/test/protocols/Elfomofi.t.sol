@@ -13,7 +13,6 @@ import {
     IElfomofiRouter,
     ElfomofiExecutor__InvalidData,
     ElfomofiExecutor__InvalidRouter,
-    ElfomofiExecutor__QuoteExpired,
     ElfomofiExecutor__InvalidAmount
 } from "@src/executors/ElfomofiExecutor.sol";
 
@@ -177,11 +176,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
             bool outputToRouter
         ) = executor.getTransferData(
             abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp + 10),
-                uint256(100),
-                uint256(199)
+                address(input), address(output), uint256(100), uint256(199)
             )
         );
         assertEq(
@@ -209,11 +204,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
             encodeSingleSwap(
                 address(executor),
                 abi.encodePacked(
-                    address(input),
-                    address(output),
-                    uint64(block.timestamp + 10),
-                    uint256(100),
-                    uint256(199)
+                    address(input), address(output), uint256(100), uint256(199)
                 )
             )
         );
@@ -235,11 +226,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         bytes memory data = encodeSingleSwap(
             address(executor),
             abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp + 10),
-                uint256(100),
-                uint256(199)
+                address(input), address(output), uint256(100), uint256(199)
             )
         );
         vm.prank(BOB);
@@ -279,9 +266,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
             200,
             BOB,
             noClientFee(),
-            encodeSingleSwap(
-                address(executor), _elfomofiData(uint64(block.timestamp + 10))
-            )
+            encodeSingleSwap(address(executor), _elfomofiData())
         );
         assertEq(amount, 214);
         assertEq(output.balanceOf(BOB), 214);
@@ -314,9 +299,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
                 address(beforeDex), address(firstToken), address(input)
             )
         );
-        swaps[1] = encodeSequentialSwap(
-            address(executor), _elfomofiData(uint64(block.timestamp + 10))
-        );
+        swaps[1] = encodeSequentialSwap(address(executor), _elfomofiData());
         swaps[2] = encodeSequentialSwap(
             address(dexExecutor),
             abi.encodePacked(
@@ -352,6 +335,53 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         assertEq(output.approvalCalls(tychoRouterAddr, address(afterDex)), 0);
     }
 
+    function testPositiveUpstreamSlippageAcrossPriceLevelRetainsMinimum()
+        public
+    {
+        PropAMMExecutor dexExecutor = _registerPushDexExecutor();
+        MockElfomofiPushDex beforeDex = new MockElfomofiPushDex();
+        ElfomofiTestToken firstToken = new ElfomofiTestToken();
+        firstToken.mint(BOB, 10_110);
+        input.mint(address(beforeDex), 10_110);
+        output.mint(address(venue), 20_050);
+        venue.setOutputCap(20_050);
+        vm.prank(BOB);
+        firstToken.approve(tychoRouterAddr, 10_110);
+
+        bytes[] memory swaps = new bytes[](2);
+        swaps[0] = encodeSequentialSwap(
+            address(dexExecutor),
+            abi.encodePacked(
+                address(beforeDex), address(firstToken), address(input)
+            )
+        );
+        swaps[1] = encodeSequentialSwap(
+            address(executor),
+            abi.encodePacked(
+                address(input),
+                address(output),
+                uint256(10_000),
+                uint256(19_900)
+            )
+        );
+        vm.prank(BOB);
+        uint256 amount = tychoRouter.sequentialSwap(
+            10_110,
+            address(firstToken),
+            address(output),
+            20_000,
+            20_000,
+            BOB,
+            noClientFee(),
+            pleEncode(swaps)
+        );
+        assertEq(amount, 20_050);
+        assertEq(venue.lastAmount(), 10_110);
+        assertEq(venue.lastMinimum(), 19_900);
+        assertEq(output.balanceOf(BOB), 20_050);
+        assertEq(input.approvalCalls(tychoRouterAddr, address(venue)), 0);
+    }
+
     function testVaultFundingPushesOnlyTheRequestedInput() public {
         vm.prank(BOB);
         tychoRouter.deposit(address(input), 100);
@@ -365,9 +395,7 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
             200,
             BOB,
             noClientFee(),
-            encodeSingleSwap(
-                address(executor), _elfomofiData(uint64(block.timestamp + 10))
-            )
+            encodeSingleSwap(address(executor), _elfomofiData())
         );
         assertEq(amount, 200);
         assertEq(output.balanceOf(BOB), 200);
@@ -384,13 +412,8 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         MockElfomofiPushDex dex = new MockElfomofiPushDex();
         output.mint(address(dex), 50);
         bytes[] memory swaps = new bytes[](2);
-        swaps[0] = encodeSplitSwap(
-            0,
-            1,
-            0x800000,
-            address(executor),
-            _elfomofiData(uint64(block.timestamp + 10))
-        );
+        swaps[0] =
+            encodeSplitSwap(0, 1, 0x800000, address(executor), _elfomofiData());
         swaps[1] = encodeSplitSwap(
             0,
             1,
@@ -433,17 +456,9 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         vm.warp(block.timestamp + tychoRouter.DELAY_EXECUTOR_ACTIVATION());
     }
 
-    function _elfomofiData(uint64 validUntil)
-        internal
-        view
-        returns (bytes memory)
-    {
+    function _elfomofiData() internal view returns (bytes memory) {
         return abi.encodePacked(
-            address(input),
-            address(output),
-            validUntil,
-            uint256(100),
-            uint256(199)
+            address(input), address(output), uint256(100), uint256(199)
         );
     }
 
@@ -453,21 +468,13 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         vm.expectRevert(ElfomofiExecutor__InvalidData.selector);
         executor.getTransferData(
             abi.encodePacked(
-                ETH_ADDRESS,
-                address(output),
-                uint64(block.timestamp + 10),
-                uint256(100),
-                uint256(199)
+                ETH_ADDRESS, address(output), uint256(100), uint256(199)
             )
         );
         vm.expectRevert(ElfomofiExecutor__InvalidData.selector);
         executor.getTransferData(
             abi.encodePacked(
-                address(input),
-                address(input),
-                uint64(block.timestamp + 10),
-                uint256(100),
-                uint256(199)
+                address(input), address(input), uint256(100), uint256(199)
             )
         );
     }
@@ -477,98 +484,12 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         new ElfomofiExecutor(address(0));
     }
 
-    function testExpiredQuoteRevertsAtomically() public {
-        bytes memory data = encodeSingleSwap(
-            address(executor),
-            abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp - 1),
-                uint256(100),
-                uint256(199)
-            )
-        );
-        vm.prank(BOB);
-        vm.expectRevert(ElfomofiExecutor__QuoteExpired.selector);
-        tychoRouter.singleSwap(
-            100,
-            address(input),
-            address(output),
-            200,
-            200,
-            BOB,
-            noClientFee(),
-            data
-        );
-        assertEq(input.balanceOf(BOB), 100);
-        assertEq(output.balanceOf(BOB), 0);
-        assertEq(input.balanceOf(address(venue)), 0);
-        assertEq(input.balanceOf(venue.vault()), 0);
-        assertEq(venue.lastAmount(), 0);
-    }
-
-    function testQuoteRejectsExactDeadline() public {
-        bytes memory data = encodeSingleSwap(
-            address(executor),
-            abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp),
-                uint256(100),
-                uint256(199)
-            )
-        );
-        vm.prank(BOB);
-        vm.expectRevert(ElfomofiExecutor__QuoteExpired.selector);
-        tychoRouter.singleSwap(
-            100,
-            address(input),
-            address(output),
-            200,
-            200,
-            BOB,
-            noClientFee(),
-            data
-        );
-        assertEq(input.balanceOf(BOB), 100);
-        assertEq(output.balanceOf(BOB), 0);
-    }
-
-    function testQuoteAcceptsImmediatelyBeforeDeadline() public {
-        bytes memory data = encodeSingleSwap(
-            address(executor),
-            abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp + 1),
-                uint256(100),
-                uint256(199)
-            )
-        );
-        vm.prank(BOB);
-        uint256 amount = tychoRouter.singleSwap(
-            100,
-            address(input),
-            address(output),
-            200,
-            200,
-            BOB,
-            noClientFee(),
-            data
-        );
-        assertEq(amount, 200);
-    }
-
     function testRejectsZeroExactInput() public {
         vm.expectRevert(ElfomofiExecutor__InvalidAmount.selector);
         executor.swap(
             0,
             abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp + 10),
-                uint256(100),
-                uint256(199)
+                address(input), address(output), uint256(100), uint256(199)
             ),
             BOB
         );
@@ -579,16 +500,14 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
 
     function testMinimumRateScalesWithActualInput() public {
         input.mint(address(venue), 50);
-        executor.swap(50, _elfomofiData(uint64(block.timestamp + 10)), BOB);
+        executor.swap(50, _elfomofiData(), BOB);
         assertEq(venue.lastMinimum(), 100);
         assertEq(output.balanceOf(BOB), 100);
     }
 
     function testCappedOutputBelowLegMinimumRevertsAtomically() public {
         venue.setOutputCap(150);
-        bytes memory data = encodeSingleSwap(
-            address(executor), _elfomofiData(uint64(block.timestamp + 10))
-        );
+        bytes memory data = encodeSingleSwap(address(executor), _elfomofiData());
         vm.prank(BOB);
         vm.expectRevert(
             abi.encodeWithSignature("Error(string)", "minimum output")
@@ -610,13 +529,9 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
     function testMinimumRateUsesFullPrecisionUnsignedMath() public {
         input.mint(address(venue), 100);
         executor.swap(
-            type(uint256).max,
+            type(uint256).max - 1,
             abi.encodePacked(
-                address(input),
-                address(output),
-                uint64(block.timestamp + 10),
-                type(uint256).max,
-                uint256(199)
+                address(input), address(output), type(uint256).max, uint256(199)
             ),
             BOB
         );
@@ -631,7 +546,6 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
                 abi.encodePacked(
                     address(input),
                     address(output),
-                    uint64(block.timestamp + 10),
                     i == 0 ? uint256(0) : uint256(100),
                     i == 0 ? uint256(199) : uint256(0)
                 )
@@ -697,6 +611,8 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
 
     function _quoteToken() internal pure virtual returns (address);
 
+    function _productionRouter() internal pure virtual returns (address);
+
     function setUp() public override {
         super.setUp();
         _configureForkSystemContracts();
@@ -725,6 +641,49 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
         _testDirection(true);
     }
 
+    function testFillableHelperLevelsMatchTychoPricing() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            )
+            .getOrderbook(_baseToken(), _quoteToken());
+        _assertHelperLevelsMatchPricing(
+            book.bidCumulativeLevels,
+            _baseToken(),
+            _quoteToken(),
+            book.balanceQuote
+        );
+        _assertHelperLevelsMatchPricing(
+            book.askCumulativeLevels,
+            _quoteToken(),
+            _baseToken(),
+            book.balanceBase
+        );
+    }
+
+    function _assertHelperLevelsMatchPricing(
+        IElfomofiHelperTest.Level[] memory levels,
+        address sell,
+        address buy,
+        uint256 outputBalance
+    ) internal {
+        address[2] memory routers = [tychoRouterAddr, _productionRouter()];
+        for (uint256 i = 0; i < levels.length; i++) {
+            if (levels[i].amountOut > outputBalance) break;
+            for (uint256 j = 0; j < routers.length; j++) {
+                vm.prank(VENUE);
+                (uint256 expected,,) = IElfomofiPricingTest(PRICING)
+                    .getAmountOut(
+                        sell, buy, levels[i].amountIn, routers[j], 299
+                    );
+                assertEq(
+                    levels[i].amountOut,
+                    expected,
+                    "Helper quote differs for Tycho partner 299"
+                );
+            }
+        }
+    }
+
     function _testDirection(bool reverse) internal {
         (
             IElfomofiHelperTest.Book memory book,
@@ -749,6 +708,11 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
         (uint256 expected,,) = IElfomofiPricingTest(PRICING)
             .getAmountOut(sell, buy, level.amountIn, tychoRouterAddr, 299);
         assertGt(expected, 0);
+        assertEq(
+            level.amountOut,
+            expected,
+            "Helper quote differs for Tycho partner 299"
+        );
         // This pinned block has no venue input dust, so the pushed balance is exactly quoted.
         assertEq(IERC20(sell).balanceOf(VENUE), 0);
         assertEq(IERC20(sell).allowance(tychoRouterAddr, VENUE), 0);
@@ -759,13 +723,7 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
             _swapData(sell, buy, reverse, level.amountIn, referenceMinimum);
         assertEq(
             swapData,
-            abi.encodePacked(
-                sell,
-                buy,
-                uint64(block.timestamp + 10),
-                level.amountIn,
-                referenceMinimum
-            )
+            abi.encodePacked(sell, buy, level.amountIn, referenceMinimum)
         );
         bytes memory data = encodeSingleSwap(address(executor), swapData);
         vm.startPrank(BOB);
@@ -779,8 +737,8 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
             level.amountIn,
             sell,
             buy,
-            expected,
-            expected,
+            level.amountOut,
+            level.amountOut,
             BOB,
             noClientFee(),
             data
@@ -800,17 +758,101 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
         uint256 referenceIn,
         uint256 referenceMinOut
     ) internal view virtual returns (bytes memory) {
-        return abi.encodePacked(
-            sell,
-            buy,
-            uint64(block.timestamp + 10),
-            referenceIn,
-            referenceMinOut
-        );
+        return abi.encodePacked(sell, buy, referenceIn, referenceMinOut);
     }
 }
 
 contract ElfomofiForkTest is ElfomofiForkTestBase {
+    function testHelperRefreshTracksTimeDecay() public {
+        (IElfomofiHelperTest.Book memory initial,,) = IElfomofiHelperTest(
+                _helper()
+            )
+            .getOrderbook(_baseToken(), _quoteToken());
+        uint256 previousOutput = initial.bidCumulativeLevels[0].amountOut;
+        testFillableHelperLevelsMatchTychoPricing();
+        uint256[2] memory elapsed = [uint256(6), 12];
+        for (uint256 i = 0; i < elapsed.length; i++) {
+            vm.warp(forkTimestamp + elapsed[i]);
+            (IElfomofiHelperTest.Book memory refreshed,,) = IElfomofiHelperTest(
+                    _helper()
+                )
+                .getOrderbook(_baseToken(), _quoteToken());
+            assertLt(refreshed.bidCumulativeLevels[0].amountOut, previousOutput);
+            previousOutput = refreshed.bidCumulativeLevels[0].amountOut;
+            testFillableHelperLevelsMatchTychoPricing();
+        }
+        vm.warp(forkTimestamp + 60);
+        (IElfomofiHelperTest.Book memory expired,,) = IElfomofiHelperTest(
+                _helper()
+            )
+            .getOrderbook(_baseToken(), _quoteToken());
+        assertEq(expired.bidCumulativeLevels.length, 0);
+        assertEq(expired.askCumulativeLevels.length, 0);
+        vm.prank(VENUE);
+        (uint256 output,,) = IElfomofiPricingTest(PRICING)
+            .getAmountOut(
+                _baseToken(),
+                _quoteToken(),
+                initial.bidCumulativeLevels[0].amountIn,
+                _productionRouter(),
+                299
+            );
+        assertEq(output, 0);
+    }
+
+    function testInterpolatedBidExecutesAtQuotedOutput() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            )
+            .getOrderbook(_baseToken(), _quoteToken());
+        uint256 quotedOutput;
+        uint256 previousInput;
+        uint256 previousOutput;
+        for (uint256 i = 0; i < book.bidCumulativeLevels.length; i++) {
+            IElfomofiHelperTest.Level memory level = book.bidCumulativeLevels[i];
+            if (3 ether <= level.amountIn) {
+                assertLt(3 ether, level.amountIn);
+                quotedOutput = previousOutput + (3 ether - previousInput)
+                    * (level.amountOut - previousOutput)
+                    / (level.amountIn - previousInput);
+                break;
+            }
+            previousInput = level.amountIn;
+            previousOutput = level.amountOut;
+        }
+        assertEq(quotedOutput, 7_403_192704);
+        vm.prank(VENUE);
+        (uint256 executionQuote,,) = IElfomofiPricingTest(PRICING)
+            .getAmountOut(
+                _baseToken(), _quoteToken(), 3 ether, tychoRouterAddr, 299
+            );
+        assertEq(quotedOutput, executionQuote);
+        deal(_baseToken(), BOB, 3 ether);
+        uint256 beforeOutput = IERC20(_quoteToken()).balanceOf(BOB);
+        vm.startPrank(BOB);
+        IERC20(_baseToken()).approve(tychoRouterAddr, 3 ether);
+        uint256 amount = tychoRouter.singleSwap(
+            3 ether,
+            _baseToken(),
+            _quoteToken(),
+            quotedOutput,
+            quotedOutput,
+            BOB,
+            noClientFee(),
+            encodeSingleSwap(
+                address(executor),
+                abi.encodePacked(
+                    _baseToken(), _quoteToken(), uint256(3 ether), quotedOutput
+                )
+            )
+        );
+        vm.stopPrank();
+        assertEq(amount, quotedOutput);
+        assertEq(IERC20(_quoteToken()).balanceOf(BOB) - beforeOutput, amount);
+        assertEq(IERC20(_baseToken()).balanceOf(BOB), 0);
+        assertEq(IERC20(_baseToken()).allowance(tychoRouterAddr, VENUE), 0);
+    }
+
     function getChain() public pure override returns (string memory) {
         return "base";
     }
@@ -821,6 +863,10 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
 
     function _helper() internal pure override returns (address) {
         return 0xc1b13606FC7227f2554067aFb3fb12De75C02d81;
+    }
+
+    function _productionRouter() internal pure override returns (address) {
+        return 0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67;
     }
 
     function _baseToken() internal pure override returns (address) {
@@ -859,6 +905,10 @@ contract ElfomofiBscForkTest is ElfomofiForkTestBase {
         return 0x78015E3544d989f0712a0b9986cB05838c3fE06D;
     }
 
+    function _productionRouter() internal pure override returns (address) {
+        return 0x7f3D12BBaFb8955E51B3ab9588b34c8ad95BDA4e;
+    }
+
     function _baseToken() internal pure override returns (address) {
         return address(0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c);
     }
@@ -889,6 +939,10 @@ contract ElfomofiRobinhoodForkTest is ElfomofiForkTestBase {
 
     function _helper() internal pure override returns (address) {
         return 0x20D24Ee45c9b338Ef7ACf2eEde75183B9E2C9E3c;
+    }
+
+    function _productionRouter() internal pure override returns (address) {
+        return 0x09215a470bD585E59EB3F4B612fBD2678131fF9e;
     }
 
     function _baseToken() internal pure override returns (address) {
