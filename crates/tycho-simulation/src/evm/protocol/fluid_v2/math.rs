@@ -65,11 +65,19 @@ pub(super) struct SwapOutcome {
     pub initialized_ticks_crossed: u64,
 }
 
-/// Swaps `amount_in_raw` through the pool, as `_swapIn` does.
-///
-/// With `sqrt_price_limit`, the swap stops at that price instead of consuming the whole input,
-/// and `amount_in_raw` of the outcome is what reaching it took; the contract has no such limit,
-/// it serves [`max_sqrt_price_move`].
+/// Where a swap stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SwapEnd {
+    /// Once the whole input is swapped, as the contract does.
+    InputSpent,
+    /// At the 20% price move, measured from where the swap finds liquidity: no swap the dex
+    /// accepts takes more input. The input only caps the walk. A direction without liquidity
+    /// stops with nothing swapped.
+    LargestSwap,
+}
+
+/// Swaps `amount_in_raw` through the pool, as `_swapIn` does, or walks to the end of the largest
+/// swap (see [`SwapEnd`]); `amount_in_raw` of the outcome is what the swap took.
 ///
 /// # Errors
 /// - `InvalidInput` when the input reaches past the outermost tick (the dex fills nothing
@@ -79,7 +87,7 @@ pub(super) fn swap_in(
     pool: &SwapPool,
     swap0_to1: bool,
     amount_in_raw: U256,
-    sqrt_price_limit: Option<U256>,
+    end: SwapEnd,
 ) -> Result<SwapOutcome, SimulationError> {
     let mut sqrt_price = pool.sqrt_price_x96;
     let mut tick = pool.tick;
@@ -99,13 +107,20 @@ pub(super) fn swap_in(
     let mut sqrt_price_start = (liquidity > 0).then_some(sqrt_price);
 
     while amount_remaining > U256::ZERO {
-        if sqrt_price_limit == Some(sqrt_price) {
+        let price_bound = match (end, sqrt_price_start) {
+            (SwapEnd::LargestSwap, Some(start)) => Some(max_sqrt_price_move(start, swap0_to1)?),
+            _ => None,
+        };
+        if price_bound == Some(sqrt_price) {
             break;
         }
         let step_start = sqrt_price;
         let (next_tick, initialized) =
             next_initialized_tick_within_one_word(pool.ticks, tick, pool.tick_spacing, swap0_to1);
         if !(MIN_TICK..=MAX_TICK).contains(&next_tick) {
+            if end == SwapEnd::LargestSwap {
+                break;
+            }
             return Err(SimulationError::InvalidInput(
                 "Fluid v2 pool lacks the liquidity to fill the whole input".to_string(),
                 None,
@@ -113,8 +128,8 @@ pub(super) fn swap_in(
         }
         let sqrt_price_next = get_sqrt_ratio_at_tick(next_tick)?;
         sqrt_price = align_rounded_sqrt_price(sqrt_price, sqrt_price_next, swap0_to1)?;
-        let target = match sqrt_price_limit {
-            Some(limit) if swap0_to1 == (limit > sqrt_price_next) => limit,
+        let target = match price_bound {
+            Some(bound) if swap0_to1 == (bound > sqrt_price_next) => bound,
             _ => sqrt_price_next,
         };
 
@@ -156,7 +171,9 @@ pub(super) fn swap_in(
         }
     }
 
-    verify_sqrt_price_change_limits(sqrt_price_start.unwrap_or(sqrt_price), sqrt_price)?;
+    if end == SwapEnd::InputSpent {
+        verify_sqrt_price_change_limits(sqrt_price_start.unwrap_or(sqrt_price), sqrt_price)?;
+    }
     outcome.sqrt_price_x96 = sqrt_price;
     outcome.tick = tick;
     outcome.liquidity = liquidity;
@@ -164,10 +181,7 @@ pub(super) fn swap_in(
 }
 
 /// The furthest sqrt price one swap may reach from `sqrt_price_x96`.
-pub(super) fn max_sqrt_price_move(
-    sqrt_price_x96: U256,
-    swap0_to1: bool,
-) -> Result<U256, SimulationError> {
+fn max_sqrt_price_move(sqrt_price_x96: U256, swap0_to1: bool) -> Result<U256, SimulationError> {
     let max_change =
         mul_div(sqrt_price_x96, U256::from(MAX_SQRT_PRICE_CHANGE), U256::from(TEN_DECIMALS))?;
     if swap0_to1 {

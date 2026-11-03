@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap},
 };
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
@@ -21,12 +21,12 @@ use crate::evm::{
     protocol::{
         fluid::find_max_valid_u256,
         fluid_v2::{
-            math::{self, SwapOutcome, SwapPool},
+            math::{self, SwapEnd, SwapOutcome, SwapPool},
             vm::{self, TokenLiquidity},
         },
         safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256},
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
-        utils::add_fee_markup,
+        utils::{add_fee_markup, bytes_to_address},
     },
 };
 
@@ -60,21 +60,28 @@ pub enum DexType {
 /// normalized by Fluid Liquidity exchange prices and paid out through the dex and Liquidity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FluidV2State {
-    dex_type: DexType,
-    token0: Token,
-    token1: Token,
+    pub(super) dex_type: DexType,
+    pub(super) token0: Token,
+    pub(super) token1: Token,
     /// The DEX v2 resolver whose `getTokenBaseState` reads the tokens' Liquidity state.
-    resolver: Bytes,
-    tick_spacing: i32,
-    dex_variables: DexVariables,
-    dex_variables2: DexVariables2,
+    pub(super) resolver: Address,
+    /// Fluid Liquidity, which settles the swap legs the dex does not serve from its balance.
+    pub(super) liquidity: Address,
+    pub(super) tick_spacing: i32,
+    pub(super) dex_variables: DexVariables,
+    pub(super) dex_variables2: DexVariables2,
     /// Raw-adjusted reserves, bounded by the pool only while per-pool accounting runs.
-    token0_reserve: U256,
-    token1_reserve: U256,
+    pub(super) token0_reserve: U256,
+    pub(super) token1_reserve: U256,
     /// Initialized ticks and their net liquidity.
-    ticks: BTreeMap<i32, i128>,
-    token0_liquidity: TokenLiquidity,
-    token1_liquidity: TokenLiquidity,
+    pub(super) ticks: BTreeMap<i32, i128>,
+    pub(super) token0_liquidity: TokenLiquidity,
+    pub(super) token1_liquidity: TokenLiquidity,
+    /// Whether Fluid Liquidity is paused as a whole, which reverts every leg settled through it.
+    pub(super) liquidity_paused: bool,
+    /// Set by the indexer once the DEX v2 proxy runs an implementation this simulation was not
+    /// verified against.
+    pub(super) paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,48 +116,21 @@ struct Quote {
 }
 
 impl FluidV2State {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dex_type: DexType,
-        token0: Token,
-        token1: Token,
-        resolver: Bytes,
-        tick_spacing: i32,
-        dex_variables: DexVariables,
-        dex_variables2: DexVariables2,
-        token0_reserve: U256,
-        token1_reserve: U256,
-        ticks: BTreeMap<i32, i128>,
-        token0_liquidity: TokenLiquidity,
-        token1_liquidity: TokenLiquidity,
-    ) -> Self {
-        Self {
-            dex_type,
-            token0,
-            token1,
-            resolver,
-            tick_spacing,
-            dex_variables,
-            dex_variables2,
-            token0_reserve,
-            token1_reserve,
-            ticks,
-            token0_liquidity,
-            token1_liquidity,
-        }
-    }
-
-    /// Reads both tokens' Liquidity state through the DEX v2 resolver in the shared VM database.
-    pub(super) fn fetch_token_liquidity(
-        resolver: &Bytes,
-        token0: &Bytes,
-        token1: &Bytes,
-    ) -> Result<(TokenLiquidity, TokenLiquidity), SimulationError> {
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
-        let resolver = alloy::primitives::Address::from_slice(resolver);
-        let token0 = vm::fetch_token_liquidity(&engine, resolver, to_fluid_token(token0))?;
-        let token1 = vm::fetch_token_liquidity(&engine, resolver, to_fluid_token(token1))?;
-        Ok((token0, token1))
+    /// Reads both tokens' Liquidity state through the DEX v2 resolver, and whether Liquidity is
+    /// paused, from the shared VM database.
+    pub(super) fn refresh_liquidity_state(&mut self) -> Result<(), SimulationError> {
+        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).map_err(|e| {
+            SimulationError::FatalError(format!("Failed to create the Fluid v2 VM engine: {e}"))
+        })?;
+        let token0 = to_fluid_token(&self.token0.address)?;
+        let token1 = to_fluid_token(&self.token1.address)?;
+        let token0_liquidity = vm::fetch_token_liquidity(&engine, self.resolver, token0)?;
+        let token1_liquidity = vm::fetch_token_liquidity(&engine, self.resolver, token1)?;
+        let liquidity_paused = vm::fetch_liquidity_paused(&engine, self.liquidity)?;
+        self.token0_liquidity = token0_liquidity;
+        self.token1_liquidity = token1_liquidity;
+        self.liquidity_paused = liquidity_paused;
+        Ok(())
     }
 
     fn zero_for_one(&self, token_in: &Bytes, token_out: &Bytes) -> Result<bool, SimulationError> {
@@ -166,21 +146,34 @@ impl FluidV2State {
         }
     }
 
-    /// Rejects the pools whose fee this simulation cannot reproduce.
-    fn check_supported(&self) -> Result<(), SimulationError> {
+    /// Rejects the pools whose fee this simulation cannot reproduce. The controller can switch a
+    /// pool's fee mode back, so the refusal is recoverable.
+    fn check_fee_supported(&self) -> Result<(), SimulationError> {
         if self.dex_variables2.fetch_dynamic_fee {
-            return Err(SimulationError::FatalError(
+            return Err(SimulationError::RecoverableError(
                 "Fluid v2 pools that fetch their fee from a controller are not supported"
                     .to_string(),
             ));
         }
         if self.dex_variables2.fee_version != 0 {
-            return Err(SimulationError::FatalError(format!(
+            return Err(SimulationError::RecoverableError(format!(
                 "Fluid v2 fee version {} is not supported",
                 self.dex_variables2.fee_version
             )));
         }
         Ok(())
+    }
+
+    /// Rejects the pools this simulation cannot price: paused ones and unsupported fee modes.
+    fn check_quotable(&self) -> Result<(), SimulationError> {
+        if self.paused {
+            return Err(SimulationError::RecoverableError(
+                "Fluid v2 pool is paused: the DEX v2 proxy runs an implementation this simulation \
+                 was not verified against"
+                    .to_string(),
+            ));
+        }
+        self.check_fee_supported()
     }
 
     fn token_liquidity(&self, is_token0: bool) -> &TokenLiquidity {
@@ -236,18 +229,23 @@ impl FluidV2State {
                 zero_for_one,
             ),
             liquidity: self.dex_variables2.active_liquidity,
-            protocol_fee: if zero_for_one {
-                self.dex_variables2.protocol_fee_0_to_1
-            } else {
-                self.dex_variables2.protocol_fee_1_to_0
-            },
+            protocol_fee: self.protocol_fee(zero_for_one),
             protocol_cut_fee: self.dex_variables2.protocol_cut_fee,
             lp_fee: self.dex_variables2.lp_fee,
         }
     }
 
+    /// Protocol fee of a swap in the given direction, in pips.
+    fn protocol_fee(&self, zero_for_one: bool) -> u64 {
+        if zero_for_one {
+            self.dex_variables2.protocol_fee_0_to_1
+        } else {
+            self.dex_variables2.protocol_fee_1_to_0
+        }
+    }
+
     fn quote(&self, amount_in: U256, zero_for_one: bool) -> Result<Quote, SimulationError> {
-        self.check_supported()?;
+        self.check_quotable()?;
         verify_amount(amount_in)?;
         let token_in =
             Normalization::new(self.decimals(zero_for_one), self.exchange_price(zero_for_one)?);
@@ -256,8 +254,12 @@ impl FluidV2State {
 
         let amount_in_raw = token_in.to_raw_round_down(amount_in)?;
         verify_adjusted_amount(amount_in_raw)?;
-        let outcome =
-            math::swap_in(&self.swap_pool(zero_for_one), zero_for_one, amount_in_raw, None)?;
+        let outcome = math::swap_in(
+            &self.swap_pool(zero_for_one),
+            zero_for_one,
+            amount_in_raw,
+            SwapEnd::InputSpent,
+        )?;
         verify_adjusted_amount(outcome.amount_out_raw)?;
         let amount_out = token_out.to_amount_round_down(outcome.amount_out_raw)?;
         verify_amount(amount_out)?;
@@ -285,9 +287,9 @@ impl FluidV2State {
     /// token balance without calling Fluid Liquidity.
     ///
     /// D3 supplies the token in and withdraws the token out. A leg that fits the dex balance stays
-    /// there; a larger one goes to Liquidity, which rejects it while that leg is paused. D4 pays
-    /// back the token in and borrows the token out plus the swap fee, and syncs every borrow leg
-    /// with Liquidity.
+    /// there; a larger one goes to Liquidity, which rejects it while that leg, or Liquidity as a
+    /// whole, is paused. D4 pays back the token in, borrows the token out plus the swap fee and
+    /// supplies that fee, and syncs every leg with Liquidity.
     ///
     /// Not modeled: Liquidity also rejects a leg too small to change the dex's stored position
     /// (`UserModule__OperateAmountInsufficient`). Only dust swaps hit it, such as the fee leg of
@@ -305,6 +307,9 @@ impl FluidV2State {
             DexType::D3 => {
                 let in_from_balance = amount_in <= liquidity_in.float_balance;
                 let out_from_balance = amount_out <= liquidity_out.float_balance;
+                if !(in_from_balance && out_from_balance) && self.liquidity_paused {
+                    return Err(liquidity_paused());
+                }
                 if !in_from_balance && liquidity_in.supply_paused {
                     return Err(liquidity_rejects("supply", &self.token_address(zero_for_one)));
                 }
@@ -319,11 +324,17 @@ impl FluidV2State {
                 Ok(in_from_balance && out_from_balance)
             }
             DexType::D4 => {
+                if self.liquidity_paused {
+                    return Err(liquidity_paused());
+                }
                 if liquidity_in.payback_paused {
                     return Err(liquidity_rejects("payback", &self.token_address(zero_for_one)));
                 }
                 if liquidity_out.borrow_paused {
                     return Err(liquidity_rejects("borrow", &self.token_address(!zero_for_one)));
+                }
+                if liquidity_out.supply_paused {
+                    return Err(liquidity_rejects("supply", &self.token_address(!zero_for_one)));
                 }
                 let borrowed = safe_add_u256(amount_out, fee_out)?;
                 if borrowed > liquidity_out.available_for_swap_out_borrow {
@@ -402,20 +413,33 @@ impl FluidV2State {
         Ok(state)
     }
 
-    /// Applies the pool attributes of `delta`: packed pool variables, reserves and ticks.
+    /// Applies the pool attributes of `delta`: packed pool variables, reserves, ticks and the
+    /// pause the indexer sets on an unverified upgrade.
     fn apply_attributes(&mut self, delta: &ProtocolStateDelta) -> Result<(), TransitionError> {
         let attributes = &delta.updated_attributes;
+        let word = |name: &str, value: &Bytes| {
+            decode_word(name, value).map_err(TransitionError::DecodeError)
+        };
         if let Some(value) = attributes.get("dex_variables") {
-            self.dex_variables = DexVariables::from_packed(U256::from_be_slice(value));
+            self.dex_variables = DexVariables::from_packed(word("dex_variables", value)?);
         }
         if let Some(value) = attributes.get("dex_variables2") {
-            self.dex_variables2 = DexVariables2::from_packed(U256::from_be_slice(value));
+            self.dex_variables2 = DexVariables2::from_packed(word("dex_variables2", value)?);
         }
         if let Some(value) = attributes.get("token0/token_reserves") {
-            self.token0_reserve = U256::from_be_slice(value);
+            self.token0_reserve = word("token0/token_reserves", value)?;
         }
         if let Some(value) = attributes.get("token1/token_reserves") {
-            self.token1_reserve = U256::from_be_slice(value);
+            self.token1_reserve = word("token1/token_reserves", value)?;
+        }
+        if let Some(value) = attributes.get("paused") {
+            self.paused = decode_paused(value);
+        }
+        if delta
+            .deleted_attributes
+            .contains("paused")
+        {
+            self.paused = false;
         }
         for (key, value) in attributes {
             let Some(tick) = parse_tick_key(key)? else {
@@ -549,6 +573,10 @@ fn liquidity_rejects(leg: &str, token: &Bytes) -> SimulationError {
     SimulationError::RecoverableError(format!("Fluid Liquidity has {leg} of {token} paused"))
 }
 
+fn liquidity_paused() -> SimulationError {
+    SimulationError::RecoverableError("Fluid Liquidity is paused".to_string())
+}
+
 fn payout_exceeded(amount: U256, cap: U256) -> SimulationError {
     SimulationError::InvalidInput(
         format!("Fluid v2 payout {amount} exceeds what the dex can pay out ({cap})"),
@@ -575,6 +603,13 @@ fn encode_sqrt_price(sqrt_price_x96: U256) -> U256 {
     ((sqrt_price_x96 >> exponent) << SQRT_PRICE_EXPONENT_BITS) | U256::from(exponent)
 }
 
+/// The fee of one swap: the protocol fee, then the LP fee on the rest, both in pips.
+fn swap_fee(protocol_fee: u64, lp_fee: u64) -> f64 {
+    let protocol_fee = protocol_fee as f64 / 1e6;
+    let lp_fee = lp_fee as f64 / 1e6;
+    1.0 - (1.0 - protocol_fee) * (1.0 - lp_fee)
+}
+
 fn bits(value: U256, offset: usize, width: usize) -> U256 {
     (value >> offset) & ((U256::from(1u64) << width) - U256::from(1u64))
 }
@@ -583,12 +618,21 @@ fn ten_pow(exponent: u8) -> U256 {
     U256::from(10u64).pow(U256::from(exponent))
 }
 
-fn to_fluid_token(token: &Bytes) -> alloy::primitives::Address {
-    if token.iter().all(|byte| *byte == 0) {
-        alloy::primitives::Address::from(FLUID_NATIVE_TOKEN)
-    } else {
-        alloy::primitives::Address::from_slice(token)
-    }
+fn to_fluid_token(token: &Bytes) -> Result<Address, SimulationError> {
+    let token = bytes_to_address(token)?;
+    Ok(if token.is_zero() { Address::from(FLUID_NATIVE_TOKEN) } else { token })
+}
+
+/// A big-endian word of at most 32 bytes.
+pub(super) fn decode_word(name: &str, value: &Bytes) -> Result<U256, String> {
+    U256::try_from_be_slice(value).ok_or_else(|| {
+        format!("Fluid v2 attribute {name} is {} bytes, more than a word", value.len())
+    })
+}
+
+/// The indexer pauses a component with a non-zero `paused` attribute.
+pub(super) fn decode_paused(value: &Bytes) -> bool {
+    value.iter().any(|byte| *byte != 0)
 }
 
 /// The tick of a `ticks/{tick}/net-liquidity` attribute key, or `None` for other keys.
@@ -622,33 +666,32 @@ pub(super) fn decode_net_liquidity(value: &Bytes) -> Result<i128, String> {
 
 #[typetag::serde]
 impl ProtocolSim for FluidV2State {
-    /// The fee of a token0 to token1 swap: the protocol fee, then the LP fee on the rest.
+    /// The fee of a token0 to token1 swap: the protocol fee, then the LP fee on the rest. NaN for
+    /// a pool whose fee this simulation cannot reproduce, which has no constant fee.
     fn fee(&self) -> f64 {
-        let protocol_fee = self.dex_variables2.protocol_fee_0_to_1 as f64 / 1e6;
-        let lp_fee = self.dex_variables2.lp_fee as f64 / 1e6;
-        1.0 - (1.0 - protocol_fee) * (1.0 - lp_fee)
+        if self.check_fee_supported().is_err() {
+            return f64::NAN;
+        }
+        swap_fee(self.protocol_fee(true), self.dex_variables2.lp_fee)
     }
 
+    /// The price of buying `base` with `quote`, at the margin: the quote to base swap's price and
+    /// fees.
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let zero_for_one = self.zero_for_one(&base.address, &quote.address)?;
+        self.check_quotable()?;
+        let base_is_token0 = self.zero_for_one(&base.address, &quote.address)?;
+        let buy_zero_for_one = !base_is_token0;
         let sqrt_price = u256_to_f64(decode_sqrt_price(
             self.dex_variables
                 .current_sqrt_price_x96,
-            zero_for_one,
+            buy_zero_for_one,
         ))? / 2f64.powi(96);
         let price_0_in_1 = sqrt_price * sqrt_price;
         // Raw-adjusted amounts all carry 9 decimals, so only the exchange prices remain.
-        let raw_price = if zero_for_one { price_0_in_1 } else { 1.0 / price_0_in_1 };
-        let exchange_price_ratio = u256_to_f64(self.exchange_price(!zero_for_one)?)? /
-            u256_to_f64(self.exchange_price(zero_for_one)?)?;
-        let protocol_fee = if zero_for_one {
-            self.dex_variables2.protocol_fee_0_to_1
-        } else {
-            self.dex_variables2.protocol_fee_1_to_0
-        } as f64 /
-            1e6;
-        let lp_fee = self.dex_variables2.lp_fee as f64 / 1e6;
-        let fee = 1.0 - (1.0 - protocol_fee) * (1.0 - lp_fee);
+        let raw_price = if base_is_token0 { price_0_in_1 } else { 1.0 / price_0_in_1 };
+        let exchange_price_ratio = u256_to_f64(self.exchange_price(!base_is_token0)?)? /
+            u256_to_f64(self.exchange_price(base_is_token0)?)?;
+        let fee = swap_fee(self.protocol_fee(buy_zero_for_one), self.dex_variables2.lp_fee);
         Ok(add_fee_markup(raw_price * exchange_price_ratio, fee))
     }
 
@@ -667,25 +710,28 @@ impl ProtocolSim for FluidV2State {
         ))
     }
 
-    /// The largest input whose swap the dex accepts, and its output.
+    /// The largest input whose swap the dex accepts, found by search to within about one
+    /// millionth, and its output.
     ///
-    /// One swap may move the sqrt price at most 20%, so the input that reaches that price bounds
-    /// the search; payout caps, reserves and amount bounds can lower it further.
+    /// One swap may move the sqrt price at most 20% from where it finds liquidity, so the input
+    /// that reaches that price bounds the search; payout caps, reserves and amount bounds can
+    /// lower it further. A direction without liquidity has zero limits.
     fn get_limits(
         &self,
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let zero_for_one = self.zero_for_one(&sell_token, &buy_token)?;
-        self.check_supported()?;
-        let pool = self.swap_pool(zero_for_one);
-        let price_limit = math::max_sqrt_price_move(pool.sqrt_price_x96, zero_for_one)?;
+        self.check_quotable()?;
         let walk = math::swap_in(
-            &pool,
+            &self.swap_pool(zero_for_one),
             zero_for_one,
             U256::from(1u64) << MAX_ADJUSTED_AMOUNT_BITS,
-            Some(price_limit),
+            SwapEnd::LargestSwap,
         )?;
+        if walk.amount_in_raw.is_zero() {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
         let upper_bound: U256 =
             Normalization::new(self.decimals(zero_for_one), self.exchange_price(zero_for_one)?)
                 .to_amount_round_up(walk.amount_in_raw)?;
@@ -697,7 +743,7 @@ impl ProtocolSim for FluidV2State {
         Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out)))
     }
 
-    /// Applies the pool attributes, then reads both tokens' Liquidity state again: a delta also
+    /// Applies the pool attributes, then reads the tokens' Liquidity state again: a delta also
     /// arrives when only the dex base state or Fluid Liquidity changed.
     fn delta_transition(
         &mut self,
@@ -706,13 +752,8 @@ impl ProtocolSim for FluidV2State {
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         self.apply_attributes(&delta)?;
-        let resolver = self.resolver.clone();
-        let (token0_liquidity, token1_liquidity) =
-            Self::fetch_token_liquidity(&resolver, &self.token0.address, &self.token1.address)
-                .map_err(TransitionError::SimulationError)?;
-        self.token0_liquidity = token0_liquidity;
-        self.token1_liquidity = token1_liquidity;
-        Ok(())
+        self.refresh_liquidity_state()
+            .map_err(TransitionError::SimulationError)
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -742,11 +783,14 @@ mod tests {
     use tycho_common::models::Chain;
 
     use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::get_sqrt_ratio_at_tick;
 
     const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
     const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
     const ETH: &str = "0x0000000000000000000000000000000000000000";
     const WBTC: &str = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+    const RESOLVER: &str = "0x143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9";
+    const LIQUIDITY: &str = "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497";
 
     fn token(address: &str, symbol: &str, decimals: u32) -> Token {
         Token::new(
@@ -812,20 +856,23 @@ mod tests {
         liquidity: (TokenLiquidity, TokenLiquidity),
     ) -> FluidV2State {
         let reserves = word(reserves);
-        FluidV2State::new(
+        FluidV2State {
             dex_type,
-            tokens.0,
-            tokens.1,
-            Bytes::from_str("0x143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9").unwrap(),
+            token0: tokens.0,
+            token1: tokens.1,
+            resolver: Address::from_str(RESOLVER).unwrap(),
+            liquidity: Address::from_str(LIQUIDITY).unwrap(),
             tick_spacing,
-            DexVariables::from_packed(word(dex_variables)),
-            DexVariables2::from_packed(word(dex_variables2)),
-            reserves & ((U256::from(1u64) << 128) - U256::from(1u64)),
-            reserves >> 128,
-            ticks.iter().copied().collect(),
-            liquidity.0,
-            liquidity.1,
-        )
+            dex_variables: DexVariables::from_packed(word(dex_variables)),
+            dex_variables2: DexVariables2::from_packed(word(dex_variables2)),
+            token0_reserve: reserves & ((U256::from(1u64) << 128) - U256::from(1u64)),
+            token1_reserve: reserves >> 128,
+            ticks: ticks.iter().copied().collect(),
+            token0_liquidity: liquidity.0,
+            token1_liquidity: liquidity.1,
+            liquidity_paused: false,
+            paused: false,
+        }
     }
 
     // Pool storage at block 26331500.
@@ -1178,5 +1225,231 @@ mod tests {
                 .dex_variables2
                 .per_pool_accounting_stopped
         );
+    }
+
+    #[rstest::rstest]
+    #[case::d3_settled_through_liquidity("d3_usdc_usdt")]
+    #[case::d4("d4_usdc_usdt")]
+    fn test_paused_liquidity_rejects_swaps_it_settles(#[case] pool: &str) {
+        let mut state = pool_named(pool);
+        state.liquidity_paused = true;
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+    }
+
+    #[test]
+    fn test_paused_liquidity_leaves_swaps_the_dex_serves_from_its_balance() {
+        let mut state = d3_usdc_usdt();
+        state.liquidity_paused = true;
+        state.token0_liquidity.float_balance = U256::from(1_000_000u64);
+        state.token1_liquidity.float_balance = U256::from(2_000_000u64);
+
+        assert_eq!(amount_out(&state, 1_000_000, true).unwrap(), 1_000_776);
+    }
+
+    #[test]
+    fn test_d4_paused_supply_of_token_out_rejects_swaps_buying_it() {
+        let mut state = d4_usdc_usdt();
+        state.token1_liquidity.supply_paused = true;
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+        assert!(amount_out(&state, 1_000_000, false).is_ok());
+    }
+
+    #[test]
+    fn test_paused_pool_refuses_quotes_until_unpaused() {
+        let mut state = d3_usdc_usdt();
+        let pause = ProtocolStateDelta {
+            updated_attributes: HashMap::from([("paused".to_string(), Bytes::from(vec![1]))]),
+            ..Default::default()
+        };
+        state.apply_attributes(&pause).unwrap();
+
+        assert!(amount_out(&state, 1_000_000, true).is_err());
+        assert!(state
+            .get_limits(state.token0.address.clone(), state.token1.address.clone())
+            .is_err());
+        assert!(state
+            .spot_price(&state.token0, &state.token1)
+            .is_err());
+
+        let unpause = ProtocolStateDelta {
+            deleted_attributes: ["paused".to_string()].into(),
+            ..Default::default()
+        };
+        state
+            .apply_attributes(&unpause)
+            .unwrap();
+        assert_eq!(amount_out(&state, 1_000_000, true).unwrap(), 1_000_776);
+    }
+
+    #[rstest::rstest]
+    #[case::fee_version_1(1, false)]
+    #[case::fetch_dynamic_fee(0, true)]
+    fn test_unsupported_fee_modes_are_refused_everywhere(
+        #[case] fee_version: u8,
+        #[case] fetch_dynamic_fee: bool,
+    ) {
+        let mut state = d3_usdc_usdt();
+        state.dex_variables2.fee_version = fee_version;
+        state.dex_variables2.fetch_dynamic_fee = fetch_dynamic_fee;
+
+        assert!(state.fee().is_nan());
+        assert!(matches!(
+            state.spot_price(&state.token0, &state.token1),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        assert!(matches!(
+            state.get_limits(state.token0.address.clone(), state.token1.address.clone()),
+            Err(SimulationError::RecoverableError(_))
+        ));
+    }
+
+    #[test]
+    fn test_spot_price_charges_the_protocol_fee_of_the_buy() {
+        let state = d3_usdc_eth();
+        let mut fee_on_0_to_1 = d3_usdc_eth();
+        fee_on_0_to_1
+            .dex_variables2
+            .protocol_fee_0_to_1 = 4_000;
+        let spot = |state: &FluidV2State, base: &Token, quote: &Token| {
+            state.spot_price(base, quote).unwrap()
+        };
+
+        // Buying ETH (token1) with USDC is the 0 to 1 swap, which pays the fee; buying USDC is not.
+        let eth_price = spot(&state, &state.token1, &state.token0);
+        let eth_price_with_fee = spot(&fee_on_0_to_1, &state.token1, &state.token0);
+        assert!((eth_price_with_fee / eth_price - 1.0 / 0.996).abs() < 1e-9);
+        assert_eq!(
+            spot(&state, &state.token0, &state.token1),
+            spot(&fee_on_0_to_1, &state.token0, &state.token1)
+        );
+    }
+
+    /// Moves the WBTC/USDC pool, whose only range spans ticks 109210 to 113260, to `tick`.
+    fn d3_wbtc_usdc_at_tick(tick: i32) -> FluidV2State {
+        let mut state = d3_wbtc_usdc();
+        state.dex_variables.current_tick = tick;
+        state
+            .dex_variables
+            .current_sqrt_price_x96 = encode_sqrt_price(get_sqrt_ratio_at_tick(tick).unwrap());
+        state.dex_variables2.active_liquidity = 0;
+        state
+    }
+
+    #[rstest::rstest]
+    #[case::below_the_range_buying_wbtc(105_000, false)]
+    #[case::above_the_range_selling_wbtc(118_000, true)]
+    fn test_limits_measure_the_price_move_from_the_liquidity(
+        #[case] tick: i32,
+        #[case] zero_for_one: bool,
+    ) {
+        let state = d3_wbtc_usdc_at_tick(tick);
+        let (sell, buy) = if zero_for_one {
+            (&state.token0, &state.token1)
+        } else {
+            (&state.token1, &state.token0)
+        };
+
+        let (limit_in, limit_out) = state
+            .get_limits(sell.address.clone(), buy.address.clone())
+            .unwrap();
+
+        let limit_in: u128 = limit_in.try_into().unwrap();
+        assert!(limit_in > 0);
+        assert_eq!(
+            amount_out(&state, limit_in, zero_for_one).unwrap(),
+            u128::try_from(limit_out).unwrap()
+        );
+        assert!(amount_out(&state, limit_in + limit_in / 100, zero_for_one).is_err());
+    }
+
+    #[rstest::rstest]
+    #[case::below_the_range_selling_wbtc(105_000, true)]
+    #[case::above_the_range_buying_wbtc(118_000, false)]
+    fn test_limits_are_zero_away_from_the_liquidity(#[case] tick: i32, #[case] zero_for_one: bool) {
+        let state = d3_wbtc_usdc_at_tick(tick);
+        let (sell, buy) = if zero_for_one {
+            (&state.token0, &state.token1)
+        } else {
+            (&state.token1, &state.token0)
+        };
+
+        let limits = state
+            .get_limits(sell.address.clone(), buy.address.clone())
+            .unwrap();
+
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    #[test]
+    fn test_stopped_accounting_leaves_the_reserves_alone() {
+        let mut state = d3_usdc_usdt();
+        state
+            .dex_variables2
+            .per_pool_accounting_stopped = true;
+
+        let result = state
+            .get_amount_out(BigUint::from(1_000_000u64), &state.token0, &state.token1)
+            .unwrap();
+
+        let new_state = result
+            .new_state
+            .as_any()
+            .downcast_ref::<FluidV2State>()
+            .unwrap();
+        assert_eq!(new_state.token0_reserve, state.token0_reserve);
+        assert_eq!(new_state.token1_reserve, state.token1_reserve);
+    }
+
+    #[test]
+    fn test_apply_attributes_updates_the_pool_variables() {
+        let mut state = d3_usdc_usdt();
+        let target = d3_wbtc_usdc();
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([
+                (
+                    "dex_variables".to_string(),
+                    Bytes::from_str(
+                        "0xfff1df46994405694b05000000000000000000000801e1dc18df777b1293629f",
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "dex_variables2".to_string(),
+                    Bytes::from_str(
+                        "0x00000000000000000000001f4000000000000000000001cabac7da9a00000000",
+                    )
+                    .unwrap(),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        state.apply_attributes(&delta).unwrap();
+
+        assert_eq!(state.dex_variables, target.dex_variables);
+        assert_eq!(state.dex_variables2, target.dex_variables2);
+    }
+
+    #[test]
+    fn test_apply_attributes_rejects_a_value_wider_than_a_word() {
+        let mut state = d3_usdc_usdt();
+        let delta = ProtocolStateDelta {
+            updated_attributes: HashMap::from([(
+                "dex_variables".to_string(),
+                Bytes::from(vec![1u8; 33]),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(state.apply_attributes(&delta).is_err());
+    }
+
+    #[test]
+    fn test_decode_net_liquidity_keeps_the_sign() {
+        assert_eq!(decode_net_liquidity(&Bytes::from(vec![0xff, 0x38])).unwrap(), -200);
+        assert_eq!(decode_net_liquidity(&Bytes::from(vec![0x00, 0xc8])).unwrap(), 200);
+        assert!(decode_net_liquidity(&Bytes::from(vec![0u8; 17])).is_err());
     }
 }
