@@ -3,39 +3,66 @@ protocol_system: "fluid_v2"
 protocol_type_names:
   - "fluid_v2_pool"
 module_name: "map_protocol_changes"
+# Pool balances are the LP flows of each pool; the tokens sit in the dex float or in Fluid
+# Liquidity, shared by every pool, so no account holds a pool's balance.
 skip_balance_check: true
-initialized_accounts:
+
 tests:
-  - name: test_polygon_usdc_usdt0
-    start_block: 79889908
-    stop_block: 80217047
+  # All four pools are created in 0x292e627c… at block 26284652. The range then covers D3
+  # deposits and a withdrawal, the D4 borrow 0x33f55905…, and five swaps.
+  - name: test_ethereum_pools
+    start_block: 26284650
+    stop_block: 26330000
     expected_components:
-      - id: "0x038d1b5f8da63fa29b191672231d3845740a11fcbef6c76e077cfffe56cc27c707"
+      - id: "0x03e018f09af38956affdfeab72c2cefbcd4e6fee44d09df7525ec9dba3e51356a5"
         tokens:
-          - "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" # usdc
-          - "0xc2132D05D31c914a87C6611C10748AEb04B58e8F" # usdt0
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
         static_attributes:
           dex_type: "0x03"
           fee: "0x64"
           tick_spacing: "0x01"
           controller: "0x0000000000000000000000000000000000000000"
-        creation_tx: "0xaafc296f56d9c5242f95da9ac467e1388d94074d50cbfd717b8dc23f03f882aa"
+          resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+        creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         skip_simulation: false
-        skip_execution: true
-
-  - name: test_polygon_usdc_eth
-    start_block: 79889908
-    stop_block: 80217047
-    expected_components:
-      - id: "0x03bc4435ed6fcf5fe373cdb243a3e5685f49dbde7d3d91bff4806cc064f9efd11e"
+        skip_execution: false
+      - id: "0x04e018f09af38956affdfeab72c2cefbcd4e6fee44d09df7525ec9dba3e51356a5"
         tokens:
-          - "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" # usdc
-          - "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" # eth
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0xdAC17F958D2ee523a2206206994597C13D831ec7" # USDT
+        static_attributes:
+          dex_type: "0x04"
+          fee: "0x64"
+          tick_spacing: "0x01"
+          controller: "0x0000000000000000000000000000000000000000"
+          resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+        creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x03d0adee4ff64cfb16d76667ef79e093420a3f01cd648ffaae9bfab849449930fd"
+        tokens:
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+          - "0x0000000000000000000000000000000000000000" # ETH
         static_attributes:
           dex_type: "0x03"
           fee: "0x01f4"
           tick_spacing: "0x0a"
           controller: "0x0000000000000000000000000000000000000000"
-        creation_tx: "0x5fdf994b79d2307047e3b4c319988ca858065b50144d9355d9b357da3b3fa062"
+          resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+        creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
         skip_simulation: false
-        skip_execution: true
+        skip_execution: false
+      - id: "0x033ea74c37fbb79dfcd6d760870f0f4e00cf4c3960b3259d0d43f211c0547394c1"
+        tokens:
+          - "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" # WBTC
+          - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+        static_attributes:
+          dex_type: "0x03"
+          fee: "0x01f4"
+          tick_spacing: "0x0a"
+          controller: "0x0000000000000000000000000000000000000000"
+          resolver: "0x143c3927eaf0e50a59b1651c2eb1e37fb62aa2a9"
+        creation_tx: "0x292e627cd513d63d348e8cef143fc376caf3401fa3414a89e885b8890528d3a7"
+        skip_simulation: false
+        skip_execution: false

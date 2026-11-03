@@ -18,24 +18,20 @@ binaries:
     type: wasm/rust-v1
     file: ../target/wasm32-unknown-unknown/release/ethereum_fluid_v2.wasm
 
-network: polygon
+network: mainnet
 networks:
-  polygon:
+  mainnet:
+    # Deployment block of the DEX v2 proxy.
     initialBlock:
-      map_pools_created: 79801933
-      store_pools: 79801933
-      map_balance_changes: 79801933
-      store_pools_balances: 79801933
-      map_protocol_changes: 79801933
+      map_pools_created: 26243693
+      store_pools: 26243693
+      map_balance_changes: 26243693
+      store_pools_balances: 26243693
+      map_protocol_changes: 26243693
     params:
-      map_pools_created: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
-      map_balance_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
-      map_protocol_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
-
-params:
-  map_pools_created: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
-  map_protocol_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
-  map_balance_changes: "dex_v2_address=7822B3944B1a68B231a6e7F55B57967F28BB369e&liquidity_address=52Aa899454998Be5b000Ad077a46Bbe360F4e497"
+      map_pools_created: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
+      map_balance_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
+      map_protocol_changes: "dex_v2_address=aBE4D5AA1Bb188f4B5d3a1aE3B8ec5e300A78261&resolver_address=143c3927EaF0e50a59b1651C2Eb1e37FB62Aa2a9"
 
 modules:
   - name: map_pools_created
@@ -49,14 +45,7 @@ modules:
   - name: store_pools
     kind: store
     updatePolicy: set_if_not_exists
-    valueType: proto:fluid_v2.Pool
-    inputs:
-      - map: map_pools_created
-
-  - name: store_token_to_pools
-    kind: store
-    updatePolicy: append
-    valueType: string
+    valueType: proto:tycho.evm.fluid_v2.Pool
     inputs:
       - map: map_pools_created
 
@@ -86,6 +75,5 @@ modules:
       - store: store_pools_balances
         mode: deltas
       - map: map_balance_changes
-      - store: store_token_to_pools
     output:
       type: proto:tycho.evm.v1.BlockChanges

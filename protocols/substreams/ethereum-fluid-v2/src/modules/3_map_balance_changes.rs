@@ -13,7 +13,7 @@ pub fn map_balance_changes(
     pools_store: StoreGetProto<Pool>,
 ) -> Result<BlockBalanceDeltas, anyhow::Error> {
     let params = Params::parse_from_query(&params)?;
-    let dex_v2_address = hex::decode(&params.dex_v2_address).expect("Invalid dex_v2_address");
+    let dex_v2_address = params.dex_v2_address()?;
 
     let mut balance_deltas = Vec::new();
     for trx in block.transactions() {

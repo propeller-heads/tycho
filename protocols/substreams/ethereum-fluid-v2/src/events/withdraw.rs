@@ -1,13 +1,25 @@
 use crate::{
     abi::d3_user_module::events::LogWithdraw,
-    events::EventTrait,
-    modules::utils,
+    events::{position::PositionChange, EventTrait},
     pb::tycho::evm::fluid_v2::Pool,
-    storage::{dex_v2, storage_view::StorageChangesView},
 };
-use substreams::store::{StoreGet, StoreGetProto};
+use substreams::store::StoreGetProto;
 use substreams_ethereum::pb::eth::v2::StorageChange;
 use tycho_substreams::prelude::*;
+
+impl LogWithdraw {
+    fn position_change(&self) -> PositionChange<'_> {
+        PositionChange {
+            dex_type: &self.dex_type,
+            dex_id: &self.dex_id,
+            tick_lower: &self.tick_lower,
+            tick_upper: &self.tick_upper,
+            amount0: &self.amount0,
+            amount1: &self.amount1,
+            adds_reserves: false,
+        }
+    }
+}
 
 impl EventTrait for LogWithdraw {
     fn get_changed_attributes(
@@ -15,18 +27,8 @@ impl EventTrait for LogWithdraw {
         storage_changes: &[StorageChange],
         dex_v2_address: &[u8],
     ) -> (String, Vec<Attribute>) {
-        let storage_view = StorageChangesView::new_filtered(dex_v2_address, storage_changes);
-        let dex_type = self.dex_type.to_u64();
-        let mut attrs = Vec::new();
-        attrs.extend(dex_v2::tick_data_attributes(
-            &storage_view,
-            &self.dex_id,
-            dex_type,
-            vec![&self.tick_lower, &self.tick_upper],
-        ));
-        attrs.extend(dex_v2::dex_variables2_attributes(&storage_view, &self.dex_id, dex_type));
-        attrs.extend(dex_v2::token_reserves_attributes(&storage_view, &self.dex_id, dex_type));
-        (utils::component_id(&self.dex_type, &self.dex_id), attrs)
+        self.position_change()
+            .changed_attributes(storage_changes, dex_v2_address)
     }
 
     fn get_balance_delta(
@@ -35,36 +37,7 @@ impl EventTrait for LogWithdraw {
         ordinal: u64,
         pools_store: &StoreGetProto<Pool>,
     ) -> Vec<BalanceDelta> {
-        let component_id = utils::component_id(&self.dex_type, &self.dex_id);
-        let pool_key = utils::pool_store_key(&self.dex_type, &self.dex_id);
-        let pool = match pools_store.get_last(pool_key) {
-            Some(pool) => pool,
-            None => return vec![],
-        };
-
-        vec![
-            BalanceDelta {
-                ord: ordinal,
-                tx: Some(tx.clone()),
-                token: pool.token0.clone(),
-                delta: self
-                    .amount0
-                    .neg()
-                    .clone()
-                    .to_signed_bytes_be(),
-                component_id: component_id.clone().into_bytes(),
-            },
-            BalanceDelta {
-                ord: ordinal,
-                tx: Some(tx.clone()),
-                token: pool.token1.clone(),
-                delta: self
-                    .amount1
-                    .neg()
-                    .clone()
-                    .to_signed_bytes_be(),
-                component_id: component_id.into_bytes(),
-            },
-        ]
+        self.position_change()
+            .balance_deltas(tx, ordinal, pools_store)
     }
 }

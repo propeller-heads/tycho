@@ -8,6 +8,7 @@ use crate::{
         },
         d3_swap_module::events::{LogSwapIn, LogSwapOut},
         d3_user_module::events::{LogDeposit, LogInitialize, LogWithdraw},
+        d4_user_module::events::{LogBorrow, LogPayback},
     },
     pb::tycho::evm::fluid_v2::Pool,
 };
@@ -18,9 +19,12 @@ use substreams_ethereum::{
 };
 use tycho_substreams::prelude::*;
 
+pub mod borrow;
 pub mod deposit;
 pub mod fetch_dynamic_fee_flag;
 pub mod initialize;
+pub mod payback;
+mod position;
 pub mod stop_per_pool_accounting;
 pub mod swap_in;
 pub mod swap_out;
@@ -66,6 +70,8 @@ pub enum EventType {
     SwapOut(LogSwapOut),
     Deposit(LogDeposit),
     Withdraw(LogWithdraw),
+    Borrow(LogBorrow),
+    Payback(LogPayback),
     StopPerPoolAccounting(LogStopPerPoolAccounting),
     UpdateProtocolFee(LogUpdateProtocolFee),
     UpdateProtocolCutFee(LogUpdateProtocolCutFee),
@@ -82,6 +88,8 @@ impl EventType {
             EventType::SwapOut(e) => e,
             EventType::Deposit(e) => e,
             EventType::Withdraw(e) => e,
+            EventType::Borrow(e) => e,
+            EventType::Payback(e) => e,
             EventType::StopPerPoolAccounting(e) => e,
             EventType::UpdateProtocolFee(e) => e,
             EventType::UpdateProtocolCutFee(e) => e,
@@ -100,6 +108,8 @@ pub fn decode_event(event: &Log) -> Option<EventType> {
         LogSwapOut::match_and_decode(event).map(EventType::SwapOut),
         LogDeposit::match_and_decode(event).map(EventType::Deposit),
         LogWithdraw::match_and_decode(event).map(EventType::Withdraw),
+        LogBorrow::match_and_decode(event).map(EventType::Borrow),
+        LogPayback::match_and_decode(event).map(EventType::Payback),
         LogStopPerPoolAccounting::match_and_decode(event).map(EventType::StopPerPoolAccounting),
         LogUpdateProtocolFee::match_and_decode(event).map(EventType::UpdateProtocolFee),
         LogUpdateProtocolCutFee::match_and_decode(event).map(EventType::UpdateProtocolCutFee),
