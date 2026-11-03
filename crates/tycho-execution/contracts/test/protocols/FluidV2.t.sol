@@ -251,20 +251,30 @@ contract FluidV2ExecutorTest is Test, FluidV2Pools {
         executor.verifyCallback(abi.encodePacked(bytes4(0x12345678)));
     }
 
+    // Expected outputs are the swaps' results at FLUID_V2_FORK_BLOCK; D3 and D4
+    // pools of the same tokens price differently, so each pins its dex type.
     function testSwapD3() public {
-        _assertErc20Swap(_usdcUsdt(3, true), USDC_ADDR, USDT_ADDR, 10e6);
+        _assertErc20Swap(
+            _usdcUsdt(3, true), USDC_ADDR, USDT_ADDR, 10e6, 10_007_725
+        );
     }
 
     function testSwapD3OneToZero() public {
-        _assertErc20Swap(_usdcUsdt(3, false), USDT_ADDR, USDC_ADDR, 10e6);
+        _assertErc20Swap(
+            _usdcUsdt(3, false), USDT_ADDR, USDC_ADDR, 10e6, 9_990_168
+        );
     }
 
     function testSwapD4() public {
-        _assertErc20Swap(_usdcUsdt(4, true), USDC_ADDR, USDT_ADDR, 10e6);
+        _assertErc20Swap(
+            _usdcUsdt(4, true), USDC_ADDR, USDT_ADDR, 10e6, 9_997_172
+        );
     }
 
     function testSwapD4OneToZero() public {
-        _assertErc20Swap(_usdcUsdt(4, false), USDT_ADDR, USDC_ADDR, 10e6);
+        _assertErc20Swap(
+            _usdcUsdt(4, false), USDT_ADDR, USDC_ADDR, 10e6, 10_000_641
+        );
     }
 
     function testSellNative() public {
@@ -274,7 +284,7 @@ contract FluidV2ExecutorTest is Test, FluidV2Pools {
 
         executor.swap(amountIn, _usdcEth(false), BOB);
 
-        assertGt(IERC20(USDC_ADDR).balanceOf(BOB), balanceBefore);
+        assertEq(IERC20(USDC_ADDR).balanceOf(BOB) - balanceBefore, 2_265_698);
         assertEq(address(executor).balance, 0);
     }
 
@@ -285,7 +295,7 @@ contract FluidV2ExecutorTest is Test, FluidV2Pools {
 
         executor.swap(amountIn, _usdcEth(true), BOB);
 
-        assertGt(BOB.balance, balanceBefore);
+        assertEq(BOB.balance - balanceBefore, 4_408_600_502_206_338);
         assertEq(IERC20(USDC_ADDR).balanceOf(address(executor)), 0);
     }
 
@@ -293,14 +303,15 @@ contract FluidV2ExecutorTest is Test, FluidV2Pools {
         bytes memory data,
         address tokenIn,
         address tokenOut,
-        uint256 amountIn
+        uint256 amountIn,
+        uint256 expectedOut
     ) internal {
         deal(tokenIn, address(executor), amountIn);
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(BOB);
 
         executor.swap(amountIn, data, BOB);
 
-        assertGt(IERC20(tokenOut).balanceOf(BOB), balanceBefore);
+        assertEq(IERC20(tokenOut).balanceOf(BOB) - balanceBefore, expectedOut);
         assertEq(IERC20(tokenIn).balanceOf(address(executor)), 0);
     }
 }
@@ -313,11 +324,15 @@ contract TychoRouterForFluidV2Test is TychoRouterTestSetup, FluidV2Pools {
     }
 
     function testSingleSwapD3() public {
-        _assertRouterSwap("test_single_encoding_strategy_fluid_v2_d3", 10e6);
+        _assertRouterSwap(
+            "test_single_encoding_strategy_fluid_v2_d3", 10e6, 10_007_725
+        );
     }
 
     function testSingleSwapD4() public {
-        _assertRouterSwap("test_single_encoding_strategy_fluid_v2_d4", 10e6);
+        _assertRouterSwap(
+            "test_single_encoding_strategy_fluid_v2_d4", 10e6, 9_997_172
+        );
     }
 
     function testSingleSwapNativeBuy() public {
@@ -330,14 +345,16 @@ contract TychoRouterForFluidV2Test is TychoRouterTestSetup, FluidV2Pools {
         vm.startPrank(ALICE);
         IERC20(USDC_ADDR).forceApprove(tychoRouterAddr, amountIn);
 
-        (bool success,) = tychoRouterAddr.call(
+        (bool success, bytes memory result) = tychoRouterAddr.call(
             loadCallDataFromFile(
                 "test_single_encoding_strategy_fluid_v2_native"
             )
         );
 
         assertTrue(success, "Call Failed");
-        assertGt(ALICE.balance, balanceBefore);
+        uint256 amountOut = abi.decode(result, (uint256));
+        assertEq(amountOut, 4_408_600_502_206_338);
+        assertEq(ALICE.balance - balanceBefore, amountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(tychoRouterAddr.balance, 0);
     }
@@ -354,23 +371,28 @@ contract TychoRouterForFluidV2Test is TychoRouterTestSetup, FluidV2Pools {
             amountIn, ETH_ADDR, USDC_ADDR, 1, 1, ALICE, noClientFee(), swap
         );
 
-        assertGt(amountOut, 0);
+        assertEq(amountOut, 2_265_698);
         assertEq(IERC20(USDC_ADDR).balanceOf(ALICE) - balanceBefore, amountOut);
         assertEq(tychoRouterAddr.balance, 0);
     }
 
-    function _assertRouterSwap(string memory testName, uint256 amountIn)
-        internal
-    {
+    function _assertRouterSwap(
+        string memory testName,
+        uint256 amountIn,
+        uint256 expectedOut
+    ) internal {
         deal(USDC_ADDR, ALICE, amountIn);
         uint256 balanceBefore = IERC20(USDT_ADDR).balanceOf(ALICE);
         vm.startPrank(ALICE);
         IERC20(USDC_ADDR).forceApprove(tychoRouterAddr, amountIn);
 
-        (bool success,) = tychoRouterAddr.call(loadCallDataFromFile(testName));
+        (bool success, bytes memory result) =
+            tychoRouterAddr.call(loadCallDataFromFile(testName));
 
         assertTrue(success, "Call Failed");
-        assertGt(IERC20(USDT_ADDR).balanceOf(ALICE), balanceBefore);
+        uint256 amountOut = abi.decode(result, (uint256));
+        assertEq(amountOut, expectedOut);
+        assertEq(IERC20(USDT_ADDR).balanceOf(ALICE) - balanceBefore, amountOut);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(USDT_ADDR).balanceOf(tychoRouterAddr), 0);
     }
