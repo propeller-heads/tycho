@@ -298,6 +298,7 @@ impl ProtocolStatesParams {
 #[derive(Clone, PartialEq, Debug)]
 pub struct TokensParams {
     chain: Chain,
+    token_addresses: Option<Vec<Bytes>>,
     min_quality: Option<i32>,
     traded_n_days_ago: Option<u64>,
     page: i64,
@@ -308,11 +309,19 @@ impl TokensParams {
     pub fn new(chain: Chain) -> Self {
         Self {
             chain,
+            token_addresses: None,
             min_quality: None,
             traded_n_days_ago: None,
             page: 0,
             page_size: TokensRequestBody::MAX_PAGE_SIZE_COMPRESSED,
         }
+    }
+
+    /// Returns only the tokens at `addresses`. An address Tycho does not know is left out of the
+    /// response; an empty list returns no tokens.
+    pub fn with_token_addresses(mut self, addresses: Vec<Bytes>) -> Self {
+        self.token_addresses = Some(addresses);
+        self
     }
 
     pub fn with_min_quality(mut self, min_quality: i32) -> Self {
@@ -1702,7 +1711,7 @@ impl RPCClient for HttpRPCClient {
 
     async fn get_tokens(&self, params: TokensParams) -> Result<Page<Vec<Token>>, RPCError> {
         let request = TokensRequestBody {
-            token_addresses: None,
+            token_addresses: params.token_addresses,
             min_quality: params.min_quality,
             traded_n_days_ago: params.traded_n_days_ago,
             pagination: PaginationParams { page: params.page, page_size: params.page_size },
@@ -2543,8 +2552,13 @@ mod tests {
         // test that the response is deserialized correctly
         serde_json::from_str::<TokensRequestResponse>(server_resp).expect("deserialize");
 
+        let weth = Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let usdc = Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         let mocked_server = server
             .mock("POST", "/v1/tokens")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "token_addresses": [weth.to_string(), usdc.to_string()],
+            })))
             .expect(1)
             .with_body(server_resp)
             .create_async()
@@ -2553,7 +2567,7 @@ mod tests {
             .expect("create client");
 
         let tokens = client
-            .get_tokens(TokensParams::new(Chain::Ethereum))
+            .get_tokens(TokensParams::new(Chain::Ethereum).with_token_addresses(vec![weth, usdc]))
             .await
             .expect("get tokens");
 
